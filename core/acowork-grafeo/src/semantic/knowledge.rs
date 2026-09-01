@@ -143,7 +143,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeSubType, NodeStatus};
+    use crate::types::{KnowledgeSubType, NodeStatus, PrivacyLevel};
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
@@ -173,6 +173,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
 
         let id = store.store_knowledge(&node).unwrap();
@@ -198,6 +200,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
 
         let id1 = store.store_knowledge(&node1).unwrap();
@@ -235,6 +239,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&node).unwrap();
 
@@ -264,6 +270,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let id = store.store_knowledge(&node).unwrap();
 

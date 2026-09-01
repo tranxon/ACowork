@@ -14,13 +14,15 @@
 pub mod admin;
 pub mod consolidation;
 pub mod judge;
+pub mod keyword;
 pub mod manager;
 pub mod provider;
+pub mod quality;
 pub mod store;
 pub mod types;
 
 // Re-exports: MemoryProvider trait (new, for ADR-051 migration)
-pub use provider::{IngestResult, MemoryProvider};
+pub use provider::MemoryProvider;
 
 // Re-exports: MemoryAdminService trait (ADR-051 P4, admin/management operations)
 pub use admin::{
@@ -51,13 +53,19 @@ pub use consolidation::MemoryStoreResult as ProcessResult;
 // Re-exports: judge types (ADR-051 P4, moved from acowork_grafeo)
 pub use judge::{JudgeConfig, JudgeResult, should_sample};
 
+// Re-exports: memory quality config (ADR-062 D2)
+pub use quality::{
+    ConsolidationQuality, DedupQuality, EdgeWeightQuality, GraphExpandQuality,
+    MemoryQualityConfig,
+};
+
 // Re-exports: core memory types
 pub use types::{
     AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType, ContextSource,
     DEFAULT_EMBEDDING_DIM, DecayConfig, DecayScanResult, DistilledEpisode, Episode, KnowledgeNode,
     KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery, NodeStatus, PrivacyLevel,
     ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics, SearchResult, StoreHealth,
-    StoreStats, Triple,
+    StoreStats,
 };
 
 // Label and edge type constants

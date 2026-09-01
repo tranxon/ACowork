@@ -36,7 +36,10 @@ impl Default for GraphExpandConfig {
         Self {
             max_hops: 3,
             max_total_nodes: 20,
-            early_stop_thresholds: vec![0.15, 0.2, 0.25],
+            // G11 (design §6.3): early_stop_thresholds per hop = [0.1, 0.15, 0.2]
+            // (1-hop 0.1 / 2-hop 0.15 / 3-hop 0.2). The previous [0.15, 0.2, 0.25]
+            // was too strict at hop 1, terminating diffusion too early.
+            early_stop_thresholds: vec![0.1, 0.15, 0.2],
             min_edge_weight: 0.1,
         }
     }
@@ -98,11 +101,14 @@ pub struct ExpandedNode {
     pub path: Vec<NodeId>,
 }
 
-/// Decay factor applied per hop during expansion.
-const DECAY_PER_HOP: f64 = 0.7;
-
 /// Default edge weight when no explicit weight property exists.
 const DEFAULT_EDGE_WEIGHT: f64 = 1.0;
+
+// NOTE (ADR-062 D2): The per-hop decay factor during expansion (previously
+// `DECAY_PER_HOP = 0.7`) is now centralized in
+// `acowork_memory::quality::MemoryQualityConfig::graph_expand.decay_per_hop`
+// and read via `self.quality()` — see `graph_expand` below. "Zero-config =
+// current behaviour" is preserved by the matching Default value.
 
 // ---------------------------------------------------------------------------
 // S2.8.1: Graph expansion (BFS with scoring and early stopping)
@@ -164,7 +170,10 @@ impl GrafeoStore {
                 }
 
                 let next_hop = hops + 1;
-                let accumulated_score = parent_score * edge_weight * DECAY_PER_HOP;
+                // Decay factor from ADR-062 GraphExpandQuality.decay_per_hop
+                // (default 0.7 == pre-ADR-062 hardcoded behaviour).
+                let accumulated_score =
+                    parent_score * edge_weight * self.quality().graph_expand.decay_per_hop;
 
                 // Early stop: check threshold for this hop.
                 if let Some(threshold) = config.threshold_for_hop(next_hop)
@@ -796,14 +805,15 @@ pub fn get_hint_weights(hint_type: &str) -> (f32, f32, f32) {
 
 /// Get graph_expand early stop thresholds based on hint type.
 ///
-/// - `"s"` (semantic): conservative thresholds `[0.15, 0.2, 0.25]`
+/// G11 (design §6.3):
+/// - `"s"` (semantic): `[0.1, 0.15, 0.2]` (1-hop 0.1 / 2-hop 0.15 / 3-hop 0.2)
 /// - `"r"` (relational): aggressive thresholds `[0.1, 0.12, 0.15]`
-/// - Other: default conservative thresholds `[0.15, 0.2, 0.25]`
+/// - Other: default `[0.1, 0.15, 0.2]`
 pub fn get_expand_thresholds(hint_type: &str) -> Vec<f32> {
     match hint_type {
-        "s" => vec![0.15, 0.2, 0.25],
+        "s" => vec![0.1, 0.15, 0.2],
         "r" => vec![0.1, 0.12, 0.15],
-        _ => vec![0.15, 0.2, 0.25],
+        _ => vec![0.1, 0.15, 0.2],
     }
 }
 
@@ -870,7 +880,8 @@ mod tests {
         let config = GraphExpandConfig::default();
         assert_eq!(config.max_hops, 3);
         assert_eq!(config.max_total_nodes, 20);
-        assert_eq!(config.early_stop_thresholds, vec![0.15, 0.2, 0.25]);
+        // G11 (design §6.3): 1-hop 0.1 / 2-hop 0.15 / 3-hop 0.2.
+        assert_eq!(config.early_stop_thresholds, vec![0.1, 0.15, 0.2]);
         assert!((config.min_edge_weight - 0.1).abs() < f32::EPSILON);
     }
 
@@ -882,9 +893,10 @@ mod tests {
     fn test_threshold_for_hop() {
         let config = GraphExpandConfig::default();
         assert_eq!(config.threshold_for_hop(0), None);
-        assert_eq!(config.threshold_for_hop(1), Some(0.15));
-        assert_eq!(config.threshold_for_hop(2), Some(0.2));
-        assert_eq!(config.threshold_for_hop(3), Some(0.25));
+        // G11 (design §6.3): 1-hop 0.1 / 2-hop 0.15 / 3-hop 0.2.
+        assert_eq!(config.threshold_for_hop(1), Some(0.1));
+        assert_eq!(config.threshold_for_hop(2), Some(0.15));
+        assert_eq!(config.threshold_for_hop(3), Some(0.2));
         assert_eq!(config.threshold_for_hop(4), None);
     }
 
@@ -1237,9 +1249,20 @@ mod tests {
 
     #[test]
     fn test_get_expand_thresholds() {
-        assert_eq!(get_expand_thresholds("s"), vec![0.15, 0.2, 0.25]);
+        // G11 (design §6.3): semantic + default = [0.1, 0.15, 0.2];
+        // relational keeps the more aggressive [0.1, 0.12, 0.15].
+        assert_eq!(get_expand_thresholds("s"), vec![0.1, 0.15, 0.2]);
         assert_eq!(get_expand_thresholds("r"), vec![0.1, 0.12, 0.15]);
-        assert_eq!(get_expand_thresholds("f"), vec![0.15, 0.2, 0.25]);
+        assert_eq!(get_expand_thresholds("f"), vec![0.1, 0.15, 0.2]);
+        // config_from_hint must follow the same thresholds.
+        assert_eq!(
+            config_from_hint("s").early_stop_thresholds,
+            vec![0.1, 0.15, 0.2]
+        );
+        assert_eq!(
+            config_from_hint("r").early_stop_thresholds,
+            vec![0.1, 0.12, 0.15]
+        );
     }
 
     // =====================================================================

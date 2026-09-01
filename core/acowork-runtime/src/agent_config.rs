@@ -196,6 +196,15 @@ pub struct AgentConfig {
     /// manifest default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
+
+    /// Minimum compression ratio for ADR-061 context compaction (levels 1-7).
+    ///
+    /// Expressed as the *saved* share: 0.90 means "compress until at most
+    /// 10% of the history remains" (e.g. 200K → 20K). `None` = use
+    /// `crate::agent::compression_constants::MIN_COMPRESSION_RATIO` (0.90
+    /// default). Configured via the Agent Setup panel; valid range 0.05–0.95.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression_ratio_threshold: Option<f64>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.

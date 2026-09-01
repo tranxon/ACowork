@@ -584,6 +584,9 @@ pub(crate) async fn phase_b_init_session(
                 dirty = true;
             }
             c.context_window_override = updated.context_window;
+            // ADR-061: compression ratio threshold — None = built-in default
+            // (0.90), no manifest/fallback chain, so no dirty-write here.
+            c.compression_ratio_threshold = updated.compression_ratio_threshold;
 
             // ── temperature: manifest.llm.temperature → 0.3 ─────────
             if updated.temperature.is_none() {

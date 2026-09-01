@@ -13,3 +13,6 @@
 
 # Build/dev scripts
 *.bat text eol=crlf
+
+# All source code — LF everywhere
+*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml,css,html,vue,svelte} text eol=lf

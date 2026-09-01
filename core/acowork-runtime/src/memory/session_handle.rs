@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use acowork_memory::MemoryProvider;
+use acowork_memory::{MemoryManagerConfig, MemoryProvider};
 
 use crate::embedding::EmbeddingProvider;
 
@@ -24,6 +24,12 @@ pub struct MemorySessionHandle {
     current_session_id: RwLock<Option<String>>,
     /// Embedding provider (set once at construction, immutable thereafter).
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// Agent-level `MemoryManagerConfig`, set once at memory initialization.
+    ///
+    /// Config consistency: the `memory_recall` tool reads this so it uses the
+    /// SAME quality config (min_score / graph_expand / …) as auto-inject,
+    /// instead of hardcoded defaults. Falls back to default when unset.
+    memory_config: RwLock<Option<MemoryManagerConfig>>,
 }
 
 impl MemorySessionHandle {
@@ -33,6 +39,7 @@ impl MemorySessionHandle {
             provider: RwLock::new(None),
             current_session_id: RwLock::new(None),
             embedding_provider,
+            memory_config: RwLock::new(None),
         }
     }
 
@@ -82,5 +89,20 @@ impl MemorySessionHandle {
     /// Read a clone of the embedding provider, if set.
     pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
         self.embedding_provider.clone()
+    }
+
+    /// Set the agent's memory manager config (called once at memory init).
+    pub fn set_memory_config(&self, config: MemoryManagerConfig) {
+        if let Ok(mut guard) = self.memory_config.write() {
+            *guard = Some(config);
+        }
+    }
+
+    /// Read a clone of the agent's memory manager config, if set.
+    pub fn memory_config(&self) -> Option<MemoryManagerConfig> {
+        self.memory_config
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 }

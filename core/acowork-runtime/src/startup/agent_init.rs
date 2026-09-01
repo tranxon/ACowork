@@ -62,6 +62,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     > = None;
+    // ADR-033: receiver for `acowork/global/embedding_models` retained
+    // updates, wired through `gateway_loop` to SessionManager so sessions
+    // rebuild their embedding provider when the embed sidecar becomes
+    // ready or the active model switches.
+    let mut embedding_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
+    > = None;
     // ADR-055 §6.7 (Phase 4): receiver for node LSP relay state changes,
     // wired through `gateway_loop` to SessionManager.
     let mut lsps_update_rx: Option<
@@ -281,6 +288,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::ProviderUpdate>();
         let (search_update_tx, search_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::SearchUpdate>();
+        // ADR-033: sink for `acowork/global/embedding_models` retained
+        // updates (embed sidecar ready / model switch). gateway_loop
+        // forwards to SessionManager::handle_embedding_config_update.
+        let (embedding_update_tx, embedding_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::EmbeddingUpdate>();
         // ADR-055 §6.7 (Phase 4): sink for the node's LSP relay state.
         // The MQTT event loop decodes `acowork/nodes/{id}/lsps` retained
         // pushes; gateway_loop forwards to SessionManager so the
@@ -308,6 +320,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_tx: Some(identity_update_tx),
                 provider_update_tx: Some(provider_update_tx),
                 search_update_tx: Some(search_update_tx),
+                embedding_update_tx: Some(embedding_update_tx),
                 node_id: config.node_id.as_deref(),
                 lsps_update_tx: Some(lsps_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
@@ -379,6 +392,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_rx = Some(identity_update_chan_rx);
                 provider_update_rx = Some(provider_update_chan_rx);
                 search_update_rx = Some(search_update_chan_rx);
+                embedding_update_rx = Some(embedding_update_chan_rx);
                 lsps_update_rx = Some(lsps_update_chan_rx);
 
                 // Bug B fix (active pull, v3): after the MQTT client
@@ -606,14 +620,54 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // emb_provider = None means memory::manager auto-falls back to
     // text_search_with_filter (manager.rs L270-280).
 
-    let embed_endpoint = std::env::var("ACOWORK_EMBED_ENDPOINT").ok();
-    let embed_model_id = std::env::var("ACOWORK_EMBED_MODEL")
+    let env_endpoint = std::env::var("ACOWORK_EMBED_ENDPOINT").ok();
+    let env_model = std::env::var("ACOWORK_EMBED_MODEL").ok();
+    let env_dim = std::env::var("ACOWORK_EMBED_DIMENSION")
         .ok()
-        .unwrap_or_else(|| "bge-small-zh-v1.5".to_string());
-    let embed_dimension = std::env::var("ACOWORK_EMBED_DIMENSION")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
+        .and_then(|s| s.parse().ok());
+
+    // Bug1: the Gateway never injects ACOWORK_EMBED_ENDPOINT into spawned
+    // node/runtime env after the MQTT refactor, so endpoint is normally
+    // missing here. Fall back to the cached global-resources snapshot
+    // (populated by the synchronous active pull right after MQTT connect,
+    // or by the retained `acowork/global/embedding_models` message).
+    let cached_embed = match available_cache.as_ref() {
+        Some(cache) => cache.read().await.embedding_config(),
+        None => None,
+    };
+    let cache_present = available_cache.is_some();
+    tracing::info!(
+        target: "embedding_diag",
+        env_endpoint_present = env_endpoint.is_some(),
+        env_model_present = env_model.is_some(),
+        env_dim_present = env_dim.is_some(),
+        cache_present,
+        cache_hit = cached_embed.is_some(),
+        "Step 3.5: embedding config source check"
+    );
+
+    // Prefer explicit env values when present; otherwise recover the
+    // endpoint/model/dimension from the MQTT-populated cache.
+    let (embed_endpoint, embed_model_id, embed_dimension) = match cached_embed {
+        Some((ep, mdl, d)) => (
+            env_endpoint.or(Some(ep)),
+            env_model.unwrap_or(mdl),
+            env_dim.unwrap_or(d),
+        ),
+        None => (
+            env_endpoint,
+            env_model.unwrap_or_else(|| "bge-small-zh-v1.5".to_string()),
+            env_dim.unwrap_or(512),
+        ),
+    };
+    tracing::info!(
+        target: "embedding_diag",
+        resolved_endpoint = embed_endpoint.as_deref(),
+        resolved_model_id = %embed_model_id,
+        resolved_dimension = embed_dimension,
+        resolved_endpoint_present = embed_endpoint.is_some(),
+        "Step 3.5: embedding config resolved"
+    );
 
     let emb_provider: Option<Arc<dyn EmbeddingProvider>> = match embed_endpoint.as_deref() {
         Some(endpoint) => {
@@ -1035,6 +1089,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         identity_update_rx,
         provider_update_rx,
         search_update_rx,
+        embedding_update_rx,
         lsps_update_rx,
         runtime_http_port,
         provider,

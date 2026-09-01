@@ -166,7 +166,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeNode, KnowledgeSubType};
+    use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeNode, KnowledgeSubType, PrivacyLevel};
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
@@ -207,6 +207,8 @@ mod tests {
             created_at: two_days_ago,
             updated_at: two_days_ago,
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
@@ -219,6 +221,9 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let result = store.process_memory_store(&input).unwrap();
@@ -253,6 +258,8 @@ mod tests {
             created_at: two_days_ago,
             updated_at: two_days_ago,
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&existing).unwrap();
 
@@ -265,6 +272,9 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         store.process_memory_store(&input).unwrap();
@@ -304,6 +314,8 @@ mod tests {
                     );
                     m
                 },
+                privacy: PrivacyLevel::Personal,
+                importance: 0.5,
             };
             let node_b = KnowledgeNode {
                 id: None,
@@ -325,6 +337,8 @@ mod tests {
                     );
                     m
                 },
+                privacy: PrivacyLevel::Personal,
+                importance: 0.5,
             };
             store.store_knowledge(&node_a).unwrap();
             store.store_knowledge(&node_b).unwrap();
@@ -359,6 +373,8 @@ mod tests {
             created_at: two_days_ago,
             updated_at: two_days_ago,
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&existing).unwrap();
 
@@ -371,6 +387,9 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         store.process_memory_store(&input).unwrap();
@@ -405,6 +424,8 @@ mod tests {
             created_at: two_days_ago,
             updated_at: two_days_ago,
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
@@ -417,6 +438,9 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let result = store.process_memory_store(&input).unwrap();

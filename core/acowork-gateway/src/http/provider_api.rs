@@ -179,7 +179,7 @@ pub struct UpdateSearchKeyRequest {
 /// comes from provider_list.json (resource_cache).
 pub async fn list_providers(
     State(state): State<AppState>,
-) -> Result<Json<Vec<ProviderEntryResponse>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<ProviderEntryResponse>>, ApiError> {
     let gw = state.gateway_state.read().await;
 
     // Build key_preview lookup from Vault (only for key masking, not authority).
@@ -244,7 +244,7 @@ pub async fn list_providers(
 pub async fn add_provider(
     State(state): State<AppState>,
     Json(body): Json<AddProviderRequest>,
-) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
     // ADR-059 §7.3: reject stale writers before touching the vault.
     crate::http::routes::check_expected_version(&state, body.expected_version).await?;
 
@@ -349,7 +349,7 @@ pub async fn add_provider(
 pub async fn remove_provider(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let mut gw = state.gateway_state.write().await;
 
     // 1. Remove API key from Vault.
@@ -385,7 +385,7 @@ pub async fn update_provider(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Json(body): Json<UpdateProviderRequest>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     if let Some(ref url) = body.base_url
         && !url.is_empty()
         && !url.starts_with("http://")
@@ -522,7 +522,7 @@ pub async fn update_provider(
 /// `GET /api/search/keys` — list stored search provider keys (masked)
 pub async fn list_search_keys(
     State(state): State<AppState>,
-) -> Result<Json<Vec<SearchKeyEntryResponse>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<Vec<SearchKeyEntryResponse>>, ApiError> {
     let gw = state.gateway_state.read().await;
     let entries = gw
         .vault
@@ -544,7 +544,7 @@ pub async fn list_search_keys(
 pub async fn add_search_key(
     State(state): State<AppState>,
     Json(body): Json<AddSearchKeyRequest>,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
     if body.provider.is_empty() {
         return Err(ApiError::bad_request("provider must not be empty"));
     }
@@ -580,7 +580,7 @@ pub async fn add_search_key(
 pub async fn remove_search_key(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let mut gw = state.gateway_state.write().await;
     gw.vault.remove_search_key(&provider).map_err(|e| {
         ApiError::not_found(&format!("Search key not found for '{}': {}", provider, e))
@@ -607,7 +607,7 @@ pub async fn update_search_key(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Json(body): Json<UpdateSearchKeyRequest>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let mut gw = state.gateway_state.write().await;
 
     // Resolve the API key: use provided key, or preserve existing key

@@ -142,6 +142,10 @@ pub struct RuntimeConfigOverrides {
     pub system_prompt_override: Option<String>,
     pub shell_approval_threshold: Option<String>,
     pub approval_timeout_secs: Option<u64>,
+    /// ADR-061: minimum compression ratio for levels 1-7 (default 0.90 =
+    /// "compress until at most 10% remains"). `None` = use the built-in
+    /// default. See [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`].
+    pub compression_ratio_threshold: Option<f64>,
 }
 
 impl RuntimeConfigOverrides {
@@ -154,6 +158,7 @@ impl RuntimeConfigOverrides {
             && self.system_prompt_override.is_none()
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
+            && self.compression_ratio_threshold.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -179,6 +184,9 @@ impl RuntimeConfigOverrides {
         }
         if other.approval_timeout_secs.is_some() {
             self.approval_timeout_secs = other.approval_timeout_secs;
+        }
+        if other.compression_ratio_threshold.is_some() {
+            self.compression_ratio_threshold = other.compression_ratio_threshold;
         }
     }
 
@@ -214,6 +222,9 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.approval_timeout_secs {
             cfg.approval_timeout_secs = Some(v);
         }
+        if let Some(v) = self.compression_ratio_threshold {
+            cfg.compression_ratio_threshold = Some(v);
+        }
     }
 }
 
@@ -232,6 +243,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             system_prompt_override: cfg.system_prompt_override.clone(),
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
+            compression_ratio_threshold: cfg.compression_ratio_threshold,
         }
     }
 }
@@ -2070,16 +2082,26 @@ After installation, ask the user to re-enable the MCP server.",
     /// FallbackEmbeddingProvider chain with the new ONNX provider as the
     /// first entry, following the same cache + broadcast pattern as
     /// `update_llm_config` (ADR-012).
+    ///
+    /// ADR-s1: when `embed_provider_id` is `Some(...)`, the endpoint above
+    /// carries the cloud base URL (e.g. `https://ark.cn-beijing.volces.com/api/v3`)
+    /// and `embed_api_key` is the decrypted API key — sessions construct
+    /// a `RemoteEmbeddingProvider` against it instead of the local ONNX
+    /// sidecar. When both are `None`, behaviour is unchanged.
     pub fn handle_embedding_config_update(
         &mut self,
         embed_endpoint: String,
         embed_model_id: String,
         embed_dimension: usize,
+        embed_provider_id: Option<String>,
+        embed_api_key: Option<String>,
     ) {
         tracing::info!(
             endpoint = %embed_endpoint,
             model_id = %embed_model_id,
             dimension = embed_dimension,
+            cloud_provider = embed_provider_id.as_deref().unwrap_or("<local-onnx>"),
+            has_api_key = embed_api_key.is_some(),
             "SessionManager: received embedding config update via SidecarEndpointUpdate"
         );
 
@@ -2091,6 +2113,8 @@ After installation, ask the user to re-enable the MCP server.",
                     embed_endpoint: embed_endpoint.clone(),
                     embed_model_id: embed_model_id.clone(),
                     embed_dimension,
+                    embed_provider_id: embed_provider_id.clone(),
+                    embed_api_key: embed_api_key.clone(),
                 })
                 .is_err()
             {

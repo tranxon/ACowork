@@ -373,7 +373,7 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
 pub async fn get_agent_detail(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AgentDetailResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AgentDetailResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let info = gw
         .installed_agents
@@ -430,7 +430,7 @@ pub async fn get_agent_detail(
 pub async fn get_agent_avatar(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+) -> Result<Response<Body>, ApiError> {
     let (install_path, avatar_rel) = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -545,7 +545,7 @@ pub async fn update_agent_manifest_avatar(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<UpdateAvatarRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let install_path = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -690,7 +690,7 @@ fn has_avatar_extension(path: &str) -> bool {
 fn validate_path_within_install(
     install_path: &str,
     relative_path: &str,
-) -> Result<std::path::PathBuf, (StatusCode, Json<ApiError>)> {
+) -> Result<std::path::PathBuf, ApiError> {
     let install_dir = std::path::Path::new(install_path);
     let canonical_install = std::fs::canonicalize(install_dir).map_err(|_| {
         ApiError::not_found("Install directory not found for agent")
@@ -718,7 +718,7 @@ fn validate_path_within_install(
 pub async fn get_avatar_config(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AvatarConfigResponse>, ApiError> {
     let (manifest, is_running) = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -754,7 +754,7 @@ pub async fn update_avatar_config(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<UpdateAvatarConfigRequest>,
-) -> Result<Json<AvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AvatarConfigResponse>, ApiError> {
     let (manifest, is_running) = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -887,7 +887,7 @@ pub async fn update_avatar_config(
 pub async fn list_avatar_assets(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AvatarAssetsResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AvatarAssetsResponse>, ApiError> {
     let install_path = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -967,7 +967,7 @@ pub async fn get_avatar_file(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Query(query): Query<AvatarFileQuery>,
-) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+) -> Result<Response<Body>, ApiError> {
     let install_path = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -1028,7 +1028,7 @@ pub async fn delete_avatar_file(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Query(query): Query<AvatarFileQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let (install_path, manifest, _is_running) = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -1102,7 +1102,7 @@ pub async fn upload_agent_file(
     Path(agent_id): Path<String>,
     Query(params): Query<UploadFileQuery>,
     mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let install_path = {
         let gw = state.gateway_state.read().await;
         let info = gw
@@ -1229,7 +1229,7 @@ pub async fn download_package(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     headers: HeaderMap,
-) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+) -> Result<Response<Body>, ApiError> {
     // agent_id is a slug; reject path separators / traversal.
     if agent_id.is_empty()
         || agent_id.contains('/')
@@ -1256,14 +1256,11 @@ pub async fn download_package(
             .map(|store| store.any_token_matches(token))
             .unwrap_or(false);
         if !valid {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiError {
-                    error: "Invalid node token".to_string(),
-                    code: 403,
-                    structured: None,
-                }),
-            ));
+            return Err(ApiError {
+                error: "Invalid node token".to_string(),
+                code: 403,
+                structured: None,
+            });
         }
     }
 
@@ -1316,7 +1313,7 @@ pub(crate) async fn gateway_dev_mode(state: &AppState) -> bool {
 pub(crate) async fn check_node_compatible(
     state: &AppState,
     node_id: &str,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<(), ApiError> {
     let Some(registry) = state.node_registry.as_ref() else {
         // No node registry (MQTT disabled) — the command path fails later
         // with a clearer "control plane unavailable" error.
@@ -1369,7 +1366,7 @@ pub struct AgentLspEndpointResponse {
 pub async fn get_agent_lsp_endpoint(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AgentLspEndpointResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AgentLspEndpointResponse>, ApiError> {
     let node_id = {
         let gw = state.gateway_state.read().await;
         gw.running_agents
@@ -1411,7 +1408,7 @@ pub async fn get_agent_lsp_endpoint(
 pub async fn install_agent(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
     // ADR-059 §7.3: optional optimistic-concurrency precondition — the
@@ -1539,7 +1536,7 @@ async fn register_package_in_registry(
     state: &AppState,
     package_bytes: &[u8],
     node_id: &str,
-) -> Result<(AgentManifest, String), (StatusCode, Json<ApiError>)> {
+) -> Result<(AgentManifest, String), ApiError> {
     let temp_file = std::env::temp_dir().join(format!(
         "acowork-install-{}-{}.agent",
         std::process::id(),
@@ -1724,7 +1721,7 @@ pub async fn clone_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<CloneRequest>,
-) -> Result<(StatusCode, Json<CloneResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<CloneResponse>), ApiError> {
     // Validate new_agent_id is different from source
     if req.new_agent_id == agent_id {
         return Err(ApiError::bad_request(
@@ -1791,7 +1788,7 @@ pub async fn upgrade_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
 
@@ -1874,7 +1871,7 @@ pub async fn upgrade_agent(
 pub async fn uninstall_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     // Check if agent is running first (lightweight read)
     {
         let gw = state.gateway_state.read().await;
@@ -1923,7 +1920,7 @@ pub async fn start_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<StartAgentRequest>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     // Pre-flight checks — released before we issue the node command.
     {
         let gw = state.gateway_state.read().await;
@@ -1970,7 +1967,7 @@ pub async fn start_agent(
         }
         // 2. Apply to Gateway's own tracing subscriber
         if let Some(handle) = &state.log_reload_handle {
-            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            let new_filter = acowork_core::logging::build_env_filter(level);
             if let Err(e) = handle.reload(new_filter) {
                 tracing::warn!(
                     "Failed to reload Gateway tracing filter for debug mode: {}",
@@ -1995,7 +1992,7 @@ pub async fn start_agent(
 pub async fn stop_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_running(&agent_id) {
@@ -2044,7 +2041,7 @@ pub async fn stop_agent(
 pub async fn restart_agent_in_debug(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_running(&agent_id) {
@@ -2112,7 +2109,7 @@ pub async fn restart_agent_in_debug(
             }
         }
         if let Some(handle) = &state.log_reload_handle {
-            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            let new_filter = acowork_core::logging::build_env_filter(level);
             if let Err(e) = handle.reload(new_filter) {
                 tracing::warn!(
                     "Failed to reload Gateway tracing filter for debug mode: {}",
@@ -2138,7 +2135,7 @@ pub async fn restart_agent_in_debug(
 pub async fn get_agent_model(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AgentModelResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AgentModelResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
 
     // Verify agent exists
@@ -2340,7 +2337,7 @@ pub struct AgentSearchProvidersResponse {
 pub async fn get_agent_search_providers(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<AgentSearchProvidersResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AgentSearchProvidersResponse>, ApiError> {
     // Verify agent exists
     {
         let gw = state.gateway_state.read().await;

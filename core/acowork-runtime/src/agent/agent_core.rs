@@ -145,6 +145,11 @@ pub struct AgentCore {
     /// Per-agent context window cap (from agent_config.json, set via Agent Setup panel).
     /// Layer 1 in the resolution chain. 0 means "no limit".
     pub(crate) context_window_override: Option<u64>,
+    /// ADR-061: minimum compression ratio for levels 1-7 (from
+    /// agent_config.json, set via Agent Setup panel). `None` = use
+    /// [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`] (0.90
+    /// default = "compress until at most 10% remains").
+    pub(crate) compression_ratio_threshold: Option<f64>,
     /// Context window cap from manifest.toml [llm].context_window (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
@@ -177,6 +182,20 @@ pub struct AgentCore {
     pub(crate) rag_provider: Option<Arc<dyn RagProvider>>,
     /// Debug observer slot — Production (no-op) or Dev (real observer).
     pub(crate) debug_observer: DebugObserverSlot,
+    /// ADR-048: shared bypass-injection channel for debug handles.
+    ///
+    /// SessionManager writes `DebugHandles` here while the agent loop is
+    /// running (its message channel is blocked inside `run()`), and the
+    /// agent loop drains it at the start of each iteration via
+    /// [`Self::take_pending_debug_handles`].
+    ///
+    /// Held here — not on the observer slot — because the observer's
+    /// `set_pending_injection` is a no-op while the slot is `Production`,
+    /// which is exactly the state during a mid-loop `EnableDebugMode`.
+    /// `disable_debug_mode` clears the shared slot (session_manager.rs),
+    /// so a stale handles pointer cannot be applied after teardown.
+    pub(crate) pending_debug_handles:
+        Option<Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>>,
     /// ADR-046: blob store for `file_upload` / `image_upload` items
     /// (uploaded PDFs, images, …). Populated in Phase B of `session_init`
     /// via [`AgentCore::set_attachment_service`]; the agent loop reads
@@ -272,6 +291,7 @@ impl AgentCore {
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
+            compression_ratio_threshold: None,
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
@@ -283,6 +303,7 @@ impl AgentCore {
             rag_provider: None,
             memory_session: None,
             debug_observer: observer,
+            pending_debug_handles: None,
             approval_gate: None,
             shell_approval_threshold,
             shell_risk_rules: crate::security::shell_risk::ShellRiskRules::load(
@@ -637,6 +658,14 @@ impl AgentCore {
             );
             self.approval_timeout_secs = Some(timeout);
         }
+        if let Some(threshold) = overrides.compression_ratio_threshold {
+            tracing::info!(
+                old = ?self.compression_ratio_threshold,
+                new = threshold,
+                "runtime config: compression_ratio_threshold updated"
+            );
+            self.compression_ratio_threshold = Some(threshold);
+        }
 
         // ADR-061 §10.2: the `tool_compression_enabled` toggle and its
         // platform-tools hot-reload are deleted; `context_retrieve` is
@@ -695,10 +724,18 @@ impl AgentCore {
                 let existing: usize = ["Episodic", "Knowledge", "Procedural", "Autobiographical"]
                     .iter().map(|l| graph.nodes_by_label(l).len()).sum();
                 tracing::info!(path = %db_path.display(), existing_nodes = existing, "Grafeo memory store opened");
+                let quality = self.memory_quality_config();
+                if let Err(e) = store.apply_quality_config(&quality) {
+                    tracing::warn!(error = %e, "Failed to apply memory quality config to GrafeoStore, using defaults");
+                }
                 let store_arc = Arc::new(store);
                 self.bootstrap_autobiographical_from_manifest(&*store_arc);
                 if let Some(ref session) = self.memory_session {
                     session.set_provider(store_arc.clone());
+                    // Config consistency: the memory_recall tool reads the
+                    // SAME MemoryManagerConfig as auto-inject (ADR-062 M5),
+                    // so per-agent quality settings apply to both paths.
+                    session.set_memory_config(self.memory_manager_config());
                 }
                 self.memory_admin = Some(store_arc.clone());
                 self.memory_provider = Some(store_arc);
@@ -754,7 +791,9 @@ impl AgentCore {
                 id: None, category: AutobioCategory::Identity, key: key.to_string(),
                 value: value.clone(), confidence: 1.0, source_episode_id: None,
                 embedding: None, status: NodeStatus::Active,
-                created_at: now, updated_at: now, metadata: HashMap::new(),
+                created_at: now, updated_at: now,
+                // Bootstrapped from the agent manifest — not a user statement.
+                source: "manifest".to_string(), metadata: HashMap::new(),
             };
             if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node");
@@ -765,7 +804,9 @@ impl AgentCore {
                 id: None, category: AutobioCategory::Capability, key: cap_key.clone(),
                 value: cap_def.description.clone(), confidence: 1.0, source_episode_id: None,
                 embedding: None, status: NodeStatus::Active,
-                created_at: now, updated_at: now, metadata: HashMap::new(),
+                created_at: now, updated_at: now,
+                // Bootstrapped from the agent manifest — not a user statement.
+                source: "manifest".to_string(), metadata: HashMap::new(),
             };
             if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node");
@@ -774,8 +815,48 @@ impl AgentCore {
         tracing::info!(identity_count = identity_entries.len(), capability_count = manifest.capabilities.len(), "Bootstrapped Autobiographical nodes from manifest");
     }
 
+    /// Resolve the agent's `MemoryManagerConfig` (manifest overrides +
+    /// defaults).
+    ///
+    /// Shared by `init_memory_manager` (auto-inject path) and the
+    /// `memory_recall` tool (via `MemorySessionHandle`) so both retrieval
+    /// paths use identical quality settings (ADR-062 M5).
+    pub(crate) fn memory_manager_config(&self) -> MemoryManagerConfig {
+        // auto-inject defaults OFF: the LLM recalls memories explicitly via
+        // the `memory_recall` tool (same user-message query), so first-turn
+        // injection would duplicate already-present context. Per-agent
+        // opt-in via `[memory.quality].auto_inject_enabled = true`.
+        // The override is read straight from the manifest — it is a
+        // `MemoryManagerConfig` field, not part of `MemoryQualityConfig`.
+        let manifest_auto_inject = self
+            .manifest
+            .memory
+            .quality
+            .as_ref()
+            .and_then(|q| q.auto_inject_enabled);
+        MemoryManagerConfig {
+            quality: self.memory_quality_config(),
+            auto_inject_enabled: manifest_auto_inject.unwrap_or(false),
+            ..MemoryManagerConfig::default()
+        }
+    }
+
     pub fn init_memory_manager(&self) -> MemoryManager {
-        MemoryManager::new(MemoryManagerConfig::default())
+        MemoryManager::new(self.memory_manager_config())
+    }
+
+    /// Resolve the agent's memory quality config (ADR-062 D2).
+    ///
+    /// Source: the `.agent` manifest `[memory.quality]` section (package
+    /// author default). An absent section yields `MemoryQualityConfig::default()`
+    /// ("zero configuration = current behaviour").
+    pub(crate) fn memory_quality_config(&self) -> acowork_memory::quality::MemoryQualityConfig {
+        self.manifest
+            .memory
+            .quality
+            .clone()
+            .map(Into::into)
+            .unwrap_or_default()
     }
 
     pub fn start_consolidation_pipeline(&mut self) {
@@ -921,7 +1002,42 @@ impl AgentCore {
         &mut self,
         ch: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>,
     ) {
-        self.debug_observer.set_pending_injection(ch);
+        // ADR-048: hold the bypass-injection channel at the AgentCore level.
+        // The observer slot's `set_pending_injection` is a NO-OP while the
+        // observer is `Production` (which is almost always the case here —
+        // `session_task.rs` calls this in `SessionTask::new` before any
+        // DevMode is active). Relying on the observer slot alone silently
+        // dropped the channel, so a mid-loop `EnableDebugMode` written into
+        // `session_handle.pending_debug_handles` was never visible to the
+        // running agent loop. The agent loop drains this channel at the
+        // start of each iteration via [`Self::take_pending_debug_handles`].
+        //
+        // We still forward to the observer slot as well: for a session that
+        // is ALREADY Dev, `DebugObserverImpl::check_pending_injection` can
+        // observe a late bypass write (rewind/patch injection), and the
+        // observer's own pending slot remains the mirror for the Dev case.
+        self.debug_observer.set_pending_injection(ch.clone());
+        self.pending_debug_handles = Some(ch);
+    }
+
+    /// Take any bypass-injected debug handles, clearing the slot.
+    ///
+    /// Called at the start of every agent-loop iteration. Returns the
+    /// handles written by SessionManager's `push_debug_mode_to_existing_sessions`
+    /// (the mid-loop `EnableDebugMode` path) if any, so the caller can
+    /// build a DevMode observer and inject it via [`Self::set_debug_mode`].
+    ///
+    /// Returns `None` when the lock is contended (the writer holds it); in
+    /// that case the caller should retry next iteration rather than block
+    /// the agent loop.
+    pub(crate) fn take_pending_debug_handles(
+        &self,
+    ) -> Option<crate::debug::DebugHandles> {
+        let ch = self.pending_debug_handles.as_ref()?;
+        match ch.try_lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        }
     }
 
     pub fn debug_observer(&self) -> &DebugObserverSlot { &self.debug_observer }
@@ -1024,6 +1140,7 @@ impl Clone for AgentCore {
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
+            compression_ratio_threshold: self.compression_ratio_threshold,
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
@@ -1033,6 +1150,12 @@ impl Clone for AgentCore {
             rag_provider: self.rag_provider.clone(),
             memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),
+            // ADR-048: the pending-debug channel is intentionally NOT
+            // carried across clones — it is per-session state bound by
+            // `SessionTask::new` via `set_debug_pending_injection`. A
+            // template (or another session's clone) must not inherit a
+            // sibling's bypass channel.
+            pending_debug_handles: None,
             approval_gate: self.approval_gate.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
             shell_risk_rules: self.shell_risk_rules.clone(),
@@ -1750,6 +1873,144 @@ mod tests {
         assert_eq!(
             session_core.rag_provider.as_ref().unwrap().name(),
             "dummy_rag"
+        );
+    }
+
+    /// Build a minimal per-session `DebugHandles` bundle, mirroring
+    /// `SessionManager::create_session` / `push_debug_mode_to_existing_sessions`.
+    async fn make_debug_handles(session_id: &str) -> crate::debug::DebugHandles {
+        let ctrl = Arc::new(tokio::sync::Mutex::new(
+            crate::debug::controller::DebugController::new(),
+        ));
+        let bus = crate::debug::events::DebugEventBus::new();
+        let (rw, rs, rc) = {
+            let guard = ctrl.lock().await;
+            (
+                guard.rewind_notify_handle(),
+                guard.resume_notify_handle(),
+                guard.control_notify_handle(),
+            )
+        };
+        crate::debug::DebugHandles {
+            debug_ctrl: ctrl,
+            debug_event_tx: bus.sender_template().for_session(session_id.to_string()),
+            rewind_notify: rw,
+            resume_notify: rs,
+            control_notify: rc,
+        }
+    }
+
+    /// Regression for the mid-loop `EnableDebugMode` bypass bug (ADR-048):
+    ///
+    /// `AgentCore::set_debug_pending_injection` must hold the bypass
+    /// channel at the AgentCore level EVEN when the observer slot is
+    /// `Production` (the observer's own `set_pending_injection` is a no-op
+    /// in that state). Before this fix, `session_task.rs` bound the channel
+    /// in `SessionTask::new` — which runs while the observer is Production
+    /// — so a debug panel opened mid-loop could never be picked up, and
+    /// iteration counters stayed frozen until the SessionTask message loop
+    /// processed the queued `EnableDebugMode`.
+    #[tokio::test]
+    async fn test_pending_debug_handles_held_at_core_level_and_clone_isolated() {
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        // Sanity: a fresh core has no pending channel.
+        assert!(core.take_pending_debug_handles().is_none());
+
+        // Simulate SessionTask::new binding the shared bypass channel while
+        // the observer is still Production.
+        let channel: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        core.set_debug_pending_injection(channel.clone());
+
+        // The channel must be retained at the AgentCore level (the fix).
+        assert!(core.pending_debug_handles.is_some());
+
+        // Simulate SessionManager::push_debug_mode_to_existing_sessions
+        // writing per-session handles into the shared channel while the
+        // agent loop is running.
+        {
+            let mut pending = channel.lock().await;
+            *pending = Some(make_debug_handles("sess-1").await);
+        }
+
+        // The agent loop drains it at the next iteration boundary.
+        let taken = core
+            .take_pending_debug_handles()
+            .expect("bypass-injected handles must be drainable");
+        assert_eq!(taken.debug_event_tx.session_id(), "sess-1");
+
+        // A second drain yields nothing (slot cleared).
+        assert!(core.take_pending_debug_handles().is_none());
+
+        // Clones do NOT carry the pending channel: it is per-session state,
+        // rebound by each SessionTask::new. A template clone must not
+        // inherit a sibling session's bypass channel.
+        let clone = core.clone();
+        assert!(clone.pending_debug_handles.is_none());
+        assert!(clone.take_pending_debug_handles().is_none());
+    }
+
+    // ── auto_inject manifest opt-in (per-agent switch) ─────────────
+
+    /// Build an AgentCore whose manifest carries the given TOML fragment
+    /// appended after the `[llm]` section (e.g. a `[memory.quality]`
+    /// block). An empty fragment leaves `[memory]` absent entirely.
+    fn make_core_with_memory_toml(extra_toml: &str) -> AgentCore {
+        let config = RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(&format!(
+            r#"
+            agent_id = "com.test.cw"
+            version = "1.0.0"
+            name = "Test CW"
+            description = "auto-inject opt-in test agent"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+
+            {extra_toml}
+            "#
+        ))
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+        AgentCore::new(config, manifest, provider, vec![])
+    }
+
+    #[test]
+    fn test_auto_inject_defaults_off_when_manifest_absent() {
+        // Zero-config = current behaviour: auto-inject stays OFF, the LLM
+        // recalls memories via the explicit `memory_recall` tool.
+        let core = make_core_with_memory_toml("");
+        assert!(
+            !core.init_memory_manager().config().auto_inject_enabled,
+            "auto_inject_enabled must default to false"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_manifest_opt_in_true() {
+        // Per-agent opt-in: `[memory.quality].auto_inject_enabled = true`.
+        let core = make_core_with_memory_toml(
+            "[memory.quality]\nauto_inject_enabled = true\n",
+        );
+        assert!(
+            core.init_memory_manager().config().auto_inject_enabled,
+            "manifest opt-in must enable auto-inject"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_manifest_opt_in_false() {
+        // Explicit opt-out is still honored.
+        let core = make_core_with_memory_toml(
+            "[memory.quality]\nauto_inject_enabled = false\n",
+        );
+        assert!(
+            !core.init_memory_manager().config().auto_inject_enabled,
+            "manifest opt-out must disable auto-inject"
         );
     }
 }

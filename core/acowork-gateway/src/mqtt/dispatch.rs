@@ -36,6 +36,91 @@ use crate::mqtt::node_control::NodeControlClient;
 use crate::mqtt::node_registry::SharedNodeRegistry;
 use crate::operation_store::SharedOperationStore;
 
+/// Window within which an offline signal (LWT `offline` status or an
+/// empty retained `NodeReady`) is treated as a stale retained replay
+/// rather than a live event (ADR-059 §7.2 replay race).
+///
+/// When the Gateway MQTT client (re)connects, the broker replays its
+/// retained snapshot asynchronously; the replayed queue can deliver a
+/// pre-reconnect offline snapshot AFTER the node's live re-announcement
+/// (`status=online` + `NodeReady`) already marked it ready. Without the
+/// guard such a stale snapshot demotes a healthy node back to BOOTING
+/// with no recovery path (bootstrap stuck in BOOTING; the Runtime's LLM
+/// availability stuck in LOADING). Retained replay of the small node
+/// topic set completes in well under this bound, so any offline signal
+/// arriving within it of a gateway (re)connect + node re-announcement
+/// is a replay.
+const REPLAY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Per-node last-live-online-signal bookkeeping for the replay guard.
+///
+/// An offline signal is only treated as a stale replay when BOTH hold:
+/// - the Gateway MQTT client (re)connected within [`REPLAY_WINDOW`]
+///   (retained replays only exist right after a (re)subscribe), and
+/// - the node announced a live online signal AFTER that reconnect
+///   (the node re-announced, so an offline snapshot predating the
+///   reconnect is stale).
+///
+/// Synchronous (called from the dispatch path) — the timestamps must
+/// be visible to the demote checks in the same message-processing order
+/// the broker delivered the live signals, which is what makes the
+/// suppression deterministic.
+#[derive(Default)]
+pub struct NodeReplayGuard {
+    last_online_signal: std::sync::Mutex<
+        std::collections::HashMap<String, std::time::Instant>,
+    >,
+    last_gateway_reconnect: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl NodeReplayGuard {
+    /// Record a live online signal for `node_id` (`status=online` or a
+    /// non-empty `NodeReady`).
+    pub fn mark_online(&self, node_id: &str) {
+        self.last_online_signal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Record a Gateway MQTT client (re)connection (ConnAck).
+    ///
+    /// Called by the Gateway's own MQTT poll task; retained replays
+    /// only exist in the window following a (re)subscribe.
+    pub fn mark_gateway_reconnect(&self) {
+        *self
+            .last_gateway_reconnect
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+    }
+
+    /// Whether an offline signal for `node_id` is a stale replay.
+    ///
+    /// True only when the Gateway recently (re)connected AND the node
+    /// announced a live online signal after that reconnect — i.e. the
+    /// node already re-announced, so a queued offline snapshot
+    /// predating the reconnect must be ignored. A genuine offline (no
+    /// recent gateway reconnect, or a node that never re-announced) is
+    /// never suppressed.
+    pub fn is_replay(&self, node_id: &str) -> bool {
+        let reconnect = self
+            .last_gateway_reconnect
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(gw_reconnect) = *reconnect else {
+            return false;
+        };
+        if gw_reconnect.elapsed() >= REPLAY_WINDOW {
+            return false;
+        }
+        let signals = self
+            .last_online_signal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        matches!(signals.get(node_id), Some(t) if *t > gw_reconnect)
+    }
+}
+
 /// Bundled dependencies for the MQTT dispatch layer.
 ///
 /// Groups every optional dependency the dispatch handlers need so the
@@ -76,6 +161,9 @@ pub struct DispatchContext {
     /// Operation store — correlates NodeEvent replies to tracked
     /// mutation operations (ADR-059 §6).
     pub operation_store: Option<SharedOperationStore>,
+    /// Replay guard — suppresses stale retained replays of offline
+    /// signals from demoting freshly-reconnected nodes (ADR-059 §7.2).
+    pub node_replay_guard: Arc<NodeReplayGuard>,
 }
 
 impl Default for DispatchContext {
@@ -94,6 +182,7 @@ impl Default for DispatchContext {
             auth_enabled: false,
             bootstrap_registry: None,
             operation_store: None,
+            node_replay_guard: Arc::new(NodeReplayGuard::default()),
         }
     }
 }
@@ -350,20 +439,30 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // node re-announces `NodeReady` on its next (re)connect, which
         // re-marks it ready; `mark_booting` (not `mark_failed`) keeps
         // that path open.
-        if let Some(node_id) = extract_node_id_from_status_topic(topic)
-            && String::from_utf8_lossy(payload).trim() == "offline"
-            && let Some(registry) = ctx.bootstrap_registry.as_ref()
-        {
-            let subsystem = SubsystemId(format!("node.{}", node_id));
-            // Only demote when currently ready — a node that never
-            // announced NodeReady stays booting already.
-            if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
-                let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
-                handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
-                tracing::info!(
-                    node_id,
-                    "Node offline — demoted node.{node_id} to booting (ADR-059 §7.2)"
-                );
+        if let Some(node_id) = extract_node_id_from_status_topic(topic) {
+            let is_offline = String::from_utf8_lossy(payload).trim() == "offline";
+            // Live online signals reset the replay guard so a stale
+            // replayed `offline` (queued at subscribe time) cannot
+            // demote a node that already reconnected and re-announced
+            // (ADR-059 §7.2 replay race — see `NodeReplayGuard`).
+            if !is_offline {
+                ctx.node_replay_guard.mark_online(&node_id);
+            }
+            if is_offline
+                && !ctx.node_replay_guard.is_replay(&node_id)
+                && let Some(registry) = ctx.bootstrap_registry.as_ref()
+            {
+                let subsystem = SubsystemId(format!("node.{}", node_id));
+                // Only demote when currently ready — a node that never
+                // announced NodeReady stays booting already.
+                if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
+                    let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+                    handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
+                    tracing::info!(
+                        node_id,
+                        "Node offline — demoted node.{node_id} to booting (ADR-059 §7.2)"
+                    );
+                }
             }
         }
     } else if topic_matches("acowork/nodes/+/ready", topic) {
@@ -385,13 +484,31 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             // Retained snapshot cleared (graceful shutdown or poll-task
             // disconnect clear). Demote to booting; NOT terminal — the
             // Node re-announces NodeReady on reconnect.
-            handle.mark_booting(Some(format!("node '{node_id}' cleared NodeReady (offline)")));
-            tracing::info!(
-                node_id,
-                "NodeReady retained cleared — demoted node.{node_id} to booting (ADR-059 §7.2)"
-            );
+            //
+            // Replay guard: the empty snapshot is retained, so the
+            // broker replays it to a reconnecting Gateway. When it
+            // arrives after the node's live re-announcement (status
+            // online + NodeReady) the guard recognizes it as a stale
+            // replay and skips the demotion — otherwise the node stays
+            // demoted until its next reconnect and bootstrap is stuck
+            // in BOOTING. Demote only a node that is currently ready
+            // (a never-ready node is already BOOTING; a Failed node
+            // must not be resurrected by a replay).
+            if !ctx.node_replay_guard.is_replay(&node_id)
+                && registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready)
+            {
+                handle.mark_booting(Some(format!("node '{node_id}' cleared NodeReady (offline)")));
+                tracing::info!(
+                    node_id,
+                    "NodeReady retained cleared — demoted node.{node_id} to booting (ADR-059 §7.2)"
+                );
+            }
             return;
         }
+        // A non-empty NodeReady is authoritative (live re-announcement
+        // or a valid retained replay) — record it as an online signal
+        // so subsequent stale replays are suppressed by the guard.
+        ctx.node_replay_guard.mark_online(&node_id);
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
         tokio::spawn(async move {
@@ -994,6 +1111,122 @@ mod tests {
         Arc::new(RwLock::new(GatewayState::new(
             "/tmp/acowork-dispatch-test-vault",
         )))
+    }
+
+    /// Shared dispatch context wired with the given bootstrap registry
+    /// (the replay guard must be shared across messages, so build one
+    /// context per test rather than per call).
+    fn ctx_with_registry(
+        registry: crate::bootstrap::SharedSubsystemReadinessRegistry,
+    ) -> DispatchContext {
+        DispatchContext {
+            runtime_http_registry: crate::http::proxy::new_shared_registry(),
+            agent_registry: crate::mqtt::agent_registry::new_shared_registry(),
+            node_registry: crate::mqtt::node_registry::new_shared_registry(),
+            state: test_state(),
+            bootstrap_registry: Some(registry),
+            ..Default::default()
+        }
+    }
+
+    fn node_ready_payload(node_id: &str) -> Vec<u8> {
+        let ready = acowork_core::mqtt_proto::NodeReady {
+            node_id: node_id.to_string(),
+            protocol_version: 1,
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::NodeReady(ready)),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    #[tokio::test]
+    async fn node_ready_replay_does_not_demote_reconnected_node() {
+        // Regression for the ADR-059 §7.2 replay race: when the
+        // Gateway MQTT client reconnects, the broker replays the
+        // retained snapshot asynchronously. A stale EMPTY `NodeReady`
+        // (the node cleared it on disconnect BEFORE the Gateway
+        // subscribed) or a stale LWT `offline` can be delivered AFTER
+        // the node's live re-announcement marked it ready. They must
+        // not demote the node back to BOOTING — that would stick
+        // bootstrap in BOOTING and the Runtime's LLM availability in
+        // LOADING until the node's next reconnect.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let ctx = ctx_with_registry(registry.clone());
+        // The Gateway MQTT client (re)connected — this is what makes
+        // later offline signals candidates for stale retained replays.
+        ctx.node_replay_guard.mark_gateway_reconnect();
+
+        // Live re-announcement: retained non-empty NodeReady.
+        handle_plaintext_message(
+            "acowork/nodes/local/ready",
+            &node_ready_payload("local"),
+            &ctx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.local".to_string())),
+            Some(crate::bootstrap::SubsystemState::Ready)
+        );
+
+        // Stale replay: empty retained snapshot delivered late.
+        handle_plaintext_message("acowork/nodes/local/ready", &[], &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.local".to_string())),
+            Some(crate::bootstrap::SubsystemState::Ready),
+            "stale empty NodeReady replay must not demote a reconnected node"
+        );
+
+        // Stale replay: LWT `offline` delivered late.
+        handle_plaintext_message("acowork/nodes/local/status", b"offline", &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.local".to_string())),
+            Some(crate::bootstrap::SubsystemState::Ready),
+            "stale offline replay must not demote a reconnected node"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_offline_demotes_when_not_a_replay() {
+        // A genuine offline signal (no recent live online signal) must
+        // still demote a ready node — the replay guard only suppresses
+        // the reconnect window, not real LWT offlines (ADR-059 §7.2).
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let ctx = ctx_with_registry(registry.clone());
+        let handle = registry.register("node.local", crate::bootstrap::ReadinessKind::Required);
+        handle.mark_ready(None);
+
+        handle_plaintext_message("acowork/nodes/local/status", b"offline", &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.local".to_string())),
+            Some(crate::bootstrap::SubsystemState::Booting),
+            "genuine offline must demote a ready node"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_offline_demotes_even_after_gateway_reconnect_when_node_stayed_offline() {
+        // The Gateway reconnected (replays exist) but the node never
+        // re-announced — its offline signal is genuine and must still
+        // demote (the guard requires a node online signal AFTER the
+        // gateway reconnect).
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let ctx = ctx_with_registry(registry.clone());
+        ctx.node_replay_guard.mark_gateway_reconnect();
+        let handle = registry.register("node.local", crate::bootstrap::ReadinessKind::Required);
+        handle.mark_ready(None);
+
+        handle_plaintext_message("acowork/nodes/local/status", b"offline", &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.local".to_string())),
+            Some(crate::bootstrap::SubsystemState::Booting),
+            "offline must demote when the node never re-announced after the gateway reconnect"
+        );
     }
 
     #[tokio::test]

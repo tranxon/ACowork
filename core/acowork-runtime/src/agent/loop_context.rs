@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::Provider;
 
+use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
@@ -666,7 +667,17 @@ impl AgentLoop {
                             error = %e,
                             "Compaction LLM call failed, trying next tier"
                         );
+                        // LowQuality is a model-capability problem — stepping
+                        // down the chain only gets cheaper/weaker, so discard
+                        // instead of retrying (quality-over-nothing).
+                        let non_retryable = matches!(
+                            &e,
+                            crate::error::RuntimeError::Summary(se) if !se.is_retryable()
+                        );
                         last_err = Some(e);
+                        if non_retryable {
+                            break;
+                        }
                     }
                 }
             }
@@ -712,14 +723,25 @@ impl AgentLoop {
                         "<summary>{}</summary>\n<user_intent>{}</user_intent>",
                         validated.summary, validated.user_intent
                     );
+                    // ADR-061 §19.3: the per-agent compression ratio threshold
+                    // (Agent Setup panel, agent_config.json) replaces the
+                    // built-in default; None → MIN_COMPRESSION_RATIO (0.90).
+                    let min_ratio = self
+                        .core
+                        .compression_ratio_threshold
+                        .unwrap_or(MIN_COMPRESSION_RATIO);
                     let (level, removed) = match self
                         .session
                         .history
-                        .plan_compression(&marker_text)
+                        .plan_compression(&marker_text, min_ratio)
                     {
                         Ok(plan) => {
                             let level = plan.level;
-                            match self.session.history.apply_compression(plan, &marker_text) {
+                            match self
+                                .session
+                                .history
+                                .apply_compression(plan, &marker_text, min_ratio)
+                            {
                                 Ok(outcome) => {
                                     tracing::info!(
                                         level = outcome.level,
@@ -799,13 +821,24 @@ impl AgentLoop {
                         .as_ref()
                         .map(|c| c.session_id().to_string())
                         .unwrap_or_default();
-                    crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
+                    if let Err(e) = crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
                         &summary,
                         &session_id,
                         &memory_provider,
                         self.core.embedding_provider.as_deref(),
                     )
-                    .await;
+                    .await
+                    {
+                        // Write failure is infrastructure-level: the compaction
+                        // itself already succeeded (history replaced), so log
+                        // and continue — the user-facing error surface stays
+                        // reserved for LLM generation failures.
+                        tracing::warn!(
+                            error = %e,
+                            session_id = %session_id,
+                            "Failed to write compaction summary to provider (non-fatal)"
+                        );
+                    }
 
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
@@ -1674,7 +1707,7 @@ mod tests {
         // [0] Block A: system kernel.
         assert_eq!(request.messages[0].role, MessageRole::System);
         assert!(
-            !request.messages[0].content.contains("Active Task List"),
+            !request.messages[0].content.contains("Todo Task List"),
             "Block A must not contain the dynamic todo snapshot"
         );
 
@@ -1691,7 +1724,7 @@ mod tests {
         let block_c = request
             .messages
             .iter()
-            .find(|m| m.content.contains("Active Task List"))
+            .find(|m| m.content.contains("Todo Task List"))
             .unwrap();
         assert_eq!(
             block_c.role, MessageRole::User,
@@ -2074,6 +2107,14 @@ mod tests {
         fn log(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
             self.call_log.clone()
         }
+        /// Build from an explicit response script — used by tests that need
+        /// text responses of varying quality (e.g. a LowQuality first call).
+        fn from_responses(responses: Vec<MockResponse>) -> Self {
+            Self {
+                responses: std::sync::Arc::new(std::sync::Mutex::new(responses)),
+                call_log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -2191,7 +2232,10 @@ mod tests {
         // To force the *call-phase* fallback, install a provider mock
         // that fails on the first call regardless of which tier it is.
         // Three targets → three attempts. First call fails, second succeeds.
-        let fail_once = Tier1FailThenSucceedProvider::new(1, "<summary>ok</summary>");
+        let fail_once = Tier1FailThenSucceedProvider::new(
+            1,
+            "<summary>a valid compact model summary output here</summary>",
+        );
         let call_log = fail_once.log();
         loop_.core.update_provider(
             std::sync::Arc::new(fail_once) as std::sync::Arc<dyn Provider>,
@@ -2280,6 +2324,74 @@ mod tests {
         assert!(
             tokens_after <= tokens_before,
             "FIFO path must not grow history: before={tokens_before} after={tokens_after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_phase_fallback_stops_on_low_quality_without_stepping_down() {
+        // LowQuality means the top tier's model cannot produce a usable
+        // summary — stepping down the chain only gets cheaper/weaker, so
+        // the chain must STOP (quality-over-nothing, P1), not retry with a
+        // weaker model. Script: call 1 returns a placeholder summary
+        // (< 20 chars → LowQuality), call 2 would return a valid summary.
+        // If the chain wrongly stepped down, call 2 would succeed and
+        // history would be compacted — the test asserts neither happens.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        let provider = Tier1FailThenSucceedProvider::from_responses(vec![
+            MockResponse::Text {
+                content: "<summary>ok</summary>".to_string(),
+            },
+            MockResponse::Text {
+                content: "<summary>a valid compact model summary output here</summary>"
+                    .to_string(),
+            },
+        ]);
+        let call_log = provider.log();
+        loop_.core.update_provider(
+            std::sync::Arc::new(provider) as std::sync::Arc<dyn Provider>,
+            "deepseek-v4-pro".to_string(),
+        );
+
+        for i in 0..10 {
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: format!("Message #{i}"),
+                ..Default::default()
+            });
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::Assistant,
+                content: format!("Reply #{i}"),
+                ..Default::default()
+            });
+        }
+
+        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+
+        // Only ONE LLM call: LowQuality breaks the chain instead of
+        // stepping down to a weaker model.
+        let log = call_log.lock().unwrap();
+        assert_eq!(
+            log.len(),
+            1,
+            "LowQuality must not step down the chain; call log: {log:?}"
+        );
+
+        // History untouched: no compaction marker, no raw replacement.
+        let has_marker = loop_
+            .session
+            .history
+            .messages()
+            .iter()
+            .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME));
+        assert!(
+            !has_marker,
+            "low-quality compaction must leave history untouched"
         );
     }
 }

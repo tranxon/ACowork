@@ -72,7 +72,8 @@ type WiredField =
   | "contextWindow"
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
-  | "idleTimeoutSecs";
+  | "idleTimeoutSecs"
+  | "compressionRatioThreshold";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -83,6 +84,7 @@ const WIRE_FIELD: Record<WiredField, string> = {
   shellApprovalThreshold: "shell_approval_threshold",
   approvalTimeoutSecs: "approval_timeout_secs",
   idleTimeoutSecs: "idle_timeout_secs",
+  compressionRatioThreshold: "compression_ratio_threshold",
 };
 
 const FIELD_DEBOUNCE_MS = 500;
@@ -96,6 +98,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   maxTokens: FIELD_DEBOUNCE_MS,
   maxIterations: FIELD_DEBOUNCE_MS,
   maxSessions: FIELD_DEBOUNCE_MS,
+  compressionRatioThreshold: FIELD_DEBOUNCE_MS,
 };
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -178,6 +181,7 @@ export function AgentSetupTab() {
           shell_approval_threshold?: string | null;
           approval_timeout_secs?: number | null;
           idle_timeout_secs?: number | null;
+          compression_ratio_threshold?: number | null;
         };
         // Race-safe merge (ADR-052 follow-up): only overwrite each
         // local profile field when the server returned a concrete
@@ -222,6 +226,9 @@ export function AgentSetupTab() {
         }
         if (typeof cfg.idle_timeout_secs === "number") {
           patch.idleTimeoutSecs = cfg.idle_timeout_secs;
+        }
+        if (typeof cfg.compression_ratio_threshold === "number") {
+          patch.compressionRatioThreshold = cfg.compression_ratio_threshold;
         }
         setProfile(selectedAgentId, patch);
       })
@@ -545,6 +552,13 @@ export function AgentSetupTab() {
   }
 
   const agentName = profile.displayName ?? selectedAgent.name ?? selectedAgentId;
+
+  // Derived once so the slider thumb and the numeric badge can never
+  // disagree (bug: previously the slider used `?? 0.9` while the badge
+  // used strict `!== undefined`, so a freshly loaded agent whose runtime
+  // config omitted `compression_ratio_threshold` showed thumb-at-90%
+  // with a "—" badge until the user dragged — see ADR-061 §16).
+  const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
     <div className="flex-1 overflow-y-auto p-3">
@@ -943,6 +957,37 @@ export function AgentSetupTab() {
         </div>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.temperatureDesc")}
+        </p>
+      </div>
+
+      {/* Compression Ratio Threshold (ADR-061) */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.compressionRatioThreshold")}
+        </label>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={50}
+            max={95}
+            step={5}
+            value={ratioPct}
+            onChange={(e) => {
+              saveField(
+                "compressionRatioThreshold",
+                parseFloat(e.target.value) / 100,
+              );
+            }}
+            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
+              bg-zinc-200 dark:bg-zinc-700
+              accent-zinc-600 dark:accent-zinc-400"
+          />
+          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+            {ratioPct}%
+          </span>
+        </div>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.compressionRatioThresholdDesc")}
         </p>
       </div>
 

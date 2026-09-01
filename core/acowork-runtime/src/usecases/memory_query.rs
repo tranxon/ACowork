@@ -117,6 +117,27 @@ pub struct ConsolidationReport {
     pub message: String,
 }
 
+/// Result of an embedding-dimension rebuild.
+///
+/// Mirrors `MemoryAdminService::migrate_embedding_dimension`'s
+/// `RebuildStats` so the HTTP handler can ferry it through
+/// `serde_json::to_value` without engine-specific types.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RebuildReport {
+    /// Total nodes scanned.
+    pub total_scanned: u64,
+    /// Nodes successfully re-embedded.
+    pub rebuilt: u64,
+    /// Nodes skipped because they had no embedding vector.
+    pub skipped_no_embedding: u64,
+    /// Nodes skipped because they had no content.
+    pub skipped_no_content: u64,
+    /// Nodes that failed during re-embedding.
+    pub errors: u64,
+    /// Human-readable summary message for the UI.
+    pub message: String,
+}
+
 /// Memory query methods.
 #[async_trait]
 pub trait MemoryQueryService: Send + Sync {
@@ -131,6 +152,20 @@ pub trait MemoryQueryService: Send + Sync {
 
     /// Trigger a consolidation run.
     async fn consolidate(&self, force: bool, retention_days: u32) -> Result<ConsolidationReport>;
+
+    /// Re-embed all nodes with a new embedding function/dimension.
+    ///
+    /// `endpoint` / `model_id` / `dimension` describe the new embedding
+    /// model the Gateway has switched to. The implementation builds a
+    /// temporary provider and migrates the stored vectors, rebuilding the
+    /// HNSW indexes (Bug3: restores the dimension-migration feature that
+    /// was lost in the gRPC→MQTT refactor).
+    async fn rebuild_embeddings(
+        &self,
+        endpoint: &str,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<RebuildReport>;
 
     /// Delete a node by id.
     async fn delete_node(&self, node_id: u64) -> Result<()>;

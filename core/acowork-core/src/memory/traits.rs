@@ -26,10 +26,14 @@ pub struct MemoryNode {
 }
 
 /// Privacy level for memory nodes
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum PrivacyLevel {
+    /// 可跨 Agent 共享（如用户姓名）— 打包分享时保留
     Public,
+    /// Agent 私有（如用户偏好风格）— 打包分享时剥离（保守默认）
+    #[default]
     Personal,
+    /// 敏感信息 — 打包分享时剥离
     Sensitive,
 }
 

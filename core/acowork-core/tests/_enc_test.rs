@@ -23,7 +23,7 @@ fn encode_session_config_runtime_realistic() {
     let b_unspec = prost::Message::encode_to_vec(&enc(cfg_real(LlmAvailability::Unspecified)));
     let b_configured = prost::Message::encode_to_vec(&enc(cfg_real(LlmAvailability::Configured)));
     let b_missing = prost::Message::encode_to_vec(&enc(cfg_real(LlmAvailability::Missing)));
-    let b_zero = prost::Message::encode_to_vec(&enc(cfg_real(LlmAvailability::from_i32(0).unwrap())));
+    let b_zero = prost::Message::encode_to_vec(&enc(cfg_real(LlmAvailability::try_from(0).unwrap())));
     
     println!("Runtime-realistic Unspecified (0): {}", b_unspec.len());
     println!("Runtime-realistic Configured (2):  {}", b_configured.len());

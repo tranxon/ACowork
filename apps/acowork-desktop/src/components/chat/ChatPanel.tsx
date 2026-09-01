@@ -20,7 +20,7 @@ import { ContextUsageIcon } from "./ContextUsageIcon";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
-import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
+import { useLiveStream, getChatAdapterSession, releaseAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
 import { ContextMenu, useContextMenu } from "../common/ContextMenu";
@@ -851,7 +851,12 @@ export function ChatPanel() {
     });
 
     // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
-    if (!hasMessages) {
+    // Gate the "skip reload" branch on cache integrity too: after a
+    // clearSessionMessages the cache may be PARTIALLY repopulated by
+    // background record_complete writes (messagesStale=true) — those
+    // tail records must not mask the missing older history, so force a
+    // full load until a real HTTP window has landed.
+    if (!hasMessages || ss0?.messagesStale) {
       // 2a. No messages in store — load from backend (first mount or new session).
       // The scroll controller handles positioning after blocks arrive:
       // scrollToBottom() for atBottom/no-snapshot, scrollToBlockId() for browsing.
@@ -896,12 +901,26 @@ export function ChatPanel() {
   useEffect(() => {
     if (!selectedAgentId || !currentSessionId) return;
 
-    // Release the previous session's messages (memory cleanup).
+    // Release the previous session's resources (memory cleanup).
     // We do this BEFORE loading the new session so the memory is freed
     // before the new data arrives.
+    //
+    // Two pieces:
+    //   1. `messages[]` - released unconditionally via clearSessionMessages.
+    //   2. `chatAdapterStore.sessions[prevKey]` - released ONLY when the
+    //      previous session is not actively streaming. If the user switched
+    //      away mid-stream, the rolling `assistantStream` / `thinkingStream`
+    //      ChatMessage objects are still in flight; dropping them would lose
+    //      the live preview when the user switches back. Once stream ends,
+    //      `record_complete` lands in `messages[]` and the next switch-away
+    //      will release the (now-stale) adapter entry.
     const prevId = prevSessionIdRef.current;
     if (prevId && prevId !== currentSessionId) {
       useChatStore.getState().clearSessionMessages(selectedAgentId, prevId);
+      const prevAdapter = getChatAdapterSession(selectedAgentId, prevId);
+      if (!prevAdapter.isAssistantReplying && !prevAdapter.isThinking) {
+        releaseAdapterSession(selectedAgentId, prevId);
+      }
     }
     prevSessionIdRef.current = currentSessionId;
 
@@ -928,9 +947,10 @@ export function ChatPanel() {
       (existingMessages && existingMessages.length > 0) ||
       (existingOptimistic && existingOptimistic.length > 0)
     );
-    if (hasMessages) {
-      // Messages (and/or optimistic overlay) already cached — just
-      // refresh session state.
+    if (hasMessages && !ss1?.messagesStale) {
+      // Messages (and/or optimistic overlay) already cached AND the cache
+      // is authoritative (not a partially-repopulated post-clear slice) —
+      // just refresh session state.
       chatStore.loadSession(selectedAgentId, currentSessionId);
       return;
     }
@@ -1389,6 +1409,14 @@ export function ChatPanel() {
     const cd = e.clipboardData;
     if (!cd) return;
 
+    // ALWAYS preventDefault — every branch below handles insertion itself,
+    // so the browser's default paste must NOT run. Leaving it enabled
+    // (as the original "let default paste happen" comment suggested) is
+    // exactly how the double-paste bug surfaces: in some Tauri WebView
+    // paths the browser's native paste fires alongside our manual
+    // `insertTextAtCaret`, producing the clipboard text twice.
+    e.preventDefault();
+
     // Read plain text up front — needed for the "no files" branch.
     // `text/uri-list` (X11/Wayland file URIs) and `text` are also probed
     // for completeness, but in Tauri WebViews the dominant case is
@@ -1417,7 +1445,6 @@ export function ChatPanel() {
       // NOT also insert the `text/plain` here: when Explorer copies N
       // files, the text payload is exactly the N paths joined by
       // newlines, and inserting them would duplicate the upload UX.
-      e.preventDefault();
       for (const p of paths) void uploadFileAtPath(p);
       return;
     }
@@ -1426,7 +1453,6 @@ export function ChatPanel() {
     // it at the caret — this is the dominant case when the user copies
     // agent output (mermaid / tables / code) and pastes it back.
     if (text) {
-      e.preventDefault();
       insertTextAtCaret(text);
       return;
     }
@@ -1436,13 +1462,15 @@ export function ChatPanel() {
     // `name` (no path), so we can't upload — but inserting the
     // filename gives the user visual feedback.
     if (cd.files && cd.files.length > 0) {
-      e.preventDefault();
       const names = Array.from(cd.files).map((f) => f.name).join("\n");
       insertTextAtCaret(names);
       return;
     }
-    // else: clipboard held neither paths nor files nor text — let the
-    // browser default paste happen so the user sees *some* response.
+    // else: clipboard held neither paths nor files nor text — we
+    // already called preventDefault above, so nothing pastes. The
+    // silent no-op is intentional (and matches the original comment
+    // about "user sees *some* response" — the previous default-paste
+    // fallback was the source of the double-paste bug).
   }, [insertTextAtCaret, uploadFileAtPath]);
 
   /**
@@ -1735,7 +1763,31 @@ export function ChatPanel() {
         {/* ADR-015: Session tab bar */}
         {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}
         {/* Messages area with drawer overlay */}
-        <div className="relative flex-1 overflow-hidden">
+        <div
+          className="relative flex-1 overflow-hidden"
+          onWheel={(e) => {
+            // The jump-to-top / jump-to-bottom buttons live as siblings of
+            // the scroll container inside this `overflow-hidden` wrapper
+            // (see JSX below), so the browser's scrollable-ancestor lookup
+            // for a wheel event hitting a button walks up the chain,
+            // finds no `overflow-y-auto` ancestor (overflow:hidden doesn't
+            // count), and falls through to the body — the messages
+            // container never receives the wheel.  This is invisible most
+            // of the time because the buttons are tiny, but right after
+            // clicking jump-to-top the cursor is still over the button
+            // (and the button stays mounted for one rAF while isNearTop
+            // catches up) so the user immediately wheels to scroll back
+            // down and the wheel appears dead.  Forward wheel events that
+            // hit a button to the scroll container; leave all other wheel
+            // events alone so native scrolling inside the container works
+            // exactly as before.
+            if (!(e.target as HTMLElement).closest("button")) return;
+            const container = messagesContainerRef.current;
+            if (!container) return;
+            container.scrollTop += e.deltaY;
+            e.preventDefault();
+          }}
+        >
           <div
             ref={messagesContainerRef}
             onScroll={() => {

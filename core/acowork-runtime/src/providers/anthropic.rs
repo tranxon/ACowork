@@ -1178,7 +1178,7 @@ mod tests {
         let mut sys = ChatMessage::system("Static kernel");
         sys.cache_control = Some(CacheControl::Ephemeral);
         // Block C: todo snapshot (User role) with ephemeral breakpoint.
-        let mut todo = ChatMessage::user("## Active Task List\n- task1");
+        let mut todo = ChatMessage::user("## Todo Task List\n- task1");
         todo.cache_control = Some(CacheControl::Ephemeral);
         // Block B tail: assistant message with ephemeral breakpoint.
         let mut asst = ChatMessage::assistant("Previous turn");
@@ -1264,7 +1264,7 @@ mod tests {
                 },
             }],
         );
-        let mut todo = ChatMessage::user("## Active Task List\n- [ ] t1 (t1)");
+        let mut todo = ChatMessage::user("## Todo Task List\n- [ ] t1 (t1)");
         todo.cache_control = Some(CacheControl::Ephemeral);
 
         let (converted, _system) =
@@ -1289,7 +1289,7 @@ mod tests {
             converted[2].content.as_ref().unwrap()[0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("Active Task List")
+                .contains("Todo Task List")
         );
     }
 

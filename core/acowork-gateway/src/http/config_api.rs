@@ -8,7 +8,6 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
     routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
@@ -107,7 +106,7 @@ pub struct MessageResponse {
 /// instead of hardcoded placeholder values.
 pub async fn get_config(
     State(state): State<AppState>,
-) -> Result<Json<ConfigResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ConfigResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let config = gw
         .config
@@ -141,7 +140,7 @@ pub async fn get_config(
 pub async fn update_config(
     State(state): State<AppState>,
     Json(body): Json<UpdateConfigRequest>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let mut updates = Vec::new();
     if let Some(level) = &body.log_level {
         let valid = ["trace", "debug", "info", "warn", "error"];
@@ -247,7 +246,7 @@ pub async fn update_config(
     if let Some(level) = &body.log_level {
         // 1. Apply to Gateway itself
         if let Some(handle) = &state.log_reload_handle {
-            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            let new_filter = acowork_core::logging::build_env_filter(level);
             if let Err(e) = handle.reload(new_filter) {
                 tracing::warn!("Failed to reload Gateway tracing filter: {}", e);
             } else {
@@ -281,7 +280,7 @@ pub async fn update_config(
 ///    `{install_path}/workspace/logs/*.log` directly via filesystem.
 pub async fn delete_logs(
     State(_state): State<AppState>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let mut total_deleted = 0u64;
 
     // ── Phase 1: Push LogRotate to running agents (ADR-033: TODO via MQTT) ──

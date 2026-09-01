@@ -40,6 +40,11 @@ pub struct ContextBuilder {
     /// ambiguous conflicts exist, this hint guides the Agent to naturally
     /// ask the user for disambiguation. Injected after retrieved memory.
     ambiguous_confirmation_hint: Option<String>,
+    /// G9: Abstention guidance prompt — when retrieval returns nothing and
+    /// abstention is enabled, this prompt tells the Agent to say "I'm not
+    /// sure" rather than fabricate an answer. Injected after retrieved
+    /// memory (same slot as `ambiguous_confirmation_hint`).
+    abstention_prompt: Option<String>,
     /// Skill instructions override (for debug patching and runtime config).
     /// Injected into system prompt after identity and before memory sections.
     skill_instructions: Option<String>,
@@ -75,6 +80,7 @@ impl ContextBuilder {
             override_model: None,
             retrieved_memory: None,
             ambiguous_confirmation_hint: None,
+            abstention_prompt: None,
             skill_instructions: None,
             todo_context: None,
             reasoning_effort: None,
@@ -378,6 +384,9 @@ impl ContextBuilder {
         if self.ambiguous_confirmation_hint.is_some() {
             self.ambiguous_confirmation_hint = None;
         }
+        if self.abstention_prompt.is_some() {
+            self.abstention_prompt = None;
+        }
     }
 
     /// P3-4: Set ambiguous conflict confirmation hint for injection into
@@ -385,6 +394,23 @@ impl ContextBuilder {
     /// this hint guides the Agent to naturally ask the user about them.
     pub fn set_ambiguous_confirmation_hint(&mut self, hint: String) {
         self.ambiguous_confirmation_hint = Some(hint);
+    }
+
+    /// G9: Set the abstention guidance prompt for injection into the
+    /// system prompt. When retrieval returns nothing and abstention is
+    /// enabled, this prompt steers the Agent to abstain rather than guess.
+    pub fn set_abstention_prompt(&mut self, prompt: String) {
+        self.abstention_prompt = Some(prompt);
+    }
+
+    /// G9: Clear the abstention guidance prompt.
+    pub fn clear_abstention_prompt(&mut self) {
+        self.abstention_prompt = None;
+    }
+
+    /// G9: Get the abstention guidance prompt text, if set.
+    pub fn abstention_prompt(&self) -> Option<&str> {
+        self.abstention_prompt.as_deref()
     }
 
     /// Clear the ambiguous-confirmation hint.
@@ -499,6 +525,15 @@ impl ContextBuilder {
             system_content.push_str(&format!("\n\n## Relevant Memories\n{memory}"));
         }
 
+        // 2.5.1 Abstention guidance (G9): injected only when retrieval
+        // returned nothing and abstention was enabled. In the abstention
+        // case `retrieved_memory` is empty, so this slot is otherwise
+        // unused — Block A stays byte-stable on the normal path. Position
+        // matches the historical `ambiguous_confirmation_hint` slot.
+        if let Some(ref prompt) = self.abstention_prompt {
+            system_content.push_str(&format!("\n\n## Memory Abstention Guidance\n{prompt}"));
+        }
+
         // 2.6 Skill instructions (debug patching or runtime config)
         if let Some(ref skills) = self.skill_instructions {
             system_content.push_str(&format!("\n\n## Skill Instructions\n{skills}"));
@@ -557,7 +592,7 @@ impl ContextBuilder {
             messages.push(ChatMessage {
                 role: MessageRole::User,
                 content: format!(
-                    "## Active Task List\nUse the `todo_write` tool to manage this list. Current tasks:\n{todos}"
+                    "## Todo Task List\nThis is your todo task list. If any task status needs updating, use the `todo_write` tool to update it. If nothing needs updating, do nothing.\n\n{todos}"
                 ),
                 cache_control: Some(CacheControl::Ephemeral),
                 ..Default::default()
@@ -999,7 +1034,7 @@ mod tests {
         let history = HistoryManager::new(10000);
         let request = builder.build(&manifest, &history, None, None, 32_768);
         let system = &request.messages[0].content;
-        assert!(!system.contains("Active Task List"), "todo omitted");
+        assert!(!system.contains("Todo Task List"), "todo omitted");
         assert!(
             !system.contains("Memory Conflicts Needing Confirmation"),
             "ambiguous hint omitted"
@@ -1010,7 +1045,7 @@ mod tests {
             !request
                 .messages
                 .iter()
-                .any(|m| m.content.contains("Active Task List")),
+                .any(|m| m.content.contains("Todo Task List")),
             "todo omitted from Block C after clear"
         );
     }
@@ -1039,7 +1074,7 @@ mod tests {
             Some(acowork_core::providers::traits::CacheControl::Ephemeral)
         );
         // Block A must NOT contain dynamic todo content.
-        assert!(!request.messages[0].content.contains("Active Task List"));
+        assert!(!request.messages[0].content.contains("Todo Task List"));
         // Block A must NOT contain the ambiguous hint section.
         assert!(!request.messages[0].content.contains("Memory Conflicts"));
 
@@ -1056,7 +1091,7 @@ mod tests {
             block_c.role, MessageRole::User,
             "Block C must use User role (ADR-060 §5.4)"
         );
-        assert!(block_c.content.contains("Active Task List"));
+        assert!(block_c.content.contains("Todo Task List"));
         assert!(block_c.content.contains("task1"));
         assert_eq!(
             block_c.cache_control,
@@ -1101,7 +1136,49 @@ mod tests {
         // [0] A, [1..3] B, [4] C — no D.
         assert_eq!(request.messages.len(), 5);
         assert_eq!(request.messages[4].role, MessageRole::User);
-        assert!(request.messages[4].content.contains("Active Task List"));
+        assert!(request.messages[4].content.contains("Todo Task List"));
+    }
+
+    // ── G9: Abstention guidance injection ──
+
+    #[test]
+    fn test_build_injects_abstention_prompt_when_set() {
+        // G9: when abstention triggers (empty retrieval + enabled), the
+        // prompt is injected into the system prompt (Block A) after the
+        // retrieved-memory slot. On the normal path it is absent.
+        let manifest = test_manifest();
+        let history = HistoryManager::new(10000);
+
+        // Normal path: no abstention prompt set → Block A unchanged.
+        let builder = ContextBuilder::new("Kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        let request = builder.build(&manifest, &history, None, None, 32_768);
+        assert!(!request.messages[0].content.contains("Memory Abstention Guidance"));
+
+        // Abstention path: prompt set → injected into Block A.
+        let mut builder = ContextBuilder::new("Kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_abstention_prompt("When you are not confident, say you're not sure.".to_string());
+        let request = builder.build(&manifest, &history, None, None, 32_768);
+        assert!(
+            request.messages[0].content.contains("## Memory Abstention Guidance"),
+            "Block A must contain the abstention guidance section"
+        );
+        assert!(
+            request.messages[0].content.contains("not confident"),
+            "Block A must contain the abstention prompt text"
+        );
+
+        // clear_abstention_prompt removes it (stale prevention path).
+        let mut builder = ContextBuilder::new("Kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_abstention_prompt("prompt".to_string());
+        builder.clear_retrieved_memory(); // clears memory + hint + abstention
+        let request = builder.build(&manifest, &history, None, None, 32_768);
+        assert!(
+            !request.messages[0].content.contains("Memory Abstention Guidance"),
+            "abstention prompt must be cleared with stale memory prevention"
+        );
     }
 
     #[test]
@@ -1116,8 +1193,8 @@ mod tests {
 
         let r1 = builder.build(&manifest, &history, None, None, 32_768);
         let r2 = builder.build(&manifest, &history, None, None, 32_768);
-        let c1 = r1.messages.iter().find(|m| m.content.contains("Active Task List")).unwrap();
-        let c2 = r2.messages.iter().find(|m| m.content.contains("Active Task List")).unwrap();
+        let c1 = r1.messages.iter().find(|m| m.content.contains("Todo Task List")).unwrap();
+        let c2 = r2.messages.iter().find(|m| m.content.contains("Todo Task List")).unwrap();
         assert_eq!(c1.content, c2.content, "Block C bytes must be deterministic");
         assert_eq!(r1.messages[0].content, r2.messages[0].content, "Block A bytes must be deterministic");
     }

@@ -88,7 +88,6 @@ export function AppLayout() {
     const c = useChatStore.getState();
     const sid = a.selectedAgentId ?? "";
     log.debug("[AppLayout] MOUNT", {
-      recoveryReloadFlag: sessionStorage.getItem("acowork_recovery_reload"),
       selectedAgentId: a.selectedAgentId,
       activeSessionId: c.agentStates[sid]?.activeSessionId ?? null,
       openSessionIds: c.agentStates[sid]?.openSessionIds ?? [],

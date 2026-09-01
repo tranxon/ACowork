@@ -171,12 +171,25 @@ pub struct GatewayMqttClient {
     shared_client: Arc<Mutex<AsyncClient>>,
     /// The event loop is kept alive by the background poll task.
     _eventloop_guard: Arc<EventLoopGuard>,
+    /// ADR-059 §7.2 replay guard (optional) — the poll task stamps a
+    /// gateway (re)connection on every ConnAck so the dispatch layer
+    /// can suppress stale retained replays of node offline signals.
+    replay_guard: Arc<std::sync::Mutex<Option<Arc<crate::mqtt::dispatch::NodeReplayGuard>>>>,
 }
 
 impl GatewayMqttClient {
     /// Obtain a clone of the current `AsyncClient`.
     async fn client(&self) -> AsyncClient {
         self.shared_client.lock().await.clone()
+    }
+
+    /// Attach the ADR-059 §7.2 replay guard so every gateway (re)connect
+    /// (ConnAck) opens the replay window for node offline signals.
+    pub fn set_replay_guard(&self, guard: Arc<crate::mqtt::dispatch::NodeReplayGuard>) {
+        *self
+            .replay_guard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(guard);
     }
 }
 
@@ -214,6 +227,9 @@ impl GatewayMqttClient {
 
         let (client, mut eventloop) = AsyncClient::new(options.clone(), 50);
         let shared_client: Arc<Mutex<AsyncClient>> = Arc::new(Mutex::new(client));
+        let replay_guard: Arc<
+            std::sync::Mutex<Option<Arc<crate::mqtt::dispatch::NodeReplayGuard>>>,
+        > = Arc::new(std::sync::Mutex::new(None));
 
         // ADR-039 Phase 2: session state broadcast + reconnect policy.
         let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
@@ -221,6 +237,7 @@ impl GatewayMqttClient {
         let reconnect_policy = ReconnectPolicy::default();
 
         let task_shared_client = Arc::clone(&shared_client);
+        let task_replay_guard = Arc::clone(&replay_guard);
         let task_options = options;
         let task_callback = message_callback;
 
@@ -229,6 +246,10 @@ impl GatewayMqttClient {
         // loop (normal polling) + watchdog + error classification.
         let poll_task = tokio::spawn(async move {
             let mut soft_restart_count: u32 = 0;
+            // ADR-059 §7.2: only RECONNECTS open the replay window — the
+            // first ConnAck's retained replay reflects the nodes' real
+            // current state, so no suppression is needed there.
+            let mut ever_connected = false;
 
             loop {
                 let mut consecutive_failures: u32 = 0;
@@ -250,6 +271,26 @@ impl GatewayMqttClient {
                                     poll_state_tx.set(SessionState::Connected);
                                     consecutive_failures = 0;
                                     fatal_streak = 0;
+
+                                    // ADR-059 §7.2: open the replay window —
+                                    // stale retained replays only exist after
+                                    // a (re)subscribe. The FIRST ConnAck is
+                                    // the initial connection whose retained
+                                    // replay reflects the nodes' real state
+                                    // (no window). Every later ConnAck is a
+                                    // reconnect (same eventloop or
+                                    // soft-restarted): stamp the guard.
+                                    if ever_connected {
+                                        if let Some(guard) = task_replay_guard
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .clone()
+                                        {
+                                            guard.mark_gateway_reconnect();
+                                        }
+                                    } else {
+                                        ever_connected = true;
+                                    }
 
                                     let poll_client = task_shared_client.lock().await.clone();
                                     for (filter, qos) in PERSISTENT_SUBSCRIPTIONS {
@@ -347,6 +388,7 @@ impl GatewayMqttClient {
         Ok(Self {
             shared_client,
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
+            replay_guard,
         })
     }
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AutobioCategory, ConflictSignal, KnowledgeSubType, NodeStatus};
+use crate::types::{AutobioCategory, ConflictSignal, KnowledgeSubType, NodeStatus, PrivacyLevel};
 
 // ============================================================================
 // Embedding function type alias
@@ -83,6 +83,16 @@ pub struct MemoryStoreInput {
     pub source_episode_id: Option<u64>,
     /// Pre-computed embedding vector.
     pub embedding: Option<Vec<f32>>,
+    /// Optional privacy level (design §7.1). Defaults to `Personal`.
+    ///
+    /// When `Some`, the pipeline stamps it on the created KnowledgeNode;
+    /// when `None`, the conservative default `Personal` applies.
+    pub privacy: Option<PrivacyLevel>,
+    /// Optional importance score [0.0, 1.0] (design §3.1). Defaults to 0.5.
+    pub importance: Option<f32>,
+    /// Optional keywords provided by the LLM to aid retrieval (design §4.1).
+    /// Persisted into node `metadata["keywords"]`.
+    pub keywords: Option<Vec<String>>,
     /// Optional autobiographical path.
     ///
     /// When `Some`, the pipeline writes to `AutobiographicalNode` instead of

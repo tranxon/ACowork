@@ -145,13 +145,13 @@ pub fn aggregate_node_status(
                 .and_then(|v| v.as_int64())
                 .unwrap_or(0) as u32;
 
-            let hours_since = node
+            let days_since = node
                 .properties
                 .get(&"last_accessed".into())
                 .and_then(|v| v.as_timestamp())
                 .and_then(|ts| {
                     DateTime::from_timestamp_micros(ts.as_micros())
-                        .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                        .map(|dt| (now - dt).num_seconds() as f64 / 86400.0)
                 })
                 .unwrap_or_else(|| {
                     // Fall back to created_at.
@@ -160,7 +160,7 @@ pub fn aggregate_node_status(
                         .and_then(|v| v.as_timestamp())
                         .and_then(|ts| {
                             DateTime::from_timestamp_micros(ts.as_micros())
-                                .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                                .map(|dt| (now - dt).num_seconds() as f64 / 86400.0)
                         })
                         .unwrap_or(0.0)
                 });
@@ -168,7 +168,7 @@ pub fn aggregate_node_status(
             let score = compute_decay_score(
                 &decay_config,
                 importance,
-                hours_since.clamp(0.0, f64::MAX),
+                days_since.clamp(0.0, f64::MAX),
                 access_count,
             );
 

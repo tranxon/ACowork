@@ -17,12 +17,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::{
-    labels, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
+    labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
 use crate::consolidation::{EmbeddingFn, GeneralizationConfig};
+use crate::quality::MemoryQualityConfig;
 
 use acowork_core::EmbeddingProvider;
-use crate::types::DistilledEpisode;
+use crate::types::{DistilledEpisode, NodeStatus};
 use acowork_core::error::{AcoworkError, Result};
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,14 @@ use acowork_core::error::{AcoworkError, Result};
 
 /// Default embedding dimension. Must match `HnswConfig::default().vector_dim`.
 pub const PROCEDURAL_FALLBACK_DIM: usize = 384;
+
+/// Default abstention guidance prompt (G9).
+///
+/// Mirrors `AbstentionConfig::default().abstention_prompt` in `acowork-grafeo`.
+/// Kept as a constant here so `acowork-memory` (upstream) never imports the
+/// grafeo crate; `MemoryManagerConfig.abstention_prompt` overrides it.
+pub const DEFAULT_ABSTENTION_PROMPT: &str = "When you are not confident about the \
+    information from memory, respond with 'I'm not sure about this' rather than guessing.";
 
 /// Deterministic, dependency-free fallback embedding for procedural nodes when
 /// no `EmbeddingFn` is available. The result is not semantically meaningful,
@@ -101,38 +110,54 @@ pub struct MemoryManagerConfig {
     pub max_autobio_history_tokens: usize,
     /// Default number of results to retrieve (default: 10).
     pub default_k: usize,
-    /// Default abstention threshold (default: 0.0 — no filtering;
-    /// RRF scores from hybrid search are typically 0.01-0.05,
-    /// so a non-zero default would filter everything).
-    pub default_min_score: f32,
+    /// Centralized memory quality parameters (ADR-062 D2).
+    ///
+    /// Source of truth for the retrieval-side quality knobs that were
+    /// previously separate `MemoryManagerConfig` fields:
+    /// - `quality.min_score` (replaces the old `default_min_score`)
+    /// - `quality.pagerank_weight` (replaces the old `pagerank_weight`)
+    /// - `quality.exclude_dormant` (Dormant retrieval exclusion, D1)
+    ///
+    /// The write-path thresholds (dedup / consolidation / graph expansion /
+    /// edge weight) are pushed down to the `MemoryProvider` via
+    /// `MemoryProvider::apply_quality_config` so engine internals read from
+    /// the same config (ADR-062 §4.1). `Default` mirrors current behaviour
+    /// ("zero configuration = current behaviour").
+    pub quality: MemoryQualityConfig,
+    /// Abstention guidance prompt injected when retrieval returns nothing
+    /// and `query.abstention_enabled` is true (G9).
+    ///
+    /// When `None` (default), the built-in default text is used — mirroring
+    /// `AbstentionConfig::default().abstention_prompt` in `acowork-grafeo`.
+    /// This layer must NOT import `acowork-grafeo` (dependency direction),
+    /// hence the constant lives here.
+    pub abstention_prompt: Option<String>,
     /// Enable graph expansion (default: true).
     pub enable_graph_expand: bool,
-    /// PageRank boost weight for topology-aware re-ranking (default: 0.1).
-    ///
-    /// When `enable_graph_expand` is true and this is > 0.0, the retrieval
-    /// pipeline applies PageRank scores to the deduplicated results:
-    /// `new_score = original_score * (1.0 - weight) + pagerank * weight`.
-    ///
-    /// Set to 0.0 to disable PageRank boosting.
-    pub pagerank_weight: f64,
     /// Record episodes asynchronously (default: true).
     pub record_async: bool,
-    /// Per-turn auto-injection of retrieved memories (default: **false**).
+    /// Per-turn auto-injection of retrieved memories (default: **true**,
+    /// ADR-062 M5 — first-turn trigger per session, ADR-060 §6.3).
     ///
-    /// When disabled, `MemoryManager::retrieve_and_inject` is NOT called
-    /// from the agent loop — the LLM can still trigger explicit deep recall
-    /// via the `memory_recall` tool (`MemoryQuery::deep_recall`).
+    /// When enabled, the agent loop calls `MemoryManager::retrieve_and_inject`
+    /// at most ONCE per session, on the session's FIRST user message
+    /// (`AgentLoop.memory_retrieved_for_session` guards later turns).
     ///
-    /// **Why off by default (2026-09-12 decision)**:
-    /// 1. Different agent types need different recall profiles (coding
-    ///    agents value project context; chat agents value user preference).
-    /// 2. The Grafeo memory layer (triples / preference nodes) is not yet
-    ///    mature enough for unsupervised per-turn injection.
-    /// 3. Retrieving with the raw user message as the query yields
-    ///    low-precision results that can mislead the LLM.
+    /// When disabled, auto-injection is NOT called — the LLM can still
+    /// trigger explicit deep recall via the `memory_recall` tool
+    /// (`MemoryQuery::deep_recall`).
     ///
-    /// Re-enable per agent once the memory layer matures, or once an
-    /// agent-specific query strategy exists.
+    /// **History**: off by default since 2026-09-12 (unmature memory layer,
+    /// low-precision raw-message queries). Temporarily re-opened by ADR-062
+    /// M5 once the P2 benchmark cleared the §5.2 gates (Dormant exclusion +
+    /// min_score fix + keyword quality gate), then reverted to OFF by
+    /// default: with auto-inject ON, the first-turn injection duplicates
+    /// what the LLM already retrieves via an explicit `memory_recall` call
+    /// (both paths query on the same user message). The LLM is now relied
+    /// upon for explicit recall; auto-inject is a per-agent opt-in.
+    ///
+    /// **Per-agent opt-in**: an agent can enable it via the manifest
+    /// `[memory.quality].auto_inject_enabled = true` (ADR-062 §6.1).
     pub auto_inject_enabled: bool,
 }
 
@@ -143,9 +168,9 @@ impl Default for MemoryManagerConfig {
             max_autobio_core_tokens: 100,
             max_autobio_history_tokens: 100,
             default_k: 10,
-            default_min_score: 0.0,
+            quality: MemoryQualityConfig::default(),
+            abstention_prompt: None,
             enable_graph_expand: true,
-            pagerank_weight: 0.1,
             record_async: true,
             auto_inject_enabled: false,
         }
@@ -163,6 +188,10 @@ pub struct RetrievalResult {
     pub memories: Vec<RetrievedMemory>,
     /// Metrics collected during retrieval.
     pub metrics: RetrievalMetrics,
+    /// Abstention guidance prompt to inject into the system prompt when
+    /// abstention triggered (empty result set + `abstention_enabled`).
+    /// `None` when abstention was not triggered or is disabled.
+    pub abstention_prompt: Option<String>,
 }
 
 /// A single retrieved memory with relevance metadata.
@@ -210,6 +239,9 @@ pub struct RetrieveAndInjectResult {
     pub memory_ids: Vec<String>,
     /// Pending ambiguous conflict hint, if any.
     pub ambiguous_hint: Option<String>,
+    /// Abstention guidance prompt to inject into the system prompt when
+    /// abstention triggered (G9). `None` otherwise.
+    pub abstention_prompt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -284,20 +316,21 @@ impl MemoryManager {
         } else {
             self.config.default_k
         };
-        let min_score = query.min_score.unwrap_or(self.config.default_min_score);
+        let min_score = query.min_score.unwrap_or(self.config.quality.min_score);
         let hint_type = query.hint_type;
         let (vector_weight, text_weight, _graph_weight) = hint_weights(hint_type);
 
-        // Determine which labels to search based on hint type.
-        let search_labels: Vec<&str> = match hint_type {
-            HintType::Identity => vec![labels::AUTOBIOGRAPHICAL, labels::EPISODIC],
-            _ => vec![
-                labels::EPISODIC,
-                labels::KNOWLEDGE,
-                labels::PROCEDURAL,
-                labels::AUTOBIOGRAPHICAL,
-            ],
-        };
+        // G10 (design §6.6): search ALL 4 labels regardless of hint type.
+        // The design explicitly states that "searching all 4 labels is the
+        // safer choice" — even Identity queries (e.g. `auto_inject`) must
+        // reach Knowledge / Procedural layers. Narrowing per hint type was
+        // removed (would require an explicit design decision to re-add).
+        let search_labels: Vec<&str> = vec![
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+        ];
 
         // Run hybrid search on each label.
         let mut all_results: Vec<(u64, f64, String, String)> = Vec::new();
@@ -375,6 +408,38 @@ impl MemoryManager {
             }
         }
 
+        // ADR-062 D1: Exclude Dormant nodes from the final result set.
+        // Dormant nodes are decayed below threshold but retained (design
+        // §5.2) — they may still act as graph-expansion seeds (kept in
+        // `all_results` during expansion above) but must NOT appear in
+        // retrieval results. Filtering here (before dedup / best_by_id)
+        // preserves graph bridging.
+        //
+        // Pending nodes intentionally remain retrievable: they are
+        // low-confidence but searchable, and are naturally down-ranked by
+        // confidence in the final ordering.
+        if self.config.quality.exclude_dormant && !all_results.is_empty() {
+            let before = all_results.len();
+            // Resolve status once per unique node to avoid repeated lookups.
+            let mut status_cache: HashMap<u64, Option<NodeStatus>> = HashMap::new();
+            for (id, _, _, _) in &all_results {
+                status_cache
+                    .entry(*id)
+                    .or_insert_with(|| provider.get_node_status(*id).ok().flatten());
+            }
+            all_results.retain(|(id, _, _, _)| {
+                status_cache
+                    .get(id)
+                    .and_then(|s| s.clone())
+                    .is_none_or(|s| s != NodeStatus::Dormant)
+            });
+            tracing::debug!(
+                before,
+                after = all_results.len(),
+                "Excluded Dormant nodes from retrieval results"
+            );
+        }
+
         // Deduplicate by node_id, keeping the highest score.
         let mut best_by_id: HashMap<u64, (f64, String, String)> = HashMap::new();
         for (id, score, label, source) in all_results {
@@ -409,10 +474,32 @@ impl MemoryManager {
             );
         }
 
+        // Post-filter: apply the time-range window (created_at in [since, until]).
+        // Drives the `memory_recall` tool's `since`/`until` parameters, which
+        // were previously validated but never applied (ADR-062 M5).
+        if let Some((since, until)) = query.filters.time_range {
+            let before = best_by_id.len();
+            best_by_id.retain(|node_id, _| {
+                match provider.get_node_created_at(*node_id) {
+                    Ok(Some(ts)) => ts >= since && ts <= until,
+                    // No timestamp or error -> keep (defensive; mirrors the
+                    // exclude_session_id filter's keep-on-unknown policy).
+                    _ => true,
+                }
+            });
+            tracing::debug!(
+                before,
+                after = best_by_id.len(),
+                since = %since,
+                until = %until,
+                "Applied time-range filter to retrieval"
+            );
+        }
+
         // Apply PageRank topology boost for re-ranking (S2.8.3).
         // Only when graph expansion is enabled and weight > 0.
         if self.config.enable_graph_expand
-            && self.config.pagerank_weight > 0.0
+            && self.config.quality.pagerank_weight > 0.0
             && !best_by_id.is_empty()
         {
             let mut scored: Vec<(u64, f64)> = best_by_id
@@ -420,7 +507,9 @@ impl MemoryManager {
                 .map(|(id, (score, _, _))| (*id, *score))
                 .collect();
 
-            if let Err(e) = provider.apply_pagerank_boost(&mut scored, self.config.pagerank_weight) {
+            if let Err(e) =
+                provider.apply_pagerank_boost(&mut scored, self.config.quality.pagerank_weight)
+            {
                 tracing::warn!("PageRank boost failed, continuing with unboosted scores: {e}");
             } else {
                 // Map boosted scores back to best_by_id.
@@ -476,6 +565,23 @@ impl MemoryManager {
         };
         let abstention_triggered = result_count == 0 && query.abstention_enabled;
 
+        // G9: When abstention triggers, attach the abstention guidance prompt
+        // so the caller can inject it into the system prompt. This prevents
+        // the LLM from fabricating answers based on an empty result set.
+        // The prompt text comes from `MemoryManagerConfig.abstention_prompt`
+        // (defaults to the built-in constant, mirroring grafeo's
+        // `AbstentionConfig::default().abstention_prompt`).
+        let abstention_prompt = if abstention_triggered {
+            Some(
+                self.config
+                    .abstention_prompt
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_ABSTENTION_PROMPT.to_string()),
+            )
+        } else {
+            None
+        };
+
         let metrics = RetrievalMetrics {
             result_count,
             avg_score,
@@ -495,7 +601,11 @@ impl MemoryManager {
             graph_expand_count,
         );
 
-        Ok(RetrievalResult { memories, metrics })
+        Ok(RetrievalResult {
+            memories,
+            metrics,
+            abstention_prompt,
+        })
     }
 
     /// Format retrieved memories for system prompt injection.
@@ -650,37 +760,51 @@ impl MemoryManager {
         injected
     }
 
-    /// Record a distilled/compacted episode into Grafeo.
+    /// Record a distilled/compacted episode into the episodic layer.
     ///
-    /// ADR-057 P0: This is now a thin wrapper around
-    /// [`MemoryProvider::ingest_distilled_triples`], which:
-    ///   - Stores the episode synchronously.
-    ///   - Lands each triple as a `KnowledgeNode` (Active ≥ 0.85, Pending
-    ///     otherwise).
-    ///   - Creates the cross-layer `Episodic -[SOURCED_FROM]-> Knowledge` edge
-    ///     so `graph_expand` reaches knowledge from episode seeds (D9).
+    /// ADR-057 → triples removal (this PR): only the natural-language
+    /// summary is persisted. Triple-based knowledge extraction was removed
+    /// because compact-model output quality was too low (see
+    /// [`parse_compact_output_strict`]’s gate rationale). Knowledge-layer
+    /// updates flow through the `memory_store` tool / procedural creation
+    /// paths instead (see `docs/memory-write-entrypoints.md`).
     ///
-    /// `metadata.triples` and `metadata.entities` are intentionally **not**
-    /// persisted (D3/D5 — no readers in the greenfield codebase).
+    /// Embedding of the summary is best-effort (D1 — failure degrades to
+    /// `None`, episode still stored, vector recall drops for that node).
     pub async fn record_distilled(
         &self,
         provider: &dyn MemoryProvider,
         episode: &DistilledEpisode,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<()> {
-        let result = provider
-            .ingest_distilled_triples(episode, embedding_provider)
-            .await
-            .map_err(|e| AcoworkError::Memory(format!("Failed to record distilled episode: {e}")))?;
+        let summary_embedding = match embedding_provider {
+            Some(prov) => prov.embed(&episode.summary).await.ok(),
+            None => None,
+        };
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "source_session_id".to_string(),
+            serde_json::Value::String(episode.source_session_id.clone()),
+        );
+
+        let ep = Episode {
+            session_id: episode.session_id.clone(),
+            turn_index: 0,
+            role: "distilled".to_string(),
+            content: episode.summary.clone(),
+            embedding: summary_embedding,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata,
+            importance: 0.7,
+        };
+        provider.store_episode(&ep)?;
 
         tracing::debug!(
             session_id = %episode.session_id,
             summary_len = episode.summary.len(),
-            triple_count = episode.triples.len(),
-            episode_id = result.episode_id,
-            knowledge_landed = result.knowledge_ids.len(),
-            conflicts_detected = result.conflicts_detected,
-            "Recorded distilled episode via ingest_distilled_triples"
+            "Recorded distilled episode (summary-only, no triple landing)"
         );
 
         Ok(())
@@ -756,6 +880,7 @@ impl MemoryManager {
             metrics,
             memory_ids,
             ambiguous_hint,
+            abstention_prompt: retrieval.abstention_prompt,
         })
     }
 
@@ -931,6 +1056,7 @@ impl MemoryManager {
                     status: NodeStatus::Active,
                     created_at: now,
                     updated_at: now,
+                    source: "user_statement".to_string(),
                     metadata: HashMap::new(),
                 };
                 if let Err(e) = provider.store_autobiographical(&node) {
@@ -1024,11 +1150,15 @@ mod tests {
         assert_eq!(config.max_autobio_core_tokens, 100);
         assert_eq!(config.max_autobio_history_tokens, 100);
         assert_eq!(config.default_k, 10);
-        assert_eq!(config.default_min_score, 0.0);
+        assert_eq!(config.quality.min_score, 0.0);
+        assert!(config.quality.exclude_dormant, "D1 Dormant exclusion on by default");
         assert!(config.enable_graph_expand);
         assert!(config.record_async);
-        // 2026-09-12: per-turn auto-injection is OFF by default (see the
-        // field doc for rationale). Re-enable deliberately per agent.
+        // auto-injection is OFF by default (per-agent opt-in via manifest
+        // `[memory.quality].auto_inject_enabled = true`). Rationale: the LLM
+        // already recalls memories via the explicit `memory_recall` tool on
+        // the same user-message query, so first-turn auto-inject would
+        // duplicate that context.
         assert!(!config.auto_inject_enabled);
     }
 
@@ -1063,6 +1193,7 @@ mod tests {
                 },
             ],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
@@ -1111,6 +1242,7 @@ mod tests {
                 },
             ],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
@@ -1129,6 +1261,7 @@ mod tests {
         let retrieval = RetrievalResult {
             memories: vec![],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         let manager = MemoryManager::new(MemoryManagerConfig::default());
@@ -1174,6 +1307,7 @@ mod tests {
                 },
             ],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         // Tight budget: only the first identity should fit.
@@ -1236,6 +1370,7 @@ mod tests {
                 },
             ],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         // Generous core budget but tight history budget.
@@ -1285,6 +1420,7 @@ mod tests {
                 },
             ],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         // Tight non-autobiographical budget — should not affect autobiographical.
@@ -1352,6 +1488,7 @@ mod tests {
                 chunk_id: None,
             }],
             metrics: RetrievalMetrics::default(),
+            abstention_prompt: None,
         };
 
         let injected = manager.inject(&retrieval);

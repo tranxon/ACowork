@@ -154,6 +154,7 @@ pub(crate) async fn phase_d_run(
         ctx.identity_update_rx.take(),
         ctx.provider_update_rx.take(),
         ctx.search_update_rx.take(),
+        ctx.embedding_update_rx.take(),
         ctx.lsps_update_rx.take(),
         &config.work_dir,
         ctx.session_config_slot.clone(),
@@ -400,6 +401,12 @@ async fn mqtt_only_loop(
     mut search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
+    // ADR-033: forwards `acowork/global/embedding_models` retained
+    // updates to SessionManager::handle_embedding_config_update so
+    // sessions rebuild their embedding provider in-place.
+    mut embedding_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
+    >,
     // ADR-055 §6.7 (Phase 4): forwards the node's LSP relay state
     // changes to SessionManager. None when running without `--node-id`
     // (standalone / Gateway-spawned) or when MQTT is unavailable.
@@ -551,6 +558,37 @@ async fn mqtt_only_loop(
                         update.search_key_vault,
                         update.search_list,
                     );
+                }
+            }
+
+            // ADR-033: `acowork/global/embedding_models` retained update →
+            // SessionManager::handle_embedding_config_update → broadcast
+            // UpdateEmbedConfig to every session so they rebuild their
+            // embedding provider in-place (embed sidecar became ready, or
+            // the active model/dimension switched).
+            embedding = async {
+                match embedding_update_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(update) = embedding {
+                    tracing::info!(
+                        endpoint = %update.endpoint,
+                        model_id = %update.model_id,
+                        dimension = update.dimension,
+                        "Applying acowork/global/embedding_models update to SessionManager"
+                    );
+                    session_manager
+                        .lock()
+                        .await
+                        .handle_embedding_config_update(
+                            update.endpoint,
+                            update.model_id,
+                            update.dimension,
+                            update.provider_id,
+                            update.api_key,
+                        );
                 }
             }
 

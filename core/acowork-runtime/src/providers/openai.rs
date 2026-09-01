@@ -992,6 +992,12 @@ impl OpenAIProvider {
             // emit a single Finished event at stream end with both.
             let mut tracked_usage: Option<UsageInfo> = None;
             let mut tracked_finish_reason: Option<String> = None;
+            // LOG-001: aggregate counters — replace the per-chunk raw-line
+            // DEBUG noise with ONE summary line per stream at completion.
+            let mut line_count: u64 = 0;
+            let mut content_chars: u64 = 0;
+            let mut reasoning_chars: u64 = 0;
+            let mut tool_call_count: usize = 0;
             // ADR-022: Think tag parser — splits `delta.content` containing
             // `<!think>...willReturn` tags into ReasoningContent + Content
             // events. This makes role boundaries structural at the provider
@@ -1019,10 +1025,18 @@ impl OpenAIProvider {
                                     })))
                                     .await;
                                 let _ = tx.send(None).await;
+                                tracing::debug!(
+                                    line_count,
+                                    content_chars,
+                                    reasoning_chars,
+                                    tool_call_count,
+                                    "SSE stream ended (data: [DONE])"
+                                );
                                 return;
                             }
 
                             let (events, usage, finish_reason) = parse_sse_line(&line);
+                            line_count += 1;
                             if usage.is_some() {
                                 tracked_usage = usage;
                             }
@@ -1034,7 +1048,18 @@ impl OpenAIProvider {
                                 // tag parser. It may split one Content event
                                 // into multiple ReasoningContent/Content events.
                                 let split_events = match &event {
-                                    StreamEvent::Content(text) => think_parser.feed(text),
+                                    StreamEvent::Content(text) => {
+                                        content_chars += text.chars().count() as u64;
+                                        think_parser.feed(text)
+                                    }
+                                    StreamEvent::ReasoningContent(text) => {
+                                        reasoning_chars += text.chars().count() as u64;
+                                        vec![event]
+                                    }
+                                    StreamEvent::ToolCallStart(_) => {
+                                        tool_call_count += 1;
+                                        vec![event]
+                                    }
                                     _ => vec![event],
                                 };
                                 for split_event in split_events {
@@ -1091,6 +1116,13 @@ impl OpenAIProvider {
                 })))
                 .await;
             let _ = tx.send(None).await;
+            tracing::debug!(
+                line_count,
+                content_chars,
+                reasoning_chars,
+                tool_call_count,
+                "SSE stream ended (EOF, no [DONE])"
+            );
         });
 
         Box::new(ChannelStream { rx })
@@ -1129,7 +1161,11 @@ impl Stream for ChannelStream {
 /// at stream end, combining usage + finish_reason into a single ChatResponse.
 fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<String>) {
     let line = line.trim();
-    tracing::debug!(
+    // LOG-001: per-wire-chunk noise — hundreds of lines per LLM turn.
+    // Demoted from DEBUG to TRACE; enable `trace` only when debugging a
+    // specific provider's SSE framing. Stream-level aggregates are logged
+    // once per stream in `sse_to_stream`.
+    tracing::trace!(
         line = %line.chars().take(500).collect::<String>(),
         "SSE raw line received"
     );
@@ -1218,6 +1254,8 @@ fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<St
                         // the ToolCallChunk.
                         let initial_arguments = func.arguments.unwrap_or_default();
 
+                        // LOG-001: ToolCallStart is low-frequency (once per
+                        // tool call) and high-value — keep at DEBUG.
                         tracing::debug!(
                             has_name = true,
                             name = %name,
@@ -1252,7 +1290,9 @@ fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<St
                         // DeepSeek sends empty name string in subsequent tool_call
                         // chunks; fall through to process arguments instead of
                         // skipping the entire delta.
-                        tracing::debug!(
+                        // LOG-001: per-argument-chunk noise (fires for every
+                        // delta of every tool arg) — demoted to TRACE.
+                        tracing::trace!(
                             has_name = false,
                             has_arguments = func.arguments.is_some(),
                             args_preview = ?func.arguments.as_ref().map(|a| a.chars().take(200).collect::<String>()),

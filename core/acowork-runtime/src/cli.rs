@@ -164,8 +164,7 @@ impl Cli {
     /// Returns a reload handle that allows dynamic log level changes
     /// at runtime (e.g. when Gateway pushes LogLevelUpdate).
     fn init_tracing(&self) -> Option<LogReloadHandle> {
-        let env_filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&self.log_level));
+        let env_filter = acowork_core::logging::build_env_filter(&self.log_level);
 
         // Ensure the log directory exists under work_dir
         let log_dir = std::path::Path::new(&self.work_dir).join("logs");

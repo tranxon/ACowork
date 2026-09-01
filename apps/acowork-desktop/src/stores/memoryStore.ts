@@ -210,7 +210,12 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         );
       }
       const resp = await startMigration(activeModelId, [agentId]);
-      if (resp.status !== "migration_started" && resp.status !== "loaded") {
+      // Backend `start_migration` (gateway/src/http/embedding_api.rs) returns
+      // `{"status":"ok", ...}` on success and `{"status":"error", ...}` on
+      // failure. The previous strict whitelist ("migration_started" / "loaded")
+      // did not match the live contract, so the catch branch always fired and
+      // the progress setInterval never started, leaving the panel stuck.
+      if (resp.status === "error") {
         throw new Error(resp.message || `Migration start failed: ${resp.status}`);
       }
 

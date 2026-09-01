@@ -10,17 +10,24 @@ use crate::error::RuntimeError;
 
 /// Minimum compression ratio for levels 1-7 (the target bar).
 ///
-/// A level is only selected when it removes >= 10% of the history tokens —
-/// below that the cache invalidation is not worth the summary cost
-/// (ADR-061 §3.3 break-even analysis). Level 8 is exempt (see below).
-pub(crate) const MIN_COMPRESSION_RATIO: f64 = 0.10;
+/// A level is only selected when it removes >= `MIN_COMPRESSION_RATIO` of
+/// the history tokens — below that the cache invalidation is not worth the
+/// summary cost (ADR-061 §3.3 break-even analysis). Level 8 is exempt
+/// (see below).
+///
+/// Default is 0.90 = "compress until at most 10% remains" (e.g. 200K →
+/// 20K). This is the **default** for the per-agent
+/// `AgentConfig::compression_ratio_threshold` (agent_config.json / Agent
+/// Setup panel); a user override replaces it at plan time.
+pub(crate) const MIN_COMPRESSION_RATIO: f64 = 0.90;
 
 /// Maximum output budget for the LLM compaction summary.
 ///
 /// Replaces the former hardcoded `2048` in `compact_via_llm`. With the
-/// mandatory three-section summary (`<summary>` / `<user_intent>` /
-/// `<triples>`, ADR-061 §8.1) 2K is too tight; 4K leaves room for the
-/// full user-intent list without truncating `</triples>`.
+/// mandatory two-section summary (`<summary>` / `<user_intent>`,
+/// ADR-061 §8.1; `<triples>` was removed in ADR-057) 2K is too tight;
+/// 4K leaves room for the full user-intent list without truncating
+/// `</user_intent>`.
 pub(crate) const SUMMARY_TOKEN_BUDGET: u64 = 4_096;
 
 /// Model rejection line: agents require an effective input budget of at

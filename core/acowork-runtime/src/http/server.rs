@@ -497,6 +497,8 @@ impl RuntimeHttpServer {
             )
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/consolidate", post(trigger_consolidate))
+            .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
+            .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
             // of the ADR-040 / ADR-009 v2 workspace consolidation. Workspace
             // file reads now flow exclusively through
@@ -512,6 +514,15 @@ impl RuntimeHttpServer {
             .route(
                 "/workspaces/{ws_id}/prompt-file",
                 put(set_workspace_prompt_file),
+            )
+            // ADR-058 (demand-driven revision): frontend pushes the watch
+            // set (open editor tabs + expanded tree dirs) here. Full
+            // replace semantics — the Runtime diffs against its current
+            // set and watches each target NonRecursive. Empty set → no
+            // scanning at all.
+            .route(
+                "/workspaces/{ws_id}/fs-watch",
+                put(set_workspace_fs_watch),
             )
             .route("/workspaces/tree", get(list_tree))
             .route("/workspaces/find", get(find_files))
@@ -633,6 +644,14 @@ impl RuntimeHttpServer {
             // of truth for user-facing limits.
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             .with_state(state);
+        // Diagnostic: confirms the migration route was wired into the Router
+        // during this build. Runs once at server boot. If this log never
+        // appears, the .route() call above was lost in a refactor and
+        // Gateway start-migration requests will silently 404.
+        tracing::info!(
+            target: "migration_diag",
+            "runtime HTTP server: registered POST /memory/rebuild-embeddings"
+        );
 
         // Bind to the Node-allocated loopback port (ADR-055 §6.4);
         // `127.0.0.1:0` = random port (pre-node-topology behaviour).
@@ -1144,6 +1163,75 @@ async fn trigger_consolidate(
     ))
 }
 
+/// Request body for `POST /memory/rebuild-embeddings`.
+///
+/// Carries the new embedding model the Gateway has switched to. The
+/// Runtime builds a temporary provider and re-embeds every stored node,
+/// rebuilding the HNSW indexes (Bug3 — restores the dimension-migration
+/// feature lost in the gRPC→MQTT refactor).
+#[derive(Debug, Deserialize)]
+struct RebuildEmbeddingsBody {
+    /// Embedding endpoint, e.g. `http://127.0.0.1:18080/v1`.
+    #[serde(default)]
+    endpoint: String,
+    /// Embedding model ID.
+    #[serde(default)]
+    model_id: String,
+    /// Target embedding dimension.
+    dimension: usize,
+}
+
+/// `POST /memory/rebuild-embeddings` — re-embed all nodes with a new model.
+async fn rebuild_embeddings(
+    State(state): State<HttpState>,
+    Json(body): Json<RebuildEmbeddingsBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    tracing::info!(
+        target: "migration_diag",
+        endpoint = %body.endpoint,
+        model_id = %body.model_id,
+        dimension = body.dimension,
+        "rebuild_embeddings: received request"
+    );
+
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    if svc.is_none() {
+        tracing::warn!(
+            target: "migration_diag",
+            "rebuild_embeddings: memory_query service not ready, returning 503"
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let svc = svc.as_ref().unwrap();
+    tracing::info!(
+        target: "migration_diag",
+        "rebuild_embeddings: invoking memory_query.rebuild_embeddings"
+    );
+    let report = svc
+        .rebuild_embeddings(&body.endpoint, &body.model_id, body.dimension)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                target: "migration_diag",
+                error = %e,
+                "rebuild_embeddings: memory_query.rebuild_embeddings failed"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    tracing::info!(
+        target: "migration_diag",
+        total_scanned = report.total_scanned,
+        rebuilt = report.rebuilt,
+        skipped_no_embedding = report.skipped_no_embedding,
+        errors = report.errors,
+        "rebuild_embeddings: completed"
+    );
+    Ok(Json(
+        serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
+}
+
 // ── Session detail (ADR-034 §11.2 #4 — panel 4) ──────────────
 
 /// `GET /sessions/{sid}` - full session detail (ADR-034 \u00a711.2 #4, panel 4).
@@ -1458,6 +1546,82 @@ async fn set_workspace_prompt_file(
         .await
         .map(|_| Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
         .map_err(workspace_error_to_response)
+}
+
+/// Request body for `PUT /workspaces/{ws_id}/fs-watch`.
+///
+/// `paths` are workspace-relative watch targets: `""` is the workspace
+/// root, every other entry is a file or directory to watch one level
+/// deep (`NonRecursive`). Full replace semantics — the Runtime diffs
+/// against the current set.
+#[derive(Debug, Deserialize)]
+struct SetWorkspaceFsWatchBody {
+    paths: Vec<String>,
+}
+
+/// `PUT /workspaces/{ws_id}/fs-watch` — demand-driven watch set update.
+///
+/// The frontend pushes exactly what it is showing: open editor tabs
+/// (file-level) plus the expanded directories of the visible file tree
+/// (one-level dir watch). An empty `paths` clears all watches → no
+/// scanning at all. This replaces the old "watch the whole workspace
+/// recursively on startup" model whose cost was unbounded (a large
+/// repo with a `target/` of 130k+ files pegged CPU at 47-100%).
+async fn set_workspace_fs_watch(
+    State(state): State<HttpState>,
+    Path(ws_id): Path<String>,
+    Json(body): Json<SetWorkspaceFsWatchBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // Validate the workspace id against the resolver so unknown ids
+    // fail loudly instead of silently updating nothing.
+    {
+        let resolver = state
+            .workspace_resolver
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if resolver.find_by_id(&ws_id).is_none() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "workspace not found", "ws_id": ws_id})),
+            ));
+        }
+    }
+
+    // Path-traversal guard: reject absolute paths and `..` escapes.
+    // Targets must stay within the workspace; the watcher joins them
+    // under the workspace root.
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(body.paths.len());
+    for raw in body.paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            // Empty string = workspace root itself.
+            paths.push(PathBuf::from(""));
+            continue;
+        }
+        let p = PathBuf::from(trimmed);
+        if p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "watch path must be workspace-relative and not escape the workspace",
+                    "path": trimmed,
+                })),
+            ));
+        }
+        paths.push(p);
+    }
+
+    // Deduplicate while preserving a deterministic order (frontend may
+    // send overlapping sets from tab + tree state).
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+
+    let watchers = state.workspace_watchers.lock().await;
+    watchers.set_watch_targets(&ws_id, paths);
+    Ok(Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
 }
 
 /// `DELETE /workspaces/{ws_id}` — remove a workspace entry.
@@ -1946,6 +2110,7 @@ async fn put_agent_config(
         req.shell_approval_threshold,
         req.approval_timeout_secs,
         req.idle_timeout_secs,
+        req.compression_ratio_threshold,
     );
     let svc = state
         .agent_config
@@ -2098,6 +2263,11 @@ struct UpdateAgentConfigRequest {
     /// on-disk value alone (partial PUT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     idle_timeout_secs: Option<serde_json::Value>,
+    /// ADR-061: minimum compression ratio for levels 1-7 (0.05–0.95;
+    /// 0.90 default = "compress until at most 10% remains"). Absent =
+    /// leave the on-disk value alone (partial PUT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compression_ratio_threshold: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {

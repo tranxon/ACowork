@@ -115,8 +115,10 @@ impl MemoryQuery {
 
     /// Build a query for per-turn auto-injection.
     ///
-    /// Lightweight background context: searches Autobiographical + Episodic
-    /// labels, excludes current-session nodes, no graph expansion, low limit.
+    /// Lightweight background context: searches all 4 labels (Episodic /
+    /// Knowledge / Procedural / Autobiographical) per design §6.6 — even
+    /// Identity queries default to all labels, excluding current-session
+    /// nodes, no graph expansion, low limit.
     pub fn auto_inject(query_text: String, exclude_session_id: Option<String>) -> Self {
         Self {
             query_text,
@@ -127,7 +129,11 @@ impl MemoryQuery {
             },
             limit: 5,
             expand_hops: 0,
-            min_score: Some(0.3),
+            // NOTE (ADR-062 D1): `min_score` left as `None` so it resolves via
+            // MemoryManagerConfig.quality.min_score (default 0.0). The old
+            // hardcoded `Some(0.3)` was on the RRF score scale (~0.01-0.05)
+            // and silently filtered out every auto-inject hit.
+            min_score: None,
             abstention_enabled: false,
             hint_type: HintType::Identity,
         }
@@ -255,12 +261,6 @@ pub mod edge_types {
     pub const SELF_REFERENCES: &str = "SELF_REFERENCES";
     /// Knowledge node derived from an episodic node.
     pub const DERIVED_FROM: &str = "DERIVED_FROM";
-    /// Episodic node sourced a knowledge node (ADR-057 D9 cross-layer link).
-    ///
-    /// The `Episodic -[SOURCED_FROM]-> Knowledge` edge lets `graph_expand`
-    /// reach knowledge from episode seeds. The reverse direction is implicit
-    /// via the `source_episode_id` property on knowledge nodes.
-    pub const SOURCED_FROM: &str = "SOURCED_FROM";
 }
 
 // ============================================================================
@@ -439,6 +439,14 @@ pub struct KnowledgeNode {
     pub updated_at: DateTime<Utc>,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Privacy level — drives package-share stripping (design §7.1/§8.1).
+    /// Defaults to `Personal` (conservative: stripped when sharing).
+    #[serde(default)]
+    pub privacy: PrivacyLevel,
+    /// Importance scored by LLM at write time [0.0, 1.0] (design §3.1/§5.1).
+    /// Defaults to 0.5 when unset.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
 }
 
 /// Procedural memory node — behavior pattern.
@@ -514,8 +522,19 @@ pub struct AutobiographicalNode {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Provenance of this self-knowledge.
+    ///
+    /// Conventional values: `"user_statement"`, `"important_event"`,
+    /// `"self_evaluation"`, `"manifest"`. Defaults to `"user_statement"`.
+    #[serde(default = "default_source")]
+    pub source: String,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Default provenance for autobiographical knowledge (design §9).
+fn default_source() -> String {
+    "user_statement".to_string()
 }
 
 // ============================================================================
@@ -677,44 +696,16 @@ pub struct StoreStats {
 // DistilledEpisode without depending on acowork-runtime.
 // ============================================================================
 
-/// A simple subject-predicate-object triple extracted during compaction.
-///
-/// ADR-057 D7/D8: `confidence` and `sub_type` are **required** fields at
-/// construction time (the compact model must emit both). `#[serde(default)]`
-/// is used so that legacy JSON missing these fields still deserializes — this
-/// is *not* a defensive Option, it is purely a serde-level accommodation for
-/// round-tripping during the development phase. New code MUST always supply
-/// both fields when constructing a `Triple` (see `episode_distill::parse_compact_output`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Triple {
-    pub subject: String,
-    pub predicate: String,
-    pub object: String,
-    /// LLM-assigned confidence in [0.0, 1.0]. Drives Active/Pending dispatch.
-    #[serde(default = "default_triple_confidence")]
-    pub confidence: f32,
-    /// Knowledge sub-type. Drives routing / labelling of the KnowledgeNode.
-    #[serde(default = "default_triple_sub_type")]
-    pub sub_type: KnowledgeSubType,
-}
-
-fn default_triple_confidence() -> f32 {
-    0.7
-}
-
-fn default_triple_sub_type() -> KnowledgeSubType {
-    KnowledgeSubType::Fact
-}
-
 /// A compacted/distilled episode - natural-language summary of a conversation segment.
 ///
 /// Per [ADR-011], the summary is plain natural language text. No structured JSON
 /// fields (intent_type, decision, keywords, etc.) - the summary text IS the
 /// distillation result and is directly suitable for semantic retrieval.
 ///
-/// ADR-057: Triples are extracted during compaction by the compact model and
-/// landed synchronously into the semantic layer (`MemoryProvider::ingest_distilled_triples`).
-/// Entities are intentionally NOT modelled as graph nodes in P0 (D5).
+/// ADR-057 (方案 C 撤销): Compaction no longer extracts structured triples.
+/// The natural-language summary is the only persistent output of compaction;
+/// structured knowledge comes from the `memory_store` tool or future batch
+/// refinement (see ADR-057 §12 retraction record).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistilledEpisode {
     /// Session that produced this episode.
@@ -726,9 +717,4 @@ pub struct DistilledEpisode {
     /// Whether this episode has been consolidated to the semantic layer.
     /// Initial value is always `false`.
     pub consolidated: bool,
-    /// Knowledge triples (subject|predicate|object|confidence|sub_type) extracted
-    /// during compaction. Each triple is grounded into a `KnowledgeNode` (Active
-    /// when `confidence >= 0.85`, Pending otherwise) by
-    /// [`crate::provider::MemoryProvider::ingest_distilled_triples`].
-    pub triples: Vec<Triple>,
 }

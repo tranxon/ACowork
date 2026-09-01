@@ -40,6 +40,8 @@ pub type SharedWorkspaceWatcherSet = Arc<tokio::sync::Mutex<WorkspaceWatcherSet>
 struct WatcherHandle {
     root: PathBuf,
     shutdown_tx: mpsc::UnboundedSender<()>,
+    /// Push the desired watch set (workspace-relative paths) to the task.
+    targets_tx: mpsc::UnboundedSender<Vec<PathBuf>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -118,6 +120,9 @@ impl WorkspaceWatcherSet {
     /// Idempotent when a watcher already runs with the same root.
     /// A path change stops the old watcher first (single-instance
     /// invariant per workspace_id).
+    ///
+    /// The watcher starts demand-driven (zero targets); the frontend
+    /// pushes the actual watch set via [`WorkspaceWatcherSet::set_watch_targets`].
     pub fn ensure_watcher(
         &mut self,
         workspace_id: &str,
@@ -130,7 +135,7 @@ impl WorkspaceWatcherSet {
             self.stop_watcher(workspace_id);
         }
 
-        let watcher = WorkspaceFsWatcher::new(root, &self.agent_id, workspace_id)?;
+        let (watcher, targets_tx) = WorkspaceFsWatcher::new(root, &self.agent_id, workspace_id)?;
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(MqttFsEventSink {
             agent_id: self.agent_id.clone(),
@@ -141,17 +146,32 @@ impl WorkspaceWatcherSet {
             agent_id = %self.agent_id,
             workspace_id = %workspace_id,
             root = %root.display(),
-            "Workspace watcher started"
+            "Workspace watcher started (demand-driven)"
         );
         self.watchers.insert(
             workspace_id.to_string(),
             WatcherHandle {
                 root: root.clone(),
                 shutdown_tx,
+                targets_tx,
                 task,
             },
         );
         Ok(())
+    }
+
+    /// Push the desired watch set for a workspace (demand-driven).
+    ///
+    /// `targets` are workspace-relative paths: `""` is the workspace
+    /// root, every other entry is a file or directory to watch one level
+    /// deep (`NonRecursive`). The task diffs against its current set and
+    /// `watch`/`unwatch`s accordingly. An empty set stops all scanning.
+    ///
+    /// No-op when the workspace has no watcher.
+    pub fn set_watch_targets(&self, workspace_id: &str, targets: Vec<PathBuf>) {
+        if let Some(handle) = self.watchers.get(workspace_id) {
+            let _ = handle.targets_tx.send(targets);
+        }
     }
 
     /// Stop the watcher for `workspace_id` (no-op when absent).
