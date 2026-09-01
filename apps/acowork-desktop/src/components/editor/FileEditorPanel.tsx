@@ -16,6 +16,8 @@ import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, Refr
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
+import { SetiIcon } from "../common/SetiIcon";
+import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
 import {
@@ -1210,11 +1212,23 @@ export function FileEditorPanel({ width }: { width: number }) {
                                     onContextMenu={(e) => handleTabContextMenu(e, file)}
                                     active={isActive}
                                 >
-                                    {/* Dirty indicator / loading / preview badge */}
+                                    {/* File type icon — mirrors the file tree's icon (Seti UI).
+                                        URL-preview tabs (kind === "url") have no meaningful
+                                        extension mapping (fileName is a hostname like "example.com"),
+                                        so they fall back to a plain generic icon. */}
+                                    {file.kind === "file" ? (
+                                        <SetiIcon {...getFileIcon(file.fileName)} size={14} />
+                                    ) : (
+                                        // Generic file glyph for URL tabs — keeps alignment with
+                                        // file-type tabs while signalling "not a workspace file".
+                                        <FileText className="h-3 w-3 shrink-0 text-zinc-400" />
+                                    )}
+                                    {/* Loading / dirty indicator. Preview-mode tabs no longer
+                                        render a separate badge here — the right-side toggle button
+                                        already exposes the current mode, and adding another icon
+                                        next to the file-type icon would crowd the tab. */}
                                     {file.loading ? (
                                         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-400" />
-                                    ) : isPreview ? (
-                                        <Eye className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
                                     ) : file.dirty ? (
                                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                                     ) : null}
