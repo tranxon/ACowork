@@ -8,6 +8,7 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §5.1.6, §5.2, §9.1.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,24 +79,67 @@ pub struct DesktopMqttClient {
     _eventloop_guard: Arc<EventLoopGuard>,
     /// Signal to force a soft-restart of the MQTT event loop.
     ///
-    /// When `force_reconnect()` is called, the poll task receives this
-    /// notification, breaks out of its inner polling loop, and recreates
-    /// the `AsyncClient` + `EventLoop` from scratch – exactly the same
-    /// path as the automatic 3-fatal-error recovery.
-    force_restart: Arc<tokio::sync::Notify>,
+    /// When `recover_after_wake()` / `force_reconnect()` is called, the
+    /// poll task receives this signal, breaks out of its inner polling
+    /// loop, and recreates the `AsyncClient` + `EventLoop` from scratch –
+    /// exactly the same path as the automatic 3-fatal-error recovery.
+    force_restart: Arc<ForceRestart>,
     /// ADR-039 Phase 2: session state broadcast.
     ///
     /// Held in the struct purely to keep the original `watch::Sender` alive
     /// for the lifetime of the client. All status transitions are driven
     /// through the `poll_state_tx` clone captured by the eventloop task;
-    /// `self.state_tx` is read by the public `session_state()` accessor so
-    /// external consumers can poll the current state.
-    #[allow(dead_code)]
+    /// `self.state_tx` is read by the public `session_state()` accessor and
+    /// written by `recover_after_wake()` so external consumers can poll
+    /// the current state.
     state_tx: SessionStateTx,
 }
 
 struct EventLoopGuard {
     _task: tokio::task::JoinHandle<()>,
+}
+
+/// Force-restart signal for the MQTT event-loop task.
+///
+/// Combines a `tokio::sync::Notify` (fast wake-up while the poll task is
+/// parked in `select!`) with a persistent `AtomicBool` flag (covers the
+/// window where the poll task is busy handling an event and would miss
+/// the notification). Consumers must call [`ForceRestart::take`] to
+/// atomically consume the pending request, so a request is never lost.
+struct ForceRestart {
+    notify: tokio::sync::Notify,
+    requested: AtomicBool,
+}
+
+impl ForceRestart {
+    fn new() -> Self {
+        Self {
+            notify: tokio::sync::Notify::new(),
+            requested: AtomicBool::new(false),
+        }
+    }
+
+    /// Request a soft-restart of the MQTT event loop.
+    ///
+    /// Idempotent: sets the persistent flag and wakes any waiter.
+    /// `notify_one` (not `notify_waiters`) so a request issued while
+    /// the poll task is NOT yet parked in `select!` stores a permit —
+    /// the task's next `notified()` resolves immediately instead of
+    /// waiting for the flag check at the top of the loop. (A request
+    /// issued with no waiters through `notify_waiters` would be lost
+    /// entirely, leaving the poll task to finish its current backoff
+    /// before noticing the flag.)
+    fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    /// Atomically consume the persistent request flag.
+    ///
+    /// Returns `true` if a restart was requested and not yet handled.
+    fn take(&self) -> bool {
+        self.requested.swap(false, Ordering::SeqCst)
+    }
 }
 
 /// An MQTT message received from the broker.
@@ -165,9 +209,45 @@ fn error_descriptor_from_rumqttc_025(err: &rumqttc::ConnectionError) -> ErrorDes
             }),
             io_kind: None,
         },
-        ConnectionError::MqttState(_) => ErrorDescriptor {
-            kind: ErrorKind::MqttState,
-            io_kind: None,
+        ConnectionError::MqttState(state_err) => {
+            // rumqttc wraps transient I/O errors (e.g. ConnectionAborted,
+            // ConnectionReset – both produced when the OS tears down the
+            // TCP socket during sleep/wake) inside `MqttState`. Two
+            // shapes exist:
+            //   StateError::Io(io::Error)                     — direct wrap
+            //   StateError::Deserialization(mqttbytes::Error::Io)
+            //     — the poll task read a partially-written packet at
+            //     wake time and mqttbytes wrapped the same io::Error
+            //     at decode time (the shape observed in practice)
+            // Unwrap the inner I/O error in BOTH cases so `classify`
+            // maps it to E1 Transient instead of the fatal E4
+            // ConfigError – otherwise a wake-from-sleep reset would
+            // wait out the 60s fatal backoff. Mirrors the shared
+            // `acowork-mqtt-session` `from_rumqttc_0_25` impl used by
+            // the Runtime and Gateway.
+            match state_err {
+                rumqttc::StateError::Io(io_err) => ErrorDescriptor {
+                    kind: ErrorKind::Io,
+                    io_kind: Some(io_err.kind()),
+                },
+                rumqttc::StateError::Deserialization(mqttbytes_err) => {
+                    if let rumqttc::mqttbytes::Error::Io(io_err) = mqttbytes_err {
+                        ErrorDescriptor {
+                            kind: ErrorKind::Io,
+                            io_kind: Some(io_err.kind()),
+                        }
+                    } else {
+                        ErrorDescriptor {
+                            kind: ErrorKind::MqttState,
+                            io_kind: None,
+                        }
+                    }
+                }
+                _ => ErrorDescriptor {
+                    kind: ErrorKind::MqttState,
+                    io_kind: None,
+                },
+            }
         },
         ConnectionError::NotConnAck(_) => ErrorDescriptor {
             kind: ErrorKind::NotConnAck,
@@ -340,7 +420,7 @@ impl DesktopMqttClient {
         // Clone shared state for the poll task.
         let task_shared_client = shared_client.clone();
         let task_options = options;
-        let force_restart = Arc::new(tokio::sync::Notify::new());
+        let force_restart = Arc::new(ForceRestart::new());
         let task_force_restart = force_restart.clone();
 
         // Spawn the eventloop poller.
@@ -371,9 +451,22 @@ impl DesktopMqttClient {
                 // We use `select!` to allow external force-restart
                 // signals to interrupt polling at any time.
                 loop {
+                    // Persistent force-restart flag: covers the window
+                    // where the poll task is busy handling an event (not
+                    // parked in select!) and would miss the Notify.
+                    if task_force_restart.take() {
+                        tracing::info!(
+                            "MQTT force-restart requested – \
+                             breaking to soft-restart path"
+                        );
+                        on_status(MqttStatus::Connecting);
+                        poll_state_tx.set(SessionState::Connecting);
+                        break; // break inner loop -> outer loop recreates
+                    }
                     tokio::select! {
                         biased; // favour the force-restart signal
-                        _ = task_force_restart.notified() => {
+                        _ = task_force_restart.notify.notified() => {
+                            let _ = task_force_restart.take(); // consume the persistent flag
                             tracing::info!(
                                 "MQTT force-restart requested by user – \
                                  breaking to soft-restart path"
@@ -450,7 +543,19 @@ impl DesktopMqttClient {
                                     break; // break inner loop -> outer loop recreates
                                 }
 
-                                tokio::time::sleep(Duration::from_secs(60)).await;
+                                // 60s backoff, interruptible by a
+                                // force-restart request (wake recovery
+                                // must never wait out the backoff).
+                                tokio::select! {
+                                    _ = task_force_restart.notify.notified() => {
+                                        let _ = task_force_restart.take();
+                                        tracing::info!(
+                                            "MQTT force-restart requested during fatal backoff"
+                                        );
+                                        break;
+                                    }
+                                    _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                                }
                             } else {
                                 // E1/E5: retryable. Apply exponential backoff.
                                 poll_state_tx.set(SessionState::Reconnecting);
@@ -463,7 +568,19 @@ impl DesktopMqttClient {
                                         sleep_ms = backoff.duration.as_millis(),
                                         "Desktop backing off before reconnect attempt"
                                     );
-                                    tokio::time::sleep(backoff.duration).await;
+                                    // Interruptible by force-restart so
+                                    // wake recovery never waits out the
+                                    // backoff.
+                                    tokio::select! {
+                                        _ = task_force_restart.notify.notified() => {
+                                            let _ = task_force_restart.take();
+                                            tracing::info!(
+                                                "MQTT force-restart requested during backoff"
+                                            );
+                                            break;
+                                        }
+                                        _ = tokio::time::sleep(backoff.duration) => {}
+                                    }
                                 }
                             }
                         }
@@ -720,6 +837,19 @@ impl DesktopMqttClient {
 
     /// Force a soft-restart of the MQTT event loop.
     ///
+    /// Deterministic recovery after a system wake.
+    ///
+    /// Synchronously resets the session state to `Connecting` – so
+    /// `wait_for_connected` can never read the stale pre-sleep `Connected`
+    /// value – and requests a fresh `AsyncClient` + `EventLoop` pair. The
+    /// OS tears down TCP sockets during sleep, so the old EventLoop is
+    /// unusable by definition: rebuild immediately instead of waiting for
+    /// rumqttc to classify the failure.
+    pub fn recover_after_wake(&self) {
+        self.state_tx.set(SessionState::Connecting);
+        self.force_restart.request();
+    }
+
     /// Signals the background poll task to drop the current `EventLoop`
     /// and create a fresh `AsyncClient` + `EventLoop` pair. This is the
     /// same recovery path as the automatic 3-fatal-error soft-restart,
@@ -730,7 +860,7 @@ impl DesktopMqttClient {
     /// "Reconnecting" for an extended period, or messages stop arriving
     /// despite the broker being healthy).
     pub fn force_reconnect(&self) {
-        self.force_restart.notify_one();
+        self.recover_after_wake();
     }
 
     /// Wait for the MQTT client to reach `Connected` state.
