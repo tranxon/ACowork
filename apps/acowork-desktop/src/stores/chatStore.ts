@@ -1890,7 +1890,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   ensureLatestInCache: async (agentId: string, sessionId: string) => {
     const sessionState = getSessionState(get(), agentId, sessionId);
     if (sessionState.isLoadingMore) return;
-    const { messageOffset, messageLimit, messageTotal, messages } = sessionState;
+    const { messageOffset, messageLimit, messageTotal, messages, messagesStale } = sessionState;
     // Already at the tail:
     //   - The cache window's far edge touches the end of the conversation
     //     (messageOffset + messageLimit >= messageTotal), AND
@@ -1898,7 +1898,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
     //     empty, which would otherwise be mistaken for "already at tail"), AND
     //   - messages.length > 0 (the cache has at least some data at the tail).
+    //   - !messagesStale — a stale cache's cursor (offset/limit/total) is
+    //     NOT trustworthy: after clearSessionMessages, background
+    //     record_complete writes directly append tail records and bump
+    //     messageTotal/messageLimit (chatStore record_complete handler),
+    //     making a PARTIAL slice look like it fully covers the tail
+    //     (offset 0 + limit N == total N) while older history — typically
+    //     the first user message — is still missing.  Short-circuiting on
+    //     such a cache would swallow the reload that restores the missing
+    //     head; we must NOT skip the fetch until a real HTTP window lands.
     const tailCovered =
+      !messagesStale &&
       messageTotal > 0 &&
       messageOffset + messageLimit >= messageTotal &&
       messages.length > 0;
@@ -1909,8 +1919,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // `offset = max(0, total - limit)`.  When total === 0 (fresh session
       // that has never been loaded) we delegate to the initial-load path,
       // which uses `?tail=true` to grab the newest `limit` entries.
+      // A stale cache's messageTotal is likewise untrustworthy (partial
+      // tail write-backs), so treat it the same way and force a fresh
+      // tail fetch instead of deriving an offset from the polluted cursor.
       const limit = 50;
-      if (messageTotal === 0) {
+      if (messagesStale || messageTotal === 0) {
         await get().loadSessionMessages(agentId, sessionId, undefined, limit);
       } else {
         const tailOffset = Math.max(0, messageTotal - limit);

@@ -970,4 +970,89 @@ describe("messagesStale: cache-integrity flag", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("ensureLatestInCache does NOT short-circuit on a stale partially-repopulated cache (polluted cursor)", async () => {
+    // Scenario: user switched away mid-stream → clearSessionMessages wiped the
+    // cache; then background record_complete appended ONLY the tail records,
+    // bumping messageTotal/messageLimit so the window LOOKS tail-covered
+    // (offset 0 + limit N == total N) while the first user message is missing.
+    // The OLD code's `tailCovered` check (messageTotal>0 && offset+limit>=total
+    // && messages.length>0) returned true here and swallowed the reload —
+    // exactly the "switch back hides the first user message" bug.
+    seedSessionState(
+      [{ id: "assistant-1", type: "assistant", content: "tail record", timestamp: 2000 }],
+      { offset: 0, limit: 1, total: 1 },
+    );
+    useChatStore.setState((s) => ({
+      ...s,
+      agentStates: {
+        ...s.agentStates,
+        [AGENT]: {
+          ...(s.agentStates[AGENT] ?? {}),
+          sessionStates: {
+            ...(s.agentStates[AGENT]?.sessionStates ?? {}),
+            [SESSION]: {
+              ...(s.agentStates[AGENT]?.sessionStates?.[SESSION] ?? {}),
+              messagesStale: true,
+            },
+          },
+        },
+      },
+    }));
+
+    let fetchCalled = false;
+    vi.stubGlobal("fetch", vi.fn(() => {
+      fetchCalled = true;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          messages: [
+            { id: "u1", role: "user", content: "hi", ts: "2026-01-01T00:00:00.000Z" },
+            { id: "assistant-1", role: "assistant", content: "tail record", ts: "2026-01-01T00:00:02.000Z" },
+          ],
+          offset: 0,
+          limit: 2,
+          total: 2,
+        }),
+      });
+    }));
+
+    await useChatStore.getState().ensureLatestInCache(AGENT, SESSION);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    // The HTTP fetch MUST have happened despite the polluted cursor looking
+    // tail-covered — this is the regression that swallowed the reload.
+    expect(fetchCalled).toBe(true);
+    // The missing first user message is restored and the cache becomes
+    // authoritative again.
+    expect(ss.messages.map((m) => m.id)).toEqual(["u1", "assistant-1"]);
+    expect(ss.messagesStale).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("ensureLatestInCache short-circuits when the cache is authoritative and tail-covered", async () => {
+    // Control case: with messagesStale=false and a genuinely complete tail
+    // window, ensureLatestInCache must remain a no-op (no redundant HTTP).
+    seedSessionState(
+      [
+        { id: "u1", type: "user", content: "hi", timestamp: 1000 },
+        { id: "assistant-1", type: "assistant", content: "hello back", timestamp: 2000 },
+      ],
+      { offset: 0, limit: 2, total: 2 },
+    );
+
+    let fetchCalled = false;
+    vi.stubGlobal("fetch", vi.fn(() => {
+      fetchCalled = true;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ messages: [], offset: 0, limit: 0, total: 0 }) });
+    }));
+
+    await useChatStore.getState().ensureLatestInCache(AGENT, SESSION);
+
+    expect(fetchCalled).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
 });
