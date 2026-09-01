@@ -136,25 +136,28 @@ pub struct MemoryManagerConfig {
     pub enable_graph_expand: bool,
     /// Record episodes asynchronously (default: true).
     pub record_async: bool,
-    /// Per-turn auto-injection of retrieved memories (default: **false**).
+    /// Per-turn auto-injection of retrieved memories (default: **true**,
+    /// ADR-062 M5 — first-turn trigger per session, ADR-060 §6.3).
     ///
-    /// When disabled, `MemoryManager::retrieve_and_inject` is NOT called
-    /// from the agent loop — the LLM can still trigger explicit deep recall
-    /// via the `memory_recall` tool (`MemoryQuery::deep_recall`).
+    /// When enabled, the agent loop calls `MemoryManager::retrieve_and_inject`
+    /// at most ONCE per session, on the session's FIRST user message
+    /// (`AgentLoop.memory_retrieved_for_session` guards later turns).
     ///
-    /// **Why off by default (2026-09-12 decision)**:
-    /// 1. Different agent types need different recall profiles (coding
-    ///    agents value project context; chat agents value user preference).
-    /// 2. The Grafeo memory layer (triples / preference nodes) is not yet
-    ///    mature enough for unsupervised per-turn injection.
-    /// 3. Retrieving with the raw user message as the query yields
-    ///    low-precision results that can mislead the LLM.
+    /// When disabled, auto-injection is NOT called — the LLM can still
+    /// trigger explicit deep recall via the `memory_recall` tool
+    /// (`MemoryQuery::deep_recall`).
     ///
-    /// Re-enable per agent once the memory layer matures, or once an
-    /// agent-specific query strategy exists.
+    /// **History**: off by default since 2026-09-12 (unmature memory layer,
+    /// low-precision raw-message queries). Temporarily re-opened by ADR-062
+    /// M5 once the P2 benchmark cleared the §5.2 gates (Dormant exclusion +
+    /// min_score fix + keyword quality gate), then reverted to OFF by
+    /// default: with auto-inject ON, the first-turn injection duplicates
+    /// what the LLM already retrieves via an explicit `memory_recall` call
+    /// (both paths query on the same user message). The LLM is now relied
+    /// upon for explicit recall; auto-inject is a per-agent opt-in.
     ///
-    /// ADR-062 D3: re-opening this switch is gated on benchmark evidence
-    /// (retrieval quality must clear §5.2 thresholds first).
+    /// **Per-agent opt-in**: an agent can enable it via the manifest
+    /// `[memory.quality].auto_inject_enabled = true` (ADR-062 §6.1).
     pub auto_inject_enabled: bool,
 }
 
@@ -468,6 +471,28 @@ impl MemoryManager {
                 after = best_by_id.len(),
                 exclude_session_id = %exclude_sid,
                 "Excluded current-session nodes from retrieval"
+            );
+        }
+
+        // Post-filter: apply the time-range window (created_at in [since, until]).
+        // Drives the `memory_recall` tool's `since`/`until` parameters, which
+        // were previously validated but never applied (ADR-062 M5).
+        if let Some((since, until)) = query.filters.time_range {
+            let before = best_by_id.len();
+            best_by_id.retain(|node_id, _| {
+                match provider.get_node_created_at(*node_id) {
+                    Ok(Some(ts)) => ts >= since && ts <= until,
+                    // No timestamp or error -> keep (defensive; mirrors the
+                    // exclude_session_id filter's keep-on-unknown policy).
+                    _ => true,
+                }
+            });
+            tracing::debug!(
+                before,
+                after = best_by_id.len(),
+                since = %since,
+                until = %until,
+                "Applied time-range filter to retrieval"
             );
         }
 
@@ -1129,8 +1154,11 @@ mod tests {
         assert!(config.quality.exclude_dormant, "D1 Dormant exclusion on by default");
         assert!(config.enable_graph_expand);
         assert!(config.record_async);
-        // 2026-09-12: per-turn auto-injection is OFF by default (see the
-        // field doc for rationale). Re-enable deliberately per agent.
+        // auto-injection is OFF by default (per-agent opt-in via manifest
+        // `[memory.quality].auto_inject_enabled = true`). Rationale: the LLM
+        // already recalls memories via the explicit `memory_recall` tool on
+        // the same user-message query, so first-turn auto-inject would
+        // duplicate that context.
         assert!(!config.auto_inject_enabled);
     }
 

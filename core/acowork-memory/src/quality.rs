@@ -157,9 +157,11 @@ pub struct MemoryQualityConfig {
     pub dedup: DedupQuality,
     /// Consolidation confidence gates.
     pub consolidation: ConsolidationQuality,
-    /// Whether `keywords` participate in retrieval (P2 gate, ADR-062 D3).
-    /// Default `false` — must NOT be enabled until the benchmark threshold is
-    /// met (ADR-062 §5).
+    /// Whether sanitized `keywords` are folded into the BM25-indexed
+    /// `object` field at write time (ADR-062 §6.2 Plan Y, M5 step 2b).
+    /// Default `false` — per-agent opt-in via manifest
+    /// `[memory.quality].keyword_index = true`. The keyword quality gate
+    /// (ADR-062 §6.2.1) runs regardless of this toggle.
     pub keyword_index: bool,
 }
 
@@ -315,7 +317,10 @@ mod tests {
         assert_eq!(q.consolidation.generalization_active_threshold, 0.8);
         assert_eq!(q.consolidation.dormant_confidence, 0.3);
         assert_eq!(q.consolidation.min_pending_age_hours, 1);
-        assert!(!q.keyword_index, "keyword_index behind P2 benchmark gate");
+        // ADR-062 M5: keyword fold is per-agent opt-in via manifest
+        // `[memory.quality].keyword_index = true` — default stays false
+        // (zero-config = M4 metadata-only behaviour).
+        assert!(!q.keyword_index, "keyword_index defaults to off; opt-in per agent");
     }
 
     #[test]

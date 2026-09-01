@@ -18,6 +18,7 @@ use acowork_memory::{
     MemoryQualityConfig, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult,
     StoreHealth, StoreStats,
 };
+use chrono::{DateTime, Utc};
 
 use grafeo_common::types::NodeId;
 
@@ -685,6 +686,17 @@ impl MemoryProvider for GrafeoStore {
                 // Legacy nodes without an explicit status default to Active
                 // (consistent with `stats.rs` / `admin_impl.rs`).
                 .or(Some(NodeStatus::Active))),
+            None => Ok(None),
+        }
+    }
+
+    fn get_node_created_at(&self, node_id: u64) -> AcoworkResult<Option<DateTime<Utc>>> {
+        let nid = NodeId(node_id);
+        match self.db().get_node(nid) {
+            Some(node) => Ok(node
+                .get_property("created_at")
+                .and_then(|v| v.as_timestamp())
+                .and_then(|ts| DateTime::from_timestamp_micros(ts.as_micros()))),
             None => Ok(None),
         }
     }

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use acowork_core::error::Result;
 use async_trait::async_trait;
-
+use chrono::{DateTime, Utc};
 
 use crate::consolidation::{
     EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
@@ -264,6 +264,15 @@ pub trait MemoryProvider: Send + Sync {
     ///
     /// Returns `None` if the node does not exist or has no status property.
     fn get_node_status(&self, node_id: u64) -> Result<Option<NodeStatus>>;
+
+    /// Get the creation timestamp of a node.
+    ///
+    /// Used by the retrieval pipeline to apply time-range filters
+    /// (`MemoryFilters.time_range`) — e.g. the `memory_recall` tool's
+    /// `since`/`until` parameters ("memories created after X").
+    ///
+    /// Returns `None` if the node does not exist or has no timestamp.
+    fn get_node_created_at(&self, node_id: u64) -> Result<Option<DateTime<Utc>>>;
 
     /// Push the agent's memory quality configuration to the provider
     /// (ADR-062 D2).

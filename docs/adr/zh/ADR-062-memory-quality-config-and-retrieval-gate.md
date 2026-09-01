@@ -1,13 +1,20 @@
 # ADR-062：记忆质量参数集中化与检索质量门禁（MemoryQualityConfig）
 
-> ✅ **M5 计划已确定（方案 A）**——auto_inject 首轮触发（§6.5）+ keyword 质量门 + 写时拼入 `object`（§6.2.1 + §6.5 步骤 2a/2b），**代码待启动开发**。
+> ✅ **M5 已全绿落地（方案 A）**——auto_inject 首轮触发（§6.1）+ keyword 写时质量门（§6.2.1）+ `keyword_index` 写时拼入 `object`（§6.2 Plan Y / §6.5 步骤 2a/2b）。
 >
-> - 当前代码：auto_inject 默认 `false`、无 `quality.keyword_index` 入口；M1-M3.6/M4 已全绿落地。
-> - 方案 A 决策：keyword_index 启用前必须完成质量门（§6.2.1），LLM 锚定风险已闭环。
-> - 提交历史：`15654af0`（含 M5 草案的安全快照）→ `b117f901`（仅撤回 M5 代码增量）→ `6de0caf2`（§6.2.1 质量门文档）。
-> - 下一步：基于 §6.5 步骤 2a/2b + §6.2.1 规则启动 M5 代码开发。
+> - 当前代码：`auto_inject_enabled` 默认 `false`（per-agent 经 manifest `[memory.quality].auto_inject_enabled = true` 显式开启，开启后每 session 首轮触发一次）；`keyword::sanitize` 质量门 always-on（memory_store LLM 边界 + instant 持久边界双向调用）；`quality.keyword_index` 默认 `false`（per-agent manifest 显式开启）。
+> - **M5 后修正**：M5 曾将 `auto_inject_enabled` 默认 `false → true`；因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠，见 [05-memory.md §0](../design/zh/05-memory.md#0-分层原则) 检索注入行），默认值回退为 `false`（per-agent opt-in），`memory_recall` 工具描述已加防重复召回提示（"do NOT re-run the same query"）。
+> - M5 benchmark（`memory_m5_bench.rs`）：keyword hit@5 0.0000→1.0000，Precision@5 0.5000→0.8750，Recall@5 0.6250→1.0000，MRR 0.6250→1.0000，无回归。
+> - 提交历史：`15654af0`（含 M5 草案的安全快照）→ `b117f901`（仅撤回 M5 代码增量）→ `6de0caf2`（§6.2.1 质量门文档）→ **M5 落地提交**（本实施）。
+> - 回滚路径：所有开关参数化（`quality.auto_inject_enabled` / `quality.keyword_index`），回滚成本 = 改配置。
+>
+> ✅ **检索参数接通（M5 后续增量）**——盘点 `memory_recall` 未生效参数后实施两项：
+> - **时间过滤接通（#1）**：`since`/`until` 此前只校验、从不生效（全代码无 `filters.time_range` 写入点）。现打通三层——`MemoryProvider::get_node_created_at`（新 trait 方法，GrafeoProvider 读节点 `created_at` 属性 + InMemoryProvider 实现）、`MemoryManager::retrieve` post-filter（镜像 `exclude_session_id` 的 keep-on-unknown 策略）、`memory_recall` 工具写入 `filters.time_range`（单边补界：`since` 单边 → `[since, now]`，`until` 单边 → `[epoch, until]`）。
+> - **配置一致性（#6）**：`memory_recall` 此前硬编码 `MemoryManagerConfig::default()`（`memory_recall.rs:184`），不读 agent 的 manifest quality 配置。现 `MemorySessionHandle` 持有 agent 的 `MemoryManagerConfig`，工具从 handle 读取——与 auto_inject 同一份配置（min_score / graph_expand / …），双路径行为一致。
+> - 测试：memory_recall 工具 20 个测试全绿（新增：since/until 双 provider e2e——InMemoryProvider + GrafeoStore、manager 层 time_range 过滤、`get_node_created_at` trait 直接测试、spec 描述断言）；memory 30 / grafeo 291 / runtime 1138 / memory_e2e 4 / p1p2 17 / m4 1 / m5 1 全绿，clippy 0 警告。
+> - 待接通（后续）：`search_mode` 三种策略、`privacy_levels`、`session_id` 过滤、加权 RRF——多数有 ADR-062 P3 决策约束（先 benchmark 证明需要），见 §9。
 
-**状态**：提案（2026-09 定稿）
+**状态**：已实施（2026-09）
 **日期**：2026-09
 **决策者**：大鱼
 **前置**：
@@ -298,9 +305,9 @@ pub struct MemoryQualityConfig {
 | M3（P3） | memory_store 提示词去锚定——**schema 已先行落地**，本里程碑收敛为"验收确认（§6.5）+ 写入路径分布埋点" | M2 |
 | M3.6（P3） | 采集 confidence/importance 分布（需先在写入路径加轻量分布埋点，当前无），校准阈值默认值（§6.6） | M3 |
 | M4（P2） | 跑 before/after benchmark，出具报告 | M1-M3.6 |
-| M5（P2 门禁） | 依据 benchmark 决定打开 auto_inject / keyword_index | M4 |
+| M5（P2 门禁） | ✅ **已落地**：auto_inject 首轮触发机制 + keyword 质量门 + `keyword_index` 写时拼入 object（per-agent 开启）；benchmark 达标。**后续修正**：auto_inject 默认值回退 `true → false`（per-agent opt-in，与 `memory_recall` 双路径召回重复），见状态行 | M4 |
 
-每个里程碑独立可合并、可回滚（参数化保证回滚成本 = 改配置）。
+每个里程碑独立可合并、可回滚（参数化保证回滚成本 = 改配置）。M5 落地后仍开放的事项见 §9 与 benchmark 报告 §6.7（P1：pagerank 非确定性修复、vector 索引填充验证；P3：加权 RRF、Block C 注入等）。
 
 ---
 

@@ -732,6 +732,10 @@ impl AgentCore {
                 self.bootstrap_autobiographical_from_manifest(&*store_arc);
                 if let Some(ref session) = self.memory_session {
                     session.set_provider(store_arc.clone());
+                    // Config consistency: the memory_recall tool reads the
+                    // SAME MemoryManagerConfig as auto-inject (ADR-062 M5),
+                    // so per-agent quality settings apply to both paths.
+                    session.set_memory_config(self.memory_manager_config());
                 }
                 self.memory_admin = Some(store_arc.clone());
                 self.memory_provider = Some(store_arc);
@@ -811,11 +815,34 @@ impl AgentCore {
         tracing::info!(identity_count = identity_entries.len(), capability_count = manifest.capabilities.len(), "Bootstrapped Autobiographical nodes from manifest");
     }
 
-    pub fn init_memory_manager(&self) -> MemoryManager {
-        MemoryManager::new(MemoryManagerConfig {
+    /// Resolve the agent's `MemoryManagerConfig` (manifest overrides +
+    /// defaults).
+    ///
+    /// Shared by `init_memory_manager` (auto-inject path) and the
+    /// `memory_recall` tool (via `MemorySessionHandle`) so both retrieval
+    /// paths use identical quality settings (ADR-062 M5).
+    pub(crate) fn memory_manager_config(&self) -> MemoryManagerConfig {
+        // auto-inject defaults OFF: the LLM recalls memories explicitly via
+        // the `memory_recall` tool (same user-message query), so first-turn
+        // injection would duplicate already-present context. Per-agent
+        // opt-in via `[memory.quality].auto_inject_enabled = true`.
+        // The override is read straight from the manifest — it is a
+        // `MemoryManagerConfig` field, not part of `MemoryQualityConfig`.
+        let manifest_auto_inject = self
+            .manifest
+            .memory
+            .quality
+            .as_ref()
+            .and_then(|q| q.auto_inject_enabled);
+        MemoryManagerConfig {
             quality: self.memory_quality_config(),
+            auto_inject_enabled: manifest_auto_inject.unwrap_or(false),
             ..MemoryManagerConfig::default()
-        })
+        }
+    }
+
+    pub fn init_memory_manager(&self) -> MemoryManager {
+        MemoryManager::new(self.memory_manager_config())
     }
 
     /// Resolve the agent's memory quality config (ADR-062 D2).
@@ -1922,5 +1949,68 @@ mod tests {
         let clone = core.clone();
         assert!(clone.pending_debug_handles.is_none());
         assert!(clone.take_pending_debug_handles().is_none());
+    }
+
+    // ── auto_inject manifest opt-in (per-agent switch) ─────────────
+
+    /// Build an AgentCore whose manifest carries the given TOML fragment
+    /// appended after the `[llm]` section (e.g. a `[memory.quality]`
+    /// block). An empty fragment leaves `[memory]` absent entirely.
+    fn make_core_with_memory_toml(extra_toml: &str) -> AgentCore {
+        let config = RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(&format!(
+            r#"
+            agent_id = "com.test.cw"
+            version = "1.0.0"
+            name = "Test CW"
+            description = "auto-inject opt-in test agent"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+
+            {extra_toml}
+            "#
+        ))
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+        AgentCore::new(config, manifest, provider, vec![])
+    }
+
+    #[test]
+    fn test_auto_inject_defaults_off_when_manifest_absent() {
+        // Zero-config = current behaviour: auto-inject stays OFF, the LLM
+        // recalls memories via the explicit `memory_recall` tool.
+        let core = make_core_with_memory_toml("");
+        assert!(
+            !core.init_memory_manager().config().auto_inject_enabled,
+            "auto_inject_enabled must default to false"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_manifest_opt_in_true() {
+        // Per-agent opt-in: `[memory.quality].auto_inject_enabled = true`.
+        let core = make_core_with_memory_toml(
+            "[memory.quality]\nauto_inject_enabled = true\n",
+        );
+        assert!(
+            core.init_memory_manager().config().auto_inject_enabled,
+            "manifest opt-in must enable auto-inject"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_manifest_opt_in_false() {
+        // Explicit opt-out is still honored.
+        let core = make_core_with_memory_toml(
+            "[memory.quality]\nauto_inject_enabled = false\n",
+        );
+        assert!(
+            !core.init_memory_manager().config().auto_inject_enabled,
+            "manifest opt-out must disable auto-inject"
+        );
     }
 }

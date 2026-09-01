@@ -162,6 +162,8 @@ auto_inject min_score=None    → 1 result, score 0.6437
 
 **M5 默认值变更**：`MemoryManagerConfig.auto_inject_enabled: false → true`（[manager.rs:172](core/acowork-memory/src/manager.rs#L172)）。零配置 = 首次触发；agent 在 manifest `[memory.quality]` 显式设 `auto_inject_enabled: false` 可关闭。
 
+> ⚠️ **后续回退（2026-09）**：该默认值已回退为 `false`（per-agent opt-in，经 manifest `[memory.quality].auto_inject_enabled = true` 显式开启，开启后首轮触发一次）。原因：与 LLM 自主 `memory_recall` 双路径召回重复——两条路径同以 user 消息为 query（auto_inject：全 4 labels / limit=5 / expand_hops=0 / hint=Identity；deep_recall：全 4 labels / limit=10 / expand_hops=2 / hint=Semantic），核心节点必然重叠。配套措施：`memory_recall` 工具描述已加防重复召回提示（"do NOT re-run the same query"），是否去重交由 LLM 判断。
+
 ### 6.2 keyword_index：**打开（方案 Y：写时拼入 `object`）**
 
 **事实基线**：
@@ -259,3 +261,50 @@ cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # 分�
 ```
 
 自包含、使用 in-memory `GrafeoStore`，不触碰运行中的 Gateway / Runtime / Desktop 进程或端口。
+
+---
+
+## 8. M5 执行结果（2026-09）
+
+**harness**：`core/acowork-runtime/tests/memory_m5_bench.rs`（自 `15654af0` 安全快照恢复，`set_quality` 辅助因 `b117f901` 撤回而替换为 trait 方法 `apply_quality_config`）。
+
+### 8.1 代码改动清单（对应 §6.5 步骤）
+
+| 步骤 | 改动 | 验证 |
+|---|---|---|
+| 1 | `MemoryManagerConfig.auto_inject_enabled` 默认 `false → true`（[manager.rs](core/acowork-memory/src/manager.rs)），首轮触发逻辑（`loop_memory.rs` `memory_retrieved_for_session`）已存在 | 默认值断言更新 |
+| 2a | 新增 `acowork-memory/src/keyword.rs`（`sanitize`/`sanitize_with_stats`，6 条规则 + 30 停用词 + cap 8）；`memory_store.rs` LLM 边界与 `instant.rs` 持久边界双向调用（幂等）；工具描述更新；`memory_write_keyword_gate` 埋点 | 10 个规则边界单测 + e2e 回归 |
+| 2b | `instant.rs`：`quality.keyword_index=true` 时清洗后 keywords 拼入 BM25 `object` 字段（Plan Y） | 单测（off 时 object 干净 / on 时含 `Keywords: …`）+ bench |
+| 3 | manifest `[memory.quality].auto_inject_enabled` 新增（草案与 §6.5 声称"已就位"均不实）+ `agent_core::init_memory_manager` 注入；`keyword_index` 镜像已有 | core manifest 测试 |
+| 4/5 | `memory_m5_bench` before/after | 见 §8.2 |
+
+### 8.2 Before/After 结果（`enable_graph_expand=false` 确定性管线）
+
+```
+metric                                  before       after
+----------------------------------------------------------
+Precision@5 (full)                      0.5000      0.8750
+Recall@5 (full)                         0.6250      1.0000
+MRR (full)                              0.6250      1.0000
+keyword hit@5 rate (K* only)            0.0000      1.0000
+keyword any-rank rate (K* only)         0.0000      1.0000
+----------------------------------------------------------
+```
+
+- **Plan Y 生效**：`keyword_index=false` 时 BM25 完全无法命中 K*（content 词法隔离，keyword hit@5 = 0）；`true` 时写时拼入 `object` 使 BM25 全量命中（1.0）。
+- **无回归**：after P@5 / R@5 ≥ before（M4 基线不损）。
+- **质量门前置**：K_CORPUS 的 keywords 全部通过 `sanitize`（`santorini/vacation/summer-2024`、`graphql/schema-stitching/federation`、`beekeeping/apiary/honey-extraction` 均为干净 token），fold 内容无污染。
+
+### 8.3 结论
+
+- **auto_inject**：默认关闭（per-agent opt-in），经 manifest `[memory.quality].auto_inject_enabled=true` 显式开启（开启后首轮触发一次，ADR-060 §6.3）。M5 曾默认开启，因与 LLM 自主 `memory_recall` 双路径召回重复回退为 opt-in（见 §6.1 注记）。
+- **keyword_index**：默认 `false`（per-agent 经 `[memory.quality].keyword_index=true` 开启）——能力 + 质量门落地，M4 基线保持；benchmark 已证明开启后 keyword 专项检索从 0 命中到全量命中。
+- 质量门（`sanitize`）**always-on**，与 `keyword_index` 解耦，保证 `metadata["keywords"]` 自身干净。
+
+### 8.4 复现
+
+```bash
+cd core
+cargo test -p acowork-runtime --test memory_m5_bench -- --nocapture   # M5 keyword before/after
+cargo test -p acowork-memory --lib keyword                             # 质量门规则单测
+```

@@ -115,7 +115,7 @@ impl MemoryStoreTool {
                     "keywords": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Optional keywords to help retrieval (e.g. ['beijing', 'location', 'home'])"
+                        "description": "Optional keywords to help retrieval. Provide short lowercase tokens (≤30 chars), avoid duplicates and common stopwords (e.g. ['beijing', 'location', 'home'])"
                     }
                 },
                 "required": ["content", "category"],
@@ -268,12 +268,31 @@ impl Tool for MemoryStoreTool {
             .map(|c| c.clamp(0.0, 1.0) as f32)
             .unwrap_or(default_confidence);
 
-        // --- Extract optional keywords ---
+        // --- Extract optional keywords (ADR-062 §6.2.1 M5 step 2a: quality gate) ---
+        // The LLM is the only keyword source; sanitize deterministically at
+        // this boundary so garbage never reaches metadata["keywords"] or the
+        // BM25 fold (step 2b). Pure + always-on — independent of
+        // `quality.keyword_index`.
         let _keywords: Option<Vec<String>> = params.get("keywords").and_then(|v| {
             v.as_array().map(|arr| {
-                arr.iter()
+                let raw: Vec<String> = arr
+                    .iter()
                     .filter_map(|item| item.as_str().map(String::from))
-                    .collect()
+                    .collect();
+                let (clean, stats) =
+                    acowork_memory::keyword::sanitize_with_stats(raw);
+                tracing::debug!(
+                    target: "memory_write_keyword_gate",
+                    input = stats.input_count,
+                    output = stats.output_count,
+                    dropped_empty_or_too_long = stats.dropped_empty_or_too_long,
+                    dropped_no_alpha_cjk = stats.dropped_no_alpha_cjk,
+                    dropped_duplicate = stats.dropped_duplicate,
+                    dropped_stopword = stats.dropped_stopword,
+                    dropped_over_cap = stats.dropped_over_cap,
+                    "keyword quality gate applied at memory_store LLM boundary"
+                );
+                clean
             })
         });
 

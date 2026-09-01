@@ -64,7 +64,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 | ------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入 Grafeo。不再每轮写入，避免与 JSONL 冗余 |
 | 经历层 → 沉淀层     | 巩固管道 | 即时提取（LLM 自主 tool call）+ 离线回放（空闲时专用调用）                                                   |
-| 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**2026-09-12 起默认关闭**（`MemoryManagerConfig::auto_inject_enabled = false`）：不同 Agent 的召回需求差异大、Grafeo 三元组/偏好记忆未完善、原始用户消息作 query 命中率低。恢复方式：将 `auto_inject_enabled` 置为 `true`（可 per-agent 配置）。显式 `memory_recall` 工具不受影响 |
+| 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-agent opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-agent opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
 | 沉淀层/经历层内流动 | 关联扩散 | 检索时沿图边 1-2 跳扩展                                                                                      |
 | 沉淀层 → Dormant    | 遗忘衰减 | 后台定期计算 decay_score                                                                                     |
 

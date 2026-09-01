@@ -2,8 +2,10 @@
 //!
 //! Adapted from zeroclaw/src/tools/memory_recall.rs
 //! ACowork deviation: uses acowork_core::Tool trait; replaces Memory trait
-//! with GrafeoStore backend; adds agent_id isolation; supports search_mode
-//! parameter for future embedding/hybrid search.
+//! with GrafeoStore backend; adds agent_id isolation. The retrieval strategy
+//! (hybrid/BM25/vector) is decided by the engine based on embedding
+//! availability — NOT exposed to the LLM (ADR-062: strategy is an engine
+//! concern, see memory_recall.md).
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
@@ -39,7 +41,7 @@ impl MemoryRecallTool {
     fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "memory_recall".to_string(),
-            description: "Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance. Supports keyword search, time-only query (since/until), or both.".to_string(),
+            description: "Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance. Supports keyword search, time-only query (since/until), or both. NOTE: if the conversation context already includes auto-injected memories (a retrieved-memory block is present in the system prompt), do NOT re-run the same query — use this tool only for deeper or targeted recall (different keywords, graph neighbors, or time-filtered) to avoid duplicating already-present context.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -58,11 +60,6 @@ impl MemoryRecallTool {
                     "until": {
                         "type": "string",
                         "description": "Filter memories created at or before this time (RFC 3339)"
-                    },
-                    "search_mode": {
-                        "type": "string",
-                        "enum": ["bm25", "embedding", "hybrid"],
-                        "description": "Search strategy: bm25 (keyword), embedding (semantic), or hybrid (both). Defaults to bm25."
                     }
                 }
             }),
@@ -138,25 +135,10 @@ impl Tool for MemoryRecallTool {
             });
         }
 
-        // Validate search_mode
-        if let Some(mode) = params.get("search_mode").and_then(|v| v.as_str())
-            && !["bm25", "embedding", "hybrid"].contains(&mode)
-        {
-            return Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some(format!(
-                    "Invalid search_mode '{}'. Must be bm25, embedding, or hybrid",
-                    mode
-                )),
-                token_usage: None,
-            });
-        }
-
         let limit = params
             .get("limit")
             .and_then(Value::as_u64)
-            .map_or(10, |v| v.min(20)) as usize;
+            .map_or(5, |v| v.min(20)) as usize;
 
         // Resolve provider and session context.
         // ADR-051 C3: Use grafeo_store() compat accessor for MemoryManager
@@ -180,8 +162,38 @@ impl Tool for MemoryRecallTool {
         let mut memory_query = MemoryQuery::deep_recall(query.to_string(), exclude_session_id);
         memory_query.limit = limit;
 
-        let manager =
-            crate::memory::MemoryManager::new(crate::memory::MemoryManagerConfig::default());
+        // since/until → time_range filter. The dates were validated above;
+        // this finally wires them into the query (previously validated but
+        // never applied — ADR-062 M5). Single-sided ranges get a sane bound:
+        // `since` only → [since, now]; `until` only → [epoch, until].
+        if let Some(s) = since {
+            if let Ok(s_dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                let until_dt = until
+                    .and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok())
+                    .map(|u| u.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(chrono::Utc::now);
+                memory_query.filters.time_range =
+                    Some((s_dt.with_timezone(&chrono::Utc), until_dt));
+            }
+        } else if let Some(u) = until
+            && let Ok(u_dt) = chrono::DateTime::parse_from_rfc3339(u)
+        {
+            let epoch = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+                .unwrap_or_else(chrono::Utc::now);
+            memory_query.filters.time_range =
+                Some((epoch, u_dt.with_timezone(&chrono::Utc)));
+        }
+
+        // Config consistency (ADR-062 M5): use the agent's MemoryManagerConfig
+        // (quality min_score / graph_expand / …) so `memory_recall` behaves
+        // identically to auto-inject for the same agent. Falls back to
+        // defaults when the handle has no config (tests, degraded mode).
+        let config = self
+            .handle
+            .as_ref()
+            .and_then(|h| h.memory_config())
+            .unwrap_or_default();
+        let manager = crate::memory::MemoryManager::new(config);
 
         // Pass embedding provider from session handle so retrieve() can
         // auto-generate query embeddings (Ollama → Remote fallback).
@@ -258,8 +270,29 @@ mod tests {
         let spec = MemoryRecallTool::spec_value();
         assert_eq!(spec.name, "memory_recall");
         assert!(spec.description.contains("long-term memory"));
+        assert!(
+            spec.description.contains("do NOT re-run the same query"),
+            "spec must warn the LLM against duplicating auto-injected memories"
+        );
         assert!(spec.input_schema["properties"]["query"].is_object());
-        assert!(spec.input_schema["properties"]["search_mode"].is_object());
+        // Schema must match the actual default used in execute() (map_or(5)).
+        assert_eq!(
+            spec.input_schema["properties"]["limit"]["description"],
+            "Max results to return (default: 5)"
+        );
+        // since/until must be documented (they are applied via filters.time_range).
+        assert!(
+            spec.input_schema["properties"]["since"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("created at or after")
+        );
+        assert!(
+            spec.input_schema["properties"]["until"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("created at or before")
+        );
     }
 
     #[tokio::test]
@@ -352,41 +385,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memory_recall_invalid_search_mode() {
-        let tool = test_tool();
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "query": "test",
-                    "search_mode": "invalid"
-                }),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(!result.ok);
-        assert!(result.error.unwrap().contains("Invalid search_mode"));
-    }
-
-    #[tokio::test]
-    async fn test_memory_recall_valid_search_modes() {
-        for mode in &["bm25", "embedding", "hybrid"] {
-            let tool = test_tool();
-            let result = tool
-                .execute(
-                    serde_json::json!({
-                        "query": "test",
-                        "search_mode": mode
-                    }),
-                    None,
-                )
-                .await
-                .unwrap();
-            assert!(result.ok, "search_mode '{}' should be valid", mode);
-        }
-    }
-
-    #[tokio::test]
     async fn test_memory_recall_limit_capped() {
         let tool = test_tool();
         let result = tool
@@ -405,8 +403,7 @@ mod tests {
                     "query": "project status",
                     "since": "2025-01-01T00:00:00Z",
                     "until": "2025-12-31T23:59:59Z",
-                    "search_mode": "hybrid",
-                    "limit": 10
+                    "limit": 5
                 }),
                 None,
             )
@@ -483,22 +480,297 @@ mod tests {
         );
     }
 
-    /// Verify that valid search modes work with InMemoryProvider.
+    /// Verify that a query with no search_mode works with InMemoryProvider
+    /// (the engine picks the strategy automatically — search_mode was removed
+    /// as an LLM-facing knob; strategy is an engine concern).
     #[tokio::test]
-    async fn test_memory_recall_valid_search_modes_inmemory() {
-        for mode in &["bm25", "embedding", "hybrid"] {
-            let (tool, _provider) = test_tool_inmemory();
-            let result = tool
-                .execute(
-                    serde_json::json!({
-                        "query": "test",
-                        "search_mode": mode
-                    }),
-                    None,
-                )
-                .await
-                .unwrap();
-            assert!(result.ok, "search_mode '{}' should be valid", mode);
-        }
+    async fn test_memory_recall_plain_query_inmemory() {
+        let (tool, _provider) = test_tool_inmemory();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "query": "test"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+    }
+
+    /// Time-range filtering (`since`/`until`) must actually filter by
+    /// created_at — previously validated but never applied (ADR-062 M5).
+    /// InMemoryProvider variant covers the manager post-filter + tool wiring.
+    #[tokio::test]
+    async fn test_memory_recall_since_filters_by_created_at_inmemory() {
+        use acowork_memory::types::{
+            KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel,
+        };
+        use chrono::{Duration, Utc};
+
+        let (tool, provider) = test_tool_inmemory();
+        let now = Utc::now();
+
+        let old = KnowledgeNode {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "coffee".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            confidence: 0.9,
+            source_episode_id: None,
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: now - Duration::days(30),
+            updated_at: now - Duration::days(30),
+            metadata: Default::default(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
+        };
+        provider.store_knowledge(&old).unwrap();
+
+        let mut recent = old.clone();
+        recent.object = "rust".to_string();
+        recent.created_at = now - Duration::days(1);
+        recent.updated_at = now - Duration::days(1);
+        provider.store_knowledge(&recent).unwrap();
+
+        // No time filter: both memories are recalled.
+        let result = tool
+            .execute(serde_json::json!({ "query": "likes" }), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("coffee"));
+        assert!(result.content.contains("rust"));
+
+        // since = 7 days ago: the 30-day-old memory must be filtered out.
+        let since = (now - Duration::days(7)).to_rfc3339();
+        let result = tool
+            .execute(serde_json::json!({ "query": "likes", "since": since }), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("rust"),
+            "recent memory must be recalled, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("coffee"),
+            "old memory must be filtered by since, got: {}",
+            result.content
+        );
+    }
+
+    /// GrafeoStore variant of the time-range filter test — covers
+    /// `GrafeoProvider::get_node_created_at` (real property read path).
+    #[tokio::test]
+    async fn test_memory_recall_since_filters_by_created_at_grafeo() {
+        use acowork_memory::types::{
+            KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel,
+        };
+        use chrono::{Duration, Utc};
+
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
+        handle.set_provider(store.clone());
+        let tool = MemoryRecallTool {
+            agent_id: "com.test.agent".to_string(),
+            handle: Some(handle),
+        };
+
+        let now = Utc::now();
+        let old = KnowledgeNode {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "coffee".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            confidence: 0.9,
+            source_episode_id: None,
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: now - Duration::days(30),
+            updated_at: now - Duration::days(30),
+            metadata: Default::default(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
+        };
+        store.store_knowledge(&old).unwrap();
+
+        // NOTE: use a different `subject` than `old` — GrafeoStore's semantic
+        // dedup (semantic/knowledge.rs) merges same (subject, predicate) nodes
+        // when embeddings are absent, keeping the *old* created_at. That would
+        // collapse both nodes into one 30-day-old node and `since` would
+        // correctly filter it out (not what this test targets).
+        let mut recent = old.clone();
+        recent.subject = "colleague".to_string();
+        recent.object = "rust".to_string();
+        recent.created_at = now - Duration::days(1);
+        recent.updated_at = now - Duration::days(1);
+        store.store_knowledge(&recent).unwrap();
+
+        let since = (now - Duration::days(7)).to_rfc3339();
+        let result = tool
+            .execute(serde_json::json!({ "query": "likes", "since": since }), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("rust"),
+            "recent memory must be recalled, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("coffee"),
+            "old memory must be filtered by since, got: {}",
+            result.content
+        );
+    }
+
+    /// `until` variant of the time-range filter — only memories created at or
+    /// before the boundary survive.
+    #[tokio::test]
+    async fn test_memory_recall_until_filters_by_created_at_inmemory() {
+        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
+        use chrono::{Duration, Utc};
+
+        let (tool, provider) = test_tool_inmemory();
+        let now = Utc::now();
+
+        let old = KnowledgeNode {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "coffee".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            confidence: 0.9,
+            source_episode_id: None,
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: now - Duration::days(30),
+            updated_at: now - Duration::days(30),
+            metadata: Default::default(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
+        };
+        provider.store_knowledge(&old).unwrap();
+
+        let mut recent = old.clone();
+        recent.subject = "colleague".to_string();
+        recent.object = "rust".to_string();
+        recent.created_at = now - Duration::days(1);
+        recent.updated_at = now - Duration::days(1);
+        provider.store_knowledge(&recent).unwrap();
+
+        // until = 7 days ago: only the 30-day-old memory survives.
+        let until = (now - Duration::days(7)).to_rfc3339();
+        let result = tool
+            .execute(serde_json::json!({ "query": "likes", "until": until }), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("coffee"),
+            "old memory must be recalled, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("rust"),
+            "recent memory must be filtered by until, got: {}",
+            result.content
+        );
+    }
+
+    /// Direct trait test: `get_node_created_at` round-trips the stored
+    /// `created_at` timestamp from the provider (InMemoryProvider impl).
+    #[test]
+    fn test_get_node_created_at_inmemory() {
+        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
+        use acowork_memory::MemoryProvider;
+        use chrono::{Duration, Utc};
+
+        let provider = Arc::new(InMemoryProvider::new());
+        let created = Utc::now() - Duration::days(3);
+        let node = KnowledgeNode {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "coffee".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            confidence: 0.9,
+            source_episode_id: None,
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: created,
+            updated_at: created,
+            metadata: Default::default(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
+        };
+        provider.store_knowledge(&node).unwrap();
+
+        // Locate the node via retrieval to obtain its id.
+        let results = provider
+            .hybrid_search(&MemoryQuery::new("user likes coffee"))
+            .unwrap();
+        assert_eq!(results.len(), 1, "node must be searchable");
+        let ts = provider.get_node_created_at(results[0].node_id).unwrap();
+        assert_eq!(ts, Some(created));
+
+        // Unknown id -> None (defensive).
+        assert_eq!(provider.get_node_created_at(999_999).unwrap(), None);
+    }
+
+    /// Manager-layer test: `filters.time_range` is honored directly by
+    /// `MemoryManager::retrieve` (independent of the tool layer), covering
+    /// the post-filter at manager.rs (kept when timestamp is unknown).
+    #[tokio::test]
+    async fn test_manager_time_range_filter_inmemory() {
+        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
+        use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider};
+        use chrono::{Duration, Utc};
+
+        let provider = Arc::new(InMemoryProvider::new());
+        let now = Utc::now();
+
+        let old = KnowledgeNode {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "coffee".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            confidence: 0.9,
+            source_episode_id: None,
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: now - Duration::days(30),
+            updated_at: now - Duration::days(30),
+            metadata: Default::default(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
+        };
+        provider.store_knowledge(&old).unwrap();
+
+        let mut recent = old.clone();
+        recent.subject = "colleague".to_string();
+        recent.object = "rust".to_string();
+        recent.created_at = now - Duration::days(1);
+        recent.updated_at = now - Duration::days(1);
+        provider.store_knowledge(&recent).unwrap();
+
+        let mut query = MemoryQuery::new("likes");
+        query.filters.time_range = Some((now - Duration::days(7), now + Duration::days(1)));
+        let manager = MemoryManager::new(MemoryManagerConfig::default());
+        let retrieval = manager
+            .retrieve(provider.as_ref(), &mut query, None)
+            .await
+            .unwrap();
+
+        assert!(
+            retrieval.memories.iter().any(|m| m.content.contains("rust")),
+            "recent memory must survive the time-range filter"
+        );
+        assert!(
+            !retrieval.memories.iter().any(|m| m.content.contains("coffee")),
+            "old memory must be filtered by time_range at manager layer"
+        );
     }
 }

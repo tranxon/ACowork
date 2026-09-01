@@ -399,10 +399,11 @@ pub struct AgentLoop {
 
     /// ADR-060 §6.3: whether auto-inject has already run for this session.
     ///
-    /// `auto_inject_enabled` (default false) triggers at most once, on the
-    /// session's FIRST user message; later turns skip the retrieval.
-    /// Explicit `memory_recall` tool calls use an independent path and do
-    /// not touch this flag.
+    /// `auto_inject_enabled` (default false, per-agent opt-in via manifest
+    /// `[memory.quality].auto_inject_enabled = true`) triggers at most
+    /// once, on the session's FIRST user message; later turns skip the
+    /// retrieval. Explicit `memory_recall` tool calls use an independent
+    /// path and do not touch this flag.
     pub(crate) memory_retrieved_for_session: bool,
 
     /// ADR-052: Shared queue for `context_retrieve` tool requests.

@@ -14,6 +14,7 @@
 pub mod admin;
 pub mod consolidation;
 pub mod judge;
+pub mod keyword;
 pub mod manager;
 pub mod provider;
 pub mod quality;

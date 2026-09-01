@@ -33,7 +33,7 @@ use acowork_memory::types::{
 use acowork_memory::MemoryProvider;
 use acowork_memory::quality::MemoryQualityConfig;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 // ============================================================================
 // InMemoryProvider
@@ -50,6 +50,7 @@ struct InMemoryNode {
     session_id: Option<String>,
     confidence: f32,
     status: NodeStatus,
+    created_at: DateTime<Utc>,
 }
 
 /// A simple in-memory implementation of `MemoryProvider` for testing.
@@ -185,6 +186,7 @@ impl MemoryProvider for InMemoryProvider {
                 session_id: None,
                 confidence: node.confidence,
                 status: node.status.clone(),
+                created_at: node.created_at,
             },
         );
         Ok(())
@@ -209,6 +211,7 @@ impl MemoryProvider for InMemoryProvider {
                 session_id: None,
                 confidence: node.confidence,
                 status: node.status.clone(),
+                created_at: node.created_at,
             },
         );
         Ok(())
@@ -227,6 +230,7 @@ impl MemoryProvider for InMemoryProvider {
                 session_id: None,
                 confidence: node.confidence,
                 status: NodeStatus::Active,
+                created_at: node.created_at,
             },
         );
         Ok(())
@@ -382,6 +386,7 @@ impl MemoryProvider for InMemoryProvider {
                 session_id: None,
                 confidence,
                 status,
+                created_at: Utc::now(),
             },
         );
         Ok(Some(MemoryStoreResult {
@@ -506,6 +511,15 @@ impl MemoryProvider for InMemoryProvider {
             .unwrap()
             .get(&node_id)
             .map(|n| n.status.clone()))
+    }
+
+    fn get_node_created_at(&self, node_id: u64) -> Result<Option<DateTime<Utc>>> {
+        Ok(self
+            .nodes
+            .read()
+            .unwrap()
+            .get(&node_id)
+            .map(|n| n.created_at))
     }
 
     fn apply_pagerank_boost(&self, _scores: &mut [(u64, f64)], _weight: f64) -> Result<()> {

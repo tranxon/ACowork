@@ -221,27 +221,55 @@ impl GrafeoStore {
         // Step 4: Create the new knowledge node.
         let subject = input.subject.clone().unwrap_or_else(|| "user".to_string());
         let predicate = input.predicate.clone().unwrap_or_default();
-        let object = input
+        let mut object = input
             .object
             .clone()
             .unwrap_or_else(|| input.content.clone());
 
         let mut new_metadata = std::collections::HashMap::new();
         // Persist LLM-provided keywords to aid retrieval (design §4.1, Gap G8).
-        // Stored under metadata["keywords"] as a JSON array so BM25/keyword
-        // matching can consume them during recall.
+        // Stored under metadata["keywords"] as a JSON array.
+        //
+        // ADR-062 §6.2.1 (M5 step 2a): the keyword quality gate also runs
+        // here as a defensive, idempotent fallback — the LLM boundary
+        // (memory_store tool) already sanitizes, this keeps the persistence
+        // boundary clean for direct `process_memory_store` callers too.
+        //
+        // ADR-062 §6.2 Plan Y (M5 step 2b): when `quality.keyword_index` is
+        // enabled, sanitized keywords are ALSO folded into the BM25-indexed
+        // `object` field so text search matches them without adding a new
+        // grafeo-engine hybrid source. Default `keyword_index=false` keeps
+        // the metadata-only behaviour, preserving M4 baselines.
         if let Some(keywords) = &input.keywords
             && !keywords.is_empty()
         {
-            new_metadata.insert(
-                "keywords".to_string(),
-                serde_json::Value::Array(
-                    keywords
-                        .iter()
-                        .map(|k| serde_json::Value::String(k.clone()))
-                        .collect(),
-                ),
+            let (clean, stats) =
+                acowork_memory::keyword::sanitize_with_stats(keywords.clone());
+            tracing::debug!(
+                target: "memory_write_keyword_gate",
+                input = stats.input_count,
+                output = stats.output_count,
+                dropped_empty_or_too_long = stats.dropped_empty_or_too_long,
+                dropped_no_alpha_cjk = stats.dropped_no_alpha_cjk,
+                dropped_duplicate = stats.dropped_duplicate,
+                dropped_stopword = stats.dropped_stopword,
+                dropped_over_cap = stats.dropped_over_cap,
+                "keyword quality gate applied at instant persistence boundary"
             );
+            if !clean.is_empty() {
+                new_metadata.insert(
+                    "keywords".to_string(),
+                    serde_json::Value::Array(
+                        clean
+                            .iter()
+                            .map(|k| serde_json::Value::String(k.clone()))
+                            .collect(),
+                    ),
+                );
+                if self.quality().keyword_index {
+                    object.push_str(&format!(" Keywords: {}", clean.join(" ")));
+                }
+            }
         }
 
         let mut new_node = KnowledgeNode {
@@ -758,6 +786,8 @@ fn parse_procedure_content(content: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acowork_memory::quality::MemoryQualityConfig;
+    use acowork_memory::MemoryProvider;
     use crate::types::{DEFAULT_EMBEDDING_DIM, PrivacyLevel};
 
     fn test_store() -> GrafeoStore {
@@ -1053,6 +1083,83 @@ mod tests {
         assert!(
             !node2.metadata.contains_key("keywords"),
             "no keywords should not write the metadata key"
+        );
+    }
+
+    #[test]
+    fn test_keyword_index_folds_into_object_and_sanitizes() {
+        let store = test_store();
+
+        let input = MemoryStoreInput {
+            content: "User lives in Shanghai".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: Some("user".to_string()),
+            predicate: Some("lives_in".to_string()),
+            object: Some("Shanghai".to_string()),
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            // "The" is a stopword → dropped by the gate; "LOCATION" is
+            // lowercased. Exercises the defensive sanitize at the
+            // persistence boundary (ADR-062 §6.2.1).
+            keywords: Some(vec![
+                "The".to_string(),
+                "shanghai".to_string(),
+                "LOCATION".to_string(),
+            ]),
+            autobiographical: None,
+        };
+
+        // State 1: keyword_index = false (default) → metadata-only, object clean.
+        let r1 = store.process_memory_store(&input).unwrap().unwrap();
+        let n1 = store.get_knowledge(NodeId::new(r1.node_id)).unwrap().unwrap();
+        assert_eq!(
+            n1.object, "Shanghai",
+            "object must NOT contain keywords when keyword_index is off"
+        );
+        let kw1 = n1
+            .metadata
+            .get("keywords")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(
+            kw1,
+            Some(vec!["shanghai".to_string(), "location".to_string()]),
+            "gate sanitizes at persistence boundary: stopword dropped, case normalized"
+        );
+
+        // State 2: keyword_index = true → sanitized keywords folded into the
+        // BM25-indexed object field (ADR-062 §6.2 Plan Y, M5 step 2b).
+        // NB: use a different content than State 1 — the dedup gate
+        // (knowledge_threshold 0.95) would otherwise return Ok(None).
+        store
+            .apply_quality_config(&MemoryQualityConfig {
+                keyword_index: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let input2 = MemoryStoreInput {
+            content: "User enjoys spending weekends in Shanghai".to_string(),
+            predicate: Some("enjoys".to_string()),
+            object: Some("Shanghai on weekends".to_string()),
+            ..input.clone()
+        };
+        let r2 = store.process_memory_store(&input2).unwrap().unwrap();
+        let n2 = store.get_knowledge(NodeId::new(r2.node_id)).unwrap().unwrap();
+        assert!(
+            n2.object.contains("Keywords: shanghai location"),
+            "object must fold sanitized keywords when gate is on, got: {:?}",
+            n2.object
+        );
+        assert!(
+            !n2.object.contains("The"),
+            "stopword must never reach the object fold"
         );
     }
 
