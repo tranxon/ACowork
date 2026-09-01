@@ -140,6 +140,7 @@ mod tests {
             status: NodeStatus::Dormant, // intentionally wrong; store should force Active
             created_at: test_dt(),
             updated_at: test_dt(),
+            source: "user_statement".to_string(),
             metadata: std::collections::HashMap::new(),
         }
     }

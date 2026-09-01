@@ -424,7 +424,10 @@ impl GrafeoStore {
                     updated.updated_at = Utc::now();
 
                     // Upgrade Pending → Active if confidence reaches threshold
-                    if updated.status == NodeStatus::Pending && updated.confidence >= 0.8 {
+                    // (ADR-062 ConsolidationQuality.generalization_active_threshold).
+                    if updated.status == NodeStatus::Pending
+                        && updated.confidence >= self.quality().consolidation.generalization_active_threshold
+                    {
                         updated.status = NodeStatus::Active;
                     }
 
@@ -470,7 +473,9 @@ impl GrafeoStore {
                         source_skill: None,
                         learned_from: "generalization".to_string(),
                         embedding: Some(embedding),
-                        status: if pattern.confidence >= 0.8 {
+                        status: if pattern.confidence
+                            >= self.quality().consolidation.generalization_active_threshold
+                        {
                             NodeStatus::Active
                         } else {
                             NodeStatus::Pending

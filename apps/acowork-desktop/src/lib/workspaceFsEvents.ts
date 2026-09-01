@@ -35,6 +35,7 @@ import { useSettingsStore } from "../stores/settingsStore";
 import { DEFAULT_GATEWAY_URL } from "./config";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "./logger";
+import { initWorkspaceWatchReporter, disposeWorkspaceWatchReporter } from "./workspaceFsWatch";
 
 /** One aggregated change within a 500ms window (Runtime → Desktop). */
 export interface FsChange {
@@ -187,6 +188,11 @@ export async function initWorkspaceFsListener(): Promise<void> {
 async function doInit(): Promise<void> {
     // Unregister previous listeners (recovery reload re-inits).
     disposeWorkspaceFsListener();
+    // Start the demand-driven watch-set reporter (frontend state → Runtime
+    // fs-watch). Must come before the listeners below: a wake/reconnect
+    // full-sync and the watch reporter are independent, but both are torn
+    // down together in disposeWorkspaceFsListener.
+    initWorkspaceWatchReporter();
 
     _fsUnlisten = await listen<WorkspaceFsChangeEvent>(
         "acowork:workspace-fs-changed",
@@ -228,6 +234,9 @@ async function doInit(): Promise<void> {
 }
 
 export function disposeWorkspaceFsListener(): void {
+    // Tear down the watch-set reporter first — its subscriptions reference
+    // the stores, independent of the Tauri listeners below.
+    disposeWorkspaceWatchReporter();
     if (_fsUnlisten) {
         _fsUnlisten();
         _fsUnlisten = null;

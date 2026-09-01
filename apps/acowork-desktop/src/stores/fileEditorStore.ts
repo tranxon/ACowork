@@ -21,6 +21,56 @@ function normalizeUrl(candidate: string): string | null {
     }
 }
 
+// ── Dispose registry ───────────────────────────��────────────────────────────
+//
+// FileEditorPanel owns the Monaco TextModel for each opened file (plus its
+// LSP didClose side-effect). When any caller closes a file — UI X button,
+// right-click menu, batch-confirm dialog, panel unmount, or an external
+// trigger like workspaceFsEvents reacting to a disk-delete — the store
+// must release the Monaco TextModel. But the store has no Monaco reference,
+// and pushing Monaco knowledge down into the store would couple the data
+// layer to the editor implementation.
+//
+// This module-level registry inverts the dependency: the owning component
+// registers a disposer on mount, the close actions invoke every registered
+// disposer for each removed file, and the store stays free of editor
+// internals. New close paths (e.g. the disk-delete watcher) get correct
+// disposal for free — no caller can forget to release.
+//
+// The registry is a Set rather than a single function because the panel
+// may legitimately want to register multiple disposers (today only one is
+// needed; future renderers — a separate LSP-tracker panel, a search-result
+// preview — could each register their own).
+type FileDisposer = (file: OpenFile) => void;
+const fileDisposers = new Set<FileDisposer>();
+
+/**
+ * Register a disposer invoked once per file removed by closeFile,
+ * closeOthers, or closeAllFiles. Returns an unregister callback for
+ * use as the cleanup of a useEffect. Disposers run BEFORE the store
+ * mutation, so a disposer that throws still leaves the store consistent
+ * for the next call.
+ */
+export function registerFileDisposer(disposer: FileDisposer): () => void {
+    fileDisposers.add(disposer);
+    return () => {
+        fileDisposers.delete(disposer);
+    };
+}
+
+/** Invoke every registered disposer for each file in files. */
+function disposeFiles(files: OpenFile[]): void {
+    for (const file of files) {
+        for (const disposer of fileDisposers) {
+            try {
+                disposer(file);
+            } catch (err) {
+                log.error("[FileEditorStore] file disposer threw:", err);
+            }
+        }
+    }
+}
+
 /** Extension → Monaco language ID mapping */
 const EXT_LANGUAGE_MAP: Record<string, string> = {
     rs: "rust",
@@ -398,6 +448,9 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         if (!file) return true;
         if (file.dirty && !force) return false;
 
+        // Release Monaco TextModel + LSP didClose BEFORE mutating store state.
+        disposeFiles([file]);
+
         set((state) => {
             const nextFiles = state.openFiles.filter((f) => f.id !== fileId);
             let nextActive = state.activeFileId;
@@ -422,6 +475,9 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             );
             if (hasDirty) return false;
         }
+        const others = state.openFiles.filter((f) => f.id !== keepFileId);
+        // Release Monaco TextModels for every non-kept tab BEFORE the store mutation.
+        disposeFiles(others);
         set({
             openFiles: state.openFiles.filter((f) => f.id === keepFileId),
             // Keep the requested tab active; if it wasn't the active one,
@@ -597,6 +653,8 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
     closeAllFiles: (force?: boolean) => {
         const state = get();
         if (!force && state.openFiles.some((f) => f.dirty)) return false;
+        // Release Monaco TextModels for every open tab BEFORE the store mutation.
+        disposeFiles(state.openFiles);
         set({ openFiles: [], activeFileId: null });
         return true;
     },

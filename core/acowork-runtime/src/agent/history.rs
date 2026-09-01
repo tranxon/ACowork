@@ -10,8 +10,9 @@
 //! Programmatic folding strategies (Tool Result folding, content folding) have been
 //! removed per [ADR-010](../../../../docs/adr/ADR-010-context-compression-simplification.md).
 //! Context compression is a semantic understanding task — only an LLM can reliably
-//! decide what to discard. The remaining strategies (trim_fifo, emergency_trim) are
-//! safety nets for when the LLM-based compaction itself cannot execute.
+//! decide what to discard. Per ADR-061, the FIFO safety nets (trim_fifo,
+//! emergency_trim) are deleted too: the 8-level plan (level 8 floor) covers every
+//! within-budget case, and LLM failure is an explicit `ChunkEvent::Error` (§11.3).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
 #[cfg(test)]
 use acowork_core::providers::traits::ChatRequest;
 
+use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
@@ -70,6 +72,120 @@ pub(crate) const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str = "[Tool result compre
 /// (rather than "Assistant") in the summary prompt, so the LLM knows
 /// it is reading a previous compaction output rather than a fresh turn.
 pub(crate) const COMPACTION_SUMMARY_NAME: &str = "compaction_summary";
+
+// ── ADR-061: 8-level degradation compression types ─────────────────────
+
+/// ADR-061: error from planning / applying an 8-level compression.
+#[derive(Debug)]
+pub(crate) enum CompressError {
+    /// The plan failed its acceptance check at apply time (defensive;
+    /// plan-time validation normally catches this first).
+    InsufficientCompression { projected_ratio: f64 },
+    /// Level 8 (the sole budget-only level) still cannot fit the
+    /// summary + retained skeleton within the budget (§19.5).
+    UnrecoverableOverflow { projected: u64, budget: u64 },
+}
+
+impl std::fmt::Display for CompressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientCompression { projected_ratio } => write!(
+                f,
+                "compression plan failed acceptance check (projected ratio {:.1}%)",
+                projected_ratio * 100.0
+            ),
+            Self::UnrecoverableOverflow { projected, budget } => write!(
+                f,
+                "level 8 cannot fit within budget: projected {} > budget {}",
+                projected, budget
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompressError {}
+
+/// ADR-061: result of a successful 8-level compression apply.
+#[derive(Debug, Clone)]
+pub(crate) struct CompressionOutcome {
+    pub level: u8,
+    pub original_tokens: u64,
+    pub new_tokens: u64,
+    pub compression_ratio: f64,
+    pub removed_messages: usize,
+}
+
+/// ADR-061: retention statistics per level — persisted inside the summary
+/// marker's level-metadata block (§9) for post-hoc debugging.
+#[derive(Debug, Clone)]
+struct RetentionStats {
+    user_messages: usize,
+    assistant_messages: usize,
+    tool_messages: usize,
+    user_desc: String,
+    assistant_desc: String,
+    tool_desc: String,
+}
+
+/// ADR-061: how tool messages are retained for levels 1-4.
+#[derive(Clone, Copy)]
+enum ToolKeep {
+    /// Keep tool messages from (and after) the K-th assistant from the end.
+    WithinLastAssistants(usize),
+    /// Keep no tool messages.
+    None,
+}
+
+/// ADR-061: an 8-level degradation compression plan (levels 1-8).
+///
+/// Captures exactly which messages survive at the chosen level (system +
+/// user skeleton + selected assistant/tool tail) plus the token projection.
+/// Created by [`HistoryManager::plan_compression`], consumed by
+/// [`HistoryManager::apply_compression`].
+#[derive(Debug)]
+pub(crate) struct CompressionPlan {
+    /// Selected level (1-8).
+    pub level: u8,
+    /// Retained messages in original order (excluding the new summary
+    /// marker).
+    retained: Vec<ChatMessage>,
+    /// History token count at plan time.
+    original_tokens: u64,
+    /// Estimated tokens of `retained` (via `count_message`).
+    retained_tokens: u64,
+    /// Projected total = retained + summary marker (exact: the summary
+    /// size is already known at plan time, §19.1).
+    projected_tokens: u64,
+    /// Retention stats for the level metadata block.
+    stats: RetentionStats,
+}
+
+/// Build the summary marker content: level metadata block (§9) prepended
+/// to the LLM summary. Metadata is runtime-generated (not LLM output) and
+/// machine-parseable.
+fn build_summary_marker(
+    level: u8,
+    original_tokens: u64,
+    new_tokens: u64,
+    ratio: f64,
+    stats: &RetentionStats,
+    summary: &str,
+) -> String {
+    format!(
+        "[compressed: level={}]\n  user_messages: {} ({})\n  assistant_messages: {} ({})\n  tool_messages: {} ({})\n  tokens: {} -> {} (ratio {:.1}%)\n\n{}",
+        level,
+        stats.user_desc,
+        stats.user_messages,
+        stats.assistant_desc,
+        stats.assistant_messages,
+        stats.tool_desc,
+        stats.tool_messages,
+        original_tokens,
+        new_tokens,
+        ratio * 100.0,
+        summary
+    )
+}
 
 /// History manager for conversation
 pub struct HistoryManager {
@@ -447,110 +563,6 @@ impl HistoryManager {
         self.current_tokens
     }
 
-    /// Trim history using FIFO strategy — removes oldest non-system messages
-    /// until total tokens are within budget.
-    pub fn trim_fifo(&mut self) -> usize {
-        if self.current_tokens <= self.max_tokens {
-            return 0;
-        }
-
-        let mut removed = 0;
-        // Never remove system messages; start from first user/assistant message
-        let first_removable = self
-            .messages
-            .iter()
-            .position(|m| !matches!(m.role, MessageRole::System))
-            .unwrap_or(0);
-
-        while self.current_tokens > self.max_tokens
-            && first_removable + removed < self.messages.len() - 1
-        {
-            let idx = first_removable + removed;
-            if idx < self.messages.len() {
-                let tokens = self.counter.count_message(
-                    &self.messages[idx],
-                    self.model_for_counting(),
-                    Some(&self.protocol_type),
-                );
-                self.current_tokens = self.current_tokens.saturating_sub(tokens);
-                removed += 1;
-            } else {
-                break;
-            }
-        }
-
-        if removed > 0 {
-            // Actually remove the messages
-            let end = first_removable + removed;
-            let drain_end = end.min(self.messages.len());
-            self.messages_mut().drain(first_removable..drain_end);
-            tracing::debug!(
-                removed,
-                remaining_tokens = self.current_tokens,
-                "FIFO trimmed"
-            );
-        }
-
-        removed
-    }
-
-    /// Emergency trim — drastic measure for context overflow recovery.
-    /// Keeps only the last 4 non-system messages.
-    ///
-    /// Compaction markers (`name == "compaction_summary"`) are protected from
-    /// removal because they are needed by [`last_compaction_index`] for tail
-    /// distillation at session close. Without this protection, emergency trim
-    /// could delete the only compaction marker and cause the session-close
-    /// distillation to fall back to full-history summarization.
-    pub fn emergency_trim(&mut self) -> usize {
-        fn is_compaction_marker(msg: &ChatMessage) -> bool {
-            msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
-        }
-
-        let system_count = self
-            .messages
-            .iter()
-            .filter(|m| matches!(m.role, MessageRole::System))
-            .count();
-
-        let compaction_count = self
-            .messages
-            .iter()
-            .filter(|m| is_compaction_marker(m))
-            .count();
-
-        // Non-system, non-compaction messages
-        let removable_count = self.messages.len() - system_count - compaction_count;
-        if removable_count <= 4 {
-            return 0;
-        }
-
-        let to_remove = removable_count - 4;
-        let mut removed = 0;
-
-        // Remove oldest removable messages, skipping system + compaction markers
-        let mut i = 0;
-        while removed < to_remove && i < self.messages.len() {
-            if matches!(self.messages[i].role, MessageRole::System)
-                || is_compaction_marker(&self.messages[i])
-            {
-                i += 1;
-            } else {
-                let tokens = self.counter.count_message(
-                    &self.messages[i],
-                    self.model_for_counting(),
-                    Some(&self.protocol_type),
-                );
-                self.current_tokens = self.current_tokens.saturating_sub(tokens);
-                self.messages_mut().remove(i);
-                removed += 1;
-            }
-        }
-
-        tracing::warn!(removed, "Emergency trim performed");
-        removed
-    }
-
     /// Returns 1 if replaced, 0 if not found or already compressed.
     pub fn abandon_tool_result(&mut self, tool_call_id: &str) -> usize {
         for msg in self.messages_mut() {
@@ -773,11 +785,28 @@ impl HistoryManager {
             &prompt,
             provider,
             model_name,
-            2048,
+            SUMMARY_TOKEN_BUDGET as u32,
             identity_context,
             system_prompt,
         )
         .await
+    }
+
+    /// ADR-061 §8.2/§19.4: join the original user messages as the
+    /// fallback `<user_intent>` when the compaction LLM omits the block.
+    ///
+    /// Compaction markers (`name == COMPACTION_SUMMARY_NAME`) are
+    /// excluded — they are compression artifacts, not original user
+    /// input, and must never masquerade as user intent (ADR-061 §19.4).
+    pub fn user_intent_fallback_text(&self) -> String {
+        self.messages
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::User))
+            .filter(|m| m.name.as_deref() != Some(COMPACTION_SUMMARY_NAME))
+            .map(|m| m.content.trim())
+            .filter(|c| !c.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Replace the middle section of history with a compaction summary.
@@ -933,11 +962,298 @@ impl HistoryManager {
             .find(|(_, msg)| msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
             .map(|(i, _)| i)
     }
+
+    // ── ADR-061: 8-level degradation compression ──────────────────────
+
+    /// ADR-061 §19.1: select the 8-level degradation plan.
+    ///
+    /// `summary` is the LLM output (already parsed by `parse_compact_output`); its token
+    /// size is known here, so the projection is exact — the 8-level walk
+    /// happens **after** the summary (§19.1 先摘要后 plan).
+    ///
+    /// Selection rule (§19.2):
+    /// - Levels 1-7: the **first** level satisfying
+    ///   `ratio >= min_ratio && projected <= budget` wins
+    ///   (stop at the first sufficient one — more aggressive levels are
+    ///   never tried).
+    /// - Level 8: sole fallback, **exempt** from the ratio bar; only requires
+    ///   `projected <= budget` (T > budget overflow lands here in one shot).
+    ///
+    /// `min_ratio` is the per-agent compression ratio threshold (default
+    /// [`MIN_COMPRESSION_RATIO`] = 0.90, i.e. "compress until at most 10%
+    /// remains", e.g. 200K → 20K).
+    ///
+    /// Errors with [`CompressError::UnrecoverableOverflow`] when level 8
+    /// still cannot fit — the caller must not touch history (§19.5).
+    pub(crate) fn plan_compression(
+        &self,
+        summary: &str,
+        min_ratio: f64,
+    ) -> std::result::Result<CompressionPlan, CompressError> {
+        if self.current_tokens == 0 || self.max_tokens == 0 {
+            return Err(CompressError::UnrecoverableOverflow {
+                projected: self.current_tokens,
+                budget: self.max_tokens,
+            });
+        }
+
+        let msgs = self.messages.as_slice();
+        let mut level8_projected = 0u64;
+        for level in 1..=8u8 {
+            let plan = self.build_level_plan(level, msgs, summary);
+            let projected = plan.projected_tokens;
+            if level < 8 {
+                let ratio = 1.0 - (projected as f64 / self.current_tokens as f64);
+                if ratio >= min_ratio && projected <= self.max_tokens {
+                    return Ok(plan);
+                }
+            } else {
+                level8_projected = projected;
+                if projected <= self.max_tokens {
+                    return Ok(plan);
+                }
+            }
+        }
+
+        Err(CompressError::UnrecoverableOverflow {
+            projected: level8_projected,
+            budget: self.max_tokens,
+        })
+    }
+
+    /// Build the retention plan for a single level (pure function over the
+    /// message snapshot; no mutation).
+    fn build_level_plan(&self, level: u8, msgs: &[ChatMessage], summary: &str) -> CompressionPlan {
+        let system_count = msgs
+            .iter()
+            .take_while(|m| matches!(m.role, MessageRole::System))
+            .count();
+
+        // Level 8: only system + latest real user message survive; all the
+        // rest goes to the summary. "Current user message" = last non-marker
+        // User message (§19.1 note — compaction markers are User-role too,
+        // so they must be excluded here).
+        if level == 8 {
+            let last_user = msgs.iter().rposition(|m| {
+                matches!(m.role, MessageRole::User)
+                    && m.name.as_deref() != Some(COMPACTION_SUMMARY_NAME)
+            });
+            let mut retained: Vec<ChatMessage> = msgs[..system_count].to_vec();
+            let mut user_kept = 0usize;
+            if let Some(ui) = last_user {
+                retained.push(msgs[ui].clone());
+                user_kept = 1;
+            }
+            let retained_tokens = self.count_slice_tokens(&retained);
+            return CompressionPlan {
+                level,
+                retained,
+                original_tokens: self.current_tokens,
+                retained_tokens,
+                projected_tokens: retained_tokens + self.estimate_marker_tokens(summary),
+                stats: RetentionStats {
+                    user_messages: user_kept,
+                    assistant_messages: 0,
+                    tool_messages: 0,
+                    user_desc: if user_kept > 0 {
+                        "last 1".to_string()
+                    } else {
+                        "none".to_string()
+                    },
+                    assistant_desc: "none".to_string(),
+                    tool_desc: "none".to_string(),
+                },
+            };
+        }
+
+        // Levels 1-7: user messages (incl. prior compaction markers) are
+        // always preserved (§19.4); assistant/tool retention tightens per
+        // the level table (ADR-061 §6.2).
+        let (assistant_keep, tool_keep) = match level {
+            1 => (None, ToolKeep::WithinLastAssistants(5)),
+            2 => (None, ToolKeep::WithinLastAssistants(3)),
+            3 => (None, ToolKeep::WithinLastAssistants(1)),
+            4 => (Some(5), ToolKeep::WithinLastAssistants(1)),
+            5 => (Some(5), ToolKeep::None),
+            6 => (Some(3), ToolKeep::None),
+            7 => (Some(1), ToolKeep::None),
+            _ => unreachable!("level 8 handled above"),
+        };
+
+        let assistant_indices: Vec<usize> = (0..msgs.len())
+            .filter(|&i| matches!(msgs[i].role, MessageRole::Assistant))
+            .collect();
+        // Index of the K-th assistant from the end; `None` when fewer than K
+        // assistants exist → that dimension drops nothing.
+        let kth_from_end = |k: usize| -> Option<usize> {
+            (assistant_indices.len() >= k)
+                .then(|| assistant_indices[assistant_indices.len() - k])
+        };
+        let assistant_threshold = assistant_keep.and_then(kth_from_end);
+        let tool_threshold = match tool_keep {
+            // ADR-061 §6.2: tools associated with the last K assistant
+            // messages survive. A round is `Assistant{tool_calls} → Tool →
+            // Assistant`, so the K-th assistant's own tool result precedes
+            // it — threshold at the (K+1)-th assistant from the end to
+            // include that window (K=1 keeps exactly the last round's tool).
+            ToolKeep::WithinLastAssistants(k) => kth_from_end(k + 1),
+            ToolKeep::None => Some(usize::MAX),
+        };
+
+        let mut retained: Vec<ChatMessage> = Vec::with_capacity(msgs.len());
+        let mut user_kept = 0usize;
+        let mut assistant_kept = 0usize;
+        let mut tool_kept = 0usize;
+        for (i, msg) in msgs.iter().enumerate() {
+            let keep = match msg.role {
+                MessageRole::System => true,
+                MessageRole::User => {
+                    user_kept += 1;
+                    true
+                }
+                MessageRole::Assistant => {
+                    let k = assistant_threshold.is_none_or(|t| i >= t);
+                    if k {
+                        assistant_kept += 1;
+                    }
+                    k
+                }
+                MessageRole::Tool => {
+                    let k = tool_threshold.is_none_or(|t| i >= t);
+                    if k {
+                        tool_kept += 1;
+                    }
+                    k
+                }
+            };
+            if keep {
+                retained.push(msg.clone());
+            }
+        }
+
+        let retained_tokens = self.count_slice_tokens(&retained);
+        let stats = RetentionStats {
+            user_messages: user_kept,
+            assistant_messages: assistant_kept,
+            tool_messages: tool_kept,
+            user_desc: "all".to_string(),
+            assistant_desc: match assistant_keep {
+                Some(n) => format!("last {}", n.min(assistant_kept)),
+                None => "all".to_string(),
+            },
+            tool_desc: match tool_keep {
+                ToolKeep::WithinLastAssistants(k) => {
+                    format!("within last {} assistants", k)
+                }
+                ToolKeep::None => "none".to_string(),
+            },
+        };
+        CompressionPlan {
+            level,
+            retained,
+            original_tokens: self.current_tokens,
+            retained_tokens,
+            projected_tokens: retained_tokens + self.estimate_marker_tokens(summary),
+            stats,
+        }
+    }
+
+    /// ADR-061 §19.2: apply the plan — rebuild history as
+    /// `[system][summary marker][retained]`, with the level metadata block
+    /// (§9) prepended to the summary inside the marker.
+    ///
+    /// The marker keeps `User` role + `name = "compaction_summary"` so the
+    /// restorer / `last_compaction_index` contracts are unchanged, and no
+    /// `Assistant → Assistant{tool_calls}` adjacency can appear (glm-5.2
+    /// on Volcano Ark rejects that pattern).
+    pub(crate) fn apply_compression(
+        &mut self,
+        plan: CompressionPlan,
+        summary: &str,
+        min_ratio: f64,
+    ) -> std::result::Result<CompressionOutcome, CompressError> {
+        let original_tokens = plan.original_tokens;
+        let ratio = 1.0 - (plan.projected_tokens as f64 / original_tokens as f64);
+
+        // Defensive re-check (plan-time validation already ran; this guards
+        // against callers bypassing `plan_compression`). Level 8 is exempt
+        // from the ratio bar (§19.2).
+        if plan.projected_tokens > self.max_tokens
+            || (plan.level < 8 && ratio < min_ratio)
+        {
+            return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
+        }
+
+        let marker = ChatMessage {
+            role: MessageRole::User,
+            content: build_summary_marker(
+                plan.level,
+                original_tokens,
+                plan.projected_tokens,
+                ratio,
+                &plan.stats,
+                summary,
+            ),
+            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
+            ..Default::default()
+        };
+
+        // Marker sits right after the leading system block (middle-replace
+        // semantics preserved; restorer anchors replay after it).
+        let split = plan
+            .retained
+            .iter()
+            .take_while(|m| matches!(m.role, MessageRole::System))
+            .count();
+        let mut new_msgs = Vec::with_capacity(plan.retained.len() + 1);
+        new_msgs.extend_from_slice(&plan.retained[..split]);
+        new_msgs.push(marker);
+        new_msgs.extend_from_slice(&plan.retained[split..]);
+
+        let removed_messages = self.messages.len().saturating_sub(new_msgs.len());
+        *self.messages_mut() = new_msgs;
+        self.recalibrate_tokens();
+
+        tracing::info!(
+            level = plan.level,
+            removed_messages,
+            original_tokens,
+            retained_tokens = plan.retained_tokens,
+            new_tokens = self.current_tokens,
+            ratio = ?ratio,
+            "ADR-061: 8-level compression applied"
+        );
+
+        Ok(CompressionOutcome {
+            level: plan.level,
+            original_tokens,
+            new_tokens: self.current_tokens,
+            compression_ratio: ratio,
+            removed_messages,
+        })
+    }
+
+    /// Sum `count_message` over a slice (kept messages at plan time).
+    fn count_slice_tokens(&self, msgs: &[ChatMessage]) -> u64 {
+        msgs.iter()
+            .map(|m| {
+                self.counter
+                    .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
+            })
+            .sum()
+    }
+
+    /// Estimate the to-be-inserted summary marker's tokens: precise summary
+    /// text count plus a fixed overhead for the level metadata block (§9).
+    fn estimate_marker_tokens(&self, summary: &str) -> u64 {
+        crate::token::count_text(summary, "") as u64 + 64
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 
     fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         ChatMessage {
@@ -1013,68 +1329,6 @@ mod tests {
         hm.truncate_to(3);
         assert_eq!(snap.len(), 5, "snapshot keeps pre-rewind history");
         assert_eq!(hm.messages().len(), 3, "live history truncated");
-    }
-
-    #[test]
-    fn test_fifo_trim() {
-        let mut hm = HistoryManager::new(50); // Very small budget
-        hm.append(make_message(MessageRole::System, "System prompt"));
-        for i in 0..10 {
-            hm.append(make_message(
-                MessageRole::User,
-                &format!("Message {i} with some content to fill tokens"),
-            ));
-        }
-        let removed = hm.trim_fifo();
-        assert!(removed > 0);
-        // System message should still be there
-        assert!(
-            hm.messages()
-                .iter()
-                .any(|m| matches!(m.role, MessageRole::System))
-        );
-    }
-
-    #[test]
-    fn test_emergency_trim() {
-        let mut hm = HistoryManager::new(10000);
-        hm.append(make_message(MessageRole::System, "System"));
-        for i in 0..10 {
-            hm.append(make_message(MessageRole::User, &format!("Msg {i}")));
-        }
-        let removed = hm.emergency_trim();
-        assert_eq!(removed, 6); // 10 - 4 = 6
-        assert_eq!(hm.len(), 5); // 1 system + 4 remaining
-    }
-
-    #[test]
-    fn test_emergency_trim_protects_compaction_markers() {
-        let mut hm = HistoryManager::new(10000);
-        hm.append(make_message(MessageRole::System, "System"));
-        // Insert a compaction marker (User with name="compaction_summary" —
-        // see `replace_middle_with_summary`).
-        hm.append(ChatMessage {
-            role: MessageRole::User,
-            content: "Compaction summary".to_string(),
-            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
-            ..Default::default()
-        });
-        for i in 0..10 {
-            hm.append(make_message(MessageRole::User, &format!("Msg {i}")));
-        }
-        let removed = hm.emergency_trim();
-        // Should remove 6 of the 10 user messages (keeps last 4),
-        // but NOT the compaction marker
-        assert_eq!(removed, 6);
-        // Compaction marker should still be present
-        let has_marker = hm
-            .messages()
-            .iter()
-            .any(|m| m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME));
-        assert!(
-            has_marker,
-            "Compaction marker should survive emergency trim"
-        );
     }
 
     #[test]
@@ -1756,7 +2010,8 @@ mod tests {
     #[tokio::test]
     async fn compact_via_llm_without_identity_keeps_system_prompt_unchanged() {
         let hm = build_history_with_messages();
-        let provider = CaptureProvider::new("<summary>hello</summary>");
+        // Stub output must pass the compact_with_llm quality gate (≥20 chars).
+        let provider = CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
 
         let result = hm
             .compact_via_llm(
@@ -1787,7 +2042,8 @@ mod tests {
     #[tokio::test]
     async fn compact_via_llm_with_identity_embeds_language_directive_into_system() {
         let hm = build_history_with_messages();
-        let provider = CaptureProvider::new("<summary>summary text</summary>");
+        // Stub output must pass the compact_with_llm quality gate (≥20 chars).
+        let provider = CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
 
         let identity =
             "- Display Name: 大鱼\n- Language: zh-CN\n- Timezone: Asia/Shanghai\n- City: 上海";
@@ -1824,7 +2080,9 @@ mod tests {
     #[tokio::test]
     async fn compact_via_llm_with_empty_identity_keeps_system_prompt_unchanged() {
         let hm = build_history_with_messages();
-        let provider = CaptureProvider::new("ok");
+        // Stub output must carry a valid <summary> block — the quality gate in
+        // compact_with_llm rejects marker-less output (no raw-text fallback).
+        let provider = CaptureProvider::new("<summary>a valid compact model summary here</summary>");
 
         let result = hm
             .compact_via_llm(
@@ -1842,5 +2100,335 @@ mod tests {
             crate::prompt::COMPACTION_SYSTEM_PROMPT,
             "whitespace-only identity must not append the directive"
         );
+    }
+
+    // ── Quality gate rejection paths (P1: quality-over-nothing) ───────────
+
+    #[tokio::test]
+    async fn compact_via_llm_rejects_too_short_summary() {
+        let hm = build_history_with_messages();
+        // A placeholder summary (< MIN_SUMMARY_CHARS) must fail the quality
+        // gate — the output is discarded, never stored.
+        let provider = CaptureProvider::new("<summary>ok</summary>");
+        let err = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Summary(crate::episode_distill::SummaryError::LowQuality(_))
+            ),
+            "placeholder summary must fail the quality gate, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_rejects_markerless_reasoning_dump() {
+        let hm = build_history_with_messages();
+        // Reasoning-model dump without the <summary> marker — the exact
+        // pollution shape from the pasted-text incident. Must error, never
+        // fall back to the raw text as a summary.
+        let provider = CaptureProvider::new(
+            "确认 disable 路径已清理 pending 槽位。\n开始实施。改两处：\n1. 删除 resolve_distill_model 调用\n2. 验证 fallback 链",
+        );
+        let err = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Summary(crate::episode_distill::SummaryError::MissingBlock)
+            ),
+            "marker-less dump must fail the quality gate, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_rejects_empty_content() {
+        let hm = build_history_with_messages();
+        // Empty content (model ignored thinking_mode=disabled and put its
+        // output in reasoning_content) must surface as SummaryError::Empty.
+        let provider = CaptureProvider::new("");
+        let err = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Summary(crate::episode_distill::SummaryError::Empty(_))
+            ),
+            "empty content must surface as SummaryError::Empty, got: {err}"
+        );
+    }
+
+    // ── ADR-061: 8-level compression plan/apply tests ─────────────────────
+
+    /// Build 7 full rounds: System + (User → Assistant{tool_calls} → Tool →
+    /// Assistant) × 7. Tool results carry extra text so level 1's tool drops
+    /// clear a 10% ratio bar (tests that want a weak level selected pass
+    /// `0.10` explicitly — the default bar is 0.90).
+    fn build_7_round_history() -> HistoryManager {
+        let mut hm = HistoryManager::new(1_000_000);
+        hm.append(make_message(MessageRole::System, "System prompt"));
+        for i in 1..=7 {
+            hm.append(make_message(MessageRole::User, &format!("Question {i}")));
+            hm.append(ChatMessage::assistant_with_tools(
+                format!("Searching {i}"),
+                vec![make_tool_call(&format!("tc_{i}"), "search", "{}")],
+            ));
+            hm.append(make_tool_result(
+                &format!("tc_{i}"),
+                &format!(
+                    "Tool result for round {i} with a long payload so this \
+                     message carries real token weight in every level projection"
+                ),
+            ));
+            hm.append(make_message(MessageRole::Assistant, &format!("Answer {i}")));
+        }
+        hm
+    }
+
+    fn user_count(msgs: &[ChatMessage]) -> usize {
+        msgs.iter()
+            .filter(|m| matches!(m.role, MessageRole::User))
+            .count()
+    }
+
+    fn has_tool_call(msgs: &[ChatMessage], id: &str) -> bool {
+        msgs.iter().any(|m| {
+            m.tool_calls
+                .as_ref()
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == id))
+        })
+    }
+
+    fn has_tool_result(msgs: &[ChatMessage], id: &str) -> bool {
+        msgs.iter().any(|m| m.tool_call_id.as_deref() == Some(id))
+    }
+
+    #[test]
+    fn test_plan_level1_keeps_users_all_and_tools_of_last_5_assistants() {
+        let hm = build_7_round_history();
+        // Explicit 10% bar: this fixture's total is small (~1K tokens), so
+        // level 1 only clears a weak bar — under the default 0.90 bar it
+        // would be skipped (see test_plan_default_ratio_skips_weak_levels).
+        let plan = hm.plan_compression("Summary", 0.10).expect("level 1 must fit");
+        assert_eq!(plan.level, 1, "with a huge budget level 1 is selected first");
+
+        // Level 1: every User and Assistant survives; tool window = the last
+        // 5 assistants → rounds 5-7 keep their tool results, rounds 1-4 drop
+        // theirs (ADR-061 §6.2). Dropped Tool results leave orphaned
+        // `tool_calls` declarations on kept assistants — sanitized at build
+        // time (accepted deviation, §19.6).
+        assert_eq!(user_count(&plan.retained), 7, "all user messages preserved");
+        assert_eq!(
+            plan.stats.assistant_messages, 14,
+            "all assistants preserved at level 1"
+        );
+        for id in ["tc_5", "tc_6", "tc_7"] {
+            assert!(has_tool_call(&plan.retained, id), "{id} call kept");
+            assert!(has_tool_result(&plan.retained, id), "{id} result kept");
+        }
+        for id in ["tc_1", "tc_2", "tc_3", "tc_4"] {
+            assert!(
+                has_tool_call(&plan.retained, id),
+                "{id} call kept (assistant survives at level 1)"
+            );
+            assert!(!has_tool_result(&plan.retained, id), "{id} result dropped");
+        }
+        assert!(plan.projected_tokens < plan.original_tokens);
+    }
+
+    #[test]
+    fn test_plan_projections_decrease_monotonically_and_stop_at_first_fit() {
+        let hm = build_7_round_history();
+        let projections: Vec<u64> = (1..=8)
+            .map(|l| hm.build_level_plan(l, hm.messages(), "Summary").projected_tokens)
+            .collect();
+        // Core 8-level invariant: more aggressive levels never retain more.
+        for w in projections.windows(2) {
+            assert!(
+                w[0] >= w[1],
+                "level projections must be monotonic non-increasing: {w:?}"
+            );
+        }
+        assert!(projections[0] > projections[7], "level 8 must be strictly smaller");
+
+        // Budget = level-5 projection, 10% bar: levels 1-4 fail the budget
+        // check, level 5 is the first fit → selected (§19.1: stop, never try 6-8).
+        let mut hm = hm;
+        hm.set_max_tokens(projections[4]);
+        let plan = hm.plan_compression("Summary", 0.10).expect("level 5 must fit");
+        assert_eq!(plan.level, 5, "first sufficient level wins");
+        // §19.2/D5: after apply the real count stays within budget (S known
+        // at plan time + level 8 backstop).
+        let outcome = hm
+            .apply_compression(plan, "Summary", 0.10)
+            .expect("apply must succeed");
+        assert_eq!(outcome.level, 5);
+        assert!(
+            hm.token_count() <= hm.max_tokens,
+            "post-compression count must fit budget"
+        );
+    }
+
+    #[test]
+    fn test_plan_level8_exempt_from_ratio_keeps_last_non_marker_user() {
+        // Conversation dominated by the system block: levels 1-7 drop nothing
+        // (ratio ~0% < 10%) yet level 8 must still be accepted on the budget
+        // check alone (§19.2 ratio exemption).
+        let mut hm = HistoryManager::new(1_000_000);
+        hm.append(make_message(MessageRole::System, &"System prompt ".repeat(600)));
+        hm.append(ChatMessage {
+            role: MessageRole::User,
+            content: "Previous compaction summary".to_string(),
+            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
+            ..Default::default()
+        });
+        hm.append(make_message(MessageRole::User, "Question 1"));
+        hm.append(make_message(MessageRole::Assistant, "Answer 1"));
+        hm.append(make_message(MessageRole::User, "Question 2"));
+
+        let p8 = hm
+            .build_level_plan(8, hm.messages(), "Summary")
+            .projected_tokens;
+        hm.set_max_tokens(p8);
+        let plan = hm
+            .plan_compression("Summary", MIN_COMPRESSION_RATIO)
+            .expect("level 8 must fit");
+        assert_eq!(plan.level, 8, "only level 8 fits; ratio exemption required");
+
+        // Level 8 retains system + the LAST non-marker User (the earlier
+        // marker is User-role too and must be excluded, §19.1).
+        assert_eq!(user_count(&plan.retained), 1, "only the current user message");
+        assert_eq!(
+            plan.retained.last().map(|m| m.content.as_str()),
+            Some("Question 2"),
+            "last real user message survives, marker does not"
+        );
+        assert_eq!(plan.stats.assistant_messages, 0);
+        assert_eq!(plan.stats.tool_messages, 0);
+    }
+
+    #[test]
+    fn test_plan_unrecoverable_overflow_when_level8_exceeds_budget() {
+        let mut hm = build_7_round_history();
+        let p8 = hm.build_level_plan(8, hm.messages(), "Summary").projected_tokens;
+        hm.set_max_tokens(p8 - 1);
+        let err = hm
+            .plan_compression("Summary", MIN_COMPRESSION_RATIO)
+            .unwrap_err();
+        assert!(
+            matches!(err, CompressError::UnrecoverableOverflow { .. }),
+            "level 8 cannot fit => explicit failure, history untouched: {err}"
+        );
+        assert_eq!(hm.messages().len(), 29, "planning must never mutate history");
+    }
+
+    #[test]
+    fn test_apply_compression_marker_contract_and_user_preservation() {
+        let mut hm = build_7_round_history();
+        let plan = hm
+            .plan_compression("A solid summary of everything so far", 0.10)
+            .expect("plan");
+        assert_eq!(plan.level, 1);
+        let outcome = hm
+            .apply_compression(plan, "A solid summary of everything so far", 0.10)
+            .expect("apply");
+
+        assert!(outcome.removed_messages > 0);
+        assert!(outcome.new_tokens < outcome.original_tokens);
+        assert!(outcome.compression_ratio >= 0.10);
+
+        let msgs = hm.messages();
+        let system_count = msgs
+            .iter()
+            .take_while(|m| matches!(m.role, MessageRole::System))
+            .count();
+        // Marker contract: User role + name=compaction_summary, right after
+        // the leading system block (restorer anchors replay after it).
+        let marker = &msgs[system_count];
+        assert!(matches!(marker.role, MessageRole::User));
+        assert_eq!(marker.name.as_deref(), Some(COMPACTION_SUMMARY_NAME));
+        assert!(
+            marker.content.starts_with("[compressed: level=1]"),
+            "level metadata block (§9)"
+        );
+        assert!(marker.content.contains("user_messages: "), "retention stats block");
+        assert!(marker.content.contains("tokens: "), "token delta line");
+        assert!(marker.content.ends_with("A solid summary of everything so far"));
+
+        // §13.2: levels 1-7 keep every original User message (7 + new marker).
+        assert_eq!(user_count(msgs), 8, "all user messages preserved plus the new marker");
+    }
+
+    #[test]
+    fn test_apply_rejects_insufficient_plan_without_touching_history() {
+        let mut hm = build_7_round_history();
+        let plan = hm.build_level_plan(1, hm.messages(), "Summary");
+        let before = format!("{:?}", hm.messages());
+        hm.set_max_tokens(1); // projected >> budget → defensive re-check fails
+        let err = hm
+            .apply_compression(plan, "Summary", MIN_COMPRESSION_RATIO)
+            .unwrap_err();
+        assert!(matches!(err, CompressError::InsufficientCompression { .. }));
+        assert_eq!(
+            format!("{:?}", hm.messages()),
+            before,
+            "history must be untouched on reject"
+        );
+    }
+
+    #[test]
+    fn test_plan_default_ratio_skips_weak_levels() {
+        // ADR-061 §19.3: the default bar is 0.90 ("compress until at most
+        // 10% remains"). The small 7-round fixture never removes 90% at
+        // levels 1-7, so plan must fall through to level 8's ratio
+        // exemption instead of stopping at a weak level.
+        let hm = build_7_round_history();
+        let plan = hm
+            .plan_compression("Summary", MIN_COMPRESSION_RATIO)
+            .expect("level 8 must still fit");
+        assert_eq!(
+            plan.level, 8,
+            "under the default 0.90 bar every level 1-7 is skipped"
+        );
+    }
+
+    #[test]
+    fn test_build_summary_marker_metadata_format() {
+        let stats = RetentionStats {
+            user_messages: 7,
+            assistant_messages: 5,
+            tool_messages: 3,
+            user_desc: "all".to_string(),
+            assistant_desc: "last 5".to_string(),
+            tool_desc: "within last 5 assistants".to_string(),
+        };
+        let marker = build_summary_marker(3, 1000, 400, 0.6, &stats, "body summary");
+        assert!(marker.starts_with("[compressed: level=3]\n"));
+        assert!(marker.contains("user_messages: all (7)"));
+        assert!(marker.contains("assistant_messages: last 5 (5)"));
+        assert!(marker.contains("tool_messages: within last 5 assistants (3)"));
+        assert!(marker.contains("tokens: 1000 -> 400 (ratio 60.0%)"));
+        assert!(marker.ends_with("body summary"));
     }
 }

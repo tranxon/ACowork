@@ -1445,7 +1445,7 @@ fn looks_like_tool_error(result_content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::context_compression::{AbandonQueue, RetrieveQueue};
+    use crate::agent::context_compression::RetrieveQueue;
     use crate::tools::builtin::context_abandon::ContextAbandonTool;
     use crate::tools::builtin::context_retrieve::ContextRetrieveTool;
     use acowork_core::providers::traits::{FunctionCall, ToolCall};
@@ -1490,14 +1490,11 @@ mod tests {
     }
 
     /// ADR-052 §6.2: `context_abandon` MUST return `is_transient = false`.
-    /// The tool pushes to abandon_queue and returns a short confirmation;
+    /// The tool pushes to its internal queue and returns a short confirmation;
     /// the confirmation is permanently written to history.
     #[tokio::test]
     async fn test_execute_single_tool_context_abandon_not_transient() {
-        let abandon_queue: AbandonQueue = Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::new(),
-        ));
-        let tool: Arc<dyn Tool> = Arc::new(ContextAbandonTool::new(abandon_queue));
+        let tool: Arc<dyn Tool> = Arc::new(ContextAbandonTool::new());
         let tools = vec![tool];
 
         let tc = make_tool_call(

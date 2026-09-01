@@ -85,8 +85,11 @@ impl AnthropicProvider {
 struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
+    /// ADR-060: upgraded from `Option<String>` to a content-block array so
+    /// the static kernel (Block A) can carry a `cache_control` breakpoint.
+    /// The API accepts both forms; the array form is the documented one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<AnthropicSystemBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +106,46 @@ struct AnthropicRequest {
     /// Only used with `thinking: { type: "adaptive" }`.
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<AnthropicOutputConfig>,
+}
+
+/// Anthropic cache control directive (prompt caching, ADR-060).
+///
+/// Maps to the `cache_control` field on a message or system content block:
+/// `{ "type": "ephemeral" }`. Applies to the Anthropic ephemeral prompt cache
+/// breakpoints placed at Block A (system) and Block C (todo snapshot).
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
+}
+
+impl AnthropicCacheControl {
+    fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// System content block (ADR-060): allows cache_control on the top-level
+/// `system` field, which the plain-string form cannot express.
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
+}
+
+impl AnthropicSystemBlock {
+    fn text(text: String) -> Self {
+        Self {
+            block_type: "text".to_string(),
+            text,
+            cache_control: None,
+        }
+    }
 }
 
 /// Anthropic thinking configuration block.
@@ -221,6 +264,10 @@ struct AnthropicMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<serde_json::Value>,
+    /// ADR-060: cache breakpoint hint (ephemeral). Not set on tool_result
+    /// messages — Anthropic forbids cache_control on tool_result blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
 }
 
 /// Anthropic tool specification
@@ -389,20 +436,48 @@ fn parse_data_uri(uri: &str) -> (&str, &str) {
 /// Convert our ChatMessage list to Anthropic format.
 /// Anthropic requires system messages to be passed separately,
 /// and tool messages to use `tool_result` content blocks.
-fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<String>) {
-    let mut system_prompt = None;
+///
+/// ADR-060: multiple System messages are appended (never overwrite) into
+/// the top-level `system` content-block array; `cache_control` hints are
+/// mapped to message-level `cache_control` (user/assistant only).
+fn convert_messages(
+    messages: &[ChatMessage],
+) -> (Vec<AnthropicMessage>, Option<Vec<AnthropicSystemBlock>>) {
+    let mut system_blocks: Vec<AnthropicSystemBlock> = Vec::new();
     let mut converted = Vec::new();
 
     for msg in messages {
         match msg.role {
             MessageRole::System => {
-                // Anthropic uses a top-level `system` field
-                system_prompt = Some(msg.content.clone());
+                // Anthropic uses a top-level `system` field. Multiple system
+                // messages are appended (Block A is the only system message
+                // today, but append is the safe superset of the old
+                // overwrite-with-last semantics).
+                let mut block = AnthropicSystemBlock::text(msg.content.clone());
+                if msg.cache_control == Some(acowork_core::providers::traits::CacheControl::Ephemeral) {
+                    block.cache_control = Some(AnthropicCacheControl::ephemeral());
+                }
+                system_blocks.push(block);
             }
             MessageRole::User => {
+                // ADR-060: Block C (todo snapshot) is a User message carrying
+                // the ephemeral cache breakpoint. Never set cache_control on
+                // tool_result blocks (Anthropic API rejects it).
+                let is_tool_result = msg.tool_call_id.is_some()
+                    || (msg.tool_call_id.is_none() && msg.content.starts_with("{\"tool_call_id\""));
+                let cache_control = if is_tool_result {
+                    None
+                } else if msg.cache_control
+                    == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+                {
+                    Some(AnthropicCacheControl::ephemeral())
+                } else {
+                    None
+                };
                 converted.push(AnthropicMessage {
                     role: "user".to_string(),
                     content: Some(build_anthropic_content(msg)),
+                    cache_control,
                 });
             }
             MessageRole::Assistant => {
@@ -430,6 +505,13 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
                     }
                 }
 
+                let cache_control = if msg.cache_control
+                    == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+                {
+                    Some(AnthropicCacheControl::ephemeral())
+                } else {
+                    None
+                };
                 converted.push(AnthropicMessage {
                     role: "assistant".to_string(),
                     content: if content_blocks.is_empty() {
@@ -437,6 +519,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
                     } else {
                         Some(serde_json::Value::Array(content_blocks))
                     },
+                    cache_control,
                 });
             }
             MessageRole::Tool => {
@@ -474,12 +557,20 @@ fn convert_messages(messages: &[ChatMessage]) -> (Vec<AnthropicMessage>, Option<
                         "tool_use_id": tool_call_id,
                         "content": result_content
                     })])),
+                    cache_control: None,
                 });
             }
         }
     }
 
-    (converted, system_prompt)
+    (
+        converted,
+        if system_blocks.is_empty() {
+            None
+        } else {
+            Some(system_blocks)
+        },
+    )
 }
 
 /// Convert tools from our format to Anthropic format
@@ -595,6 +686,7 @@ impl Provider for AnthropicProvider {
                 content: Some(serde_json::Value::String(
                     "[Context too large — all conversation history was trimmed. Please start a new conversation or reduce attached files.]".to_string()
                 )),
+                cache_control: None,
             }]
         } else {
             messages
@@ -700,6 +792,7 @@ impl Provider for AnthropicProvider {
                 content: Some(serde_json::Value::String(
                     "[Context too large — all conversation history was trimmed. Please start a new conversation or reduce attached files.]".to_string()
                 )),
+                cache_control: None,
             }]
         } else {
             messages
@@ -1052,10 +1145,152 @@ mod tests {
         ];
 
         let (converted, system) = convert_messages(&messages);
-        assert_eq!(system, Some("You are helpful.".to_string()));
+        // ADR-060: system is now a content-block array (may carry cache_control).
+        let blocks = system.expect("system blocks present");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "You are helpful.");
+        assert_eq!(blocks[0].cache_control, None);
         assert_eq!(converted.len(), 2); // system excluded from messages
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[1].role, "assistant");
+    }
+
+    #[test]
+    fn test_convert_messages_multiple_system_append() {
+        // ADR-060: multiple System messages must be appended, never overwrite.
+        let messages = vec![
+            ChatMessage::system("Kernel A"),
+            ChatMessage::system("Kernel B"),
+        ];
+        let (converted, system) = convert_messages(&messages);
+        assert!(converted.is_empty());
+        let blocks = system.expect("system blocks present");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "Kernel A");
+        assert_eq!(blocks[1].text, "Kernel B");
+    }
+
+    #[test]
+    fn test_convert_messages_cache_control_mapping() {
+        use acowork_core::providers::traits::CacheControl;
+
+        // Block A: system kernel with ephemeral breakpoint.
+        let mut sys = ChatMessage::system("Static kernel");
+        sys.cache_control = Some(CacheControl::Ephemeral);
+        // Block C: todo snapshot (User role) with ephemeral breakpoint.
+        let mut todo = ChatMessage::user("## Todo Task List\n- task1");
+        todo.cache_control = Some(CacheControl::Ephemeral);
+        // Block B tail: assistant message with ephemeral breakpoint.
+        let mut asst = ChatMessage::assistant("Previous turn");
+        asst.cache_control = Some(CacheControl::Ephemeral);
+        // Plain user message: no breakpoint.
+        let plain = ChatMessage::user("Plain hello");
+        // Tool result: must never carry cache_control (Anthropic rejects it).
+        let tool = ChatMessage {
+            role: MessageRole::Tool,
+            content: "result ok".to_string(),
+            content_parts: None,
+            reasoning_content: None,
+            name: None,
+            tool_call_id: Some("toolu_1".to_string()),
+            tool_calls: None,
+            cache_control: Some(CacheControl::Ephemeral),
+        };
+
+        let (converted, system) = convert_messages(&[
+            sys, todo, asst, plain, tool,
+        ]);
+        let blocks = system.expect("system blocks present");
+        assert_eq!(
+            blocks[0].cache_control.as_ref().unwrap().cache_type,
+            "ephemeral"
+        );
+
+        assert_eq!(converted.len(), 4); // todo, asst, plain, tool
+        assert_eq!(converted[0].role, "user");
+        assert!(converted[0].cache_control.is_some()); // Block C breakpoint
+        assert!(converted[1].cache_control.is_some()); // Block B tail breakpoint
+        assert!(converted[2].cache_control.is_none()); // plain user
+        assert!(converted[3].cache_control.is_none()); // tool_result must not carry it
+        assert_eq!(converted[3].content.as_ref().unwrap()[0]["type"], "tool_result");
+    }
+
+    #[test]
+    fn test_convert_messages_cache_control_on_tool_result_suppressed() {
+        use acowork_core::providers::traits::CacheControl;
+
+        // Legacy tool_result shape (content JSON with tool_call_id, no
+        // dedicated field) must also suppress cache_control.
+        let messages = vec![ChatMessage {
+            role: MessageRole::Tool,
+            content: r#"{"tool_call_id":"toolu_123","content":"Sunny, 25°C"}"#.to_string(),
+            content_parts: None,
+            reasoning_content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            cache_control: Some(CacheControl::Ephemeral),
+        }];
+
+        let (converted, _system) = convert_messages(&messages);
+        assert_eq!(converted.len(), 1);
+        let msg = &converted[0];
+        assert_eq!(msg.role, "user"); // Anthropic requires tool_result in user role
+        assert!(msg.cache_control.is_none());
+        let content = msg.content.as_ref().unwrap();
+        let blocks = content.as_array().unwrap();
+        assert!(blocks[0]["type"] == "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "toolu_123");
+    }
+
+    #[test]
+    fn test_convert_messages_tool_iteration_block_c_d_layout() {
+        use acowork_core::providers::traits::CacheControl;
+
+        // ADR-060 §5.4/§5.5: the real tool-loop wire shape after a
+        // `todo_write` call — [assistant(tool_use), user(tool_result),
+        // user(Block C todo snapshot)]. Consecutive user messages are
+        // accepted by Anthropic (auto-merged); the tool_result message
+        // must NEVER carry cache_control, while Block C keeps its
+        // ephemeral breakpoint. Block D is absent on tool iterations.
+        let asst = ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_01".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "todo_write".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        );
+        let mut todo = ChatMessage::user("## Todo Task List\n- [ ] t1 (t1)");
+        todo.cache_control = Some(CacheControl::Ephemeral);
+
+        let (converted, _system) =
+            convert_messages(&[asst, ChatMessage::tool("toolu_01", "todos saved"), todo]);
+        assert_eq!(converted.len(), 3);
+        assert_eq!(converted[0].role, "assistant");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[2].role, "user");
+        // tool_result: cache_control suppressed, content is a tool_result block.
+        assert!(converted[1].cache_control.is_none());
+        assert_eq!(converted[1].content.as_ref().unwrap()[0]["type"], "tool_result");
+        assert_eq!(converted[1].content.as_ref().unwrap()[0]["tool_use_id"], "toolu_01");
+        // Block C (todo snapshot) keeps its ephemeral breakpoint.
+        assert!(converted[2].cache_control.is_some());
+        assert_eq!(
+            converted[2].cache_control.as_ref().unwrap().cache_type,
+            "ephemeral"
+        );
+        // The todo text survives as a plain text block.
+        assert_eq!(converted[2].content.as_ref().unwrap()[0]["type"], "text");
+        assert!(
+            converted[2].content.as_ref().unwrap()[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Todo Task List")
+        );
     }
 
     #[test]
@@ -1091,6 +1326,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            cache_control: None,
         }];
 
         let (converted, _system) = convert_messages(&messages);
@@ -1391,6 +1627,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            cache_control: None,
         }];
 
         let count = rt.block_on(provider.chat_token_count(&messages)).unwrap();
@@ -1412,6 +1649,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            cache_control: None,
         }];
 
         let count = rt.block_on(provider.chat_token_count(&messages)).unwrap();

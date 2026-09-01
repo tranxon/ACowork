@@ -42,6 +42,9 @@ export const SECTION_LABELS: Record<string, string> = {
   identity_context: "Identity Context",
   // ADR-054 step 3: sections previously merged/lost, now standalone.
   workspace_prompt_file: "Workspace Prompt File (CLAUDE.md / AGENTS.md)",
+  // ADR-060: Block C — an independent User-role message (Ephemeral cache
+  // breakpoint) emitted AFTER the history block, not a system-prompt
+  // sub-item anymore. Content/key unchanged; only grouping/label moved.
   todo_context: "Active Task List",
   ambiguous_confirmation_hint: "Memory Conflicts Hint",
   // ADR-054 step 4: lazy-loaded; refreshed at iteration end so it includes
@@ -58,11 +61,12 @@ export const SECTION_ORDER = [
   "retrieved_memory",
   "ambiguous_confirmation_hint",
   "skill_instructions",
-  "todo_context",
   "environment",
   "workspace_prompt_file",
   "tool_definitions",
   "messages",
+  // ADR-060: todo_context is Block C — after the history/messages block.
+  "todo_context",
 ];
 
 export function formatBytes(bytes: number): string {

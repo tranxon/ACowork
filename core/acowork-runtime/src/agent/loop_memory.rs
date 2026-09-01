@@ -45,7 +45,7 @@ impl super::loop_::AgentLoop {
     /// the former return channel fed `record_turn` (removed as dead code,
     /// see the memory write-entrypoint review doc).
     pub(crate) async fn retrieve_and_inject_memories(
-        &self,
+        &mut self,
         user_message: &str,
         context_builder: &mut ContextBuilder,
     ) {
@@ -73,20 +73,33 @@ impl super::loop_::AgentLoop {
                 handle.set_session_id(sid.clone());
             }
 
-        // Per-turn auto-injection is OFF by default (MemoryManagerConfig).
+        // Per-turn auto-injection is OFF by default (per-agent opt-in via
+        // manifest `[memory.quality].auto_inject_enabled = true`), and
+        // triggers at most once per session when enabled.
         //
-        // 2026-09-12 decision (temporary disable): different agent types
-        // need different recall profiles; the Grafeo memory layer (triples /
-        // preference nodes) is not yet mature enough for unsupervised
-        // injection; and raw user-message queries yield low-precision hits
-        // that can mislead the LLM. The `memory_recall` tool remains
-        // available for explicit deep recall.
+        // History: disabled 2026-09-12 (unmature memory layer, low-precision
+        // raw-message queries); re-opened by ADR-062 M5 after the P2
+        // benchmark cleared the §5.2 gates (Dormant exclusion + min_score
+        // fix + keyword quality gate), then reverted to OFF: with auto-inject
+        // ON, the first-turn injection duplicates what the LLM retrieves via
+        // an explicit `memory_recall` call (both query on the same user
+        // message). Agents opt in via the manifest
+        // `[memory.quality].auto_inject_enabled = true`.
+        //
+        // ADR-060 §6.3: trigger at most ONCE per session — on the first
+        // user message. Later turns bail out via
+        // `memory_retrieved_for_session`; explicit `memory_recall` tool
+        // calls use an independent path and never touch that flag.
         //
         // NOTE: `clear_retrieved_memory()` and `set_session_id()` above
         // still run so stale memory from previous turns never leaks into
         // the next build, and the tool handle stays in sync.
-        if !manager.config().auto_inject_enabled {
-            tracing::debug!("Memory auto-inject disabled (auto_inject_enabled=false)");
+        if !manager.config().auto_inject_enabled || self.memory_retrieved_for_session {
+            tracing::debug!(
+                disabled = !manager.config().auto_inject_enabled,
+                already_retrieved = self.memory_retrieved_for_session,
+                "Memory auto-inject skipped (disabled or already retrieved for this session)"
+            );
             return;
         }
 
@@ -104,6 +117,12 @@ impl super::loop_::AgentLoop {
             .await
         {
             Ok(result) => {
+                // ADR-060 §6.3: first successful retrieval marks the session
+                // as handled — later turns skip auto-inject until the loop
+                // is rebuilt (new session). Failure keeps the flag false so
+                // a transient error does not permanently starve the session.
+                self.memory_retrieved_for_session = true;
+
                 let metrics = result.metrics;
 
                 // Traceability: log the retrieved node IDs (the former
@@ -177,11 +196,29 @@ impl super::loop_::AgentLoop {
                 }
 
                 // P3-4: Inject ambiguous conflict hint into context.
+                //
+                // ADR-060 §5.2: `build()` no longer injects this hint (it
+                // was moved OUT of Block A to keep the static kernel
+                // byte-stable). The setter is kept so the debug panel can
+                // still show the pending hint and the value survives
+                // `build()` calls — re-injection is deferred to ADR-060 §11
+                // follow-up work (Block C-style message or explicit path).
                 if let Some(hint) = result.ambiguous_hint {
                     tracing::info!(
                         "Injecting ambiguous conflict confirmation hint into context"
                     );
                     context_builder.set_ambiguous_confirmation_hint(hint);
+                }
+
+                // G9: Inject abstention guidance into context when retrieval
+                // returned nothing and abstention was enabled. Unlike the
+                // ambiguous hint (deferred per ADR-060 §5.2), this prompt is
+                // injected into the system prompt by `build()` — the empty
+                // result case is rare, so Block A stays byte-stable on the
+                // normal path (see context.rs `## Memory Abstention Guidance`).
+                if let Some(prompt) = result.abstention_prompt {
+                    tracing::info!("Injecting abstention guidance into context");
+                    context_builder.set_abstention_prompt(prompt);
                 }
 
                 // P3-3: Sample and evaluate retrieval quality via LLM Judge.

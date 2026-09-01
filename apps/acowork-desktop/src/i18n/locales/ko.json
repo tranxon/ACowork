@@ -421,9 +421,9 @@
     "resetToDefaults": "기본값으로 초기화",
     "resetAgentSetup": "Agent 설정 초기화",
     "reset": "초기화",
-    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
-    "toolCompressionEnabled": "도구 압축",
-    "toolCompressionEnabledDesc": "활성화하면 LLM이 자율적으로 도구 결과를 압축하고 검색할 수 있습니다"
+    "compressionRatioThreshold": "압축 비율 임계값",
+    "compressionRatioThresholdDesc": "컨텍스트 압축 후 유지 비율. 90%는 10% 남을 때까지 압축. 범위 50%–95%, 기본값 90%.",
+    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}"
   },
   "harness": {
     "tabProviders": "제공자",
@@ -638,7 +638,18 @@
     "statePaused": "일시정지됨",
     "stateStepping": "단계 진행 중",
     "stateIdle": "유휴",
-    "stateStopped": "중지됨"
+    "stateStopped": "중지됨",
+    "compressionHistory": "압축 기록 ({{count}})",
+    "loadingCompressionHistory": "압축 기록을 불러오는 중...",
+    "compressionHistoryError": "압축 기록을 불러오지 못했습니다",
+    "noCompressionEvents": "아직 압축 이벤트가 없습니다. 컨텍스트 압축이 발생하면 여기에 표시됩니다.",
+    "buttonRefresh": "새로고침",
+    "compTime": "시간",
+    "compLevel": "레벨",
+    "compTokens": "토큰 수",
+    "compRatio": "압축률",
+    "compModel": "모델",
+    "compRange": "적용 범위"
   },
   "workspace": {
     "delete": "삭제",
@@ -790,7 +801,44 @@
     "deleteConfirmTitle": "모델 파일 삭제",
     "deleteConfirmMessage": "'{{name}}'의 다운로드된 파일을 삭제하시겠습니까? 나중에 다시 다운로드할 수 있습니다.",
     "deleteConfirm": "삭제",
-    "deleteActiveError": "현재 사용 중인 모델은 삭제할 수 없습니다. 먼저 다른 모델로 전환하세요."
+    "deleteActiveError": "현재 사용 중인 모델은 삭제할 수 없습니다. 먼저 다른 모델로 전환하세요.",
+    "localModels": "로컬 모델",
+    "cloudProviders": "클라우드 제공업체",
+    "addCustom": "추가",
+    "addCustomProvider": "사용자 지정 제공업체 추가",
+    "customProviderName": "제공업체 이름",
+    "customProviderNamePlaceholder": "예: 내 GPT 프록시",
+    "customProviderId": "제공업체 ID",
+    "customProviderIdPlaceholder": "예: custom-my-proxy",
+    "customProviderNameRequired": "제공업체 이름은 비워둘 수 없습니다",
+    "customProviderIdRequired": "제공업체 ID는 비워둘 수 없습니다",
+    "customBaseUrl": "Base URL",
+    "customBaseUrlRequired": "Base URL은 http(s) URL이어야 합니다",
+    "optional": "선택 사항",
+    "apiKey": "API 키",
+    "customModels": "모델",
+    "customModelsRequired": "최소 하나의 모델을 추가하세요",
+    "customAddModel": "모델 추가",
+    "customRemoveModel": "모델 제거",
+    "customModelIdPlaceholder": "모델 ID (예: doubao-embedding)",
+    "customModelNamePlaceholder": "모델 이름 (선택)",
+    "customModelDimensionsPlaceholder": "차원 수 (예: 1024)",
+    "customModelContextLengthPlaceholder": "컨텍스트 길이 (선택)",
+    "customModelIdRequired": "모델 ID는 비워둘 수 없습니다",
+    "duplicateProviderId": "제공업체 ID '{{id}}'(이)가 이미 존재합니다",
+    "duplicateModelId": "모델 ID '{{id}}'(이)가 중복되었습니다",
+    "dimensionMustBePositive": "모델 '{{id}}'의 차원 수는 0보다 커야 합니다",
+    "saving": "저장 중...",
+    "cloudProviders": "클라우드 제공업체",
+    "cloudActive": "클라우드 사용 중",
+    "cloudNoProviders": "사용 가능한 클라우드 제공업체가 없습니다",
+    "apiKeyMissing": "API 키가 설정되지 않음",
+    "apiKeyRequired": "먼저 API 키를 설정하세요",
+    "setApiKey": "API 키 설정",
+    "changeKey": "키 변경",
+    "deleteKey": "키 삭제",
+    "save": "저장",
+    "cancel": "취소"
   },
   "memoryPanel": {
     "consolidate": "노드 통합",
@@ -984,8 +1032,11 @@
     "title": "컨텍스트 요약",
     "empty": "（빈 요약）",
     "model": "모델: {{model}}",
-    "keepLastRounds": "최근 {{count}} 라운드 유지",
+    "level": "압축 레벨 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "컨텍스트 오버플로우: 모델 기능 정보가 없어 컨텍스트 사용량을 정확히 계산할 수 없습니다. 모델 이름이 정확한지(대소문자 구분) 확인하세요."
   },
   "codeBlock": {
     "ariaLabelCopy": "코드 복사"

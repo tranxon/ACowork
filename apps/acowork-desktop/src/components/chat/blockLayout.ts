@@ -178,10 +178,14 @@ export const PROSE_LIST_ITEM_BONUS_PX = 4;
 // here, so no oscillation).
 //
 // Floor values tuned empirically:
-//   - Plain code block: 120px (header line + a few lines of code)
-//   - Mermaid diagram:  320px (typical graph diagram including title)
-export const CODE_BLOCK_MIN_HEIGHT_PX = 120;
-export const MERMAID_BLOCK_MIN_HEIGHT_PX = 320;
+//   - Plain code block: 240px (covers header + ~8 lines of code,
+//     bias-high to compensate for the previous undershoot that
+//     caused scrollToIndex(end) to miss the bottom by hundreds of px)
+//   - Mermaid diagram:  800px (typical graph diagram including title;
+//     vertical flowcharts frequently reach 800–1500px, so an 800px floor
+//     keeps scrollToIndex(end) from undershooting the real bottom)
+export const CODE_BLOCK_MIN_HEIGHT_PX = 240;
+export const MERMAID_BLOCK_MIN_HEIGHT_PX = 800;
 
 // ── AskQuestionCard (tool approval card) ───────────────────────────
 /** Card uses `my-1.5 max-w-... px-3 py-2` plus a question + options. */

@@ -312,9 +312,38 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            cache_control: None,
         }];
         let ollama_msgs = convert_messages(&messages);
         assert_eq!(ollama_msgs.len(), 1);
         assert_eq!(ollama_msgs[0].role, "user");
+    }
+
+    #[test]
+    fn test_convert_messages_cache_control_ignored() {
+        use acowork_core::providers::traits::CacheControl;
+
+        // ADR-060 regression: Ollama wire format has no cache marker — a
+        // `cache_control` flag on ChatMessage must be silently ignored
+        // (no serialization impact), never rejected.
+        let messages = vec![ChatMessage {
+            role: MessageRole::System,
+            content: "You are helpful.".to_string(),
+            content_parts: None,
+            reasoning_content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            cache_control: Some(CacheControl::Ephemeral),
+        }];
+
+        let ollama_msgs = convert_messages(&messages);
+        let json = serde_json::to_value(&ollama_msgs[0]).unwrap();
+        assert_eq!(json["role"], "system");
+        assert_eq!(json["content"], "You are helpful.");
+        assert!(
+            json.get("cache_control").is_none(),
+            "Ollama wire format must not carry cache_control"
+        );
     }
 }

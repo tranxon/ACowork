@@ -365,6 +365,14 @@ if (Test-Path $embedModelsSrc) {
     Write-Host "  WARNING: embedding_models.json not found at $embedModelsSrc" -ForegroundColor Red
 }
 
+$embedProvidersSrc = Join-Path $WorkspaceRoot "assets\offline_embedding_providers.json"
+if (Test-Path $embedProvidersSrc) {
+    Copy-Item -Path $embedProvidersSrc -Destination $targetDir -Force
+    Write-Host "  offline_embedding_providers.json -> $targetDir" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: offline_embedding_providers.json not found at $embedProvidersSrc" -ForegroundColor Red
+}
+
 if ($env:ORT_DYLIB_PATH -and (Test-Path $env:ORT_DYLIB_PATH)) {
     Copy-Item -Path $env:ORT_DYLIB_PATH -Destination (Join-Path $targetDir "onnxruntime.dll") -Force -ErrorAction SilentlyContinue
     Write-Host "  onnxruntime.dll -> $targetDir" -ForegroundColor Green

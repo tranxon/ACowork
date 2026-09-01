@@ -9,8 +9,9 @@
 
 use axum::{
     Json, Router,
+    body::to_bytes,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
 };
@@ -759,26 +760,309 @@ pub async fn get_migration_progress(
 
 /// POST /api/embedding-models/{id}/start-migration - start embedding migration for agents.
 ///
-/// TODO(MQTT-migration): Embedding migration via MQTT is not yet implemented.
-/// The old `ResourcePusher::push_migration_start` was a no-op that always
-/// returned `false`, so migration never actually worked. When MQTT-based
-/// migration is implemented, restore the validation logic (embed process
-/// check, agent enumeration, running-state verification) and replace this
-/// stub with the real implementation.
+/// Restores the dimension-migration feature that was lost in the
+/// gRPC→MQTT refactor (Bug3): reads the active embed config from the
+/// Gateway state, enumerates the target running agents, and forwards a
+/// `POST /memory/rebuild-embeddings` request to each agent's Runtime
+/// localhost HTTP server (via the ADR-055 D3 endpoint registry). Each
+/// agent's progress is recorded in `RunningAgentInfo.migration` and
+/// surfaced through `GET /api/embedding-models/migration-progress`.
 pub async fn start_migration(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(_req): Json<StartMigrationRequest>,
+    Json(req): Json<StartMigrationRequest>,
 ) -> impl IntoResponse {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(EmbeddingModelActionResponse {
-            model_id,
-            status: "error".to_string(),
-            message: "Embedding migration via MQTT not yet implemented (ADR-033)".to_string(),
-        }),
-    )
-        .into_response()
+    tracing::info!(
+        target: "migration_diag",
+        model_id = %model_id,
+        requested_agent_ids = ?req.agent_ids,
+        "start_migration: entry"
+    );
+
+    // 1. Read the active embed config from the Gateway state.
+    let gw = state.gateway_state.read().await;
+    let embed_process_present = gw.embed_process.is_some();
+    let embed_process_ready = gw.embed_process.as_ref().map(|e| e.ready).unwrap_or(false);
+    let (embed_endpoint, embed_model_id, embed_dimension) = match &gw.embed_process {
+        Some(eps) if eps.ready => {
+            let model = eps.active_model_id.clone().unwrap_or_default();
+            let dim = eps.active_dimension.unwrap_or(0);
+            let endpoint = format!("http://{}:{}/v1", gw.advertise_host, eps.port);
+            (endpoint, model, dim)
+        }
+        _ => {
+            tracing::warn!(
+                target: "migration_diag",
+                model_id = %model_id,
+                embed_process_present,
+                embed_process_ready,
+                "start_migration: embed_process not ready, aborting"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(EmbeddingModelActionResponse {
+                    model_id,
+                    status: "error".to_string(),
+                    message: "Embedding service is not running or not ready".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if embed_model_id.is_empty() || embed_dimension == 0 {
+        tracing::warn!(
+            target: "migration_diag",
+            model_id = %model_id,
+            embed_model_id = %embed_model_id,
+            embed_dimension,
+            "start_migration: embed config incomplete, aborting"
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(EmbeddingModelActionResponse {
+                model_id,
+                status: "error".to_string(),
+                message: "Embedding service has no active model loaded".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    tracing::info!(
+        target: "migration_diag",
+        model_id = %model_id,
+        embed_endpoint = %embed_endpoint,
+        embed_model_id = %embed_model_id,
+        embed_dimension,
+        "start_migration: embed config resolved"
+    );
+
+    // 2. Enumerate target agents (requested ids, or all running agents).
+    let target_ids: Vec<String> = if req.agent_ids.is_empty() {
+        gw.running_agents.keys().cloned().collect()
+    } else {
+        req.agent_ids.clone()
+    };
+    let running_agents_count = gw.running_agents.len();
+    let running_agents_keys: Vec<String> = gw.running_agents.keys().cloned().collect();
+    drop(gw);
+
+    tracing::info!(
+        target: "migration_diag",
+        model_id = %model_id,
+        target_ids_count = target_ids.len(),
+        target_ids = ?target_ids,
+        running_agents_count,
+        running_agents_keys = ?running_agents_keys,
+        "start_migration: enumerated targets"
+    );
+
+    if target_ids.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "model_id": model_id,
+                "status": "ok",
+                "message": "No running agents to migrate",
+                "results": [],
+            })),
+        )
+            .into_response();
+    }
+
+    // 3. Initialise per-agent migration state (`done=false`,
+    //    `progress=(0,0,0,"reembed","starting")`) so the desktop's first
+    //    `/api/embedding-models/migration-progress` poll sees an "in flight"
+    //    snapshot, then spawn one background `tokio::task` per agent to
+    //    proxy the rebuild request to the Runtime and write the terminal
+    //    state when it completes. The handler returns immediately — slow
+    //    Runtimes can no longer block the Gateway HTTP request, and the
+    //    desktop polling loop can now observe the `progress` tuple while
+    //    the work is actually running (Bug-UX-2: the previous synchronous
+    //    implementation wrote `done=true` before the first 2s polling cycle
+    //    could observe an intermediate `progress` snapshot, so the panel
+    //    showed "重建中…" with no numbers and the banner just disappeared).
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    for agent_id in &target_ids {
+        // 3a. Initial state — `done=false, progress=(0,0,0,"reembed","starting")`.
+        let request_id = uuid::Uuid::new_v4().to_string();
+        {
+            let mut gw = state.gateway_state.write().await;
+            if let Some(info) = gw.running_agents.get_mut(agent_id) {
+                info.migration = Some(crate::gateway::state::AgentMigrationState {
+                    request_id: request_id.clone(),
+                    target_model_id: embed_model_id.clone(),
+                    target_dimension: embed_dimension,
+                    progress: Some((
+                        0,
+                        0,
+                        0,
+                        "reembed".to_string(),
+                        "starting".to_string(),
+                    )),
+                    done: false,
+                    error: None,
+                });
+            }
+        }
+
+        // 3b. Build the body the Runtime's `rebuild_embeddings` handler
+        //     expects. The endpoint / model_id / dimension are cloned here
+        //     because they are still needed for the spawned task below.
+        let body = serde_json::json!({
+            "endpoint": embed_endpoint.clone(),
+            "model_id": embed_model_id.clone(),
+            "dimension": embed_dimension,
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+
+        tracing::info!(
+            target: "migration_diag",
+            model_id = %model_id,
+            agent_id = %agent_id,
+            request_id = %request_id,
+            body = %body,
+            "start_migration: spawning background task to forward rebuild request to runtime"
+        );
+
+        // 3c. Spawn — `AppState: Clone` makes this safe; the spawned task
+        //     owns its own copy. Content-Type is set explicitly on the
+        //     forwarded headers (Fix3): the Runtime's `Json<RebuildEmbeddingsBody>`
+        //     extractor rejects requests without `Content-Type: application/json`
+        //     with 415 Unsupported Media Type.
+        let state_for_task = state.clone();
+        let agent_id_owned: String = agent_id.clone();
+        let headers_for_task = headers.clone();
+        let request_id_owned = request_id.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                target: "migration_diag",
+                agent_id = %agent_id_owned,
+                request_id = %request_id_owned,
+                "start_migration_bg: invoking runtime rebuild endpoint"
+            );
+            let resp = crate::http::proxy::proxy_to_runtime_with_method(
+                &state_for_task,
+                &agent_id_owned,
+                "/memory/rebuild-embeddings",
+                "",
+                reqwest::Method::POST,
+                Some(body_bytes),
+                &headers_for_task,
+            )
+            .await;
+
+            let status_code = resp.status();
+            let body_bytes = match to_bytes(resp.into_body(), usize::MAX).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "migration_diag",
+                        agent_id = %agent_id_owned,
+                        request_id = %request_id_owned,
+                        error = %e,
+                        "start_migration_bg: failed to read runtime response body"
+                    );
+                    axum::body::Bytes::new()
+                }
+            };
+            let text = String::from_utf8_lossy(&body_bytes).to_string();
+            let success = status_code.is_success();
+            let error_msg: Option<String> = if success {
+                None
+            } else {
+                Some(if text.is_empty() {
+                    format!("HTTP {} (empty body)", status_code.as_u16())
+                } else {
+                    text.clone()
+                })
+            };
+
+            // 3d. Best-effort parse of the Runtime's `RebuildReport` (see
+            //     `core/acowork-runtime/src/usecases/memory_query.rs`). If
+            //     parsing fails we still write a terminal state, just
+            //     without a `progress` tuple — the desktop will see
+            //     `done=true` regardless.
+            let final_progress: Option<(u64, u64, u64, String, String)> = if success {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        let rebuilt = v.get("rebuilt")?.as_u64()?;
+                        let total = v.get("total_scanned")?.as_u64()?;
+                        let errors = v
+                            .get("errors")
+                            .and_then(|x| x.as_u64())
+                            .unwrap_or(0);
+                        Some((
+                            rebuilt,
+                            total,
+                            errors,
+                            "reembed".to_string(),
+                            "completed".to_string(),
+                        ))
+                    })
+            } else {
+                None
+            };
+
+            tracing::info!(
+                target: "migration_diag",
+                agent_id = %agent_id_owned,
+                request_id = %request_id_owned,
+                http_status = %status_code,
+                success,
+                progress = ?final_progress,
+                error = ?error_msg,
+                "start_migration_bg: completed, writing terminal state"
+            );
+
+            // 3e. Write terminal state — either `done=true,
+            //     progress=(rebuilt,total,...)` on success or
+            //     `done=false, error=Some(msg)` on failure.
+            let mut gw = state_for_task.gateway_state.write().await;
+            if let Some(info) = gw.running_agents.get_mut(&agent_id_owned) {
+                if let Some(m) = info.migration.as_mut() {
+                    m.progress = final_progress;
+                    m.done = success;
+                    m.error = error_msg;
+                } else {
+                    tracing::warn!(
+                        target: "migration_diag",
+                        agent_id = %agent_id_owned,
+                        request_id = %request_id_owned,
+                        "start_migration_bg: migration state was cleared before background task completed"
+                    );
+                }
+            }
+        });
+
+        results.push(serde_json::json!({
+            "agent_id": agent_id,
+            "status": "queued",
+            "message": "Migration enqueued; poll /api/embedding-models/migration-progress for progress",
+        }));
+    }
+
+    tracing::info!(
+        target: "migration_diag",
+        model_id = %model_id,
+        queued_count = target_ids.len(),
+        "start_migration: handler returning 200 OK (work continues in background)"
+    );
+
+    Json(serde_json::json!({
+        "model_id": model_id,
+        "status": "ok",
+        "message": format!("Migration queued for {} agent(s)", target_ids.len()),
+        "results": results,
+    }))
+    .into_response()
 }
 
 // ── Router ─────────────────────────────────────────────────────────────
@@ -794,4 +1078,305 @@ pub fn embedding_routes() -> Router<AppState> {
         .route("/api/embedding-models/{id}", delete(delete_model))
         .route("/api/embedding-models/migration-progress", get(get_migration_progress))
         .route("/api/embedding-models/{id}/start-migration", post(start_migration))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+    use tower::util::ServiceExt;
+
+    /// Bug3 + Fix3 regression: `POST /api/embedding-models/{id}/start-migration`
+    /// must forward a rebuild request to the Runtime's
+    /// `/memory/rebuild-embeddings` endpoint WITH `Content-Type: application/json`.
+    ///
+    /// Why this test exists (see session chat for full timeline):
+    /// - Earlier buggy code appended `/memory/rebuild-embeddings` to a runtime
+    ///   endpoint string that already contained `/agents/{id}`, producing a URL
+    ///   the Runtime matched to a different handler and returned 403
+    ///   `invalid node token` from. The fix is to use `proxy_to_runtime_with_method`
+    ///   (same path every other `/api/agents/{id}/memory/*` endpoint takes).
+    /// - The first version of that fix still failed: `proxy_to_runtime_with_method`
+    ///   was called with an empty `HeaderMap`, so the Runtime's `Json<T>`
+    ///   extractor returned 415 Unsupported Media Type. The fix is to set
+    ///   `Content-Type: application/json` explicitly on the proxied request.
+    ///
+    /// This test pins BOTH contracts. Without it, regression is silent and
+    /// only shows up in the Desktop memory panel as "Migration started for 1
+    /// agent(s) — then nothing" (same UI symptom as the original bug).
+    #[tokio::test]
+    async fn test_start_migration_forwards_rebuild_request_to_runtime() {
+        // ── 1. Mock Runtime: capture every received request as a single
+        //    string for assertion. Single fallback route handles every path.
+        type Captured = (String, String, String, String); // (method, uri, headers_csv, body)
+        let received: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
+        let received_for_server = received.clone();
+        let mock_runtime = axum::Router::new().fallback(
+            axum::routing::any(move |req: axum::extract::Request| async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let headers_csv = req
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "{}={}",
+                            k.as_str(),
+                            v.to_str().unwrap_or("<non-ascii>")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let body_bytes =
+                    axum::body::to_bytes(req.into_body(), usize::MAX)
+                        .await
+                        .unwrap_or_default();
+                received_for_server.lock().unwrap().push((
+                    method,
+                    uri,
+                    headers_csv,
+                    String::from_utf8_lossy(&body_bytes).to_string(),
+                ));
+                // Realistic RebuildReport payload so start_migration can
+                // serialise the response and the body contains a useful
+                // success signal.
+                axum::Json(serde_json::json!({
+                    "total_scanned": 107,
+                    "rebuilt": 95,
+                    "skipped_no_embedding": 12,
+                    "errors": 0,
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, mock_runtime).await.unwrap();
+        });
+
+        // ── 2. Build AppState with:
+        //    - embed_process ready (port 18080, bge-small-zh-v1.5, dim 512)
+        //    - running_agents[com.test.architect] present
+        //    - runtime_http_registry pointing at the mock server, with the
+        //      "/agents/{id}" suffix that a real Runtime publishes on its
+        //      retained http_endpoint topic.
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-start-migration-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut gw_state =
+            crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        gw_state.embed_process = Some(crate::lifecycle::embed::EmbedProcessState {
+            pid: 0,
+            port: 18080,
+            active_model_id: Some("bge-small-zh-v1.5".to_string()),
+            active_dimension: Some(512),
+            ready: true,
+        });
+        gw_state.running_agents.insert(
+            "com.test.architect".to_string(),
+            crate::gateway::state::RunningAgentInfo {
+                agent_id: "com.test.architect".to_string(),
+                pid: 9999,
+                started_at: chrono::Utc::now(),
+                workspace: "/tmp/test".to_string(),
+                node_id: "local".to_string(),
+                connected: true,
+                ready: true,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: Some(384), // stale → triggers migration path
+                migration: None,
+            },
+        );
+
+        let mut state = crate::http::routes::AppState::new(
+            Arc::new(tokio::sync::RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry.write().await.register(
+            "com.test.architect",
+            &format!(
+                "http://127.0.0.1:{}/agents/com.test.architect",
+                mock_port
+            ),
+        );
+        state.runtime_http_registry = Some(registry);
+
+        // ── 3. Mount embedding_routes and fire the Desktop's exact request.
+        //    Clone state first so we can inspect the post-spawn state after
+        //    the handler returns (Bug-UX-2 regression: the new async path
+        //    spawns a `tokio::task` to proxy the rebuild request and writes
+        //    the terminal state from inside that task — this assertion is
+        //    what pins that contract).
+        let state_for_assertion = state.clone();
+        let app = super::embedding_routes().with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/embedding-models/bge-small-zh-v1.5/start-migration")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let resp_status = resp.status();
+        let resp_body_bytes =
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        let resp_body_str = String::from_utf8_lossy(&resp_body_bytes).to_string();
+
+        // ── 3a. Bug-UX-2 contract: handler must return 200 OK with
+        //     `status:"ok"` and a `queued` message — the work is now
+        //     deferred to a spawned background task, not awaited.
+        assert!(
+            resp_status == axum::http::StatusCode::OK,
+            "start_migration should return 200 OK on success; got {} body={}",
+            resp_status,
+            resp_body_str,
+        );
+        let resp_json: serde_json::Value = serde_json::from_slice(&resp_body_bytes)
+            .expect("response body should be valid JSON");
+        assert_eq!(
+            resp_json["status"], "ok",
+            "handler must return status=\"ok\" for queued migrations, got body={}",
+            resp_body_str
+        );
+        assert!(
+            resp_json["message"]
+                .as_str()
+                .map(|s| s.contains("queued"))
+                .unwrap_or(false),
+            "handler message must mention \"queued\" (work continues in background), got body={}",
+            resp_body_str
+        );
+        let results = resp_json["results"]
+            .as_array()
+            .expect("response must include results array");
+        assert_eq!(
+            results.len(),
+            1,
+            "exactly one result expected for the one target agent"
+        );
+        assert_eq!(
+            results[0]["status"], "queued",
+            "per-agent status must be \"queued\" until the spawned task finishes"
+        );
+
+        // ── 3b. Yield long enough for the spawned background task to call
+        //     the mock runtime and write the terminal state. 200ms is
+        //     comfortably above the localhost HTTP roundtrip + lock
+        //     acquisition cost without making the test noticeably slow.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // ── 4. Verify the spawned task actually forwarded the rebuild
+        //    request to the Runtime with the right headers and body. This
+        //    is the Bug3 + Fix3 regression core — without it, the handler
+        //    could silently swallow the rebuild (returning "queued" but
+        //    never actually calling the runtime) and the Desktop would
+        //    never recover from the missing-embedding state.
+        let got = received.lock().unwrap().clone();
+        assert_eq!(
+            got.len(),
+            1,
+            "expected exactly 1 forwarded rebuild request; got: {:?}",
+            got
+        );
+        let (method, uri, headers_csv, body) = &got[0];
+
+        assert_eq!(method, "POST", "must be POST, got {}", method);
+
+        // Bug3 regression: the registry endpoint already includes
+        // `/agents/com.test.architect`, and proxy appends
+        // `/memory/rebuild-embeddings`. Earlier buggy code appended to a
+        // path that was missing the `/agents/{id}` segment and produced
+        // a URL the runtime's `agents/{id}/memory/*` handler matched
+        // and rejected with 403. The fix uses `proxy_to_runtime_with_method`
+        // — assert the URL is what the proxy actually builds.
+        assert_eq!(
+            uri, "/agents/com.test.architect/memory/rebuild-embeddings",
+            "proxy must build /agents/{{id}}/memory/rebuild-embeddings, got {}",
+            uri
+        );
+
+        // Fix3 regression: the runtime's `Json<RebuildEmbeddingsBody>`
+        // extractor rejects requests without `Content-Type: application/json`
+        // with 415. Without this header, the Desktop sees
+        // "Migration started for 1 agent(s) — then nothing" and the
+        // rebuild silently never runs.
+        assert!(
+            headers_csv
+                .to_lowercase()
+                .contains("content-type=application/json"),
+            "proxy must forward Content-Type: application/json, got headers: {}",
+            headers_csv
+        );
+
+        // Body must carry the new embed config so the Runtime can build a
+        // fresh provider and re-embed. Field order is JSON-defined; assert
+        // on substring presence rather than exact match.
+        assert!(
+            body.contains("\"endpoint\":\"http://127.0.0.1:18080/v1\""),
+            "body must include endpoint, got: {}",
+            body
+        );
+        assert!(
+            body.contains("\"model_id\":\"bge-small-zh-v1.5\""),
+            "body must include model_id, got: {}",
+            body
+        );
+        assert!(
+            body.contains("\"dimension\":512"),
+            "body must include dimension, got: {}",
+            body
+        );
+
+        // ── 5. Bug-UX-2 contract: the spawned background task must have
+        //    written the terminal `AgentMigrationState` (done=true,
+        //    progress=(rebuilt,total,errors,"reembed","completed"), error=None).
+        //    This is what proves the deferred work actually completed and
+        //    the Desktop polling loop will see real numbers — not just a
+        //    "queued" promise that quietly drops on the floor.
+        let gw = state_for_assertion.gateway_state.read().await;
+        let info = gw
+            .running_agents
+            .get("com.test.architect")
+            .expect("test setup must insert com.test.architect into running_agents");
+        let m = info
+            .migration
+            .as_ref()
+            .expect("spawned task must populate AgentMigrationState");
+        assert!(
+            m.done,
+            "migration.done must be true after spawned task completes, got progress={:?} error={:?}",
+            m.progress,
+            m.error
+        );
+        assert_eq!(
+            m.error, None,
+            "successful migration must have error=None, got {:?}",
+            m.error
+        );
+        assert_eq!(
+            m.progress,
+            Some((
+                95,
+                107,
+                0,
+                "reembed".to_string(),
+                "completed".to_string(),
+            )),
+            "spawned task must parse RebuildReport and store (rebuilt,total,errors,phase,label); got {:?}",
+            m.progress
+        );
+    }
 }

@@ -346,6 +346,99 @@ impl VaultFacade {
             .map_err(|e| GatewayError::Vault(format!("Failed to remove search key: {e}")))?;
         Ok(())
     }
+
+    // ── Embedding provider key CRUD (stored under "_embedding_" prefix) ──
+    //
+    // Separate namespace from `_search_` and the default provider namespace
+    // so embedding provider keys cannot collide with or be confused with
+    // chat / search keys. Pattern mirrors `search_*` exactly.
+
+    const EMBEDDING_PREFIX: &str = "_embedding_";
+
+    /// Store a cloud embedding provider API key (encrypted on disk).
+    pub fn store_embedding_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        let key_name = format!("{}{provider}", Self::EMBEDDING_PREFIX);
+        self.vault
+            .store(&key_name, api_key)
+            .map_err(|e| GatewayError::Vault(format!("Failed to store embedding key: {e}")))?;
+        Ok(())
+    }
+
+    /// Get a cloud embedding provider API key (decrypted).
+    ///
+    /// Returns `Err(Vault(...))` when no key is configured for this
+    /// provider — callers should distinguish this from a locked vault.
+    pub fn get_embedding_key(&self, provider: &str) -> Result<String, GatewayError> {
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        let key_name = format!("{}{provider}", Self::EMBEDDING_PREFIX);
+        let secret = self
+            .vault
+            .retrieve(&key_name)
+            .map_err(|e| GatewayError::Vault(format!("No embedding key for '{provider}': {e}")))?;
+        Ok(secret.expose_secret().to_string())
+    }
+
+    /// Check whether an embedding provider has a key configured.
+    /// Does NOT require the vault to be unlocked.
+    pub fn has_embedding_key(&self, provider: &str) -> bool {
+        let key_name = format!("{}{provider}", Self::EMBEDDING_PREFIX);
+        self.vault.exists(&key_name)
+    }
+
+    /// List all configured embedding providers with masked key previews.
+    /// Returns entries with provider name and masked API key (first 3 + last 3 chars).
+    pub fn list_embedding_keys(&self) -> Result<Vec<VaultKeyEntry>, GatewayError> {
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        let all_keys = self
+            .vault
+            .list()
+            .map_err(|e| GatewayError::Vault(format!("Failed to list vault keys: {e}")))?;
+        let mut entries = Vec::new();
+        for key_name in &all_keys {
+            if let Some(provider) = key_name.strip_prefix(Self::EMBEDDING_PREFIX) {
+                let preview = match self.vault.retrieve(key_name) {
+                    Ok(secret) => {
+                        let key = secret.expose_secret();
+                        if key.len() > 6 {
+                            format!("{}...{}", &key[..3], &key[key.len() - 3..])
+                        } else {
+                            "***".to_string()
+                        }
+                    }
+                    Err(_) => "***".to_string(),
+                };
+                entries.push(VaultKeyEntry {
+                    provider: provider.to_string(),
+                    key_preview: preview,
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Remove a cloud embedding provider API key.
+    /// Idempotent: returns Ok even if no key exists.
+    pub fn remove_embedding_key(&mut self, provider: &str) -> Result<(), GatewayError> {
+        if !self.vault.is_unlocked() {
+            return Err(GatewayError::Vault("Vault is locked".into()));
+        }
+        let key_name = format!("{}{provider}", Self::EMBEDDING_PREFIX);
+        if !self.vault.exists(&key_name) {
+            // Idempotent — no error if key doesn't exist
+            return Ok(());
+        }
+        self.vault
+            .delete(&key_name)
+            .map_err(|e| GatewayError::Vault(format!("Failed to remove embedding key: {e}")))?;
+        Ok(())
+    }
 }
 
 /// Unlock the vault and raise every readiness signal that depends on it.

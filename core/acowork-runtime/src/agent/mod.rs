@@ -3,8 +3,11 @@
 pub mod agent_core;
 pub mod attachment_to_image;
 pub mod budget_guard;
+pub mod compression_constants;
 pub mod context;
 pub mod context_compression;
+#[cfg(test)]
+mod e2e_prompt_cache;
 pub mod history;
 pub mod idle_watcher;
 pub mod inbound;

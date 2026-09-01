@@ -424,6 +424,8 @@
     "reset": "重置",
     "temperature": "温度",
     "temperatureDesc": "控制 LLM 输出的随机性。降低使输出更确定，升高使更富创造性。范围 0.0–2.0，留空使用包默认值。",
+    "compressionRatioThreshold": "压缩比阈值",
+    "compressionRatioThresholdDesc": "上下文压缩后保留的比例。90% 表示压缩到剩余 10%。范围 50%–95%，默认 90%。",
     "resetTemperature": "清除温度设置，使用包默认值",
     "contextWindow": "上下文窗口",
     "contextWindowDesc": "每次请求的最大上下文 token 数。设为 0 或留空表示不限制（使用模型全窗口）。设定数值可为该 Agent 限制tokens用量。",
@@ -432,9 +434,7 @@
     "tokens": "tokens",
     "builtinTools": "内置工具",
     "builtinToolsDesc": "选择要为此 Agent 启用的内置工具。未启用的工具将对 LLM 隐藏。",
-    "noBuiltinTools": "暂无内置工具。",
-    "toolCompressionEnabled": "工具压缩",
-    "toolCompressionEnabledDesc": "启用后 LLM 可自主压缩和取回工具结果"
+    "noBuiltinTools": "暂无内置工具。"
   },
   "harness": {
     "tabProviders": "模型服务商",
@@ -652,7 +652,18 @@
     "statePaused": "已暂停",
     "stateStepping": "单步中",
     "stateIdle": "空闲",
-    "stateStopped": "已停止"
+    "stateStopped": "已停止",
+    "compressionHistory": "压缩历史（{{count}}）",
+    "loadingCompressionHistory": "加载压缩历史中...",
+    "compressionHistoryError": "加载压缩历史失败",
+    "noCompressionEvents": "暂无压缩事件。上下文压缩发生后会显示在这里。",
+    "buttonRefresh": "刷新",
+    "compTime": "时间",
+    "compLevel": "级别",
+    "compTokens": "Token 数",
+    "compRatio": "压缩比",
+    "compModel": "模型",
+    "compRange": "覆盖范围"
   },
   "workspace": {
     "delete": "删除",
@@ -806,7 +817,43 @@
     "deleteConfirmTitle": "删除模型文件",
     "deleteConfirmMessage": "确定要删除「{{name}}」的已下载文件吗？您可以稍后重新下载。",
     "deleteConfirm": "删除",
-    "deleteActiveError": "无法删除当前使用的模型，请先切换到其他模型。"
+    "deleteActiveError": "无法删除当前使用的模型，请先切换到其他模型。",
+    "localModels": "本地模型",
+    "cloudProviders": "云端 Provider",
+    "addCustom": "添加",
+    "addCustomProvider": "添加自定义 Provider",
+    "customProviderName": "Provider 名称",
+    "customProviderNamePlaceholder": "例如：我的 GPT 代理",
+    "customProviderId": "Provider ID",
+    "customProviderIdPlaceholder": "例如：custom-my-proxy",
+    "customProviderNameRequired": "Provider 名称不能为空",
+    "customProviderIdRequired": "Provider ID 不能为空",
+    "customBaseUrl": "Base URL",
+    "customBaseUrlRequired": "Base URL 必须为 http(s) URL",
+    "optional": "可选",
+    "apiKey": "API Key",
+    "customModels": "模型",
+    "customModelsRequired": "至少添加一个模型",
+    "customAddModel": "添加模型",
+    "customRemoveModel": "删除模型",
+    "customModelIdPlaceholder": "模型 ID（如 doubao-embedding）",
+    "customModelNamePlaceholder": "模型名称（可留空）",
+    "customModelDimensionsPlaceholder": "维度（如 1024）",
+    "customModelContextLengthPlaceholder": "上下文长度（可选）",
+    "customModelIdRequired": "模型 ID 不能为空",
+    "duplicateProviderId": "Provider ID「{{id}}」已存在",
+    "duplicateModelId": "模型 ID「{{id}}」重复",
+    "dimensionMustBePositive": "模型「{{id}}」的维度必须大于 0",
+    "saving": "保存中...",
+    "cloudActive": "云端使用中",
+    "cloudNoProviders": "暂无可用云端 Provider",
+    "apiKeyMissing": "未设置 API Key",
+    "apiKeyRequired": "请先设置 API Key",
+    "setApiKey": "设置 API Key",
+    "changeKey": "修改 Key",
+    "deleteKey": "删除 Key",
+    "save": "保存",
+    "cancel": "取消"
   },
   "memoryPanel": {
     "consolidate": "合并节点",
@@ -1004,8 +1051,11 @@
     "title": "上下文摘要",
     "empty": "（空摘要）",
     "model": "模型: {{model}}",
-    "keepLastRounds": "保留最近 {{count}} 轮",
+    "level": "压缩级别 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "上下文溢出：模型能力信息缺失，无法准确计算上下文用量。请检查模型名称是否正确（区分大小写）。"
   },
   "codeBlock": {
     "ariaLabelCopy": "复制代码"

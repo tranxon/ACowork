@@ -116,8 +116,8 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
             style={{ fontSize: DETAIL_FONT_SIZE }}
           >
             {meta?.model && <span>{t("compactionCard.model", { model: meta.model })}</span>}
-            {meta?.keep_last_rounds != null && meta.keep_last_rounds > 0 && (
-              <span>{t("compactionCard.keepLastRounds", { count: meta.keep_last_rounds })}</span>
+            {meta?.level != null && meta.level > 0 && (
+              <span>{t("compactionCard.level", { level: meta.level })}</span>
             )}
             <span>{formatTime(timestampMs)}</span>
             {hasTokenStats && (

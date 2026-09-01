@@ -7,7 +7,6 @@ use serde_json::Value;
 use crate::tools::output;
 
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
-const MAX_LINES_PER_CALL: usize = 400;
 
 /// File read tool — fragment reader, not a whole-file reader
 pub struct FileReadTool;
@@ -105,15 +104,16 @@ impl Tool for FileReadTool {
             });
         }
         let requested = (end_line_raw - start_line_raw + 1) as usize;
-        if requested > MAX_LINES_PER_CALL {
+        if requested > super::MAX_LINES_PER_CALL {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
-                    "Range too large: {requested} lines requested, max {MAX_LINES_PER_CALL} per call. Paginate across multiple calls (e.g. start_line: {s}, end_line: {e1}, then start_line: {e1p1}, end_line: {e2}...)",
+                    "Range too large: {requested} lines requested, max {max} per call. Paginate across multiple calls (e.g. start_line: {s}, end_line: {e1}, then start_line: {e1p1}, end_line: {e2}...)",
+                    max = super::MAX_LINES_PER_CALL,
                     s = start_line_raw,
-                    e1 = start_line_raw + MAX_LINES_PER_CALL as u64 - 1,
-                    e1p1 = start_line_raw + MAX_LINES_PER_CALL as u64,
+                    e1 = start_line_raw + super::MAX_LINES_PER_CALL as u64 - 1,
+                    e1p1 = start_line_raw + super::MAX_LINES_PER_CALL as u64,
                     e2 = end_line_raw,
                 )),
                 token_usage: None,
@@ -215,5 +215,434 @@ impl Tool for FileReadTool {
                 })
             }
         }
+    }
+}
+
+// ── E2E ─────────────────────────────────────────────────────────
+//
+// file_read previously had zero integration coverage. These tests go
+// through `Tool::execute()` (the LLM-facing entry point) and verify
+// every error path the LLM could hit, plus the happy path.
+
+#[cfg(test)]
+mod tests {
+    use super::super::MAX_LINES_PER_CALL;
+    use super::*;
+    use std::io::Write;
+
+    fn with_temp_file(bytes: &[u8], name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).expect("create temp file");
+        f.write_all(bytes).expect("write temp file");
+        (dir, path)
+    }
+
+    fn build_lines_file(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        let mut buf = Vec::new();
+        for i in 1..=n {
+            buf.extend_from_slice(format!("line {i}\n").as_bytes());
+        }
+        with_temp_file(&buf, "lines.txt")
+    }
+
+    // ── Happy path ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_reads_middle_range_of_100_line_file() {
+        let (_dir, p) = build_lines_file(100);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 10,
+                    "end_line": 20
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok, "happy path must succeed: {:?}", result.error);
+        // Numbered output: line 10 starts at column 1, etc.
+        assert!(
+            result.content.contains("10: line 10"),
+            "got: {}",
+            result.content
+        );
+        assert!(result.content.contains("20: line 20"));
+        // Lines outside the requested range must NOT appear
+        assert!(!result.content.contains("9: line 9"));
+        assert!(!result.content.contains("21: line 21"));
+        // Summary marker
+        assert!(
+            result.content.contains("[Lines 10-20 of 100]"),
+            "got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_single_line_range() {
+        let (_dir, p) = build_lines_file(10);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 5,
+                    "end_line": 5
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("5: line 5"));
+        assert!(!result.content.contains("4: line 4"));
+        assert!(!result.content.contains("6: line 6"));
+        assert!(result.content.contains("[Lines 5-5 of 10]"));
+    }
+
+    // ── Required-parameter errors ──────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_missing_start_line_errors() {
+        let (_dir, p) = build_lines_file(10);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "end_line": 5
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("start_line"),
+            "error must name the missing field; got: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_missing_end_line_errors() {
+        let (_dir, p) = build_lines_file(10);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("end_line"),
+            "error must name the missing field"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_missing_path_errors() {
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "start_line": 1,
+                    "end_line": 5
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.as_deref().unwrap().contains("path"));
+    }
+
+    // ── Parameter validation ────────────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_start_line_zero_errors_as_one_based() {
+        let (_dir, p) = build_lines_file(10);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 0,
+                    "end_line": 5
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.as_deref().unwrap().contains("1-based"));
+    }
+
+    #[tokio::test]
+    async fn e2e_end_less_than_start_errors() {
+        let (_dir, p) = build_lines_file(10);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 5,
+                    "end_line": 3
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.as_deref().unwrap();
+        assert!(err.contains("end_line"), "got: {err}");
+        assert!(err.contains("start_line"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn e2e_range_over_max_lines_per_call_errors_with_paginate_template() {
+        // MAX_LINES_PER_CALL is 400. Request 500 → must error AND
+        // include the explicit paginate template so the LLM can fix
+        // its call without trial-and-error.
+        let (_dir, p) = build_lines_file(1000);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 500
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.as_deref().unwrap();
+        assert!(err.contains("Range too large"), "got: {err}");
+        assert!(
+            err.contains("400"),
+            "must mention MAX_LINES_PER_CALL: {err}"
+        );
+        assert!(
+            err.contains("Paginate"),
+            "must offer paginate template: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_range_exactly_at_max_lines_succeeds() {
+        // Boundary: exactly MAX_LINES_PER_CALL lines must work.
+        let (_dir, p) = build_lines_file(MAX_LINES_PER_CALL);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": MAX_LINES_PER_CALL
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.ok,
+            "exact MAX_LINES_PER_CALL must succeed: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_range_one_over_max_lines_errors() {
+        let (_dir, p) = build_lines_file(MAX_LINES_PER_CALL + 1);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": MAX_LINES_PER_CALL + 1
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.as_deref().unwrap().contains("Range too large"));
+    }
+
+    // ── Out-of-range handling ───────────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_start_beyond_file_length_returns_informative_marker() {
+        // file_read's contract: start > total → returns ok=true with
+        // a "[No lines in range, file has N lines]" marker. The LLM
+        // can recover by re-issuing with a smaller range.
+        let (_dir, p) = build_lines_file(5);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 100,
+                    "end_line": 105
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("No lines in range"),
+            "got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("5 lines"),
+            "must report actual line count: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_end_clamped_to_file_length() {
+        // file_read clamps `end` to total silently. The LLM gets
+        // back everything from start_line to EOF.
+        //
+        // Important: end must stay under MAX_LINES_PER_CALL (400),
+        // otherwise the range-size check rejects before the clamp can
+        // happen. We pick end=15 so the range size (15-8+1 = 8 lines)
+        // is well under the cap, while end (15) is still beyond
+        // the file length (10) — this is the actual clamp path we
+        // want to exercise.
+        let (_dir, p) = build_lines_file(10);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 8,
+                    "end_line": 15
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok, "result.ok: {:?}", result.error);
+        assert!(result.content.contains("8: line 8"));
+        assert!(result.content.contains("10: line 10"));
+        assert!(result.content.contains("[Lines 8-10 of 10]"));
+        // And no line beyond the file's end should leak.
+        assert!(!result.content.contains("11: "));
+    }
+
+    // ── I/O errors ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_nonexistent_file_errors_with_clear_message() {
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": "/this/path/should/never/exist/in/the/test/xyz123.txt",
+                    "start_line": 1,
+                    "end_line": 5
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.as_deref().unwrap();
+        assert!(err.contains("Failed to read file"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn e2e_empty_file_returns_special_marker() {
+        let (_dir, p) = with_temp_file(b"", "empty.txt");
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 1
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.content, "[File is empty]");
+    }
+
+    // ── UTF-8 content ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_utf8_cjk_content_preserved_byte_intact() {
+        // CJK is the testbed for UTF-8 safety — each character is 3
+        // bytes and file_read must not corrupt mid-character boundaries.
+        let lines = ["中文第一行", "中文第二行", "中文第三行", "中文第四行"];
+        let mut buf = Vec::new();
+        for l in &lines {
+            buf.extend_from_slice(l.as_bytes());
+            buf.push(b'\n');
+        }
+        let (_dir, p) = with_temp_file(&buf, "cjk.txt");
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 2,
+                    "end_line": 3
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("中文第二行"),
+            "got: {}",
+            result.content
+        );
+        assert!(result.content.contains("中文第三行"));
+        assert!(!result.content.contains("中文第一行"));
+        assert!(!result.content.contains("中文第四行"));
+    }
+
+    // ── Spec exposure ───────────────────────────────────────────
+
+    #[test]
+    fn e2e_spec_requires_start_line_and_end_line() {
+        // LLM sees this schema. If start_line / end_line are NOT
+        // listed as required, every model will forget to pass them.
+        let spec = FileReadTool::spec_value();
+        let required: Vec<&str> = spec.input_schema["required"]
+            .as_array()
+            .expect("required array present")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"path"), "required: {required:?}");
+        assert!(required.contains(&"start_line"), "required: {required:?}");
+        assert!(required.contains(&"end_line"), "required: {required:?}");
+    }
+
+    #[test]
+    fn e2e_spec_description_advertises_max_lines_per_call() {
+        // The spec description is the only place the LLM learns about
+        // the 400-line cap. If this drifts, models will request huge
+        // ranges and waste a round-trip on the error.
+        let desc = FileReadTool::spec_value().description;
+        assert!(
+            desc.contains("400"),
+            "must mention the 400-line cap: {desc}"
+        );
+        assert!(desc.contains("paginate"), "must teach pagination: {desc}");
     }
 }

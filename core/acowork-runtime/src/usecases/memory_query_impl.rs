@@ -8,6 +8,7 @@
 
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -15,7 +16,7 @@ use crate::error::Result;
 use crate::http::{memory_query, SharedEmbedDimension, SharedMemoryStore};
 use crate::usecases::memory_query::{
     ConsolidationReport, CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse,
-    MemoryNodeQuery, MemoryQueryService, MemoryStats,
+    MemoryNodeQuery, MemoryQueryService, MemoryStats, RebuildReport,
 };
 
 pub struct GrafeoMemoryAdapter {
@@ -169,5 +170,85 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             .and_then(|g| g.clone())
             .ok_or_else(|| crate::error::RuntimeError::Memory("memory store unavailable".into()))?;
         memory_query::update_node(Some(&store), node_id, properties)
+    }
+
+    async fn rebuild_embeddings(
+        &self,
+        endpoint: &str,
+        model_id: &str,
+        dimension: usize,
+    ) -> Result<RebuildReport> {
+        let store = self
+            .memory_store
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .ok_or_else(|| crate::error::RuntimeError::Memory("memory store unavailable".into()))?;
+        let admin: Arc<dyn acowork_memory::admin::MemoryAdminService> = store;
+
+        // Re-embedding is CPU/IO heavy and bridges async embed into a sync
+        // closure, so run the whole migration on a blocking thread (same
+        // pattern as the session-task UpdateEmbedConfig migration path).
+        let endpoint = endpoint.to_string();
+        let model_id = model_id.to_string();
+        let stats = tokio::task::spawn_blocking(move || {
+            let provider =
+                crate::embedding::remote::RemoteEmbeddingProvider::try_with_config_and_timeouts(
+                    &endpoint,
+                    None,
+                    &model_id,
+                    dimension,
+                    &acowork_core::Timeouts::default(),
+                );
+            let provider: Arc<dyn crate::embedding::EmbeddingProvider> = match provider {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    return Err(crate::error::RuntimeError::Memory(format!(
+                        "failed to build embedding provider for migration: {e}"
+                    )));
+                }
+            };
+
+            let handle = tokio::runtime::Handle::current();
+            let provider_for_fn = provider.clone();
+            let embed_fn = move |text: &str| -> Option<Vec<f32>> {
+                let text_owned = text.to_string();
+                match handle.block_on(provider_for_fn.embed(&text_owned)) {
+                    Ok(vec) => Some(vec),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Re-embedding failed during migration, skipping node"
+                        );
+                        None
+                    }
+                }
+            };
+
+            admin
+                .migrate_embedding_dimension(&embed_fn, dimension)
+                .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
+        })
+        .await
+        .map_err(|e| {
+            crate::error::RuntimeError::Memory(format!("rebuild task panicked: {e}"))
+        })??;
+
+        let message = format!(
+            "Rebuilt {} embeddings (scanned {}, skipped {} no-embedding / {} no-content, {} errors)",
+            stats.rebuilt,
+            stats.total_scanned,
+            stats.skipped_no_embedding,
+            stats.skipped_no_content,
+            stats.errors,
+        );
+        Ok(RebuildReport {
+            total_scanned: stats.total_scanned,
+            rebuilt: stats.rebuilt,
+            skipped_no_embedding: stats.skipped_no_embedding,
+            skipped_no_content: stats.skipped_no_content,
+            errors: stats.errors,
+            message,
+        })
     }
 }

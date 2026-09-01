@@ -169,6 +169,10 @@ pub fn proxy_routes() -> Router<AppState> {
             post(proxy_memory_consolidate),
         )
         .route(
+            "/api/agents/{id}/memory/rebuild-embeddings",
+            post(proxy_memory_rebuild_embeddings),
+        )
+        .route(
             "/api/agents/{id}/memory/graph",
             get(proxy_get_memory_graph),
         )
@@ -235,6 +239,13 @@ pub fn proxy_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/workspaces/{ws_id}/prompt-file",
             put(proxy_set_prompt_file),
+        )
+        // ADR-058 (demand-driven revision): frontend pushes the visible
+        // watch set (open tabs + expanded dirs) to the Runtime. Full
+        // replace semantics; empty set → no scanning.
+        .route(
+            "/api/agents/{id}/workspaces/{ws_id}/fs-watch",
+            put(proxy_set_workspace_fs_watch),
         )
         // Routes 14-15: Workspace file & dir REST resources (Gateway is
         // transparent — forwards verbatim to the Runtime's filesystem-aware
@@ -602,6 +613,33 @@ async fn proxy_memory_consolidate(
     proxy_to_runtime_with_method(&state, &id, "/memory/consolidate", "", reqwest::Method::POST, payload, &headers).await
 }
 
+/// Reverse-proxy `POST /api/agents/{id}/memory/rebuild-embeddings` to
+/// Runtime's `POST /memory/rebuild-embeddings`.
+///
+/// Forwards the inbound body verbatim: the Gateway (embedding_api
+/// `start_migration`) sends `{"endpoint", "model_id", "dimension"}` so the
+/// Runtime can build a temporary provider and re-embed every stored node
+/// (Bug3 — restores the dimension-migration feature lost in the gRPC→MQTT
+/// refactor).
+async fn proxy_memory_rebuild_embeddings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/memory/rebuild-embeddings",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 // ── New Phase 4 proxy handlers ─────────────────────────────────────────
 
 /// Reverse-proxy `POST /api/agents/{id}/sessions/{sid}/files`
@@ -715,6 +753,23 @@ async fn proxy_set_prompt_file(
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}/prompt-file", ws_id);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}/fs-watch`
+/// to Runtime's `PUT /workspaces/{ws_id}/fs-watch`.
+///
+/// Transparent pass-through (same rationale as the workspace file/dir
+/// proxies): path-traversal / workspace resolution live on the Runtime
+/// side; the Gateway only forwards the body and surfaces status codes.
+async fn proxy_set_workspace_fs_watch(
+    State(state): State<AppState>,
+    Path((id, ws_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/workspaces/{}/fs-watch", ws_id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
 }
@@ -1504,7 +1559,7 @@ pub(crate) async fn fetch_runtime_json(
     state: &AppState,
     id: &str,
     path: &str,
-) -> Result<serde_json::Value, (StatusCode, axum::Json<crate::http::routes::ApiError>)> {
+) -> Result<serde_json::Value, crate::http::routes::ApiError> {
     send_runtime_json(state, id, path, reqwest::Method::GET, None).await
 }
 
@@ -1518,7 +1573,7 @@ pub(crate) async fn send_runtime_json(
     path: &str,
     method: reqwest::Method,
     body: Option<&serde_json::Value>,
-) -> Result<serde_json::Value, (StatusCode, axum::Json<crate::http::routes::ApiError>)> {
+) -> Result<serde_json::Value, crate::http::routes::ApiError> {
     use crate::http::routes::ApiError;
 
     let registry = state.runtime_http_registry.as_ref().ok_or_else(|| {

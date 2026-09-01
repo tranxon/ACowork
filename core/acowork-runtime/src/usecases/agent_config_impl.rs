@@ -145,11 +145,11 @@ fn apply_field_patch(cfg: &mut AgentConfig, field: ConfigField, op: &FieldPatch<
         ConfigField::ApprovalTimeoutSecs => {
             cfg.approval_timeout_secs = patch_typed::<u64>(field, op);
         }
-        ConfigField::ToolCompressionEnabled => {
-            cfg.tool_compression_enabled = patch_typed::<bool>(field, op);
-        }
         ConfigField::IdleTimeoutSecs => {
             cfg.idle_timeout_secs = patch_typed::<u64>(field, op);
+        }
+        ConfigField::CompressionRatioThreshold => {
+            cfg.compression_ratio_threshold = patch_typed::<f64>(field, op);
         }
     }
 }

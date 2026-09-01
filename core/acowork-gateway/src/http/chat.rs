@@ -12,7 +12,6 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
     routing::get,
 };
 
@@ -44,7 +43,7 @@ pub fn chat_routes() -> Router<AppState> {
 pub async fn get_latest_conversation(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {

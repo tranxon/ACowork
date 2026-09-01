@@ -47,6 +47,14 @@ pub(crate) struct AgentBootContext {
     pub search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
+    /// Receiver for `acowork/global/embedding_models` updates (ADR-033).
+    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
+    /// `SessionManager::handle_embedding_config_update` so sessions rebuild
+    /// their embedding provider when the embed sidecar becomes ready or
+    /// the active model switches.
+    pub embedding_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
+    >,
     /// Receiver for node LSP relay state changes (ADR-055 §6.7,
     /// Phase 4). Consumed by `gateway_loop::mqtt_only_loop` and
     /// forwarded to `SessionManager::handle_lsp_relay_update`.
@@ -266,13 +274,9 @@ pub(crate) struct AgentBootContext {
     /// [`Self::search_key_vault`].
     pub search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList,
 
-    /// ADR-052: Shared abandon queue for context_abandon tool.
+    /// ADR-061 §10.2: Shared retrieve queue for `context_retrieve` tool.
     /// Created in Phase A, passed to the tool and injected into AgentCore
     /// in Phase B. The AgentLoop drains this queue each iteration.
-    pub abandon_queue: crate::agent::context_compression::AbandonQueue,
-
-    /// ADR-052: Shared retrieve queue for context_retrieve tool.
-    /// Same lifecycle as [`Self::abandon_queue`].
     pub retrieve_queue: crate::agent::context_compression::RetrieveQueue,
 }
 

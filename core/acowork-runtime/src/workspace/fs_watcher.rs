@@ -14,6 +14,21 @@
 //! Out-of-bounds paths (symlink escapes, sibling directories) are
 //! dropped before aggregation; only forward-slash workspace-relative
 //! paths ever leave this module.
+//!
+//! ## Demand-driven watch model (ADR-058 revision)
+//!
+//! The watcher does NOT scan the whole workspace. The only consumer of
+//! `fs-changed` events is the Desktop frontend (FileTree + editor tab
+//! conflict UX), so the watch set is driven by what the frontend is
+//! actually showing:
+//!
+//! - each open editor tab  → watch that file (`NonRecursive`)
+//! - each expanded tree dir → watch that dir (`NonRecursive`, one level)
+//!
+//! Watch targets are pushed from the outside via a control channel
+//! ([`WorkspaceFsWatcher::targets_tx`]); the watcher diffs the new set
+//! against the current one and `watch`/`unwatch`s accordingly. An empty
+//! set means no scanning at all → CPU cost ≈ 0.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +70,12 @@ pub trait WorkspaceFsEventSink: Send + Sync {
 /// The struct is consumed by [`WorkspaceFsWatcher::run`], which owns
 /// the `PollWatcher` for the task's lifetime. Dropping the struct
 /// (task abort / shutdown) stops the notify polling.
+///
+/// Watch targets are demand-driven: they arrive on `targets_rx` as a
+/// set of workspace-relative paths (empty string `""` = the workspace
+/// root). Each target is watched `NonRecursive` — files are watched as
+/// themselves, directories only one level deep (no recursion into
+/// subdirectories). An empty set means nothing is watched → zero scan.
 pub struct WorkspaceFsWatcher {
     workspace_dir: PathBuf,
     agent_id: String,
@@ -63,6 +84,12 @@ pub struct WorkspaceFsWatcher {
     /// the event channel, which makes `run`'s `rx.recv()` return `None`.
     #[allow(dead_code)] // read never happens — the field's Drop does the work
     notify_watcher: PollWatcher,
+    /// Incoming watch-target updates (absolute paths to watch, the diff
+    /// against the current set is applied in `run`). The channel closing
+    /// (`None`) is treated like shutdown.
+    targets_rx: mpsc::UnboundedReceiver<Vec<PathBuf>>,
+    /// Absolute paths currently being watched (the active set).
+    watched: std::collections::HashSet<PathBuf>,
     rx: mpsc::UnboundedReceiver<notify::Event>,
     /// Aggregator buffer for the current window (rel path → latest kind).
     pending: HashMap<PathBuf, FsChangeKind>,
@@ -71,7 +98,12 @@ pub struct WorkspaceFsWatcher {
 }
 
 impl WorkspaceFsWatcher {
-    /// Create a watcher for `workspace_root` (recursive).
+    /// Create a demand-driven watcher for `workspace_root`.
+    ///
+    /// Returns the watcher plus a `targets_tx` handle the caller uses to
+    /// push the desired watch set (workspace-relative paths; `""` is the
+    /// root). The watcher starts with an **empty** set — nothing is
+    /// scanned until the first target update arrives.
     ///
     /// Uses an unbounded tokio channel so the synchronous notify
     /// callback can emit events without an async context (same
@@ -80,10 +112,11 @@ impl WorkspaceFsWatcher {
         workspace_root: &Path,
         agent_id: &str,
         workspace_id: &str,
-    ) -> Result<Self, WorkspaceFsWatcherError> {
+    ) -> Result<(Self, mpsc::UnboundedSender<Vec<PathBuf>>), WorkspaceFsWatcherError> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (targets_tx, targets_rx) = mpsc::unbounded_channel();
 
-        let mut notify_watcher = PollWatcher::new(
+        let notify_watcher = PollWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
                     let _ = tx.send(event);
@@ -93,19 +126,71 @@ impl WorkspaceFsWatcher {
         )
         .map_err(|e| WorkspaceFsWatcherError::Init(e.to_string()))?;
 
-        notify_watcher
-            .watch(workspace_root, RecursiveMode::Recursive)
-            .map_err(|e| WorkspaceFsWatcherError::Init(e.to_string()))?;
+        Ok((
+            Self {
+                workspace_dir: workspace_root.to_path_buf(),
+                agent_id: agent_id.to_string(),
+                workspace_id: workspace_id.to_string(),
+                notify_watcher,
+                targets_rx,
+                watched: std::collections::HashSet::new(),
+                rx,
+                pending: HashMap::new(),
+                window_started: None,
+            },
+            targets_tx,
+        ))
+    }
 
-        Ok(Self {
-            workspace_dir: workspace_root.to_path_buf(),
-            agent_id: agent_id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            notify_watcher,
-            rx,
-            pending: HashMap::new(),
-            window_started: None,
-        })
+    /// Apply a new desired watch set (workspace-relative paths).
+    ///
+    /// Diff against the current set and `watch`/`unwatch` only the
+    /// changed targets. `""` maps to the workspace root itself.
+    fn apply_targets(&mut self, targets: Vec<PathBuf>) {
+        let desired: std::collections::HashSet<PathBuf> = targets
+            .into_iter()
+            .map(|rel| {
+                if rel.as_os_str().is_empty() {
+                    self.workspace_dir.clone()
+                } else {
+                    self.workspace_dir.join(&rel)
+                }
+            })
+            .collect();
+
+        // Unwatch targets that left the set.
+        for old in self.watched.difference(&desired) {
+            if let Err(e) = self.notify_watcher.unwatch(old) {
+                tracing::debug!(
+                    workspace_id = %self.workspace_id,
+                    path = %old.display(),
+                    error = %e,
+                    "state relay: unwatch failed (path may be gone)"
+                );
+            }
+        }
+        // Watch targets that joined the set (NonRecursive — one level).
+        for new in desired.difference(&self.watched) {
+            if let Err(e) = self
+                .notify_watcher
+                .watch(new, RecursiveMode::NonRecursive)
+            {
+                tracing::debug!(
+                    workspace_id = %self.workspace_id,
+                    path = %new.display(),
+                    error = %e,
+                    "workspace watcher: watch failed (path may not exist yet)"
+                );
+            }
+        }
+        if self.watched != desired {
+            tracing::info!(
+                workspace_id = %self.workspace_id,
+                targets = desired.len(),
+                "workspace watcher: watch set updated"
+            );
+        }
+        self.watched = desired;
     }
 
     /// Run the aggregation loop until the notify watcher is dropped or
@@ -120,7 +205,7 @@ impl WorkspaceFsWatcher {
             agent_id = %self.agent_id,
             workspace_id = %self.workspace_id,
             root = %self.workspace_dir.display(),
-            "WorkspaceFsWatcher started"
+            "WorkspaceFsWatcher started (demand-driven, zero targets)"
         );
         loop {
             // Window deadline is only meaningful while a window is open.
@@ -147,6 +232,13 @@ impl WorkspaceFsWatcher {
                             }
                         }
                         None => break, // notify watcher dropped → shutdown
+                    }
+                }
+                // Demand-driven watch set: diff and apply watch/unwatch.
+                maybe_targets = self.targets_rx.recv() => {
+                    match maybe_targets {
+                        Some(targets) => self.apply_targets(targets),
+                        None => break, // control channel closed → shutdown
                     }
                 }
                 _ = shutdown.recv() => break, // explicit stop from the set
@@ -292,7 +384,8 @@ mod tests {
     }
 
     fn watcher_at(dir: &Path) -> WorkspaceFsWatcher {
-        WorkspaceFsWatcher::new(dir, "agent-1", "ws-1").expect("watcher init")
+        let (w, _tx) = WorkspaceFsWatcher::new(dir, "agent-1", "ws-1").expect("watcher init");
+        w
     }
 
     fn notify_event(kind: EventKind, path: &Path) -> notify::Event {
@@ -418,9 +511,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
-        let w = WorkspaceFsWatcher::new(&dir, "agent-e2e", "ws-e2e").unwrap();
+        let (w, targets_tx) = WorkspaceFsWatcher::new(&dir, "agent-e2e", "ws-e2e").unwrap();
         let sink = sink();
         let task = tokio::spawn(w.run(sink.clone(), shutdown_rx));
+
+        // Demand-driven: watch the workspace root (NonRecursive) so the
+        // root-level file ops below are observed.
+        let _ = targets_tx.send(vec![PathBuf::from("")]);
+
+        // Watch targets land asynchronously and PollWatcher only baselines
+        // a path once its `watch()` lands — wait out a poll cycle so the
+        // root watch is live before the first op, else pre-watch creates
+        // are invisible (file already exists at baseline time).
+        tokio::time::sleep(Duration::from_millis(600)).await;
 
         // Create + modify + delete, then wait past poll (500ms) + window
         // (500ms) so the aggregated batch lands in the sink.

@@ -211,6 +211,31 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SizeRollingFileAppender {
     }
 }
 
+/// Build an `EnvFilter` for a runtime/gateway process.
+///
+/// Starts from `RUST_LOG` if set, otherwise from `base_level`, then appends
+/// targeted directives that QUIET noisy third-party crates. Without these,
+/// `rumqttc` logs every MQTT PUBLISH frame at DEBUG and `rustls` logs every
+/// handshake/alert frame — hundreds of lines per active LLM turn that drown
+/// out our own `acowork_runtime::*` INFO lines (PERF-001 / LOG-001).
+///
+/// Directives are only added when the crate emits high-frequency, low-value
+/// frames — the app's own crates are left untouched so their INFO/DEBUG
+/// level follows `base_level`.
+pub fn build_env_filter(base_level: &str) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    let mut filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(base_level));
+    // MQTT frame trace (rumqttc::state logs a `Publish.` line per frame).
+    filter = filter.add_directive("rumqttc=warn".parse().expect("valid directive"));
+    // TLS handshake/alert frame trace.
+    filter = filter.add_directive("rustls=warn".parse().expect("valid directive"));
+    // reqwest/hyper connection-level traces are per-request noise.
+    filter = filter.add_directive("hyper=warn".parse().expect("valid directive"));
+    filter = filter.add_directive("reqwest=warn".parse().expect("valid directive"));
+    filter
+}
+
 /// Initialize tracing to write to stderr.
 ///
 /// This is intended for subprocesses (embed, lsp-relay) whose stdout is
@@ -222,8 +247,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SizeRollingFileAppender {
 /// acowork_core::logging::init_subprocess_logging(&cli.log_level);
 /// ```
 pub fn init_subprocess_logging(level: &str) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+    let filter = build_env_filter(level);
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

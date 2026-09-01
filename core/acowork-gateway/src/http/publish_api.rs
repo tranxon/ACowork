@@ -55,7 +55,7 @@ pub async fn prepare_publish(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<PrepareRequest>,
-) -> Result<Json<PrepareResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<PrepareResponse>, ApiError> {
     let node_id = node_id_of(&state, &agent_id).await?;
     let node_control = state
         .node_control
@@ -95,7 +95,7 @@ pub async fn build_publish(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<BuildRequest>,
-) -> Result<Json<BuildResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<BuildResponse>, ApiError> {
     let node_id = node_id_of(&state, &agent_id).await?;
     let node_control = state
         .node_control
@@ -117,7 +117,7 @@ pub async fn build_publish(
 async fn node_id_of(
     state: &AppState,
     agent_id: &str,
-) -> Result<String, (StatusCode, Json<ApiError>)> {
+) -> Result<String, ApiError> {
     let gw = state.gateway_state.read().await;
     gw.installed_agents
         .get(agent_id)
@@ -128,7 +128,7 @@ async fn node_id_of(
 /// Parse the structured result a node reported in `NodeEvent.result_json`.
 fn parse_result<T: serde::de::DeserializeOwned>(
     event: &NodeEvent,
-) -> Result<T, (StatusCode, Json<ApiError>)> {
+) -> Result<T, ApiError> {
     let json = event
         .result_json
         .as_deref()
@@ -150,7 +150,7 @@ pub async fn install_locally(
     State(state): State<AppState>,
     Path(_agent_id): Path<String>,
     Json(req): Json<InstallLocallyRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Extract the manifest to route the install command and register cron.
     let manifest = crate::http::agents::extract_manifest_from_package(
         std::path::Path::new(&req.package_path),
@@ -198,7 +198,7 @@ pub struct ExportInfo {
 pub async fn export_package(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<ExportInfo>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ExportInfo>, ApiError> {
     let (output_dir, version) = {
         let gw = state.gateway_state.read().await;
         let info = gw

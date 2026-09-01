@@ -217,30 +217,10 @@ mod power {
     static LAST_BIASED_MS: AtomicU64 = AtomicU64::new(0);
     static LAST_UNBIASED_MS: AtomicU64 = AtomicU64::new(0);
 
-    /// Timestamp (biased clock) of the last reload that was triggered.
-    /// Used to enforce a cooldown period and prevent rapid successive
-    /// reloads from causing GPU process accumulation.
-    static LAST_RELOAD_MS: AtomicU64 = AtomicU64::new(0);
-
     /// Minimum *actual* sleep duration (ms) to trigger recovery.
     /// We measure real sleep, not wall-clock gaps, so even a few seconds
     /// is significant.  5 s filters timer imprecision.
     const SLEEP_THRESHOLD_MS: u64 = 5_000;
-
-    /// Cooldown after a reload before another one can be triggered.
-    ///
-    /// `window.reload()` is asynchronous — the old renderer process is
-    /// torn down and a new one is spawned, but this takes time.  If the
-    /// system sleeps and wakes again while a previous reload is still in
-    /// progress, a second reload would fire, spawning yet another set of
-    /// renderer/GPU processes before the old ones are cleaned up.  Over
-    /// rapid sleep/wake cycles this leads to GPU process leaks.
-    ///
-    /// 15 s is long enough for the reload to complete (typically < 2 s)
-    /// plus a safety margin, while short enough that a genuine second
-    /// sleep/wake (e.g. user closes and reopens the laptop after a brief
-    /// check) will still be recovered within a reasonable time.
-    const RELOAD_COOLDOWN_MS: u64 = 15_000;
 
     // ── Windows FFI ──────────────────────────────────────────────────────
 
@@ -309,9 +289,7 @@ mod power {
     /// minimised or backgrounded) since the last call.
     ///
     /// Updates the clock baseline on every call so that subsequent calls
-    /// measure sleep since the *last* call, not since the last reload.
-    /// No cooldown – callers use [`allow_reload_now`] to gate expensive
-    /// recovery actions like `window.reload()`.
+    /// measure sleep since the *last* call.
     pub fn detect_resume() -> bool {
         let Some((biased_ms, unbiased_ms)) = sample() else {
             return false; // API failure or unsupported platform
@@ -341,54 +319,34 @@ mod power {
         }
     }
 
-    /// Returns `true` if a webview reload is permitted (i.e. the
-    /// `RELOAD_COOLDOWN_MS` window has elapsed since the last reload).
-    ///
-    /// On success, records the current biased clock as the last reload
-    /// time.  Call this *only* when about to actually reload – it has
-    /// a side effect of updating the cooldown timestamp.
-    pub fn allow_reload_now() -> bool {
-        let Some((biased_ms, _)) = sample() else {
-            return false; // API failure or unsupported platform
-        };
-
-        let last_reload = LAST_RELOAD_MS.load(Ordering::Relaxed);
-        let elapsed_since_reload = biased_ms.saturating_sub(last_reload);
-        if last_reload > 0 && elapsed_since_reload < RELOAD_COOLDOWN_MS {
-            tracing::info!(
-                elapsed_since_reload_ms = elapsed_since_reload,
-                cooldown_remaining_ms = RELOAD_COOLDOWN_MS - elapsed_since_reload,
-                "Reload cooldown active – skipping webview reload"
-            );
-            false
-        } else {
-            LAST_RELOAD_MS.store(biased_ms, Ordering::Relaxed);
-            true
-        }
-    }
 }
 
 /// Recovery actions after a system wake.
 ///
 /// Called from both the 2-second polling task and the `Focused(true)`
 /// window event handler when [`power::detect_resume`] reports genuine
-/// sleep. Performs two independent actions:
+/// sleep:
 ///
-/// 1. **Force-reconnect MQTT** – the OS may have killed the TCP socket
-///    during sleep, leaving `eventloop.poll()` hung on a dead connection
-///    that the kernel hasn't yet detected. `force_reconnect()` is cheap
-///    (drops + recreates EventLoop) and idempotent, so it needs no
-///    cooldown.
+/// 1. **Rebuild the MQTT connection deterministically** – the OS tears
+///    down TCP sockets during sleep, so the old EventLoop is unusable by
+///    definition. [`DesktopMqttClient::recover_after_wake`] resets the
+///    session state synchronously (so `wait_for_connected` can never read
+///    the stale pre-sleep `Connected` value) and requests a fresh client
+///    + EventLoop pair.
 ///
-/// 2. **Reload webview** – gated by [`power::allow_reload_now`] to
-///    prevent GPU process accumulation during rapid sleep/wake cycles.
+/// 2. **No webview reload** – the frontend follows `mqtt-status` events
+///    (ADR-036: Rust is the source of truth) plus the `get_mqtt_status`
+///    poll fallback and retained bootstrap data, so it recovers in place.
+///    Reloading the webview was the original recovery mechanism, but it
+///    raced the reconnection (showing "Connecting to agent..." for tens
+///    of seconds) and reset UI state unnecessarily.
 ///
 /// **Concurrency guard**: `RECOVERY_IN_PROGRESS` prevents overlapping
 /// calls.  Although `detect_resume()` atomically updates the clock
 /// baseline (so it normally returns `true` only once per sleep event),
 /// the polling task and the `Focused(true)` handler could theoretically
 /// race on the very first call.  The guard ensures only one recovery
-/// task runs at a time, preventing a double `force_reconnect()` that
+/// task runs at a time, preventing a double `recover_after_wake()` that
 /// would reset the connection the first task is waiting on.
 static RECOVERY_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -400,27 +358,29 @@ fn recover_from_wake(app_handle: &tauri::AppHandle) {
         return;
     }
 
-    let window = app_handle.get_webview_window("main");
     let mqtt_client = app_handle.state::<AppState>().mqtt_client.clone();
 
     tauri::async_runtime::spawn(async move {
         // Ensure the guard is cleared even if the task panics.
         let _guard = RecoveryGuard;
 
-        // 1. Force-reconnect MQTT.
+        // 1. Deterministic MQTT rebuild: synchronously reset the session
+        //    state to Connecting (so `wait_for_connected` can never read
+        //    the stale pre-sleep Connected value) and request a fresh
+        //    EventLoop + AsyncClient.
         {
             let guard = mqtt_client.lock().await;
             if let Some(client) = guard.as_ref() {
                 let client = client.lock().await;
-                client.force_reconnect();
-                tracing::info!("MQTT force-reconnect triggered by system wake");
+                client.recover_after_wake();
+                tracing::info!("MQTT deterministic rebuild triggered by system wake");
             }
         }
 
-        // 2. Wait for MQTT to reach Connected state before reloading the
-        //    webview, so the frontend starts with a live connection instead
-        //    of racing against the reconnection and showing "Connecting to
-        //    agent..." for many seconds.
+        // 2. Wait for a real ConnAck. No webview reload happens here –
+        //    the frontend converges in place via `mqtt-status` events
+        //    (ADR-036) + the `get_mqtt_status` poll fallback, so a
+        //    reload would only add latency and UI flicker.
         let connected = {
             let guard = mqtt_client.lock().await;
             match guard.as_ref() {
@@ -430,30 +390,11 @@ fn recover_from_wake(app_handle: &tauri::AppHandle) {
         };
 
         if connected {
-            tracing::info!("MQTT reconnected after wake - reloading webview now");
+            tracing::info!("MQTT reconnected after wake");
         } else {
-            tracing::warn!("MQTT not connected within 10s after wake - reloading webview anyway");
-        }
-
-        // 3. Reload webview with recovery flag (gated by cooldown).
-        //    Both setItem and reload are done in a single `eval` so they
-        //    execute in the same JS context - the flag is set before the
-        //    page unloads.  A separate `window.reload()` call after eval()
-        //    can race against the eval's execution and cancel it.
-        if power::allow_reload_now()
-            && let Some(window) = &window
-        {
-            match window.eval(
-                "sessionStorage.setItem('acowork_recovery_reload', '1');\
-                 window.location.reload()",
-            ) {
-                Ok(()) => tracing::info!("Webview reload triggered with recovery flag"),
-                Err(e) => tracing::error!(
-                    error = %e,
-                    "Failed to eval recovery reload script - \
-                     webview may be in an invalid state after wake"
-                ),
-            }
+            tracing::warn!(
+                "MQTT not connected within 10s after wake – frontend poll fallback will converge"
+            );
         }
     });
 }
@@ -758,11 +699,10 @@ pub fn run() {
 
             // Spawn async task for automatic sleep detection.
             // Polls biased/unbiased monotonic clocks every 2 s.  On
-            // detecting real sleep, `recover_from_wake` force-reconnects
-            // the MQTT client (OS may have killed the TCP socket) and
-            // reloads the webview (gated by cooldown).  The `Focused(true)`
-            // handler below provides immediate detection when the user
-            // clicks the window.
+            // detecting real sleep, `recover_from_wake` deterministically
+            // rebuilds the MQTT connection (the OS tears down TCP sockets
+            // during sleep).  The `Focused(true)` handler below provides
+            // immediate detection when the user clicks the window.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));

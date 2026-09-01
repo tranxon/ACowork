@@ -105,35 +105,45 @@ impl ShellTool {
     /// Build the ToolSpec with a platform-appropriate description.
     ///
     /// Bash tools get Unix-style guidance; PowerShell tools get Windows-style
-    /// guidance so the LLM produces syntactically correct commands.
+    /// guidance so the LLM produces syntactically correct commands. All three
+    /// branches share the head+tail budget hint so the LLM sees the same
+    /// output contract regardless of platform — this is the *only* signal
+    /// it has about the 4 KB + 1 KB truncation behaviour.
     fn build_spec(&self) -> ToolSpec {
+        // Shared budget hint: must mention "4 KB" + "1 KB" (test guard) and
+        // both "grep" (for Unix/zsh/bash) and "Select-String" (for
+        // PowerShell) so the test assertion holds on every platform.
+        const HEAD_TAIL_HINT: &str = "IMPORTANT: Output shows the first 4 KB \
+            and the last 1 KB — anything in between is replaced with an \
+            '[... N bytes omitted from middle]' marker. For diagnostic commands \
+            (compile errors, test failures, stack traces) the actionable error \
+            is almost always at the tail and is preserved. To avoid the marker \
+            entirely, pre-filter with 'grep', 'head', 'tail', or narrower \
+            command flags. To re-query the omitted middle, use 'grep -n' on \
+            Unix-like shells or 'Select-String' on PowerShell.";
         let description = match self.tool_name.as_str() {
             "bash" => format!(
                 "Execute a command in Git Bash (Unix-style shell on Windows). \
-                 IMPORTANT: Output is capped at {}KB — pipe through 'head -N' or \
-                 'tail -N' to limit lines, filter with 'grep' to narrow results, \
-                 or use more specific patterns to avoid oversized responses that \
-                 exhaust the context window. \
+                 {HEAD_TAIL_HINT} \
                  For absolute paths outside the workspace, prefer Windows format (e.g. 'C:/Users/...'). \
                  {fallback}",
-                crate::tools::output::MAX_OUTPUT_BYTES / 1024,
                 fallback = self.fallback_hint()
             ),
             "powershell" => format!(
                 "Execute a command in {shell_name} ({shell_binary}). \
-                 IMPORTANT: Output is capped at {max_kb}KB — use 'Select-Object -First N' \
-                 to limit results, 'Select-String' to filter, or narrower parameters \
-                 to avoid oversized responses that exhaust the context window. \
+                 {HEAD_TAIL_HINT} \
                  Use this if 'bash' is unavailable or for Windows-specific tasks. \
                  {fallback}",
-                max_kb = crate::tools::output::MAX_OUTPUT_BYTES / 1024,
                 shell_name = self.shell_name,
                 shell_binary = self.shell_binary,
                 fallback = self.fallback_hint()
             ),
             _ => format!(
-                "Execute a command in {} ({}). Use with caution.",
-                self.shell_name, self.shell_binary
+                "Execute a command in {shell_name} ({shell_binary}). \
+                 {HEAD_TAIL_HINT} \
+                 Use with caution.",
+                shell_name = self.shell_name,
+                shell_binary = self.shell_binary
             ),
         };
 
@@ -318,7 +328,18 @@ impl Tool for ShellTool {
                 // Guard against unbounded shell output (e.g. `cat` on a
                 // multi-GB file or `dir /s` in a large tree) that would
                 // exhaust the LLM token budget and crash the session task.
-                let (content, _truncated) = output::truncate_output(&content);
+                //
+                // Use head+tail truncation (DeepSeek-style aggressive):
+                // keep the first 4 KB (command echo + setup) and the last
+                // 1 KB (final result / error message). Diagnostic commands
+                // (cargo / pytest / npm) almost always put the actionable
+                // error at the tail, so this is dramatically more useful
+                // than naive head-only truncation.
+                let (content, _truncated) = output::truncate_head_tail_output(
+                    &content,
+                    output::MAX_SHELL_HEAD_BYTES,
+                    output::MAX_SHELL_TAIL_BYTES,
+                );
 
                 Ok(ToolResult {
                     ok: output.status.success(),
@@ -448,6 +469,220 @@ mod tests {
             result.content.contains("hello_agentcowork"),
             "Output should contain echo text: {}",
             result.content
+        );
+    }
+
+    // ── E2E: output truncation behaviour ─────────────────────────────
+    //
+    // These tests go through `Tool::execute()` (the actual LLM-facing
+    // entry point) and verify the head+tail truncation behaviour at the
+    // 4 KB + 1 KB budget. They are critical because the previous
+    // constant-driven design (`truncate_output` with a single byte cap
+    // would throw away stderr at the tail — see git history of
+    // `tools/output.rs::truncate_head_tail_output`).
+
+    /// Build a real `ShellTool` from the platform-detected shell. Panics
+    /// with a clear message if no shell is available (which is itself a
+    /// CI-environment bug worth surfacing).
+    fn real_shell() -> ShellTool {
+        let shells = crate::platform::detected_shells();
+        let primary = shells
+            .first()
+            .expect("E2E shell test requires at least one shell on PATH");
+        ShellTool::new(
+            &primary.tool_name,
+            &primary.display_name,
+            &primary.binary,
+            &primary.path,
+            &primary.arg,
+        )
+    }
+
+    /// Generate N bytes of 'x' on stdout. Cross-platform (bash + sh).
+    fn cmd_stdout_n_bytes(n: usize) -> String {
+        format!("head -c {n} /dev/zero | tr '\\0' 'x'")
+    }
+
+    /// Generate N bytes of 'x' on stderr.
+    fn cmd_stderr_n_bytes(n: usize) -> String {
+        format!("head -c {n} /dev/zero | tr '\\0' 'x' >&2")
+    }
+
+    #[tokio::test]
+    async fn e2e_small_output_returns_full_content_no_marker() {
+        let tool = real_shell();
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("hello"));
+        assert!(
+            !result.content.contains("omitted from middle"),
+            "small output must not trigger marker: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_large_stdout_truncated_with_head_tail_marker() {
+        // 50 KB stdout ≫ 5 KB budget → must be truncated.
+        let tool = real_shell();
+        let n = 50_000;
+        let result = tool
+            .execute(serde_json::json!({"command": cmd_stdout_n_bytes(n)}), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+
+        let content_len = result.content.len();
+        // After truncation: budget (5 KB) + marker (~250 bytes). Anything
+        // noticeably under n proves truncation happened.
+        assert!(
+            content_len < n / 4,
+            "expected truncation; got {content_len} bytes (orig {n})"
+        );
+        // Head + tail were both kept
+        assert!(
+            result.content.contains("omitted from middle"),
+            "marker must be present: {}",
+            &result.content[..result.content.len().min(500)]
+        );
+        // Marker carries the omitted byte count
+        assert!(
+            result.content.contains("bytes omitted"),
+            "marker must show byte count"
+        );
+        // Marker offers re-query commands (this is the whole point of head+tail over naive head)
+        assert!(
+            result.content.contains("grep -n"),
+            "marker must teach LLM how to fetch the missing middle"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_large_stderr_only_preserves_stderr_at_tail() {
+        // When stderr is the only signal (e.g. cargo/pytest failure
+        // pattern), it must survive head+tail truncation. Critical
+        // regression guard.
+        let tool = real_shell();
+        let n = 30_000;
+        // Stderr has a unique sentinel at the very end so we can detect
+        // whether the tail was preserved.
+        let sentinel = "FATAL_ERROR_SENTINEL_AT_END";
+        let cmd = format!("{{ {}; echo '{sentinel}' >&2; }}", cmd_stderr_n_bytes(n));
+        let result = tool
+            .execute(serde_json::json!({"command": cmd}), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains(sentinel),
+            "stderr tail sentinel must survive truncation (1 KB tail budget)"
+        );
+        assert!(result.content.contains("STDERR:"));
+    }
+
+    #[tokio::test]
+    async fn e2e_large_stdout_short_stderr_preserves_stderr_at_tail() {
+        // THE central bug the head+tail design solves: a large stdout
+        // used to crowd the short stderr off the end of a head-only
+        // truncate. With head+tail, stderr sits at the very end (after
+        // the "STDERR:" wrapper) and falls inside the 1 KB tail budget.
+        let tool = real_shell();
+        let sentinel = "PYTEST_FAIL_SENTINEL";
+        let cmd = format!(
+            "{{ {}; echo '{sentinel}' >&2; }}",
+            cmd_stdout_n_bytes(50_000)
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": cmd}), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains(sentinel),
+            "stderr must be preserved in tail even when stdout is huge"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_exact_budget_no_marker() {
+        // Output exactly MAX_SHELL_HEAD_BYTES + MAX_SHELL_TAIL_BYTES
+        // bytes → no marker (boundary case). Regression guard: the
+        // off-by-one that would make this trigger a marker is easy to
+        // introduce.
+        let tool = real_shell();
+        let n = output::MAX_SHELL_HEAD_BYTES + output::MAX_SHELL_TAIL_BYTES;
+        let result = tool
+            .execute(serde_json::json!({"command": cmd_stdout_n_bytes(n)}), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            !result.content.contains("omitted from middle"),
+            "exact-budget output must not trigger marker (n={n}, got {} bytes)",
+            result.content.len()
+        );
+        // And the content should be roughly the full input (no marker bytes added)
+        assert!(result.content.len() >= n);
+    }
+
+    #[tokio::test]
+    async fn e2e_just_over_budget_triggers_marker() {
+        let tool = real_shell();
+        let n = output::MAX_SHELL_HEAD_BYTES + output::MAX_SHELL_TAIL_BYTES + 100;
+        let result = tool
+            .execute(serde_json::json!({"command": cmd_stdout_n_bytes(n)}), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("omitted from middle"),
+            "output one byte over budget must trigger marker"
+        );
+        assert!(result.content.contains("100 bytes omitted"));
+    }
+
+    #[tokio::test]
+    async fn e2e_spec_value_describes_head_tail_budget() {
+        // The spec text is the LLM's only signal about output shape. If
+        // this drifts from the actual behaviour, the LLM mispredicts.
+        let tool = real_shell();
+        let spec = tool.spec();
+        let desc = &spec.description;
+
+        // The bash description must mention both the head and tail
+        // budget so the LLM knows what's preserved.
+        assert!(
+            desc.contains("4 KB") && desc.contains("1 KB"),
+            "bash spec must mention both 4 KB and 1 KB budgets; got: {desc}"
+        );
+        // Must teach the LLM how to recover the omitted middle.
+        assert!(
+            desc.contains("grep") || desc.contains("Select-String"),
+            "bash spec must offer a concrete re-query hint; got: {desc}"
+        );
+        // Should NOT lie about being a simple byte cap (that would be
+        // the old behaviour and contradict the actual head+tail design).
+        assert!(
+            !desc.contains("capped at"),
+            "bash spec must not claim a single 'capped at' byte cap; got: {desc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_spec_value_schema_does_not_change_with_constant_drift() {
+        // Regression guard: spec schema must stay stable so LLM tool
+        // calls keep working when the constants change.
+        let tool = real_shell();
+        let schema = tool.spec().input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["command"].is_object());
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(
+            required,
+            &vec![serde_json::Value::String("command".to_string())]
         );
     }
 }

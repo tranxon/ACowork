@@ -40,8 +40,10 @@ pub mod tools;
 
 // Re-exports for convenience
 pub use manifest::{
-    AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ProviderConfig, RagToolConfig,
-    RoutingConfig, SkillMode, SkillsConfig, ToolDeclaration,
+    AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ManifestConsolidationQuality,
+    ManifestDedupQuality, ManifestEdgeWeightQuality, ManifestGraphExpandQuality,
+    ManifestMemoryQuality, ProviderConfig, RagToolConfig, RoutingConfig, SkillMode, SkillsConfig,
+    ToolDeclaration,
 };
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,

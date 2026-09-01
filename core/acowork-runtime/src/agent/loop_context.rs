@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::Provider;
 
+use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
@@ -35,15 +36,6 @@ pub(crate) const CONTEXT_WARN_PERCENT: f64 = 70.0;
 pub(crate) const CONTEXT_COMPACT_PERCENT: f64 = 80.0;
 pub(crate) const CONTEXT_HARD_PERCENT: f64 = 90.0;
 pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
-
-/// Number of conversational rounds kept at the tail after LLM compaction.
-/// A round begins with a User message, so this preserves the last N User
-/// messages and everything after them. Consumed by both
-/// [`HistoryManager::replace_middle_with_summary`] and the
-/// `CompactionEventMeta` record persisted in the JSONL session log (the
-/// session restorer reads the most recent such event to anchor the replay
-/// window on cold-start resume).
-pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
 
 // ── ADR-056: Distillation resolution types ────────────────────────
 
@@ -208,32 +200,32 @@ impl AgentLoop {
     /// No additional margin is applied here — [`compact_history_if_needed`]
     /// provides early warning at 80% usage.
     ///
-    /// **ADR-052**: this budget-fallback path is intentionally a
-    /// **token-only** fallback. It performs FIFO trim + emergency trim only;
-    /// it does NOT call any compression/placeholder logic. Placeholder
-    /// compression is now LLM-initiated via the `context_abandon` tool;
-    /// budget fallback must not be conflated with the tool-compression
-    /// path. (Historically this was a fix for the
-    /// recall → compress → recall loop in ADR-032.)
-    pub(crate) fn trim_history_to_budget(&mut self, model_name: &str) {
+    /// ADR-061 §11.2: ensure history fits the model budget by routing
+    /// through the 8-level compression plan exclusively.
+    ///
+    /// FIFO trim and emergency trim are deleted; when history exceeds the
+    /// budget, [`Self::compact_history_if_needed`] is forced so the
+    /// 8-level plan runs (level 8 is guaranteed to fit once the summary
+    /// size is known — §19.5). Failure is explicit: the compaction path
+    /// emits `ChunkEvent::Error` and leaves history untouched (§11.3)
+    /// instead of silently destroying cache continuity.
+    ///
+    /// When history is already within budget this is a no-op — the
+    /// per-iteration call sites (loop_.rs budget check) only pay a
+    /// token-count comparison.
+    pub(crate) async fn trim_history_to_budget(&mut self, model_name: &str) {
         let budget = self.context_trim_budget(model_name);
 
         // Sync HistoryManager::max_tokens to the actual model budget so
-        // trim_fifo uses the correct threshold. Without this, max_tokens
-        // remains at the static config default (128K) even after model
-        // switch, capabilities update, or max_output_tokens change.
+        // downstream token accounting uses the correct threshold. Without
+        // this, max_tokens remains at the static config default (128K)
+        // even after model switch, capabilities update, or
+        // max_output_tokens change.
         self.session.history.set_max_tokens(budget);
 
-        // Stage 1: FIFO trim oldest non-system messages until within budget
-        self.session.history.trim_fifo();
-
-        // Stage 2: If still over budget after FIFO, use emergency trim as safety net
         if self.session.history.token_count() > budget {
-            self.session.history.emergency_trim();
+            self.compact_history_if_needed(model_name, true).await;
         }
-
-        // NOTE: placeholder compression is intentionally NOT performed here.
-        // See method-level doc above.
     }
 
     /// Resolve the model to use for session distillation or compaction.
@@ -554,8 +546,11 @@ impl AgentLoop {
     /// Check context usage after LLM response and trigger compaction if needed.
     ///
     /// Per [ADR-011], this implements the three-stage compaction strategy:
-    /// - 80% usage → LLM-based compaction (`compact_via_llm` + `replace_middle_with_summary`)
-    /// - `CONTEXT_CRITICAL_PERCENT` usage → emergency trim (safety net)
+    /// - 80% usage → LLM-based compaction (`compact_via_llm` + 8-level plan)
+    ///
+    /// ADR-061: the `CONTEXT_CRITICAL_PERCENT` emergency-trim stage is
+    /// deleted (§11); the 8-level plan (level 8 floor) replaces it, and
+    /// LLM failure emits `ChunkEvent::Error` instead of FIFO trimming (§11.3).
     ///
     /// When `force` is true (manual trigger from user), the 80% threshold is
     /// bypassed and compaction proceeds regardless of current usage percentage.
@@ -672,7 +667,17 @@ impl AgentLoop {
                             error = %e,
                             "Compaction LLM call failed, trying next tier"
                         );
+                        // LowQuality is a model-capability problem — stepping
+                        // down the chain only gets cheaper/weaker, so discard
+                        // instead of retrying (quality-over-nothing).
+                        let non_retryable = matches!(
+                            &e,
+                            crate::error::RuntimeError::Summary(se) if !se.is_retryable()
+                        );
                         last_err = Some(e);
+                        if non_retryable {
+                            break;
+                        }
                     }
                 }
             }
@@ -701,11 +706,70 @@ impl AgentLoop {
                     // agent-total line in Results Panel updates even if
                     // the session's persisted meta is still on disk.
                     self.core.accumulate_llm_usage(&usage);
-                    let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
-                    let removed = self
+                    let validated = crate::episode_distill::parse_and_validate_summary(
+                        &summary,
+                        Some(&self.session.history.user_intent_fallback_text()),
+                    );
+                    // ADR-061: summary first (input = full history), then
+                    // pick the 8-level plan against the now-known summary
+                    // size, then apply (§19.1). History is untouched when no
+                    // plan fits the budget (§19.5).
+                    //
+                    // The marker text carries both the <summary> and the
+                    // <user_intent> block (§8.2: user_intent stays inside
+                    // the marker, not a separate message) so the next
+                    // compaction's LLM sees the preserved user intents.
+                    let marker_text = format!(
+                        "<summary>{}</summary>\n<user_intent>{}</user_intent>",
+                        validated.summary, validated.user_intent
+                    );
+                    // ADR-061 §19.3: the per-agent compression ratio threshold
+                    // (Agent Setup panel, agent_config.json) replaces the
+                    // built-in default; None → MIN_COMPRESSION_RATIO (0.90).
+                    let min_ratio = self
+                        .core
+                        .compression_ratio_threshold
+                        .unwrap_or(MIN_COMPRESSION_RATIO);
+                    let (level, removed) = match self
                         .session
                         .history
-                        .replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
+                        .plan_compression(&marker_text, min_ratio)
+                    {
+                        Ok(plan) => {
+                            let level = plan.level;
+                            match self
+                                .session
+                                .history
+                                .apply_compression(plan, &marker_text, min_ratio)
+                            {
+                                Ok(outcome) => {
+                                    tracing::info!(
+                                        level = outcome.level,
+                                        original_tokens = outcome.original_tokens,
+                                        new_tokens = outcome.new_tokens,
+                                        compression_ratio = ?outcome.compression_ratio,
+                                        removed_messages = outcome.removed_messages,
+                                        "ADR-061: 8-level compression plan applied"
+                                    );
+                                    (level, outcome.removed_messages)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "ADR-061: compression apply rejected, history untouched"
+                                    );
+                                    (level, 0)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "ADR-061: no compression plan fits budget, history untouched"
+                            );
+                            (0, 0)
+                        }
+                    };
 
                     // Recompute usage after compaction (used both for the
                     // JSONL event payload and the stage-3 emergency check).
@@ -742,12 +806,12 @@ impl AgentLoop {
                             // *position* in the log, not the id range.
                             compacted_from_id: String::new(),
                             compacted_to_id: String::new(),
-                            keep_last_rounds: KEEP_LAST_ROUNDS,
+                            level,
                             model: compact_model.clone(),
                             before_tokens: current_tokens,
                             after_tokens: new_tokens,
                         };
-                        conversation.append_compaction_event(&stripped, meta);
+                        conversation.append_compaction_event(&marker_text, meta);
                     }
 
                     // Write compaction summary to Grafeo
@@ -757,13 +821,24 @@ impl AgentLoop {
                         .as_ref()
                         .map(|c| c.session_id().to_string())
                         .unwrap_or_default();
-                    crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
+                    if let Err(e) = crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
                         &summary,
                         &session_id,
                         &memory_provider,
                         self.core.embedding_provider.as_deref(),
                     )
-                    .await;
+                    .await
+                    {
+                        // Write failure is infrastructure-level: the compaction
+                        // itself already succeeded (history replaced), so log
+                        // and continue — the user-facing error surface stays
+                        // reserved for LLM generation failures.
+                        tracing::warn!(
+                            error = %e,
+                            session_id = %session_id,
+                            "Failed to write compaction summary to provider (non-fatal)"
+                        );
+                    }
 
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
@@ -783,30 +858,41 @@ impl AgentLoop {
                         "LLM compaction completed"
                     );
 
-                    // Stage 3: 95% → emergency trim (safety net, even after compaction)
+                    // Stage 3: 95% → the 8-level plan already guarantees
+                    // post-compaction size ≤ budget (apply validates
+                    // projected ≤ budget; level 8 is the floor — §19.5).
+                    // Usage ≥ CRITICAL here simply means the conversation
+                    // is still large after a successful level-1..7 fit;
+                    // emergency trim is deleted (ADR-061 §11) and the next
+                    // 80% trigger will re-compact when needed.
                     if new_usage >= CONTEXT_CRITICAL_PERCENT {
-                        let em_removed = self.session.history.emergency_trim();
                         tracing::warn!(
-                            em_removed,
                             after_usage = ?new_usage,
-                            "Emergency trim performed after compaction (still >= CONTEXT_CRITICAL_PERCENT)"
+                            "Post-compaction usage still >= CONTEXT_CRITICAL_PERCENT (within budget; no emergency trim)"
                         );
                     }
                 }
                 None => {
-                    tracing::warn!(
+                    // ADR-061 §11.3: LLM unavailable → explicit failure.
+                    // History is left untouched; the FIFO + emergency trim
+                    // fallback is deleted. The user decides (new session /
+                    // larger-window model / manual compress) instead of
+                    // silently destroying cache continuity.
+                    tracing::error!(
                         error = %last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
                         target_count = targets.len(),
-                        "All distillation targets failed, falling back to FIFO + emergency trim"
+                        "ADR-061: LLM compaction failed — history untouched (no FIFO fallback)"
                     );
-                    self.session.history.trim_fifo();
-                    if self.session.history.token_count() > budget {
-                        self.session.history.emergency_trim();
-                    }
-                    // ADR-032 (revised): placeholder compression is intentionally
-                    // NOT performed here either. The fallback path is token-only,
-                    // matching the behavior of `trim_history_to_budget`. See the
-                    // docstring on that method for the full rationale.
+                    let _ = self.session_core.try_send_chunk(ChunkEvent::Error {
+                        user_message: "Context compaction failed. Please start a new conversation or compress manually."
+                            .to_string(),
+                        detail: last_err
+                            .as_ref()
+                            .map(|e| e.to_string())
+                            .unwrap_or_default(),
+                        error_type: "ContextOverflow".to_string(),
+                        message_id: "compaction-failed".to_string(),
+                    });
                 }
             }
 
@@ -874,15 +960,17 @@ impl AgentLoop {
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
-            // Stage 3: emergency trim without attempting compaction
-            // (when usage jumps directly to >= CONTEXT_CRITICAL_PERCENT)
-            let removed = self.session.history.emergency_trim();
-            tracing::warn!(
-                removed,
+            // NOTE: this branch is unreachable today — CONTEXT_COMPACT_PERCENT
+            // (80) < CONTEXT_CRITICAL_PERCENT (95), so any usage ≥ 95% enters
+            // the compaction branch above first. It is kept as documentation
+            // of the deleted Stage-3 emergency-trim safety net (ADR-061 §11):
+            // the 8-level plan replaces it, and explicit failure (ChunkEvent::Error)
+            // replaces silent FIFO trimming.
+            tracing::error!(
                 usage_percent = ?usage_percent,
                 current_tokens,
                 budget,
-                "Emergency trim performed (usage >= CONTEXT_CRITICAL_PERCENT)"
+                "Unexpected critical usage without compaction — unreachable; no emergency trim (ADR-061)"
             );
         }
     }
@@ -984,6 +1072,10 @@ impl AgentLoop {
         let mut chat_request = context_builder.build(
             &self.core.manifest,
             &self.session.history,
+            // ADR-060 §5.5: Block D — the current user message staged by
+            // `run_inner`. `None` on the debug-replay path and for direct
+            // loop usages without a staged message.
+            self.pending_user_message.as_ref(),
             caps.as_ref(),
             max_output_limit,
         );
@@ -1065,11 +1157,16 @@ impl AgentLoop {
         chat_request
     }
 
-    /// ②.6 Context usage circuit-breaking — emergency trim when context
-    /// exceeds hard threshold (90%), warn when approaching limit (70%).
+    /// ②.6 Context usage circuit-breaking — run the 8-level compression
+    /// plan when context exceeds the hard threshold (90%), warn when
+    /// approaching the limit (70%).
+    ///
+    /// ADR-061 §11.2: the hard-threshold path routes through
+    /// [`Self::compact_history_if_needed`] (force) — `emergency_trim` is
+    /// deleted, and failure is explicit (`ChunkEvent::Error`).
     ///
     /// Returns `true` if the chat_request needs to be rebuilt after trimming.
-    pub(crate) fn check_context_overflow_and_trim(&mut self, current_model: &str) -> bool {
+    pub(crate) async fn check_context_overflow_and_trim(&mut self, current_model: &str) -> bool {
         let usable = self.context_trim_budget(current_model);
         let warn_threshold = (usable as f64 * (CONTEXT_WARN_PERCENT / 100.0)) as u64;
         let hard_threshold = (usable as f64 * (CONTEXT_HARD_PERCENT / 100.0)) as u64;
@@ -1080,11 +1177,10 @@ impl AgentLoop {
                 current_tokens,
                 hard_threshold,
                 usable_context = usable,
-                "Context usage exceeds hard limit, emergency trimming"
+                "Context usage exceeds hard limit, running 8-level compaction"
             );
-            let removed = self.session.history.emergency_trim();
-            tracing::info!(removed, "Emergency trimmed messages for oversized context");
-            removed > 0 // signal that request needs rebuild
+            self.compact_history_if_needed(current_model, true).await;
+            true // signal that request needs rebuild
         } else if current_tokens > warn_threshold {
             tracing::warn!(
                 current_tokens,
@@ -1275,7 +1371,10 @@ impl AgentLoop {
     /// appending tool results, which can be very large.
     ///
     /// Triggers when `current_tokens + estimated_result_tokens > 70% of usable context`.
-    pub(crate) fn pre_trim_for_tool_results(
+    ///
+    /// ADR-061 §11.2: the pre-trim routes through the 8-level plan
+    /// (force) instead of `trim_fifo` (deleted).
+    pub(crate) async fn pre_trim_for_tool_results(
         &mut self,
         tool_results: &[String],
         current_model: &str,
@@ -1295,7 +1394,7 @@ impl AgentLoop {
                 usable_budget,
                 "Pre-trimming history before appending tool results"
             );
-            self.trim_history_to_budget(current_model);
+            self.compact_history_if_needed(current_model, true).await;
         }
     }
 
@@ -1428,6 +1527,7 @@ impl AgentLoop {
 mod tests {
     use super::*;
     use crate::agent::agent_core::BuiltinToolEntry;
+    use crate::agent::context::ContextBuilder;
     use crate::config::RuntimeConfig;
     use acowork_core::protocol::{
         ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry,
@@ -1579,6 +1679,136 @@ mod tests {
     }
 
     // ── resolve_distill_model: three-tier fallback ─────────────────────
+
+    #[test]
+    fn build_chat_request_block_layout_b_contains_current_and_d_duplicate() {
+        // ADR-060 §5.5/§7.3: Block B is the full append-only history — it
+        // INCLUDES the current user message — and Block D is a byte-identical
+        // duplicate staged by `run_inner`. Request order: A → B → C → D.
+        let mut loop_ = build_loop();
+        loop_.session.history.append(ChatMessage::user("First turn"));
+        loop_.session.history.append(ChatMessage::assistant("First reply"));
+        let current = ChatMessage::user("Second turn");
+        loop_.session.history.append(current.clone());
+        loop_.pending_user_message = Some(current.clone());
+        // Block C source: session todo snapshot.
+        loop_.session.update_todos(
+            vec![crate::agent::session_state::TodoItem {
+                id: "t1".to_string(),
+                content: "Task 1".to_string(),
+                status: crate::agent::session_state::TodoStatus::Pending,
+            }],
+            false,
+        );
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "test-model");
+
+        // [0] Block A: system kernel.
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        assert!(
+            !request.messages[0].content.contains("Todo Task List"),
+            "Block A must not contain the dynamic todo snapshot"
+        );
+
+        // Block B: history turns present, including the current user message.
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|m| m.role == MessageRole::User && m.content == "Second turn"),
+            "Block B must include the current user message"
+        );
+
+        // Block C: User role (never System), todo snapshot, after Block B.
+        let block_c = request
+            .messages
+            .iter()
+            .find(|m| m.content.contains("Todo Task List"))
+            .unwrap();
+        assert_eq!(
+            block_c.role, MessageRole::User,
+            "Block C must use User role (ADR-060 §5.4)"
+        );
+
+        // Block D (last): byte-identical duplicate of the staged message.
+        let block_d = request.messages.last().unwrap();
+        assert_eq!(block_d.role, MessageRole::User);
+        assert_eq!(block_d.content, current.content);
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.content == "Second turn")
+                .count(),
+            2,
+            "current user message appears exactly twice: Block B copy + Block D duplicate"
+        );
+    }
+
+    #[test]
+    fn build_chat_request_block_d_none_in_tool_iteration() {
+        use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+        // ADR-060 §5.5/§7.3: tool-loop iterations have no staged message
+        // (`run_inner` clears it) — the request ends with the tool result
+        // and the original user turn appears only once (Block B).
+        let mut loop_ = build_loop();
+        loop_.session.history.append(ChatMessage::user("Turn"));
+        // A REAL tool_call on the assistant turn keeps the tool result
+        // from being classified as orphaned by sanitize_messages.
+        loop_.session.history.append(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "test_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        ));
+        loop_.session.history.append(ChatMessage::tool("toolu_1", "ok"));
+        loop_.pending_user_message = None;
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "test-model");
+
+        let last = request.messages.last().unwrap();
+        assert_eq!(
+            last.role,
+            MessageRole::Tool,
+            "tool iteration: last message must be the tool result, no Block D"
+        );
+        assert_eq!(
+            request.messages.iter().filter(|m| m.content == "Turn").count(),
+            1,
+            "no Block D means the user turn appears exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_inject_does_not_set_flag_without_provider() {
+        // ADR-060 §6.3: `memory_retrieved_for_session` is set only on a
+        // SUCCESSFUL first retrieval. With no memory provider the call
+        // bails early and the flag must stay false — a transient provider
+        // absence must not permanently starve the session.
+        let mut loop_ = build_loop();
+        assert!(loop_.core.memory_provider().is_none());
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        loop_
+            .retrieve_and_inject_memories("hello", &mut builder)
+            .await;
+        assert!(
+            !loop_.memory_retrieved_for_session,
+            "no provider → no retrieval → flag stays false"
+        );
+        // Repeated calls keep retrying (flag still false).
+        loop_
+            .retrieve_and_inject_memories("hello again", &mut builder)
+            .await;
+        assert!(!loop_.memory_retrieved_for_session);
+    }
 
     #[test]
     fn tier1_global_default_is_picked_when_set_and_available() {
@@ -1877,6 +2107,14 @@ mod tests {
         fn log(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
             self.call_log.clone()
         }
+        /// Build from an explicit response script — used by tests that need
+        /// text responses of varying quality (e.g. a LowQuality first call).
+        fn from_responses(responses: Vec<MockResponse>) -> Self {
+            Self {
+                responses: std::sync::Arc::new(std::sync::Mutex::new(responses)),
+                call_log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -1994,7 +2232,10 @@ mod tests {
         // To force the *call-phase* fallback, install a provider mock
         // that fails on the first call regardless of which tier it is.
         // Three targets → three attempts. First call fails, second succeeds.
-        let fail_once = Tier1FailThenSucceedProvider::new(1, "<summary>ok</summary>");
+        let fail_once = Tier1FailThenSucceedProvider::new(
+            1,
+            "<summary>a valid compact model summary output here</summary>",
+        );
         let call_log = fail_once.log();
         loop_.core.update_provider(
             std::sync::Arc::new(fail_once) as std::sync::Arc<dyn Provider>,
@@ -2083,6 +2324,74 @@ mod tests {
         assert!(
             tokens_after <= tokens_before,
             "FIFO path must not grow history: before={tokens_before} after={tokens_after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_phase_fallback_stops_on_low_quality_without_stepping_down() {
+        // LowQuality means the top tier's model cannot produce a usable
+        // summary — stepping down the chain only gets cheaper/weaker, so
+        // the chain must STOP (quality-over-nothing, P1), not retry with a
+        // weaker model. Script: call 1 returns a placeholder summary
+        // (< 20 chars → LowQuality), call 2 would return a valid summary.
+        // If the chain wrongly stepped down, call 2 would succeed and
+        // history would be compacted — the test asserts neither happens.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        let provider = Tier1FailThenSucceedProvider::from_responses(vec![
+            MockResponse::Text {
+                content: "<summary>ok</summary>".to_string(),
+            },
+            MockResponse::Text {
+                content: "<summary>a valid compact model summary output here</summary>"
+                    .to_string(),
+            },
+        ]);
+        let call_log = provider.log();
+        loop_.core.update_provider(
+            std::sync::Arc::new(provider) as std::sync::Arc<dyn Provider>,
+            "deepseek-v4-pro".to_string(),
+        );
+
+        for i in 0..10 {
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: format!("Message #{i}"),
+                ..Default::default()
+            });
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::Assistant,
+                content: format!("Reply #{i}"),
+                ..Default::default()
+            });
+        }
+
+        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+
+        // Only ONE LLM call: LowQuality breaks the chain instead of
+        // stepping down to a weaker model.
+        let log = call_log.lock().unwrap();
+        assert_eq!(
+            log.len(),
+            1,
+            "LowQuality must not step down the chain; call log: {log:?}"
+        );
+
+        // History untouched: no compaction marker, no raw replacement.
+        let has_marker = loop_
+            .session
+            .history
+            .messages()
+            .iter()
+            .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME));
+        assert!(
+            !has_marker,
+            "low-quality compaction must leave history untouched"
         );
     }
 }

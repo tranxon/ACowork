@@ -414,7 +414,45 @@ export const VirtualMessageList = React.forwardRef<
       scrollToBottom: () => {
         const count = virtualizer.options.count;
         if (count === 0) return;
+        const el = virtualizer.scrollElement;
+        if (!el) return;
+        // Step 1: force the virtualizer to mount the last item.  The
+        // resulting DOM growth is *asynchronous* and spans several frames:
+        //   scrollToIndex → browser scroll event → virtualizer re-evaluates
+        //   visible items → React commit → ResizeObserver measures new
+        //   items → measurementsCache + totalSize update → scrollHeight
+        //   grows (repeat).  estimateSize-based offsets land short because
+        //   explore_group caps at 272px and assistant text with Mermaid/
+        //   code underestimates by hundreds of px.  In a 2k+ message
+        //   session most bottom blocks have never been measured, so a single
+        //   scrollToIndex leaves the user hundreds of px above the real
+        //   bottom — then each subsequent click measures a few more items
+        //   and the scrollTop creeps forward.
         virtualizer.scrollToIndex(count - 1, { align: "end" });
+        // Step 2: keep snapping to the real bottom until scrollHeight
+        // stops growing across consecutive frames.  Each frame we set
+        // scrollTop = scrollHeight - clientHeight based on the *current*
+        // DOM truth, so as React commits and ResizeObserver fires the
+        // scrollTop rides forward with the bottom.  Bail out after 2
+        // stable frames, or 30 frames (500ms) as a safety cap.
+        let stableFrames = 0;
+        let prevMax = -1;
+        let n = 0;
+        const tick = () => {
+          n++;
+          const max = el.scrollHeight - el.clientHeight;
+          el.scrollTop = max;
+          if (max === prevMax && el.scrollTop >= max - 0.5) {
+            stableFrames++;
+          } else {
+            stableFrames = 0;
+            prevMax = max;
+          }
+          if (stableFrames < 2 && n < 30) {
+            requestAnimationFrame(tick);
+          }
+        };
+        requestAnimationFrame(tick);
       },
       scrollToTop: () => {
         const count = virtualizer.options.count;

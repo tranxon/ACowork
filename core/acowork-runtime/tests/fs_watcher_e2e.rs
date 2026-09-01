@@ -138,6 +138,7 @@ fn fs_watcher_full_chain_e2e() {
             identity_update_tx: None,
             provider_update_tx: None,
             search_update_tx: None,
+            embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
             work_dir: std::env::temp_dir().join(format!("acowork-fs-e2e-{}", uuid::Uuid::new_v4())),
@@ -159,6 +160,17 @@ fn fs_watcher_full_chain_e2e() {
         let mut set = WorkspaceWatcherSet::new(AGENT_ID.to_string(), slot);
         set.sync_from_resolver(&resolver_for(vec![("ws-a", ws_a.clone())]));
         assert_eq!(set.watcher_count(), 1);
+        // Demand-driven: watch the workspace root (NonRecursive) so the
+        // root-level file ops below are observed.
+        set.set_watch_targets("ws-a", vec![std::path::PathBuf::from("")]);
+
+        // Watch targets travel over an async control channel to the
+        // watcher task, and PollWatcher only baselines a path once its
+        // `watch()` lands. Wait out a poll cycle so the root watch is
+        // actually live before the first file op below — otherwise a
+        // pre-watch create is never observed (the file already exists at
+        // baseline time and produces no event).
+        tokio::time::sleep(Duration::from_millis(600)).await;
 
         // ── Scenario 1: external CLI creates a new file (two rapid
         //    writes in one aggregation window → a single Created).
@@ -184,6 +196,12 @@ fn fs_watcher_full_chain_e2e() {
             ("ws-b", ws_b.clone()),
         ]));
         assert_eq!(set.watcher_count(), 2);
+        // The new workspace needs its own root watch target (the
+        // re-sync keeps ws-a's existing target set).
+        set.set_watch_targets("ws-b", vec![std::path::PathBuf::from("")]);
+        // Same live-watch wait as ws-a (async target channel + poll
+        // baseline), so the create below is actually observed.
+        tokio::time::sleep(Duration::from_millis(600)).await;
         std::fs::write(ws_b.join("in-new-workspace.txt"), b"data").unwrap();
         tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
 

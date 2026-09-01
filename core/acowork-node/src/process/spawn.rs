@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use crate::error::{NodeError, Result};
-use crate::state::SharedNodeState;
+use crate::state::{AgentSlot, SharedNodeState};
 
 /// Handle to a spawned agent process.
 ///
@@ -31,6 +31,30 @@ impl AgentChild {
     pub fn id(&self) -> u32 {
         self.pid
     }
+}
+
+/// Remove a reaped agent from the node process table and release its
+/// reserved ports (spawn-time reservation, TOCTOU fix).
+///
+/// Lock discipline: the write guard is scoped to one synchronous
+/// block. tokio RwLock is not reentrant — the 261a8f77 regression
+/// self-deadlocked here by re-acquiring a read lock inside a
+/// `match state.write().await ...` scrutinee (the guard lives for the
+/// whole match expression), freezing every state reader (run_loop
+/// heartbeat, proxy, supervisor) until the node was killed.
+async fn reap_agent(state: &SharedNodeState, agent_id: &str) -> Option<AgentSlot> {
+    let mut s = state.write().await;
+    let removed = s.remove_agent(agent_id);
+    // The allocator is an Arc with its own internal lock, so
+    // releasing under the state guard is safe and keeps removal +
+    // release atomic; no await happens under the guard.
+    if let Some(r) = &removed {
+        s.port_allocator.release(r.http_port);
+        if let Some(dp) = r.debug_port {
+            s.port_allocator.release(dp);
+        }
+    }
+    removed
 }
 
 /// Spawn an agent Runtime process.
@@ -189,14 +213,8 @@ pub async fn spawn_agent_process(
     tokio::spawn(async move {
         let exit_status = child.wait().await;
         if let Some(state) = shared_state {
-            match state.write().await.remove_agent(&agent_id_owned) {
+            match reap_agent(&state, &agent_id_owned).await {
                 Some(removed) => {
-                    // Release the ports reserved at spawn time so they
-                    // become reusable (TOCTOU fix, see PortAllocator).
-                    state.read().await.port_allocator.release(removed.http_port);
-                    if let Some(dp) = removed.debug_port {
-                        state.read().await.port_allocator.release(dp);
-                    }
                     tracing::info!(
                         agent_id = %agent_id_owned,
                         pid = removed.pid,
@@ -391,22 +409,62 @@ mod tests {
         assert_eq!(child.id(), 12345);
     }
 
+    #[tokio::test]
+    async fn reap_agent_removes_slot_and_releases_ports_without_deadlock() {
+        use crate::state::NodeState;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        use tokio::time::{timeout, Duration};
+
+        let state: SharedNodeState = Arc::new(RwLock::new(NodeState::new(8)));
+        // Fake ports: the reap path only forwards them to
+        // `PortAllocator::release` (idempotent for unreserved ports).
+        // Real allocations would race the sibling PortAllocator tests
+        // over the shared loopback port namespace.
+        let http_port = acowork_core::node::NODE_HTTP_PORT_BASE;
+        let debug_port = http_port + 1;
+        state.write().await.add_agent(AgentSlot {
+            agent_id: "com.test.reap".to_string(),
+            pid: 424242,
+            started_at: chrono::Utc::now(),
+            workspace: "/tmp".to_string(),
+            dev_mode: true,
+            debug_port: Some(debug_port),
+            http_port,
+        });
+
+        // Regression guard for 261a8f77: re-acquiring a read lock
+        // under the write guard would hang reap_agent forever.
+        let removed = timeout(Duration::from_secs(5), reap_agent(&state, "com.test.reap"))
+            .await
+            .expect("reap_agent must not deadlock")
+            .expect("agent slot must be removed");
+
+        assert_eq!(removed.http_port, http_port);
+        assert_eq!(removed.debug_port, Some(debug_port));
+        assert!(!state.read().await.is_running("com.test.reap"));
+    }
+
     #[test]
     fn port_allocator_concurrent_allocations_are_disjoint() {
         // Two allocations from the same base must never collide: the
         // first reservation is held until released (the TOCTOU fix).
+        // Dedicated base: sibling PortAllocator tests share the global
+        // loopback port namespace and would otherwise race over the
+        // same ports (Windows rebind hysteresis amplifies this).
         let alloc = PortAllocator::new();
-        let first = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
-        let second = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        let first = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE + 100);
+        let second = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE + 100);
         assert_ne!(first, second);
     }
 
     #[test]
     fn port_allocator_released_port_is_reusable() {
+        // Dedicated base (see concurrent_allocations_are_disjoint).
         let alloc = PortAllocator::new();
-        let first = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        let first = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE + 200);
         alloc.release(first);
-        let again = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        let again = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE + 200);
         assert_eq!(again, first);
     }
 

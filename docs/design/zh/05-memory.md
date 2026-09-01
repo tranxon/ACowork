@@ -64,7 +64,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 | ------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入 Grafeo。不再每轮写入，避免与 JSONL 冗余 |
 | 经历层 → 沉淀层     | 巩固管道 | 即时提取（LLM 自主 tool call）+ 离线回放（空闲时专用调用）                                                   |
-| 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**2026-09-12 起默认关闭**（`MemoryManagerConfig::auto_inject_enabled = false`）：不同 Agent 的召回需求差异大、Grafeo 三元组/偏好记忆未完善、原始用户消息作 query 命中率低。恢复方式：将 `auto_inject_enabled` 置为 `true`（可 per-agent 配置）。显式 `memory_recall` 工具不受影响 |
+| 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-agent opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-agent opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
 | 沉淀层/经历层内流动 | 关联扩散 | 检索时沿图边 1-2 跳扩展                                                                                      |
 | 沉淀层 → Dormant    | 遗忘衰减 | 后台定期计算 decay_score                                                                                     |
 
@@ -114,30 +114,29 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 └──────────────────────────────────────────┘
 ```
 
-**实体与三元组提取（v3.10 简化）：**
+**Compact Model 输出格式（v3.10 简化 + 2026-XX-XX 进一步收敛）：**
 
-不再每轮通过 memory_hint 提取实体——改为在 Compaction 触发时由 Compact Model 一次性完成。Compact Model 输出格式：
+Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下生成的三元组质量不稳定（subject/predicate/object 简化为压缩信息），落地为 KnowledgeNode 反而污染沉淀层；entities 提取与即时提取路径重叠且缺少 sub_type/confidence 等元数据，价值低于 `memory_store` 工具路径。Compaction 的职责收敛为「生成可检索的摘要 + 可回放的意图」，沉淀层落地由专用管道承担（职责分离）。
 
 ```
 <summary>
 自然语言摘要文本...
 </summary>
-<entities>
-Entity1, Entity2, Entity3
-</entities>
-<triples>
-subject | predicate | object
-subject | predicate | object
-</triples>
+<user_intent>
+当前对话用户的核心意图（可选）
+</user_intent>
 ```
 
-- **entities**：跨轮持续出现的核心实体（人、地点、技术、项目、概念），最多 10 个，逗号分隔
-- **triples**：显式事实知识，subject|predicate|object 格式，一行一个
+- **summary**：自然语言摘要文本，存入 `Episode.content`，同时用于向量检索（HNSW）与 BM25 全文匹配
+- **user_intent**：当前对话用户的核心意图（可选块），存入 `Episode.metadata.user_intent`，便于历史回放时还原用户目标
+
+沉淀层落地完全依赖两条独立管道：
+1. **即时提取**：LLM 主动调用 `memory_store` 工具——有完整上下文、LLM 自评 confidence、可指定 sub_type，质量由 LLM 自我保证
+2. **离线巩固**（Phase 3）：`run_offline_consolidation_with_generalization` 复用 Episode 摘要重新提取并仲裁冲突（与 triples 块完全独立）
 
 设计理由：
 - 每轮提取的成本（~65 tokens/轮）在 ADR-011 之后不再合理——经历层不再逐轮写入，存储目的已消失
-- Compact Model 有完整对话上下文，实体和三元组的提取质量高于逐轮快照
-- Compaction 是低频操作（每 80% 触发），边际成本可忽略
+- 沉淀层落地质量优先于压缩阶段的一次性抽取：摘要用于检索回放，沉淀由专用管道分阶段精炼
 - 检索策略始终使用默认权重，不做类型驱动的动态调整——经评估 f/r 类型的微调收益未被验证
 
 **检索策略（v3.10 简化）：**
@@ -214,6 +213,8 @@ GrafeoStore 仅负责存储和索引，不持有 `EmbeddingProvider`。
   - 已巩固 + 超过 7 天 → 自动清理（知识已转移到沉淀层，原始片段不再需要）
   - 未巩固 + 超过 14 天 + importance < 0.3 → 清理（低价值且未被提取的碎片）
   - 未巩固 + 超过 14 天 + importance >= 0.3 → 保留并尝试离线巩固
+
+> **实现状态（v3.12，P2 G13）**：差异化清理策略已落地于 `acowork-grafeo/src/consolidation/offline.rs` 的 `run_episodic_cleanup()`，由生产路径 `run_offline_consolidation` 调度。单阈值删除接口 `cleanup_episodes` / `cleanup_old_episodes` 无生产调用方（仅 trait 定义 + 测试 stub），按 Rule of three 不再重复实现。
 
 ## 3. 沉淀层：长期记忆
 
@@ -349,6 +350,8 @@ struct AutobiographicalNode {
     source: String,                  // "manifest" / "self_evaluation" / "user_statement" / "important_event"
                                         // v3.11: 由 memory_store(category=autobiographical) 即时写入时
                                         //        LLM 通过 `source` 参数标注, 取值集合扩展为 4 项
+                                        // v3.12 (P2 G7): source 已升级为 typed 字段（非仅 metadata），
+                                        //        持久化到 grafeo property，读取缺省回退 "user_statement"（向后兼容旧库）
     updated_at: DateTime,
 
     // 自传体记忆不参与遗忘衰减——这是 Agent 的核心身份
@@ -1089,6 +1092,11 @@ PendingKnowledgeNode 写入时：
 | Phase 2 | 0.6              | 保守值，精度优先。预期会过滤掉较多低质量结果       |
 | Phase 3 | 基于实际数据校准 | 根据在线评估的 NRR 指标和 LongMemEval 成绩动态调整 |
 
+> **实现澄清（v3.12，P2 G9）**：代码中存在**两个同名但语义不同的 `min_score`**，勿混淆：
+> - `AbstentionConfig.default_min_score = 0.6`（`abstention.rs`）：作用于 `check_abstention` 的 **raw scores**（向量/BM25 原始相似度），用于拒答判定。
+> - `MemoryManagerConfig.default_min_score = 0.0`（`manager.rs`）：作用于 **hybrid RRF 融合分数**。RRF 分数典型范围仅 0.01-0.05（`1/(k + rank)` 量级），设非零默认值会过滤掉几乎全部结果，故有意为 0.0（不过滤）。
+> - 两者所在分数域不同，默认值不可互相移植。manager 侧仅做注释区分，不改默认值（改 0.6 会误过滤全部，属于 §6.5 Phase 2 目标而非当前缺陷）。
+
 **与检索降级策略的关系**：
 
 Abstention 在 Level 0-3 降级策略之后生效，是最终的质量门控：
@@ -1126,7 +1134,9 @@ pub struct MemoryQuery {
     pub filters: MemoryFilters,
     pub limit: usize,
     pub expand_hops: u8,
-    pub min_score: Option<f32>,   // Abstention threshold, None = use default (0.6)
+    // 检索过滤阈值（RRF 融合分数域）。None = MemoryManagerConfig.default_min_score = 0.0（不过滤）。
+    // ⚠️ 与 AbstentionConfig.default_min_score = 0.6（raw scores，拒答判定）语义不同，勿混淆。
+    pub min_score: Option<f32>,
 }
 ```
 
@@ -1138,12 +1148,14 @@ pub struct MemoryQuery {
 
 **原设计（v3.7）**：通过 memory_hint.type 动态调整 RRF 权重和 graph_expand 参数。四种模式（s/f/r/i）各有不同权重配置。
 
-**v3.10 简化**：移除 per-round memory_hint 提取和规则引擎类型检测。所有检索统一使用默认权重（vector: 0.7, text: 0.3, graph: 0.0），graph_expand 使用保守阈值 [0.15, 0.2, 0.25]。
+**v3.10 简化**：移除 per-round memory_hint 提取和规则引擎类型检测。所有检索统一使用默认权重（vector: 0.7, text: 0.3, graph: 0.0），graph_expand 使用默认早停阈值 `[0.1, 0.15, 0.2]`（1跳/2跳/3跳）。
 
 **简化理由**：
 - f/r 类型的权重微调收益未被 benchmark 验证，不值得引入规则复杂度
 - i（Identity）类型虽然理论上有意义（仅搜 Autobiographical），但需要在检索质量损失（漏掉其他层相关知识）和性能优化之间权衡——当前默认搜全部 4 个 Label 是更安全的选择
 - graph_expand 的激进阈值依赖图质量，当前图结构尚未经过充分验证
+
+> **实现对齐（v3.12，P2 G11/G12）**：早停阈值默认值已由 `[0.15, 0.2, 0.25]` 调整为 `[0.1, 0.15, 0.2]`（与设计 §6.3 "1跳: 0.1, 2跳: 0.15, 3跳: 0.2" 一致，`GraphExpandConfig::default()` 与 `get_expand_thresholds()` 的 `"s"`/`"_"` 分支同步更新；`"r"` 分支保持 `[0.1, 0.12, 0.15]` 不变）。边权重自动计算规则（§3.1 `edge_strength = min(0.8, confidence_avg × exp(-0.01 × days_since))`）已在 `semantic/graph.rs` 落地：`create_memory_edge` 在调用方未显式传 weight 时自动读取两端节点 confidence 计算并写入 weight property；读取端优先读 property，缺省回退 `DEFAULT_EDGE_WEIGHT=1.0`（向后兼容旧库）。
 
 HintType 枚举和相关权重查找函数（`get_hint_weights`, `config_from_hint`）保留在代码中，供将来需要时使用。
 
@@ -1310,7 +1322,7 @@ ProceduralNode 的来源有三条路径：
 
 路径 A — 用户反馈即时提取（Phase 1 已有，Tool Call）：用户明确纠正（"太长了" / "不要用表格"）→ ProceduralNode.trigger_condition = "用户要求简洁输出"，action_pattern = "优先给结论，控制长度"。
 
-路径 B — 执行失败自动总结：SkillExecution 的 failure_case 触发。当 Skill 返回执行失败时，Runtime 自动将 failure_case 摘要写入 ProceduralNode，learned_from = "执行失败"，source_skill 指向对应 Skill。
+~~路径 B — 执行失败自动总结~~ **（已移除，v3.12）**：原设计 SkillExecution 的 failure_case 触发，将 failure_case 摘要写入 ProceduralNode。实际代码中 `failure_case → ProceduralNode` 自动写入路径从未落地，且 SkillExecution 的 `success_count` 从未被递增，据此派生任何"成功率"类节点都会产生 false-positive（见 offline.rs DELETED 注释）。当前程序记忆来源收敛为：路径 A（用户反馈即时提取）+ 路径 C（离线巩固提炼），失败学习暂缓。
 
 路径 C — 离线巩固提炼（Phase 3 的离线巩固负责，Phase 2 先做单 Skill 内模式识别）。
 
@@ -1332,15 +1344,16 @@ Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。Proc
 
 具体实现：在 grafeo crate 新增 `procedural_abstract` 模块，提供 `detect_merge_candidates()` 方法，扫描同类 trigger_condition 下的多个 action_pattern，由 LLM 判断是否应合并。
 
-**核心组件三：自我评估驱动的 AutobiographicalNode 更新**
+**~~核心组件三：自我评估驱动的 AutobiographicalNode 更新~~** **（已移除，v3.12）**
 
-自我评估的目标是让 Agent 认知自身的能力边界，主要体现在 Limitation 节点的自动更新。
+原设计目标是让 Agent 认知自身的能力边界，主要通过 Limitation 节点的自动更新实现：
 
-触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息，更新 SkillExperience.model_compatibility。当某模型上某类任务成功率低于 60% 时，生成或更新 AutobiographicalNode Limitation 节点："在 [模型] 上，[任务类型] 成功率约 [X]%，建议切换模型或简化任务"。
+- 触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息更新 `SkillExperience.model_compatibility`；某模型某类任务成功率低于 60% 时生成/更新 Limitation 节点。
+- 注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级）。
 
-注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级），确保 Agent 始终知道自己的边界。
+> **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 grafeo `offline.rs` 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。自传体记忆的来源收敛为 §3.3 的四条路径（Manifest 派生 / 即时 Tool Call 用户陈述 / 重要事件 / 离线自我评估），Limitation 节点的产生依赖用户或 LLM 显式陈述，不再自动生成。
 
-同时新增 Relationship 节点的自动维护：当用户与 Agent 合作超过一定时长（如 30 天），自动生成 Relationship 节点记录合作模式。
+同时原设计新增 Relationship 节点的自动维护（用户与 Agent 合作超过 30 天自动生成）——该自动触发逻辑同样未落地；当前 Relationship 节点由 `memory_store(category="autobiographical", aspect="Relationship")` 即时写入（manager.rs 含自动维护辅助逻辑，source 标记 `self_evaluation`）。
 
 **Phase 2 验收标准：**
 

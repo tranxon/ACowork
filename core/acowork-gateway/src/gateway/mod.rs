@@ -758,6 +758,14 @@ impl Gateway {
             // Clone before the move-closure; the original stays
             // available for the HTTP server below.
             let operation_store_for_dispatch = operation_store_shared.clone();
+            // ADR-059 §7.2 replay guard: shared across every dispatch
+            // message (a per-message guard would never see the live
+            // online signal that the stale replay check needs).
+            let node_replay_guard = Arc::new(crate::mqtt::dispatch::NodeReplayGuard::default());
+            // Clone before the move-closure: the callback is `move` and
+            // would otherwise consume the original, which must stay
+            // available for `set_replay_guard` after connect.
+            let node_replay_guard_for_cb = node_replay_guard.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
@@ -772,6 +780,7 @@ impl Gateway {
                 let node_tokens_for_cb = node_tokens_for_dispatch.clone();
                 let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
+                let node_replay_guard_for_cb = node_replay_guard_for_cb.clone();
                  tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
@@ -792,6 +801,7 @@ impl Gateway {
                         auth_enabled: auth_enabled_for_dispatch,
                         bootstrap_registry: Some(bootstrap_registry_for_cb),
                         operation_store: Some(operation_store_for_cb),
+                        node_replay_guard: node_replay_guard_for_cb,
                     };
                     crate::mqtt::dispatch::handle_message(&topic, &payload, &dispatch_ctx);
                 });
@@ -822,6 +832,11 @@ impl Gateway {
                 Ok(c) => {
                     tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
                     let client = Arc::new(c.clone());
+                    // ADR-059 §7.2: attach the replay guard so the poll
+                    // task stamps gateway (re)connections — dispatch uses
+                    // the stamp to suppress stale retained replays after
+                    // sleep/wake reconnects.
+                    c.set_replay_guard(node_replay_guard.clone());
                     // Backfill the dispatch slot so the status re-publish
                     // path can call `publish_envelope`. Until now the
                     // slot was `None` and dispatch silently dropped

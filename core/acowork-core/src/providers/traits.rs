@@ -417,6 +417,26 @@ impl ContentPart {
     }
 }
 
+/// Cache boundary hint for prompt caching (ADR-060).
+///
+/// Carried on `ChatMessage` so the provider layer can emit the
+/// provider-specific cache control directive:
+/// - **Anthropic**: maps to `cache_control: { type: "ephemeral" }` on the
+///   message (user/assistant) or on the system content-block.
+/// - **OpenAI / Ollama**: ignored — block position alone determines cache.
+///
+/// ADR-060: Block A (static kernel) and Block C (dynamic todo snapshot)
+/// carry `Ephemeral` breakpoints; Block B (append-only history) carries
+/// `None` so a stable prefix stays byte-identical across turns.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheControl {
+    /// Mark this message as a cache breakpoint (Anthropic ephemeral cache).
+    Ephemeral,
+    /// Reserved for future long-lived cache use; currently unused.
+    Persistent,
+}
+
 /// Chat message in conversation
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
@@ -440,6 +460,10 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Provider-specific cache boundary hint (ADR-060).
+    /// `None` = no explicit cache control on this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 impl ChatMessage {

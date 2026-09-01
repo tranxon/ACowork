@@ -212,21 +212,39 @@ mod from_rumqttc_0_25 {
                 },
                 ConnectionError::MqttState(state_err) => {
                     // rumqttc wraps transient I/O errors (e.g.
-                    // ConnectionAborted, ConnectionReset) inside
-                    // MqttState(StateError::Io(...)). Unwrap the
-                    // inner I/O error instead of blindly classifying
-                    // as ConfigError (which is fatal and breaks the
-                    // event loop).
-                    if let rumqttc::StateError::Io(io_err) = state_err {
-                        ErrorDescriptor {
+                    // ConnectionAborted, ConnectionReset — both produced
+                    // when the OS tears down the TCP socket during
+                    // sleep/wake) inside MqttState. Two shapes exist:
+                    //   StateError::Io(io::Error)                    — direct wrap
+                    //   StateError::Deserialization(mqttbytes::Error::Io)
+                    //     — the poll task read a partially-written
+                    //     packet at wake time and mqttbytes wrapped the
+                    //     same io::Error at decode time
+                    // Unwrap the inner I/O error in BOTH cases instead
+                    // of blindly classifying as ConfigError (fatal —
+                    // breaks the event loop with a 60s backoff).
+                    match state_err {
+                        rumqttc::StateError::Io(io_err) => ErrorDescriptor {
                             kind: ErrorKind::Io,
                             io_kind: Some(io_err.kind()),
+                        },
+                        rumqttc::StateError::Deserialization(mqttbytes_err) => {
+                            if let rumqttc::mqttbytes::Error::Io(io_err) = mqttbytes_err {
+                                ErrorDescriptor {
+                                    kind: ErrorKind::Io,
+                                    io_kind: Some(io_err.kind()),
+                                }
+                            } else {
+                                ErrorDescriptor {
+                                    kind: ErrorKind::MqttState,
+                                    io_kind: None,
+                                }
+                            }
                         }
-                    } else {
-                        ErrorDescriptor {
+                        _ => ErrorDescriptor {
                             kind: ErrorKind::MqttState,
                             io_kind: None,
-                        }
+                        },
                     }
                 },
                 ConnectionError::NotConnAck(_) => ErrorDescriptor {
@@ -249,6 +267,48 @@ mod from_rumqttc_0_25 {
                     io_kind: None,
                 },
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io;
+
+        #[test]
+        fn mqtt_state_direct_io_error_is_transient() {
+            let err = rumqttc::ConnectionError::MqttState(rumqttc::StateError::Io(
+                io::Error::new(io::ErrorKind::ConnectionReset, "reset"),
+            ));
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::Io);
+            assert_eq!(classify(&desc), ErrClass::Transient);
+        }
+
+        #[test]
+        fn mqtt_state_deserialization_io_error_is_transient() {
+            // The sleep/wake shape: the poll task read a partially
+            // written packet and mqttbytes wrapped the same io::Error
+            // inside `StateError::Deserialization(mqttbytes::Error::Io)`.
+            // It must NOT classify as fatal E4 ConfigError (which would
+            // trigger the 60s fatal backoff on every wake).
+            let err = rumqttc::ConnectionError::MqttState(
+                rumqttc::StateError::Deserialization(rumqttc::mqttbytes::Error::Io(
+                    io::Error::new(io::ErrorKind::ConnectionAborted, "aborted"),
+                )),
+            );
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::Io);
+            assert_eq!(desc.io_kind, Some(io::ErrorKind::ConnectionAborted));
+            assert_eq!(classify(&desc), ErrClass::Transient);
+        }
+
+        #[test]
+        fn mqtt_state_other_variants_stay_config_error() {
+            let err = rumqttc::ConnectionError::MqttState(rumqttc::StateError::InvalidState);
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::MqttState);
+            assert_eq!(classify(&desc), ErrClass::ConfigError);
         }
     }
 }

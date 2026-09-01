@@ -83,7 +83,11 @@ pub struct SessionRuntimeSnapshot {
 }
 
 /// A single item in the session-level todo list.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// `PartialEq`/`Eq` (ADR-060): content-equality drives the byte-stability
+/// check in `ConversationSession::set_todos` — unchanged snapshots must
+/// not touch the meta file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {
     /// Unique identifier for this todo item (e.g. UUID or short slug)
     pub id: String,
@@ -313,8 +317,10 @@ pub struct SessionState {
     /// ADR-014: Runtime owns this; frontend reads it via SessionStateChanged events.
     pub(crate) status: SessionStatus,
     /// Session-level todo list managed by the `todo_write` built-in tool.
-    /// Memory-only; not persisted to JSONL (conversation history is the
-    /// source of truth for task progress).
+    ///
+    /// ADR-060: mirrored into `ConversationSession` (the single persistence
+    /// owner) on every update, so a session restart restores the list from
+    /// `meta/{session_id}.json` — no longer memory-only.
     pub(crate) todos: Vec<TodoItem>,
     /// Whether compaction has occurred with zero new messages since.
     ///
@@ -475,6 +481,12 @@ impl SessionState {
         } else {
             // Replace: full swap
             self.todos = items;
+        }
+        // ADR-060 §6.1: mirror to the conversation — the single persistence
+        // owner. Content-equal snapshots are skipped inside `set_todos`
+        // (no disk write for a byte-stable todo list).
+        if let Some(ref conv) = self.conversation {
+            conv.set_todos(&self.todos);
         }
     }
 
