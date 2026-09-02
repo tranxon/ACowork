@@ -305,7 +305,29 @@ async fn async_main(
         // The value was already loaded once in Phase A (see
         // `AgentBootContext::compaction_prompt`), so both modes resolve the
         // same package declaration.
-        agent_loop.core.compaction_prompt = agent_ctx.compaction_prompt.clone();
+        //
+        // ADR-063 §3.7.5: wrap in `Arc<RwLock<Option<String>>>` for the
+        // same L2 reload reasons documented in `session_init.rs`.
+        *agent_loop.core.compaction_prompt.write().unwrap() =
+            agent_ctx.compaction_prompt.clone();
+
+        // ADR-063: 7 additional overrides. Mirror the session_init.rs
+        // Phase B injection. Both Gateway and Standalone modes resolve
+        // to the same package declaration because Phase A loaded once.
+        *agent_loop.core.search_prompt.write().unwrap() = agent_ctx.search_prompt.clone();
+        *agent_loop.core.compact_template.write().unwrap() =
+            agent_ctx.compact_template.clone();
+        *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
+        *agent_loop.core.extraction_prompt.write().unwrap() =
+            agent_ctx.extraction_prompt.clone();
+        *agent_loop.core
+            .conflict_classification_prompt
+            .write()
+            .unwrap() = agent_ctx.conflict_classification_prompt.clone();
+        *agent_loop.core.generalization_prompt.write().unwrap() =
+            agent_ctx.generalization_prompt.clone();
+        *agent_loop.core.abstention_prompt.write().unwrap() =
+            agent_ctx.abstention_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 

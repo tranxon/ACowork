@@ -160,7 +160,7 @@ pub struct AgentCore {
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Agent-specific compaction prompt (from `prompts/summary.md` in the
-    /// .agent package). `None` = use the built-in
+    /// .agent package). `None` (the inner `Option`) = use the built-in
     /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`] fallback.
     ///
     /// This is the package-declared summarization directive for context
@@ -168,7 +168,59 @@ pub struct AgentCore {
     /// of `system_prompt_override` (which covers the MAIN dialog prompt
     /// only) — compaction is a summarization task with its own directive,
     /// and per-agent rules belong to the package, not the runtime config.
-    pub(crate) compaction_prompt: Option<String>,
+    ///
+    /// ADR-063 §3.7.5: wrapped in `Arc<RwLock<...>>` so the Debug panel
+    /// L2 reload (`DebugService::reload_prompts`) can write through any
+    /// `Arc<AgentCore>` clone held by a running session, not just the
+    /// canonical `AgentCore` in `SessionManager`. `Clone for AgentCore`
+    /// shares the inner `Arc` (reference +1) — writes from one clone are
+    /// visible to all others.
+    pub(crate) compaction_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    // ── ADR-063: 7 additional package-level LLM prompt overrides ──
+    //
+    // Each follows the same `Arc<RwLock<Option<String>>>` pattern as
+    // `compaction_prompt` (see doc-comment above for L2 reload semantics).
+    // Field naming maps 1-to-1 to entries in
+    // `crate::package::prompt_builder::OVERRIDABLE_PROMPTS`; see ADR-063
+    // §3.2 for the full list and resolution chain.
+
+    /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
+    /// (`prompts/search.md`). Inner `None` = use built-in Perplexity
+    /// search system prompt.
+    pub(crate) search_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for `crate::prompt::COMPACT_PROMPT`
+    /// (`prompts/compact-template.md`). Authors MUST preserve the
+    /// `{messages_text}` placeholder — the runtime substitution is the
+    /// same `format!` pattern used for the built-in constant.
+    pub(crate) compact_template: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for `crate::prompt::TITLE_PROMPT`
+    /// (`prompts/title.md`). Authors may use `{language}` and
+    /// `{user_message}` placeholders.
+    pub(crate) title_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for grafeo's `EXTRACTION_SYSTEM_PROMPT`
+    /// (`prompts/extraction.md`). Note: grafeo holds a process-level
+    /// singleton; L2 reload for this field is NOT in ADR-063 scope —
+    /// PUT writes to disk + updates this field, but the live grafeo
+    /// cache only refreshes after Runtime restart. See ADR-063 §6.1.
+    pub(crate) extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for grafeo's `CONFLICT_CLASSIFICATION_PROMPT`
+    /// (`prompts/conflict-classification.md`). Same reload caveat as
+    /// `extraction_prompt`.
+    pub(crate) conflict_classification_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for grafeo's `GENERALIZATION_PROMPT`
+    /// (`prompts/generalization.md`). Same reload caveat.
+    pub(crate) generalization_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
+    /// (`prompts/abstention.md`). Same reload caveat.
+    pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
     /// Grafeo memory store (shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
     /// `memory_admin` is the admin interface for HTTP endpoints and
@@ -244,6 +296,76 @@ pub struct AgentCore {
 }
 
 impl AgentCore {
+    // ── ADR-063 §3.7.5: accessor methods for LLM call sites ──
+    //
+    // Each accessor:
+    //   1. Acquires a read lock briefly to clone the inner `Option<String>`.
+    //   2. Returns `Option<String>` so call sites compose naturally with
+    //      `.as_deref().unwrap_or(BUILTIN_CONSTANT)` exactly as they did
+    //      before the ADR-063 Arc<RwLock<>> refactor (ADR-053 used the
+    //      direct `Option<String>` field with the same idiom).
+    //   3. Holds the lock only for the `clone()` — a few microseconds.
+    //      LLM call sites do not hold the lock across network round-trips.
+    //
+    // For the runtime-level 4 fields (fallback / search / compact-template /
+    // title), the accessor is plumbed by the calling code at the LLM
+    // invocation site. For the grafeo/memory 4 fields, the accessor is
+    // **not yet consumed** — wiring those requires trait-level injection
+    // (ADR-063 §6.1, deferred) so the process-level singletons in those
+    // crates can pick the value up via `AgentCore::shared()`. The fields
+    // are loaded into the struct (Phase A/B) and are PUT-writable via the
+    // HTTP API, but live cache invalidation requires the trait refactor.
+
+    /// `prompts/summary.md` accessor (ADR-053 + ADR-063 §3.7.5).
+    pub fn compaction_prompt(&self) -> Option<String> {
+        self.compaction_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/search.md` (runtime-level, used by
+    /// perplexity backend). See ADR-063 §3.7.5.
+    pub fn search_prompt(&self) -> Option<String> {
+        self.search_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/compact-template.md` (runtime-level,
+    /// used by `episode_distill::compact_full_context`). See ADR-063 §3.7.5.
+    pub fn compact_template(&self) -> Option<String> {
+        self.compact_template.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/title.md` (runtime-level, used by
+    /// `episode_distill::compact_session_title_with_llm`). See ADR-063 §3.7.5.
+    pub fn title_prompt(&self) -> Option<String> {
+        self.title_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/extraction.md` (grafeo-level, **deferred
+    /// plumbing**, see ADR-063 §6.1). Loaded into the struct, PUT-writable
+    /// via HTTP, but the live grafeo singleton does not yet consult it.
+    pub fn extraction_prompt(&self) -> Option<String> {
+        self.extraction_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/conflict-classification.md` (grafeo,
+    /// deferred). See ADR-063 §6.1.
+    pub fn conflict_classification_prompt(&self) -> Option<String> {
+        self.conflict_classification_prompt
+            .read()
+            .unwrap()
+            .clone()
+    }
+
+    /// Override accessor — `prompts/generalization.md` (grafeo, deferred).
+    /// See ADR-063 §6.1.
+    pub fn generalization_prompt(&self) -> Option<String> {
+        self.generalization_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/abstention.md` (memory, deferred).
+    /// See ADR-063 §6.1.
+    pub fn abstention_prompt(&self) -> Option<String> {
+        self.abstention_prompt.read().unwrap().clone()
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_observer(
         config: RuntimeConfig,
@@ -295,9 +417,25 @@ impl AgentCore {
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
-            // Populated in Phase B of session_init from prompts/summary.md
-            // (see `load_compaction_prompt`); None until then.
-            compaction_prompt: None,
+            // ADR-053: populated in Phase B of session_init from
+            // prompts/summary.md (see `load_compaction_prompt`).
+            // ADR-063 §3.7.5: wrapped in `Arc<RwLock<...>>` so the L2
+            // reload (DebugService::reload_prompts) can write through any
+            // Arc<AgentCore> clone held by a running session, not just the
+            // canonical one in SessionManager.
+            compaction_prompt: Arc::new(std::sync::RwLock::new(None)),
+            // ADR-063: 7 additional overridable prompt fields. Each
+            // starts as `None` and is populated in Phase B from
+            // `AgentBootContext.<field>` (loaded in Phase A from
+            // `prompts/<file>.md`). The L2 reload (`reload_prompts`)
+            // overwrites these via the `RwLock::write` guard.
+            search_prompt: Arc::new(std::sync::RwLock::new(None)),
+            compact_template: Arc::new(std::sync::RwLock::new(None)),
+            title_prompt: Arc::new(std::sync::RwLock::new(None)),
+            extraction_prompt: Arc::new(std::sync::RwLock::new(None)),
+            conflict_classification_prompt: Arc::new(std::sync::RwLock::new(None)),
+            generalization_prompt: Arc::new(std::sync::RwLock::new(None)),
+            abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
             rag_provider: None,
@@ -1144,7 +1282,22 @@ impl Clone for AgentCore {
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
-            compaction_prompt: self.compaction_prompt.clone(),
+            // ADR-063 §3.7.5: these 9 fields share the inner `Arc` across
+            // clones (reference +1), so a write through one clone is
+            // visible to all clones. This is the foundation that makes
+            // `DebugService::reload_prompts` work without forcing every
+            // session to re-derive its `Arc<AgentCore>` from the canonical
+            // `AgentCore` in `SessionManager`.
+            compaction_prompt: Arc::clone(&self.compaction_prompt),
+            search_prompt: Arc::clone(&self.search_prompt),
+            compact_template: Arc::clone(&self.compact_template),
+            title_prompt: Arc::clone(&self.title_prompt),
+            extraction_prompt: Arc::clone(&self.extraction_prompt),
+            conflict_classification_prompt: Arc::clone(
+                &self.conflict_classification_prompt,
+            ),
+            generalization_prompt: Arc::clone(&self.generalization_prompt),
+            abstention_prompt: Arc::clone(&self.abstention_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
             rag_provider: self.rag_provider.clone(),
@@ -2011,6 +2164,124 @@ mod tests {
         assert!(
             !core.init_memory_manager().config().auto_inject_enabled,
             "manifest opt-out must disable auto-inject"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ADR-063 §3.4 L2 reload — AgentCore 9 prompt fields are
+    // `Arc<RwLock<Option<String>>>` so that `DebugService::reload_prompts`
+    // can mutate the canonical Arc in `SessionManager` and have every
+    // session that holds a `Clone` see the new value (no session restart).
+    //
+    // These three tests lock in the three preconditions the L2 reload
+    // path relies on:
+    //
+    //   1. Fresh AgentCore: all 9 accessors return `None` (R3 default —
+    //      nothing in memory until Phase B injects or `reload_prompts`
+    //      re-reads from disk).
+    //   2. Clone shares Arc (R3 §Clone for AgentCore): writing through
+    //      one handle is visible from any other clone. Sessions that
+    //      captured `AgentCore` before DevMode reload still see the new
+    //      prompt.
+    //   3. Accessor reflection: the `pub fn` accessor reads through the
+    //      RwLock on every call (no caching), so reload is observable
+    //      without a session re-derivation step.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_prompt_accessors_default_to_none() {
+        // ADR-063 §3.4 — fresh AgentCore has no override loaded. Phase B
+        // (session_init) or `reload_prompts` is the only path that
+        // populates these. A `None` here means "fall back to the
+        // built-in constant" at the LLM call site.
+        let core = make_core(Some(8192), None, None, 0);
+
+        assert!(core.compaction_prompt().is_none(), "compaction_prompt must default to None");
+        assert!(core.search_prompt().is_none(), "search_prompt must default to None");
+        assert!(core.title_prompt().is_none(), "title_prompt must default to None");
+        assert!(core.extraction_prompt().is_none(), "extraction_prompt must default to None");
+        assert!(
+            core.conflict_classification_prompt().is_none(),
+            "conflict_classification_prompt must default to None"
+        );
+        assert!(core.generalization_prompt().is_none(), "generalization_prompt must default to None");
+        assert!(core.abstention_prompt().is_none(), "abstention_prompt must default to None");
+        assert!(core.compact_template().is_none(), "compact_template must default to None");
+    }
+
+    #[test]
+    fn test_agent_core_clone_shares_arc_for_prompts() {
+        // ADR-063 §3.4 — `Clone for AgentCore` clones the inner
+        // `Arc<RwLock<Option<String>>>` (reference +1), so a write
+        // through any clone is visible from every other clone. This is
+        // the precondition that lets `DebugService::reload_prompts`
+        // (which holds the canonical AgentCore in SessionManager) push
+        // a new prompt into running sessions that already cloned the
+        // AgentCore at session start.
+        //
+        // We write through the `pub(crate)` field directly — same
+        // pattern `DebugService::reload_prompts` uses. The clone test
+        // is whether the OTHER handle observes the change.
+        let core = make_core(Some(8192), None, None, 0);
+        let session_clone = core.clone();
+
+        // Write through `core` — simulates `reload_prompts` doing
+        // `*core.compaction_prompt.write().unwrap() = Some(...)`.
+        *core.compaction_prompt.write().unwrap() = Some("override-from-canonical".to_string());
+
+        // Read through the cloned handle that a running session would
+        // hold. Must reflect the write.
+        assert_eq!(
+            session_clone.compaction_prompt().as_deref(),
+            Some("override-from-canonical"),
+            "Clone for AgentCore must share Arc<RwLock>; reload through \
+             canonical must be visible to session-held clones"
+        );
+
+        // Symmetry: write through the session clone, read from canonical.
+        *session_clone.search_prompt.write().unwrap() = Some("override-from-session".to_string());
+        assert_eq!(
+            core.search_prompt().as_deref(),
+            Some("override-from-session"),
+            "Write direction must be symmetric across all Arc clones"
+        );
+    }
+
+    #[test]
+    fn test_prompt_accessor_reflects_write_through_lock() {
+        // ADR-063 §3.4 — the public accessor (e.g. `search_prompt`)
+        // MUST read the RwLock on every call (no caching to a local
+        // String), otherwise L2 reload would be silently broken for any
+        // session that derived its `AgentCore` clone before the reload.
+        // Pin the behavior with an explicit sequence: read → write → read.
+        let core = make_core(Some(8192), None, None, 0);
+
+        // Initial read: None.
+        assert!(core.search_prompt().is_none());
+
+        // First reload: Some("first").
+        *core.search_prompt.write().unwrap() = Some("first".to_string());
+        assert_eq!(core.search_prompt().as_deref(), Some("first"));
+
+        // Second reload: Some("second"). The accessor must NOT have
+        // memoized "first" — it must re-read through the lock.
+        *core.search_prompt.write().unwrap() = Some("second".to_string());
+        assert_eq!(
+            core.search_prompt().as_deref(),
+            Some("second"),
+            "accessor must re-read RwLock every call; reload must be \
+             observable without re-deriving AgentCore"
+        );
+
+        // Reload to None: simulates the operator deleting the
+        // `prompts/<file>.md` file and clicking Reload. The accessor
+        // must now return None again so the call site falls back to
+        // the built-in constant.
+        *core.search_prompt.write().unwrap() = None;
+        assert!(
+            core.search_prompt().is_none(),
+            "clearing the RwLock must propagate to the accessor so the \
+             built-in fallback constant takes effect again"
         );
     }
 }

@@ -729,9 +729,9 @@
     "debugRemoteDesc": "Debug requires a direct local connection to the Agent Runtime. The Desktop App and Gateway must run on the same machine.",
     "connectingDebug": "Connecting to debug server...",
     "debugConnectionLost": "Debug connection lost",
-    "agentNotDebugMode": "Agent is not in debug mode. Click Enable Debug to start debugging.",
-    "enableDebug": "Enable Debug",
-    "enablingDebug": "Enabling Debug...",
+    "debugSection": "Debug",
+    "enterDebug": "Enter Debug",
+    "enteringDebug": "Entering Debug...",
     "noAgentDebug": "No agent in debug mode",
     "iteration": "Iteration",
     "phase": "Phase",
@@ -1141,5 +1141,20 @@
     "refresh": "Refresh",
     "loading": "Loading...",
     "refreshing": "Refreshing..."
+  },
+  "prompts": {
+    "badgeBuiltin": "built-in",
+    "badgeMissing": "missing",
+    "badgeOverridden": "overridden",
+    "badgeRequired": "required",
+    "error": "Failed: {{message}}",
+    "help": "Click an entry to edit; click Reload to apply.",
+    "loading": "Loading prompts...",
+    "openAria": "Open prompt {{name}} in editor",
+    "reload": "Refresh",
+    "reloadAria": "Reload all prompts from disk",
+    "reloadOk": "Reload complete — 8 overrides refreshed and the main-dialog system prompt synced.",
+    "reloadSystemPromptFailed": "8 overrides refreshed, but the main-dialog system prompt rebuild failed — system.md changes need an agent restart.",
+    "title": "PROMPT"
   }
 }

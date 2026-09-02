@@ -157,6 +157,7 @@ async fn spawn_memory_e2e_server(tag: &str) -> MemoryE2e {
 
     let server = RuntimeHttpServer::start(
         temp_dir.clone(),
+        temp_dir.clone(), // package_dir (ADR-063): tests reuse work_dir as package dir
         "com.test.agent".to_string(),
         snapshots,
         latest,
@@ -181,6 +182,7 @@ async fn spawn_memory_e2e_server(tag: &str) -> MemoryE2e {
             acowork_runtime::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
         )),
         session_manager_slot,
+        std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
     )
     .await
     .expect("runtime http server should start");

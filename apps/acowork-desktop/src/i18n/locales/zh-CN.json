@@ -606,9 +606,9 @@
     "debugRemoteDesc": "调试需要与 Agent Runtime 建立直接本地连接。桌面应用和网关必须在同一台机器上运行。",
     "connectingDebug": "正在连接调试服务器...",
     "debugConnectionLost": "调试连接已断开",
-    "agentNotDebugMode": "Agent 未处于调试模式。点击「启用调试」即可开始调试。",
-    "enableDebug": "启用调试",
-    "enablingDebug": "正在启用调试...",
+    "debugSection": "调试",
+    "enterDebug": "进入调试",
+    "enteringDebug": "正在进入调试...",
     "noAgentDebug": "没有 Agent 处于调试模式",
     "iteration": "迭代",
     "phase": "阶段",
@@ -1158,5 +1158,20 @@
     "refresh": "刷新",
     "loading": "加载中...",
     "refreshing": "刷新中..."
+  },
+  "prompts": {
+    "badgeBuiltin": "内置",
+    "badgeMissing": "缺失",
+    "badgeOverridden": "已覆盖",
+    "badgeRequired": "必填",
+    "error": "加载失败：{{message}}",
+    "help": "点击条目编辑；保存后点刷新使其生效。",
+    "loading": "加载提示词中...",
+    "openAria": "在编辑器中打开提示词 {{name}}",
+    "reload": "刷新",
+    "reloadAria": "从磁盘重新加载所有提示词",
+    "reloadOk": "重新加载完成 — 8 个覆盖已从磁盘刷新，主对话 system prompt 已同步。",
+    "reloadSystemPromptFailed": "8 个覆盖已刷新，但主对话 system prompt 重建失败 — system.md 改动需重启 Agent 后生效。",
+    "title": "PROMPT"
   }
 }

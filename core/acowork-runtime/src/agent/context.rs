@@ -592,7 +592,7 @@ impl ContextBuilder {
             messages.push(ChatMessage {
                 role: MessageRole::User,
                 content: format!(
-                    "## Todo Task List\nThis is your todo task list. If any task status needs updating, use the `todo_write` tool to update it. If nothing needs updating, do nothing.\n\n{todos}"
+                    "## Todo Task List\nThis is your todo task list. If any task status needs updating, use the `todo_write` tool to update it. If nothing needs updating, just do nothing and keep quiet.\n\n{todos}"
                 ),
                 cache_control: Some(CacheControl::Ephemeral),
                 ..Default::default()
