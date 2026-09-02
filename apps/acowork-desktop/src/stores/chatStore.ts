@@ -14,6 +14,7 @@ import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
 import { with503Retry } from "../lib/httpRetry";
+import { verifyAgentHealth } from "../lib/gateway-api";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
@@ -3101,6 +3102,33 @@ export function handleMessageEvent(
         // it; `updateAgentOnlineStatus` defaults `sleeping` to false.
         const sleeping = (data as { sleeping?: boolean }).sleeping ?? false;
         useAgentStore.getState().updateAgentOnlineStatus(aid, online, sleeping);
+        // HTTP health double-check on MQTT disconnect (distributed liveness):
+        // the Runtime may run on a remote node, and its MQTT connection can
+        // drop (e.g. system sleep → KeepAlive timeout → Gateway marks the
+        // agent offline) while the Runtime process itself stays alive.
+        // Probe `/health` through the Gateway reverse-proxy; if the Runtime
+        // answers 2xx it is alive, so override back to online instead of
+        // rendering it offline/sleeping.
+        if (!online) {
+          // The trailing `.catch(() => {})` is defensive: in production
+          // `verifyAgentHealth` always resolves (it has its own try/catch
+          // around `fetch`), but if a future refactor accidentally lets a
+          // rejection escape, we must not surface it as an unhandled
+          // promise rejection — that would crash the desktop renderer.
+          void verifyAgentHealth(aid)
+            .then((alive) => {
+              if (alive) {
+                useAgentStore
+                  .getState()
+                  .updateAgentOnlineStatus(aid, true, false);
+              }
+            })
+            .catch(() => {
+              // Swallow — see comment above. The agent is correctly
+              // marked offline; the chatStore will get another chance on
+              // the next MQTT status tick or the next user action.
+            });
+        }
       }
       break;
     }

@@ -92,6 +92,44 @@ export async function fetchProviders(
   return data.providers as ProviderListEntry[];
 }
 
+/**
+ * HTTP health double-check for distributed liveness.
+ *
+ * The Runtime may run on a remote node, so process-based liveness is not
+ * observable from the desktop. The only trustworthy signals are network
+ * based: MQTT (status topic) and HTTP (the Runtime's `/health` endpoint,
+ * reverse-proxied through the Gateway at `/api/agents/{id}/health`).
+ *
+ * When MQTT reports an agent as offline/sleeping — e.g. the machine was
+ * asleep and the MQTT connection dropped (KeepAlive timeout) while the
+ * Runtime process itself stayed alive — this probes `/health`. A 2xx
+ * answer means the Runtime is actually alive, and the caller should NOT
+ * render it as offline/sleeping.
+ *
+ * Returns `true` iff the Runtime answers 2xx within `timeoutMs`; `false`
+ * on any non-2xx or network error (unreachable over HTTP too).
+ */
+export async function verifyAgentHealth(
+  agentId: string,
+  timeoutMs = 3000,
+  gatewayUrl = getGatewayUrl(),
+): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const resp = await fetch(`${gatewayUrl}/api/agents/${agentId}/health`, {
+        signal: ctrl.signal,
+      });
+      return resp.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+}
+
 /** Fetch models for a specific provider from Gateway's models cache */
 export async function fetchProviderModels(
   providerId: string,

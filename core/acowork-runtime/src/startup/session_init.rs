@@ -770,17 +770,28 @@ pub(crate) async fn phase_b_init_session(
 
     session_manager.set_resolver(ctx.workspace_resolver.clone());
 
-    if let Some(ws_id) = ctx
+    // Seed the per-agent default workspace for NEW sessions. Sessions are
+    // the source of truth (their meta persists the user's last selection),
+    // so the resumed latest session's workspace_id wins; the disk
+    // `last_active` flag is kept only as a fallback for legacy data written
+    // by the pre-ADR-040 Gateway. Nothing else: the default is intentionally
+    // NOT persisted at agent level — it is inherited from the session meta
+    // at startup and updated from `route_workspace_switch` at runtime.
+    let inherited_ws = conversation_session
+        .as_ref()
+        .and_then(|c| c.workspace_id());
+    let fallback_ws = ctx
         .workspace_resolver
         .read()
         .unwrap()
         .last_active_workspace_id()
-    {
-        let ws_id_owned = ws_id.to_owned();
-        session_manager.set_default_workspace_id(&ws_id_owned);
+        .map(|s| s.to_owned());
+    if let Some(ws_id) = inherited_ws.clone().or(fallback_ws) {
+        session_manager.set_default_workspace_id(&ws_id);
         tracing::info!(
-            default_workspace_id = %ws_id_owned,
-            "SessionManager: initialized default workspace from last_active"
+            default_workspace_id = %ws_id,
+            inherited_from_session = inherited_ws.is_some(),
+            "SessionManager: initialized default workspace from latest session meta (or last_active fallback)"
         );
     }
 
