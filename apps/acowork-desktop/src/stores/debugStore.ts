@@ -314,7 +314,23 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     // No socket to close: just detach from the agent. The
     // `debug-event` listener stays registered for the app lifetime -
     // events are filtered by `debugAgentId` in `_handleDebugEvent`.
-    set({ connected: false, debugAgentId: null });
+    //
+    // Also drop every per-session debug cache (snapshots, section
+    // payloads, prompt tokens, etc.). Product semantics: leaving
+    // DevMode erases the debug history; the next time the operator
+    // enters DevMode the iteration list starts empty. Without this
+    // clear the desktop's `sessionStates` would keep stale snapshot
+    // metadata fed by MQTT `onContextBuilt` events from a previous
+    // enable cycle - Runtime's `DebugController` is recreated empty
+    // on every `enable_debug_mode` (session_manager.rs), so loading
+    // any section via `getSection` would 404 and the panel would spin
+    // on "Loading section..." forever. Clearing here keeps the local
+    // store aligned with the Runtime's source of truth.
+    set({
+      connected: false,
+      debugAgentId: null,
+      sessionStates: {},
+    });
   },
 
   // ── DevMode lifecycle ────────────────────────────────────────────────
