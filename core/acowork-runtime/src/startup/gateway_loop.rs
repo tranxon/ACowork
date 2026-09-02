@@ -747,6 +747,14 @@ async fn dispatch_inbound(
                 session_manager.lock().await.apply_builtin_tools_enabled(&entries);
                 Ok(())
             }
+            // ADR-063 §3.7.6: main-dialog system prompt hot-reload. Same
+            // agent-scoped policy as UpdateRuntimeConfig / UpdateBuiltinTools:
+            // route through SessionManager so the shared template AND every
+            // active session's ContextBuilder are updated in one shot.
+            InboundMessage::UpdateSystemPrompt { system_prompt } => {
+                session_manager.lock().await.apply_system_prompt(&system_prompt);
+                Ok(())
+            }
             other => Err(RuntimeError::Config(format!(
                 "system-level dispatch: unsupported variant {:?}",
                 std::mem::discriminant(&other)
@@ -1010,6 +1018,15 @@ async fn dispatch_inbound(
         // this is defensive uniformity.
         InboundMessage::UpdateBuiltinTools { entries } => {
             session_manager.lock().await.apply_builtin_tools_enabled(&entries);
+            Ok(())
+        }
+
+        // ADR-063 §3.7.6: main-dialog system prompt hot-reload. Defensive
+        // uniformity — any per-session producer targeting a single
+        // session_id gets the same global policy (system prompt is
+        // agent-scoped, not session-scoped).
+        InboundMessage::UpdateSystemPrompt { system_prompt } => {
+            session_manager.lock().await.apply_system_prompt(&system_prompt);
             Ok(())
         }
 

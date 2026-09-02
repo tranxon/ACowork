@@ -601,9 +601,13 @@ impl AgentLoop {
             // consulted: it overrides the dialog identity, while compaction
             // is a summarization task with its own directive (see
             // `AgentCore.compaction_prompt` doc).
-            let system_prompt = self
-                .core
-                .compaction_prompt
+            // ADR-063 §3.7.5: `compaction_prompt()` returns owned `Option<String>`
+            // (cloned through the Arc<RwLock>). Bind the temporary to a
+            // local before `.as_deref()` so the returned `&str` outlives
+            // the statement — without the binding the temporary drops and
+            // the `&str` would dangle by the next use.
+            let override_prompt = self.core.compaction_prompt();
+            let system_prompt = override_prompt
                 .as_deref()
                 .unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT);
 

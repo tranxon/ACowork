@@ -158,24 +158,29 @@ export function UserWithAttachmentsBubble({
           </div>
         )}
 
-        {/* User text bubble. Hover-revealed timestamp anchored to the
-            bubble's own LEFT edge. The bubble is split into two layers
-            (outer = relative group + chrome, inner = content + scroll)
-            so the timestamp's `-top-5` is not clipped by the inner
-            layer's `overflow-y-auto` scroll container. */}
+        {/* User text bubble. The timestamp is rendered as a sibling
+            BELOW the bubble (not absolutely positioned above) so it
+            can never collide with the username row or attachment
+            chips. Hover behaviour is preserved: the timestamp
+            reveals with an opacity fade when the wrapper is
+            hovered. The bubble and timestamp share a column with
+            `max-w-[85%]` and `items-start`, so the timestamp's
+            left edge aligns with the bubble's left edge. */}
         {userMessage.content && (
-          <div
-            className="relative group mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
-            style={fontSizeStyle}
-          >
+          <div className="group mt-[6px] max-w-[85%] flex flex-col items-start">
+            <div
+              className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
+              style={fontSizeStyle}
+            >
+              <div className="px-4 py-2.5 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+                {userMessage.content}
+              </div>
+            </div>
             {userMessage.timestamp && (
-              <span className="pointer-events-none absolute left-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
                 {formatBubbleTime(userMessage.timestamp)}
               </span>
             )}
-            <div className="px-4 py-2.5 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
-              {userMessage.content}
-            </div>
           </div>
         )}
       </div>

@@ -337,7 +337,28 @@ pub(crate) async fn phase_b_init_session(
         // so Gateway and Standalone modes share the same resolution; `None`
         // (no file) means the built-in COMPACTION_SYSTEM_PROMPT fallback is
         // used at compaction time.
-        c.compaction_prompt = ctx.compaction_prompt.clone();
+        //
+        // ADR-063 §3.7.5: wrap in `Arc<RwLock<Option<String>>>` so the
+        // L2 reload (`DebugService::reload_prompts`) can write through
+        // any Arc<AgentCore> clone held by a running session. Phase B
+        // is the single injection point for Gateway mode — see
+        // `cli.rs` (Standalone mode) for the symmetric Standalone path.
+        *c.compaction_prompt.write().unwrap() = ctx.compaction_prompt.clone();
+
+        // ADR-063: 7 additional package-level prompt overrides. Phase A
+        // loaded each `prompts/<file>.md` into the matching field on
+        // `AgentBootContext`; here we mirror the Phase B injection
+        // pattern (RwLock write — Phase B is the only writer before
+        // sessions are spawned, so no contention with the LLM call
+        // sites' read guards). `None` is the normal "no override" state.
+        *c.search_prompt.write().unwrap() = ctx.search_prompt.clone();
+        *c.compact_template.write().unwrap() = ctx.compact_template.clone();
+        *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
+        *c.extraction_prompt.write().unwrap() = ctx.extraction_prompt.clone();
+        *c.conflict_classification_prompt.write().unwrap() =
+            ctx.conflict_classification_prompt.clone();
+        *c.generalization_prompt.write().unwrap() = ctx.generalization_prompt.clone();
+        *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
 
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).

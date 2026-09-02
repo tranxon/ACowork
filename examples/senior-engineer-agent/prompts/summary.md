@@ -1,3 +1,19 @@
+<!-- ADR-063 §3.2 package-level LLM prompt override — `summary.md`.
+     This file overrides the built-in `crate::prompt::COMPACTION_SYSTEM_PROMPT`
+     at Phase A (agent_init) load time. The Runtime's Debug panel
+     surfaces it under name `summary`; editing + Reload pushes the
+     on-disk content into the live `AgentCore` Arc (R7, L2 reload).
+
+     Original ADR-053 directive body follows — preserved verbatim so
+     any operator edit history / git blame still maps to the original
+     compaction-authoring intent.
+
+     To revert to the built-in default, delete this file and click
+     Reload in the Debug panel. Filename MUST stay `summary.md` exactly
+     (case-sensitive, no extension variant) — `OVERRIDABLE_PROMPTS`
+     matches by exact filename.
+-->
+
 # Context Compaction Directive — Senior Software Engineer Agent
 
 You are an AI assistant that summarizes engineering conversations for the senior software engineer agent.

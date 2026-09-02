@@ -11,10 +11,12 @@
 //! `debug/server.rs` WebSocket server).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::agent::agent_core::AgentCore;
 use crate::debug::DebugEventSender;
 use crate::debug::controller::DebugController;
 use crate::debug::handlers::{DebugError, DebugStateSnapshot, ReExecuteOutcome, StepOutcome};
@@ -39,6 +41,18 @@ pub struct RuntimeDebugService {
     /// Per-session event senders — each sender is a fresh `DebugEventSender`
     /// instance with the corresponding session_id embedded.
     event_senders: Arc<tokio::sync::RwLock<HashMap<String, DebugEventSender>>>,
+    /// ADR-063: the agent's `Arc<AgentCore>` — `reload_prompts` writes
+    /// the 9 per-agent prompt overrides into its `Arc<RwLock<Option<String>>>`
+    /// fields. Held as `Option` because the slot is filled in Phase B
+    /// (after `RuntimeDebugService::new` is constructed in Phase A or
+    /// `startup/debug_enable.rs`); the `reload_prompts` impl tolerates
+    /// `None` with an `Internal` error rather than panicking.
+    agent_core: Arc<std::sync::RwLock<Option<Arc<AgentCore>>>>,
+    /// ADR-063: the agent's `.agent` package directory (where
+    /// `prompts/<file>.md` lives). `reload_prompts` reads each canonical
+    /// filename via `load_optional_prompt(package_dir, file)` and writes
+    /// the result into the matching `AgentCore` field.
+    package_dir: PathBuf,
 }
 
 impl RuntimeDebugService {
@@ -50,9 +64,37 @@ impl RuntimeDebugService {
         >,
         event_senders: Arc<tokio::sync::RwLock<HashMap<String, DebugEventSender>>>,
     ) -> Self {
+        // ADR-063: pre-R7 callers (tests that exercise the trait without
+        // the agent-wide reload path) still need a working service.
+        // Default `agent_core` to an empty slot and `package_dir` to a
+        // dummy path; `reload_prompts` returns `Internal` in that case.
+        // Production wiring (Phase B SessionManager + startup/debug_enable)
+        // always calls the full 4-arg constructor below.
         Self {
             sessions,
             event_senders,
+            agent_core: Arc::new(std::sync::RwLock::new(None)),
+            package_dir: PathBuf::new(),
+        }
+    }
+
+    /// ADR-063: full 4-arg constructor used by the production wiring.
+    /// The empty `agent_core` slot is filled by Phase B (or by
+    /// `startup/debug_enable` after a mid-loop `EnableDebugMode`), and
+    /// `reload_prompts` becomes fully functional once that happens.
+    pub fn new_with_agent(
+        sessions: Arc<
+            tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<DebugController>>>>,
+        >,
+        event_senders: Arc<tokio::sync::RwLock<HashMap<String, DebugEventSender>>>,
+        agent_core: Arc<std::sync::RwLock<Option<Arc<AgentCore>>>>,
+        package_dir: PathBuf,
+    ) -> Self {
+        Self {
+            sessions,
+            event_senders,
+            agent_core,
+            package_dir,
         }
     }
 
@@ -165,5 +207,62 @@ impl DebugService for RuntimeDebugService {
         let (ctrl_arc, _tx) = self.get_session_state(session_id).await?;
         let mut ctrl = ctrl_arc.lock().await;
         crate::debug::handlers::handle_re_execute(&mut ctrl).await
+    }
+
+    /// ADR-063 §3.7.5 L2 reload — re-read every `prompts/<file>.md`
+    /// from `<package_dir>/prompts/` and overwrite the corresponding
+    /// `Arc<RwLock<Option<String>>>` field on the canonical `AgentCore`.
+    ///
+    /// Reads use the canonical filename table in
+    /// [`crate::package::prompt_builder::OVERRIDABLE_PROMPTS`] so the
+    /// reload covers the same 9 fields Phase A loaded at startup.
+    /// Writes go through `Arc::clone(&core.<field>)` first — every
+    /// session of this agent holds its own `Arc<AgentCore>` clone that
+    /// shares the inner `Arc<RwLock<Option<String>>>` with the canonical
+    /// one (see `Clone for AgentCore`), so a single write propagates to
+    /// all live sessions.
+    ///
+    /// Failure modes (all map to `DebugError::Internal`):
+    ///   - `agent_core` slot still empty (Phase B hasn't run yet, or
+    ///     this is a pre-R7 2-arg-constructed service) — the caller
+    ///     should retry after Phase B finishes.
+    ///   - I/O error reading a prompt file — surfaced via the
+    ///     `load_optional_prompt` warning path; missing files are
+    ///     silently treated as "no override" (same contract as Phase A).
+    async fn reload_prompts(&self) -> Result<(), DebugError> {
+        let core_arc = {
+            let slot = self.agent_core.read().unwrap();
+            slot.clone()
+        }
+        .ok_or_else(|| {
+            DebugError::Internal(
+                "agent_core slot is empty — reload_prompts requires Phase B to have constructed AgentCore"
+                    .to_string(),
+            )
+        })?;
+
+        if self.package_dir.as_os_str().is_empty() {
+            return Err(DebugError::Internal(
+                "package_dir not configured for this DebugService — pre-R7 2-arg constructor"
+                    .to_string(),
+            ));
+        }
+
+        // Delegate to the package-level free function — single source of
+        // truth for the filename→AgentCore-field dispatch table. The HTTP
+        // `POST /agents/{id}/prompts/reload` handler also calls it
+        // directly (without going through this trait), which is what lets
+        // the Debug panel reload while DevMode is still disabled.
+        crate::package::prompt_builder::reload_prompts_into_core(
+            &self.package_dir,
+            &core_arc,
+        )
+        .map_err(|e| DebugError::Internal(e.to_string()))?;
+
+        tracing::info!(
+            package_dir = %self.package_dir.display(),
+            "ADR-063: reload_prompts — 9 LLM prompt overrides reloaded from disk into AgentCore"
+        );
+        Ok(())
     }
 }

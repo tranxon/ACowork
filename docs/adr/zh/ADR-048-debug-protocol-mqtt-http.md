@@ -19,6 +19,8 @@
 现有 `core/acowork-runtime/src/debug/server.rs` 中的 RPC handler **业务逻辑 0 改动**——只把它们从内部闭包提到 `debug/handlers.rs` 作为 `pub async fn`，再用 ADR-040 的 UseCase 模式包装成 `DebugService` trait。MQTT events / HTTP routes 都是 thin wrappers，调用 service。
 
 > **⚠️ 范围声明（D7 修订）**：原规划迁移全部 **22 个 RPC**，实际本 ADR 迁移 **10 个**（resume / pause / step / stop / getState / getContextSnapshot / getSection / rewind / patchContext / reExecute）。其余 12 个（restart / breakpoints ×3 / editMessage / rollback / reloadSkills / switchProvider / recording ×4）**不在本次范围内**——它们从未在旧 WebSocket server 中实现（旧 server 同样只有 10 个 handler 的业务逻辑，其余是文档预留），因此"业务逻辑 0 改动"承诺依然成立。未来补齐时走 ADR-053，传输接线（Gateway 反代 + Desktop `debug_rpc` 通用命令）**零改动**。
+>
+> **D8 进度（ADR-063 实现后）**：`POST /api/agents/{id}/debug/prompts/reload`（prompts 热重载）已由 [ADR-063](../063-package-level-prompt-override.md) §3.7.6 落地，**走本 ADR 的 `/api/agents/{id}/debug/{*rest}` wildcard 转发**，传输层 0 改动 — 验证了 D8 表头里"传输层 0 改动"的设计假设。其余 12 个 RPC 仍是文档预留。
 
 ```mermaid
 graph LR
@@ -190,7 +192,7 @@ acowork/agents/{agent_id}/debug/events/{event_type}
 
 #### 4.2 trait 定义骨架
 
-> **实现注（D7）**：下图为完整蓝图（22 方法）；**当前实现只落地前 10 个**（resume/pause/step/stop/get_state/get_context_snapshot/get_section/rewind/patch_context/re_execute）。未落地方法保持"文档预留"状态，补全时按 ADR-053 走，无需改传输接线。
+> **实现注（D7）**：下图为完整蓝图（22 方法）；**当前实现只落地前 10 个**（resume/pause/step/stop/get_state/get_context_snapshot/get_section/rewind/patch_context/re_execute）。未落地方法保持"文档预留"状态，补全时按 ADR-053 走，无需改传输接线。ADR-063 §3.7.6 已用本 wildcard 落地 `reload_prompts`，是 wildcard 设计的首个实战用户。
 
 ```rust
 // core/acowork-runtime/src/usecases/debug_service.rs
@@ -505,6 +507,7 @@ let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn De
 | **D6** ✅ | Desktop: DebugClient 重写 | `commands/debug.rs` 重写为 HTTP + MQTT + 删除 `debugStore.ts` WebSocket 逻辑 + `ResultsPanel.tsx` Debug 部分删除 + 同步 stale 注释 | 实测 +91 / -216 行（净 **-125 行**），含 264 行 `<DebugPanel/>` 死组件清除 |
 | **D7** ✅ | 文档 + 注释同步 | `10-debug-protocol.md` §1§2§3§9 大改 + `06-communication.md` §0 表格 + `14-desktop-app.md` §2.2§7.1 + `03-agent-runtime.md` CLI flag + 模块结构 + `module-design/02-runtime.md` debug/ 结构 + `ADR-031` L384 + `AGENTS.md` 协议分工行 + ~11 处 Rust 注释（`acowork-runtime/src/{cli,startup/subsystems,agent/session/session_manager,usecases/debug_service_impl}.rs` + `acowork-gateway/src/{lifecycle/process,http/agents,gateway/state}.rs` + `acowork-core/src/protocol.rs`） | 文档 ~150 行 / Rust 注释 ~30 行；workspace `tokio-tungstenite = "0.29"` **未删**（`acowork-lsp-relay` 仍用，见 §C 修正） |
 | **D8** ⏳ | **（可选，ADR-053）** 补齐剩余 12 个 RPC | breakpoints ×3 / editMessage / rollback / reloadSkills / switchProvider / recording ×4 / restart —— 全部通过既有传输接线（Gateway 反代 + Desktop `debug_rpc` 通用命令）新增，传输层 0 改动 | +200~300 行 |
+| **D8a** ✅ | ADR-063 §3.7.6 落地 `reload_prompts`（首个用本 wildcard 转发） | `POST /api/agents/{id}/debug/prompts/reload` → Gateway `/debug/{*rest}` 反代 → Runtime `DebugService::reload_prompts`；传输层 0 改动（详见 ADR-063 §3.7.6） | +50 行（Runtime handler + DebugService 方法 + subsystems.rs Phase C 调用） |
 
 **关键节点**：
 - D1 完成后：所有现有测试应通过（handlers 是从 server.rs 提取的，行为不变；新的 trait + impl 还没被任何 route 调用）

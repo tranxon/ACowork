@@ -276,6 +276,53 @@ All listed directories are authorized for access at the indicated permission lev
 
 System Prompt（1）、Identity Context（2）、Autobiographical（2.5）、Workspace Context（2.8）、Tool Definitions（3）始终保留，不参与裁剪。
 
+#### 3.1.1 包级 LLM Prompt 覆盖（ADR-063）
+
+> **ADR-063**：Agent 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），覆盖
+> 内置常量（`crate::prompt::*` 与 grafeo / memory 模块的 LLM 指令）。这些文件**不参与**
+> §3.1 的主 prompt 拼接（它们的语义是"任务指令性 prompt"而非"身份定义"），只通过
+> `load_optional_prompt` 在对应 LLM 调用点注入。
+
+**9 个 canonical 文件名**（大小写敏感，不含 `.md` 扩展名）：
+
+| 文件名（无 .md） | 覆盖的内置常量 | 用途 |
+|---|---|---|
+| `summary` | `COMPACTION_SYSTEM_PROMPT` | 摘要压缩指令（ADR-053） |
+| `fallback` | `PROMPT_BUILDER_FALLBACK` | 主 prompt 拼接后兜底 |
+| `search` | `SEARCH_SYSTEM_PROMPT` | perplexity 联网搜索 system prompt |
+| `compact-template` | `COMPACT_PROMPT` | 全文压缩模板（含 `{messages_text}`） |
+| `title` | `TITLE_PROMPT` | 会话标题生成（含 `{language}` + `{user_message}`） |
+| `extraction` | grafeo `EXTRACTION_SYSTEM_PROMPT` | grafeo 记忆抽取（live reload 延后，§6.1） |
+| `conflict-classification` | grafeo `CONFLICT_CLASSIFICATION_PROMPT` | grafeo 冲突分类（live reload 延后） |
+| `generalization` | grafeo `GENERALIZATION_PROMPT` | grafeo 泛化（live reload 延后） |
+| `abstention` | memory `DEFAULT_ABSTENTION_PROMPT` | RAG 弃答（live reload 延后） |
+
+**加载链（三阶段）**：
+
+1. **Phase A**（`startup/agent_init.rs`）：遍历 `OVERRIDABLE_PROMPTS`，调用
+   `load_optional_prompt(package_dir, filename)` 一次性加载到 `AgentBootContext`。
+   文件不存在 / 全空白 → 该字段保持 `None`（保持原内置行为）。
+2. **Phase B**（`startup/session_init.rs`）：把 `ctx.*` 写入 `AgentCore` 对应的
+   `Arc<RwLock<Option<String>>>` 字段。Session 启动时通过 `Clone for AgentCore`
+   拿到共享 Arc（reference +1），写一处所有 session 都看到。
+3. **Phase C**（`startup/subsystems.rs`，DevMode 启用时）：调用
+   `DebugService::reload_prompts`，从磁盘重新加载并写入 Arc，使 Debug 面板的"Reload"
+   按钮可以即时生效。
+
+**关键不变量**：
+
+- 9 个 prompt 字段在 `AgentCore` 中均为 `Arc<std::sync::RwLock<Option<String>>>`；
+  accessor（`compaction_prompt()` 等）每次调用都通过 RwLock 读最新值，**不缓存**。
+- `build_system_prompt_with_mode` 排除这 9 个文件名（大小写敏感，精确匹配），但
+  其它 markdown 文件（包括 `summary.txt` / `SUMMARY.md` 等变体）仍按普通 section
+  拼接 — 主 dialog 不会被 override 文件污染。
+- 写入路径（PUT `/agents/{id}/prompts/{name}`）做原子 rename（`tmp` + `rename`），
+  1 MiB 大小上限、空白拒绝、路径穿越拦截 — Runtime 的 `http/prompts.rs` 是
+  白名单与原子语义的唯一权威，Gateway 仅做透明反代（[protocols/zh/http.md §5.6](../../protocols/zh/http.md#56-包级-llm-prompt-覆盖-prompts)）。
+- Live reload 只覆盖 `compaction / fallback / search / title / compact-template`
+  这 5 个 runtime 内调用点；grafeo / memory 的 4 个常量是模块级 `&'static str`，
+  重新加载需重启 Runtime（ADR-063 §6.1 已记录此限制）。
+
 ### 3.2 循环检测策略
 
 防止 LLM 陷入重复调用工具的死循环。采用三种检测模式 + 三级渐进响应。

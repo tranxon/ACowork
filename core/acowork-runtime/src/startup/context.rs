@@ -109,6 +109,59 @@ pub(crate) struct AgentBootContext {
     /// [`crate::agent::AgentCore::compaction_prompt`].
     pub compaction_prompt: Option<String>,
 
+    // ── ADR-063: 7 additional package-level LLM prompt overrides ──
+    //
+    // Each field corresponds 1-to-1 to an entry in
+    // `crate::package::prompt_builder::OVERRIDABLE_PROMPTS`. Phase A loads
+    // all 8 (this one + the 7 below); Phase B injects them into
+    // `AgentCore` as `Arc<RwLock<Option<String>>>` so the L1+L2 reload path
+    // (Debug panel §3.7.5) can write them in place without recreating the
+    // shared `Arc<AgentCore>` cloned into every session.
+    //
+    // The 7 entries below are loaded *only* if their file exists in
+    // `prompts/` — `None` is the normal "no override" state and the LLM
+    // call site resolves to the built-in constant via
+    // `core.<field>.read().unwrap().as_deref().unwrap_or(const)`.
+
+    /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
+    /// (package file: `prompts/search.md`).
+    pub search_prompt: Option<String>,
+
+    /// Override for `crate::prompt::COMPACT_PROMPT`
+    /// (package file: `prompts/compact-template.md`).
+    /// Package authors MUST preserve the `{messages_text}` placeholder
+    /// in their override — the runtime substitution at the call site
+    /// panics with a clear error if the placeholder is missing.
+    pub compact_template: Option<String>,
+
+    /// Override for `crate::prompt::TITLE_PROMPT`
+    /// (package file: `prompts/title.md`). Authors may customise
+    /// `{language}` and `{user_message}` placeholders per their style.
+    pub title_prompt: Option<String>,
+
+    /// Override for `acowork-grafeo::consolidation::triple_extraction::EXTRACTION_SYSTEM_PROMPT`
+    /// (package file: `prompts/extraction.md`). Note: grafeo holds a
+    /// process-level singleton; the L2 reload (§3.7.4) for grafeo is NOT
+    /// in this ADR's scope — this field is loaded but the reload report
+    /// only covers runtime prompt.rs entries until ADR-051 trait
+    /// refactor lands.
+    pub extraction_prompt: Option<String>,
+
+    /// Override for
+    /// `acowork-grafeo::consolidation::conflict_llm::CONFLICT_CLASSIFICATION_PROMPT`
+    /// (package file: `prompts/conflict-classification.md`).
+    pub conflict_classification_prompt: Option<String>,
+
+    /// Override for
+    /// `acowork-grafeo::consolidation::generalization::GENERALIZATION_PROMPT`
+    /// (package file: `prompts/generalization.md`).
+    pub generalization_prompt: Option<String>,
+
+    /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
+    /// (package file: `prompts/abstention.md`). Note: memory holds a
+    /// process-level singleton; L2 reload is out of scope here too.
+    pub abstention_prompt: Option<String>,
+
     // Shared handles
     pub memory_session: Arc<crate::memory::MemorySessionHandle>,
     pub mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier>,
@@ -324,5 +377,8 @@ pub(crate) fn build_session_manager_config(
         session_snapshots: Some(ctx.session_snapshots.clone()),
         latest_session: Some(ctx.latest_session.clone()),
         session_configs: Some(ctx.session_configs.clone()),
+        // ADR-063: forward the package directory so `enable_debug_mode`
+        // can hand it to `RuntimeDebugService::new_with_agent` (L2 reload).
+        package_dir: ctx.loaded.package_dir.clone(),
     }
 }

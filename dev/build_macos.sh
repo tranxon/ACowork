@@ -112,7 +112,7 @@ fi
 
 # ── Header ──────────────────────────────────────────────────────────────────
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║   ACowork.AI — macOS One-Click Build Script ║${NC}"
+echo -e "${CYAN}║   ACowork.AI — macOS One-Click Build Script  ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${GRAY}  Arch: $ARCH${NC}"

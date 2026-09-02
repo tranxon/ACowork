@@ -43,6 +43,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
 
     let server = acowork_runtime::http::RuntimeHttpServer::start(
         temp_dir.clone(),
+        temp_dir.clone(), // package_dir (ADR-063): tests reuse work_dir as package dir
         "com.test.agent".to_string(),
         snapshots,
         latest,
@@ -63,6 +64,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         debug_service,
         workspace_resolver,
         session_manager_slot,
+        std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
     )
     .await
     .expect("server should start");

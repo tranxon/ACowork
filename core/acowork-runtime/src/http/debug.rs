@@ -380,6 +380,14 @@ async fn post_re_execute(
         .map_err(DebugHttpError::from)
 }
 
+// `POST /api/debug/prompts/reload` — moved to `POST /agents/{id}/prompts/reload`
+// in `http/prompts.rs` (ADR-063 §3.7.7). The old route 503'd outside
+// DevMode because it routed through `DebugService::reload_prompts`
+// and the `debug_service_slot` is only populated when DevMode is
+// active. The new placement is package-level (not debug-session-level)
+// and works unconditionally — see ADR-063 §3.7.6 for the L2 reload
+// semantics that this comment block previously documented.
+
 // ── Runtime DevMode activation ───────────────────────────────────────
 
 /// JSON body for `POST /api/debug/enable`.

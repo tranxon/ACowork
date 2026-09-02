@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,6 +103,17 @@ pub struct SessionManagerConfig {
     /// `GET/PUT /sessions/{sid}/config` without going through the
     /// serial inference queue.
     pub session_configs: Option<crate::usecases::SharedSessionConfigs>,
+
+    /// ADR-063: the agent's `.agent` package directory (where
+    /// `prompts/<file>.md` lives). Populated by
+    /// `build_session_manager_config` from `AgentBootContext.loaded.package_dir`;
+    /// `enable_debug_mode` passes it to `RuntimeDebugService::new_with_agent`
+    /// so the L2 reload endpoint can re-read the 9 canonical filenames
+    /// on demand. Empty `PathBuf` (= `Default::default()`) means no
+    /// package configured — pre-R7 tests that exercise the trait
+    /// without the reload path stay green; production wiring always
+    /// sets this.
+    pub package_dir: PathBuf,
 }
 
 impl Default for SessionManagerConfig {
@@ -124,6 +136,9 @@ impl Default for SessionManagerConfig {
             session_snapshots: None,
             latest_session: None,
             session_configs: None,
+            // ADR-063: empty default keeps pre-R7 tests green; production
+            // wiring always populates this in `build_session_manager_config`.
+            package_dir: PathBuf::new(),
         }
     }
 }
@@ -366,6 +381,13 @@ pub struct SessionManager {
     latest_session: SharedLatestSession,
     /// ADR-047: Shared session config map for `SessionConfigService`.
     session_configs: crate::usecases::SharedSessionConfigs,
+    /// ADR-063: the agent's `.agent` package directory. See
+    /// `SessionManagerConfig::package_dir` for the rationale; copied out
+    /// at construction so `enable_debug_mode` can hand it to
+    /// `RuntimeDebugService::new_with_agent` without holding onto the
+    /// whole config (which owns the `chunk_tx` mpsc Sender consumed
+    /// elsewhere).
+    package_dir: PathBuf,
 }
 
 impl SessionManager {
@@ -381,6 +403,11 @@ impl SessionManager {
             .session_configs
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(HashMap::new())));
+
+        // ADR-063: clone out the package directory BEFORE `config` is
+        // moved into `self.config` (struct literal consumes it). Same
+        // pattern as the two Arc clones above.
+        let package_dir = config.package_dir.clone();
 
         Self {
             core,
@@ -404,6 +431,7 @@ impl SessionManager {
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
             latest_session,
             session_configs,
+            package_dir,
         }
     }
 
@@ -1725,6 +1753,39 @@ After installation, ask the user to re-enable the MCP server.",
         }
     }
 
+    /// ADR-063 §3.7.6: replace the main-dialog system prompt agent-wide.
+    ///
+    /// Called by `gateway_loop::dispatch_inbound` when the L2 reload
+    /// endpoint (`POST /agents/{id}/prompts/reload`) rebuilds the main
+    /// dialog system prompt from `prompts/*.md` (including the required
+    /// `system.md`). Mirrors the `apply_runtime_config_override` /
+    /// `apply_builtin_tools_enabled` policy — the system prompt is
+    /// **agent-scoped**, so one system-level message updates:
+    ///
+    /// 1. the shared `SessionManagerConfig.system_prompt` template — so
+    ///    sessions opened LATER inherit the new value, and
+    /// 2. every active session's `ContextBuilder` via the
+    ///    `SessionMessage::UpdateSystemPrompt` broadcast — so the next
+    ///    `build_chat_request` uses the new prompt without a restart.
+    pub fn apply_system_prompt(&mut self, system_prompt: &str) {
+        tracing::info!(
+            prompt_len = system_prompt.len(),
+            "SessionManager: applying main-dialog system prompt (template sync + broadcast)"
+        );
+        // Step 1: rewrite the shared template for future sessions.
+        self.config.system_prompt = system_prompt.to_string();
+        // Step 2: push to every active session's ContextBuilder.
+        let failed = self.broadcast(SessionMessage::UpdateSystemPrompt {
+            system_prompt: system_prompt.to_string(),
+        });
+        if !failed.is_empty() {
+            tracing::warn!(
+                failed_sessions = failed.len(),
+                "apply_system_prompt: some sessions missed the broadcast (likely closed)"
+            );
+        }
+    }
+
     // ── ADR-030 C3: dynamic builtin tool registration (SidecarEndpointUpdate) ──
     //
     // When a sidecar's state changes (LSP relay became ready, sidecar
@@ -3013,9 +3074,21 @@ After installation, ask the user to re-enable the MCP server.",
         // service reads from `debug_controllers` and `debug_event_senders`
         // on every call, so future session registrations still work —
         // we don't snapshot the maps.
-        let debug_svc = Arc::new(crate::usecases::RuntimeDebugService::new(
+        //
+        // ADR-063: use the 4-arg `new_with_agent` constructor so the
+        // service can fulfil `reload_prompts` requests (L2 reload). The
+        // `agent_core` slot is an `Arc<RwLock<Option<Arc<AgentCore>>>>`
+        // because `SessionManager::core` is the canonical `Arc<AgentCore>`
+        // template that `Clone for AgentCore` clones from — every running
+        // session's `AgentCore` share the same `Arc<RwLock<Option<String>>>`
+        // inner fields, so writing here propagates to every live session.
+        let agent_core_slot: Arc<std::sync::RwLock<Option<Arc<AgentCore>>>> =
+            Arc::new(std::sync::RwLock::new(Some(self.core.clone())));
+        let debug_svc = Arc::new(crate::usecases::RuntimeDebugService::new_with_agent(
             self.debug_controllers.clone(),
             self.debug_event_senders.clone(),
+            agent_core_slot,
+            self.package_dir.clone(),
         ));
         self.debug_service = Some(debug_svc);
 

@@ -310,7 +310,14 @@ impl super::loop_::AgentLoop {
                             model_name,
                             distill_max_tokens,
                             identity_context.as_deref(),
-                            core_clone.compaction_prompt.as_deref(),
+                            // ADR-063 §3.7.5: read through the Arc<RwLock>
+                            // accessor so a Debug panel L2 reload on the
+                            // canonical AgentCore is visible to every clone
+                            // held by a running session (this `core_clone`
+                            // shares the inner Arc with the canonical one in
+                            // SessionManager — see `AgentCore::compaction_prompt`
+                            // doc and the `Clone for AgentCore` impl).
+                            core_clone.compaction_prompt().as_deref(),
                         )
                         .await
                         {

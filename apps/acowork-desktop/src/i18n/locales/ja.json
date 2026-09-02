@@ -593,9 +593,9 @@
     "debugRemoteDesc": "デバッグにはAgentランタイムへの直接ローカル接続が必要です。デスクトップアプリとゲートウェイは同じマシン上で実行する必要があります。",
     "connectingDebug": "デバッグサーバーに接続中...",
     "debugConnectionLost": "デバッグ接続が切断されました",
-    "agentNotDebugMode": "Agentはデバッグモードではありません。「デバッグを有効化」をクリックすると、Agentを再起動せずにデバッグを開始できます。",
-    "enableDebug": "デバッグを有効化",
-    "enablingDebug": "デバッグを有効化中...",
+    "debugSection": "デバッグ",
+    "enterDebug": "デバッグに入る",
+    "enteringDebug": "デバッグに入る...",
     "noAgentDebug": "デバッグモードのAgentはありません",
     "iteration": "反復",
     "phase": "フェーズ",
@@ -1137,5 +1137,20 @@
     "refresh": "更新",
     "loading": "読み込み中...",
     "refreshing": "更新中..."
+  },
+  "prompts": {
+    "badgeBuiltin": "組み込み",
+    "badgeMissing": "欠落",
+    "badgeOverridden": "オーバーライド済み",
+    "badgeRequired": "必須",
+    "error": "読み込み失敗：{{message}}",
+    "help": "クリックして編集；保存後に「更新」で反映。",
+    "loading": "プロンプトを読み込み中...",
+    "openAria": "エディタでプロンプト {{name}} を開く",
+    "reload": "更新",
+    "reloadAria": "ディスクからすべてのプロンプトを再読み込み",
+    "reloadOk": "再読み込み完了 — 8 件のオーバーライドを更新し、メイン対話 system prompt を同期しました。",
+    "reloadSystemPromptFailed": "8 件のオーバーライドは更新しましたが、メイン対話 system prompt の再構築に失敗 — system.md の変更は Agent 再起動後に反映されます。",
+    "title": "PROMPT"
   }
 }
