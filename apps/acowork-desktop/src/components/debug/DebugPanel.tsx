@@ -389,7 +389,7 @@ export function SnapshotNode({
             return (
               <div key={sectionKey}>
                 {/* Section header */}
-                <div className="flex w-full items-center gap-1.5 rounded-md bg-zinc-100 pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700">
+                <div className="flex w-full items-center gap-1.5 rounded-md bg-zinc-50 pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/40 dark:hover:bg-zinc-800/60">
                   <button
                     onClick={() => onToggleSection(sectionKey)}
                     className="flex flex-1 items-center gap-1.5"
@@ -435,7 +435,7 @@ export function SnapshotNode({
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
-                  <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-100 p-2 text-zinc-600 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                  <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-50 p-2 text-zinc-600 dark:border-zinc-600 dark:bg-zinc-900/40 dark:text-zinc-400">
                     {/* ADR-054 step 4: messages render as a conversation
                         list, not raw JSON text. */}
                     {sectionKey === "messages" ? (
