@@ -92,8 +92,12 @@ fn extract_whole(text: &str) -> Result<String, String> {
             crate::tools::output::MAX_OUTPUT_BYTES
         ));
     }
-    let (out, _) = crate::tools::output::truncate_output(text);
-    Ok(out)
+    // No truncate_output here: the OutputBoundedTool wrapper enforces
+    // the 32 KB hard cap as the last safety net. doc_reader has its own
+    // fail-fast above (Err if file > cap), which is a different
+    // decision — "this file is too big, ask the LLM to narrow" rather
+    // than "slice this output to fit".
+    Ok(text.to_string())
 }
 
 /// Paged path: slice the requested 1-based inclusive line range.
@@ -148,11 +152,11 @@ fn extract_paged(text: &str, start: usize, end: usize) -> Result<String, String>
     };
 
     let selected = &text[byte_start..byte_end];
-    // Final safety net: an extreme line range could still exceed the
-    // 32 KB output cap (e.g. 400 minified-JSON lines). Same
-    // truncate_output the whole-file path uses.
-    let (out, _) = crate::tools::output::truncate_output(selected);
-    Ok(out)
+    // No truncate_output here: the OutputBoundedTool wrapper enforces
+    // the 32 KB hard cap as the last safety net. The paged path
+    // (400-line max via MAX_LINES_PER_CALL) plus that wrapper is two
+    // independent bounds; either one alone would still be safe.
+    Ok(selected.to_string())
 }
 
 /// Byte ranges `(start, end)` for each line in `text`, where `start` is
