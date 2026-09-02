@@ -750,7 +750,20 @@ impl ConversationSession {
     /// Write the current in-memory state to the per-session meta file.
     ///
     /// Also updates `last_meta_write` timestamp for cooldown tracking.
+    ///
+    /// # Deleted-session guard
+    ///
+    /// If the session's JSONL file no longer exists, the session has been
+    /// deleted (or pruned) and the meta file must NOT be re-created. Without
+    /// this guard, a detached tail-distillation task holding the last
+    /// `Arc<ConversationSession>` would re-write the meta file *after*
+    /// `SessionManager::delete_session` removed it, leaving an orphaned meta
+    /// entry that the next startup scan treats as the "latest" session —
+    /// which then fails to resume because its JSONL is gone.
     fn write_meta(&self) {
+        if !self.session_file_path.exists() {
+            return;
+        }
         let meta = self.build_meta();
         if let Err(e) = write_session_meta(&self.conversations_dir, &meta) {
             tracing::warn!(
@@ -2521,6 +2534,66 @@ mod tests {
         assert_eq!(meta.version, CONVERSATION_FORMAT_VERSION);
         assert_eq!(meta.session_id, session_id);
         assert_eq!(meta.agent_id, agent_id);
+    }
+
+    #[test]
+    fn write_meta_skips_when_jsonl_deleted() {
+        // Regression: `ConversationSession::write_meta` used to rewrite the
+        // per-session meta file unconditionally. A detached distill task
+        // holding an `Arc<ConversationSession>` could therefore re-create a
+        // meta file for a session whose JSONL had already been deleted by
+        // `SessionManager::delete_session`. On the next startup the orphan
+        // meta was scanned as the "latest" session and resume failed because
+        // the JSONL was gone. Fix: `write_meta` now returns early when the
+        // JSONL file no longer exists.
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path();
+        let session_id = generate_session_id();
+
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            &session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+
+        let conversations_dir = work_dir.join("conversations");
+        let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
+        let meta_path = conversations_dir
+            .join("meta")
+            .join(format!("{}.json", session_id));
+
+        // Pre-condition: both files exist after creation.
+        assert!(jsonl_path.exists());
+        assert!(meta_path.exists());
+
+        // Shut down the writer so the JSONL handle is released (required
+        // to delete the file on Windows), then simulate the delete path:
+        // `SessionManager::delete_session` removes BOTH the JSONL and the
+        // meta file. The guard must then prevent `write_meta` from
+        // re-creating the orphan meta.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            session.close().await.unwrap();
+        });
+        std::fs::remove_file(&jsonl_path).unwrap();
+        std::fs::remove_file(&meta_path).unwrap();
+        assert!(!jsonl_path.exists());
+        assert!(!meta_path.exists());
+
+        // The guard must prevent the meta file from being re-created.
+        session.write_meta();
+        assert!(
+            !meta_path.exists(),
+            "write_meta must not re-create a meta file once its JSONL is gone"
+        );
     }
 
     #[test]

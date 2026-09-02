@@ -1194,6 +1194,40 @@ impl SessionManager {
             }
         }
 
+        // 4. If the deleted session was the "latest", recompute the latest
+        //    from the remaining sessions on disk (or clear it if none remain).
+        //    Without this, `/sessions/latest` keeps returning the deleted
+        //    session_id and the frontend tries to resume a session whose
+        //    JSONL is gone — the exact "deleted session reloaded as latest"
+        //    failure. `find_latest_session` scans the meta files, which are
+        //    guaranteed to be consistent here because `write_meta` refuses to
+        //    re-create a meta file once its JSONL is gone (see
+        //    `ConversationSession::write_meta`).
+        if let Some((latest_id, _)) = self.latest_session() {
+            if latest_id == session_id {
+                match crate::conversation::find_latest_session(&conversations_dir) {
+                    Some(new_id) => {
+                        let title = read_session_meta(&conversations_dir, &new_id)
+                            .ok()
+                            .and_then(|m| m.title);
+                        self.set_latest_session(new_id.clone(), title);
+                        tracing::info!(
+                            session_id = %session_id,
+                            new_latest = %new_id,
+                            "Deleted session was latest; recomputed latest from disk"
+                        );
+                    }
+                    None => {
+                        *self.latest_session.write().unwrap() = None;
+                        tracing::info!(
+                            session_id = %session_id,
+                            "Deleted session was latest; no sessions remain, cleared latest"
+                        );
+                    }
+                }
+            }
+        }
+
         tracing::info!(session_id = %session_id, "SessionManager: deleted session");
     }
 
@@ -4177,5 +4211,107 @@ mod tests {
             .expect("s2 snapshot exists");
         assert_eq!(s2_snap.model.as_deref(), Some("model-A"));
         assert_eq!(s2_snap.provider.as_deref(), Some("provider-X"));
+    }
+
+    // ── Delete-latest regression (orphan meta / stale latest marker) ──
+    //
+    // Bug history: `delete_session` removed the meta + JSONL files but
+    // never touched the in-memory `latest_session` marker. Deleting the
+    // current latest session left `/sessions/latest` pointing at a session
+    // whose JSONL was gone; the frontend then tried to resume it and
+    // failed. Fix: after deleting, if the deleted session was the latest,
+    // recompute it from the remaining meta files on disk (or clear it when
+    // none remain). This test pins that contract.
+    #[tokio::test]
+    async fn delete_session_recomputes_latest_when_deleting_latest() {
+        use crate::conversation::{SessionMeta, write_session_meta};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = crate::config::RuntimeConfig {
+            work_dir: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.delete_latest"
+            version = "1.0.0"
+            name = "Test delete latest"
+            description = "Pin latest-session cleanup on delete"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+
+        // Seed a surviving session on disk (meta + jsonl) so the recompute
+        // has something to find.
+        let survivor_id = "20260101_000000_survivor";
+        let conversations_dir = dir.path().join("conversations");
+        std::fs::create_dir_all(conversations_dir.join("meta")).unwrap();
+        std::fs::write(conversations_dir.join(format!("{}.jsonl", survivor_id)), "").unwrap();
+        write_session_meta(
+            &conversations_dir,
+            &SessionMeta {
+                version: 3, // CONVERSATION_FORMAT_VERSION
+                session_id: survivor_id.to_string(),
+                agent_id: "com.test.delete_latest".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                title: Some("Survivor".to_string()),
+                workspace_id: None,
+                model: None,
+                provider: None,
+                reasoning_effort: None,
+                temperature: None,
+                todos: None,
+                message_count: 0,
+                last_active_at: "2026-01-01T00:00:00Z".to_string(),
+                tokens: None,
+                last_compaction_offset: None,
+                corrupted: false,
+            },
+        )
+        .unwrap();
+
+        // Simulate the buggy state: latest points at a session that is
+        // about to be deleted.
+        manager.set_latest_session("doomed".to_string(), None);
+        assert_eq!(
+            manager.latest_session().map(|(id, _)| id),
+            Some("doomed".to_string())
+        );
+
+        // Delete the doomed session (not in memory; files absent).
+        manager.delete_session("doomed").await;
+
+        // The latest marker must be recomputed to the surviving session —
+        // NOT left pointing at the deleted one.
+        let latest = manager.latest_session();
+        assert_eq!(
+            latest.as_ref().map(|(id, _)| id.as_str()),
+            Some(survivor_id),
+            "latest must be recomputed from disk after deleting the latest session"
+        );
+        assert_eq!(
+            latest.and_then(|(_, title)| title),
+            Some("Survivor".to_string())
+        );
+
+        // Deleting the last remaining session clears latest entirely.
+        manager.delete_session(survivor_id).await;
+        assert_eq!(manager.latest_session(), None);
     }
 }
