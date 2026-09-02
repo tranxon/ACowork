@@ -345,4 +345,51 @@ mod tests {
         assert_eq!(payload.version, 0);
         assert!(payload.providers.is_empty());
     }
+
+    /// T4-1（P4 远程）：`pm_mcp_url` 存在时，`build_available_mcps` 把 pm MCP
+    /// 注入全局 `acowork/global/mcps` 资源，远程 Runtime 即可拿到 advertise
+    /// endpoint（`http://{advertise_host}:{gw_http_port}{mcp_http_path}`）。
+    #[test]
+    fn test_build_available_mcps_injects_pm_mcp_when_url_set() {
+        let mut gw = GatewayState::new("/tmp/test-vault");
+        // 模拟 `Gateway::run` 在 PM 启动成功且 `pm.auto_inject_mcp` 时写入的
+        // advertise endpoint（ADR-055 D3：用 advertise_host 而非 127.0.0.1）。
+        gw.pm_mcp_url = Some("http://192.168.1.50:19876/api/pm/mcp".to_string());
+
+        let payload = build_available_mcps(&gw);
+
+        let pm = payload
+            .servers
+            .iter()
+            .find(|s| s.id == "pm")
+            .expect("pm MCP should be injected into global mcps when pm_mcp_url is set");
+        assert_eq!(pm.name, "pm");
+        assert_eq!(pm.url, "http://192.168.1.50:19876/api/pm/mcp");
+        assert_eq!(
+            pm.transport,
+            map_mcp_transport(&McpTransportDef::Http) as i32,
+            "pm MCP must use HTTP transport"
+        );
+        // 身份模板：Runtime 侧替换为实际 agent_id（X-MCP-Actor header）。
+        assert_eq!(
+            pm.headers.get("X-MCP-Actor").map(|s| s.as_str()),
+            Some("{agent_id}"),
+            "pm MCP must carry X-MCP-Actor identity template"
+        );
+        assert_eq!(pm.tool_timeout_secs, 60);
+    }
+
+    /// T4-1 反向：`pm_mcp_url` 为 None（PM 未启动 / auto_inject_mcp=false）时
+    /// **不**注入 pm MCP，避免向 Agent 暴露不可达端点。
+    #[test]
+    fn test_build_available_mcps_skips_pm_when_url_none() {
+        let gw = GatewayState::new("/tmp/test-vault");
+        assert!(gw.pm_mcp_url.is_none());
+
+        let payload = build_available_mcps(&gw);
+        assert!(
+            !payload.servers.iter().any(|s| s.id == "pm"),
+            "pm MCP must NOT be injected when pm_mcp_url is None"
+        );
+    }
 }

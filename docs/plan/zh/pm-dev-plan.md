@@ -123,16 +123,16 @@
 
 ---
 
-### 3.5 P4 远程 + 验证（1-2d）
+### 3.5 P4 远程 + 验证（1-2d）✅ 已完成（2026-09-02）
 
 | ID | 任务 | 估时 | 依赖 | 验收 |
 |----|------|------|------|------|
-| T4-1 | advertise endpoint 下发：参考 ADR-055 §6.3/§6.8，复用 MQTT 全局资源与 AgentHello 回执，构造 `http://{advertise_host}:{pm_port}/mcp` 推送给远程 Runtime | 0.5d | T3-5 | 远程 Runtime 收到 pm MCP 端点配置 |
-| T4-2 | 远程 Runtime 集成：远程节点通过 advertise endpoint 调用 pm MCP 工具（含身份校验 + 可选 token） | 0.5d | T4-1 | 远程节点 Agent 可正常 claim / submit |
-| T4-3 | 端到端测试（远程）：人类 Desktop 建项目/任务 → 远程 Agent 收到通知 → claim → submit → 远程节点 Dashboard 看板刷新 | 0.5d | T4-1, T4-2, P2, P3 | 测试通过 |
-| T4-4 | 文档收口：[`21-pm-project-management.md`](../../design/zh/21-pm-project-management.md) v0.2 → v1.0（移除开放问题表 → 决策记录表） + ADR 起草（PM 目录树存储选型） | 0.25d | T4-3 | 文档 v1.0 发布 |
+| T4-1 | advertise endpoint 下发：参考 ADR-055 §6.3/§6.8，复用 MQTT 全局资源与 AgentHello 回执，构造 `http://{advertise_host}:{gw_http_port}/api/pm/mcp` 推送给远程 Runtime | 0.5d | T3-5 | ✅ `build_available_mcps` 注入 pm MCP 单测通过（`pm_mcp_url` 存在注入 / 不存在跳过） |
+| T4-2 | 远程 Runtime 集成：远程节点通过 advertise endpoint 调用 pm MCP 工具（含身份校验） | 0.5d | T4-1 | ✅ `remote_e2e.rs` 非 assignee 鉴权失败（-32002）+ 匿名只读（-32001）通过 |
+| T4-3 | 端到端测试（远程）：人类 Desktop 建项目/任务 → 远程 Agent claim → submit → 看板刷新 | 0.5d | T4-1, T4-2, P2, P3 | ✅ `remote_e2e.rs` 全链路（真实 HTTP server + reqwest）通过 |
+| T4-4 | 文档收口：[`21-pm-project-management.md`](../../design/zh/21-pm-project-management.md) v0.2 → v1.0（移除开放问题表 → 决策记录表） + ADR 起草（PM 目录树存储选型） | 0.25d | T4-3 | ✅ 文档 v1.0 发布；ADR-061 已定案 |
 
-**P4 出口**：远程节点全链路可用；文档 v1.0 发布。
+**P4 出口**：远程节点全链路可用；文档 v1.0 发布。✅ 已达成
 
 ---
 

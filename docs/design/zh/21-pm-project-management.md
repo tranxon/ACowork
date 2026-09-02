@@ -1,10 +1,11 @@
 # acowork-pm 项目管理服务设计
 
-> 版本：v0.2（草案）| 日期：2026-09-01
+> 版本：v1.0（定稿）| 日期：2026-09-02
 >
 > 关联 PRD：[`docs/prd/zh/prd-doc-pm.md`](../../prd/zh/prd-doc-pm.md)（§5 项目管理）
-> 关联设计：[`04-gateway.md`](./04-gateway.md)、[`14-desktop-app.md`](./14-desktop-app.md)
-> 关联 ADR：[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）
+> 关联设计：[`04-gateway.md`](./04-gateway.md)、[`14-desktop-app.md`](./14-desktop-app.md)、[`22-pm-desktop-ui.md`](./22-pm-desktop-ui.md)
+> 关联 ADR：[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）、[`ADR-061-pm-storage-tree.md`](../../adr/zh/ADR-061-pm-storage-tree.md)（目录树存储选型）
+> 实现仓库：[`core/acowork-pm`](../../../core/acowork-pm/) + [`core/acowork-gateway/src/http/pm_api.rs`](../../../core/acowork-gateway/src/http/pm_api.rs)
 >
 > **一句话**：`acowork-pm` 是 Gateway 托管的本地项目管理服务，管理对象为 **Agent**——人类经 Desktop 看板管理项目与任务；Agent 经 HTTP MCP 工具自查、自领、提交任务；Agent 创建的任务须经人类审核后生效。
 
@@ -14,11 +15,11 @@
 
 ### 1.1 目标
 
-1. 提供基础版项目管理：项目/任务的创建、列表、看板式状态流转（ToDo / InProgress / Done）。
+1. 提供基础版项目管理：项目/任务的创建、列表、看板式状态流转（pending / in_progress / submitted / done 四列看板，六态状态机）。
 2. 任务指派对象为 **Agent**；Agent 通过 MCP 工具自查、自领、更新、提交任务。
-3. **Agent 创建的任务须经人类审核后生效**（待审核状态），防止垃圾任务污染看板。
+3. **Agent 创建的任务须经人类审核后生效**（`review_status=pending`），防止垃圾任务污染看板；人类创建的任务 `review_status=not_required` 直接生效。
 4. 指派 Agent 必须校验存在，不存在不能指派。
-5. 复用 Gateway sidecar 托管范式；支持远程节点访问。
+5. 内嵌于 Gateway 进程托管；支持远程节点访问。
 
 ### 1.2 已决结论（PRD §10 开放问题固化）
 
@@ -26,7 +27,7 @@
 |------|------|-------------|
 | Q1 | **前端 = Desktop 本地 React 组件**（不 WebView 内嵌） | 同 doc（[20-doc-online-document.md](./20-doc-online-document.md) §1.2 Q1）：复用 Desktop 设计系统，风格统一。acowork-pm 只提供 REST API |
 | Q3 | **MCP transport = HTTP** | 服务常驻；现有 `McpTransport` 支持 HTTP |
-| Q5 | **`pm_create_task` 对 Agent 开放，但创建的任务进入「待审核」状态，人类审核通过后才生效** | 未来有专门 PM Agent 承担任务编排；先放开权限，用人类审核兜底防垃圾任务。人类创建的任务直接生效，不审核 |
+| Q5 | **`pm_create_task` 对 Agent 开放，但创建的任务进入「待审核」状态（`review_status=pending`），人类 `review` 通过后才生效** | 未来有专门 PM Agent 承担任务编排；先放开权限，用人类审核兜底防垃圾任务。人类创建的任务 `review_status=not_required`，直接生效不审核 |
 | Q6 | **指派 Agent 必须校验存在** | 不存在的 Agent 不允许指派；校验来源为 Gateway Agent 目录（§9） |
 | Q7 | **暴露给远程节点** | 与 embed 一致：endpoint 用 `advertise_host` 构造，远程 Runtime 可访问 pm MCP（§8） |
 | Q8 | **数据目录 = `{data}/acowork-pm/`** | 与 Gateway 自身数据在 `<root>/data/` 下平行 |
@@ -39,9 +40,10 @@
 
 ### 2.1 组件形态
 
-- 独立 Rust crate：`core/acowork-pm/`（新增），axum HTTP 服务，与 `acowork-embed` 同构。
-- 由 Gateway 生命周期模块拉起与监督：复用 `lifecycle/embed.rs` + `embed_supervisor.rs` 模式，新增 `lifecycle/pm.rs` + `pm_supervisor.rs`。
-- 绑定 `127.0.0.1:{pm_port}`，默认端口 **18082**（可配置，冲突自动递增）。
+- 独立 Rust crate：`core/acowork-pm/`，axum HTTP 服务，实现 PM 领域逻辑（存储、状态机、MCP 工具、REST handler）。
+- **内嵌于 Gateway 进程**（非独立进程，无独立端口）：`Gateway::run` 启动时 `PmService::with_agent_directory(config.pm, agent_dir).await` 异步构造，router 经 [`core/acowork-gateway/src/http/pm_api.rs`](../../../core/acowork-gateway/src/http/pm_api.rs) 的 `pm_routes()` 以 `nest_service("/api/pm", ...)` 挂载进 Gateway HTTP server（`{gw_http_port}` 同端口，**不带** `/api` 前缀，`nest_service` 自动补）。
+- 公开路径统一为 **`/api/pm/*`**（REST）与 **`/api/pm/mcp`**（MCP HTTP），与 Gateway 既有 `/api/*` 路由隔离。
+- 启动失败**非致命**：`pm_service` 为 `None` 时 `/api/pm/*` 不挂载，Gateway 照常运行（`pm_api.rs` 模块注释 + [`gateway/mod.rs`](../../../core/acowork-gateway/src/gateway/mod.rs) §PM 启动）。
 - 只暴露 REST API + MCP HTTP 端点，不内置前端。
 
 ### 2.2 数据目录布局（Q8）
@@ -76,18 +78,29 @@
         └── {project_id}.archived-{ts}/
 ```
 
-### 2.3 配置项（草案，Gateway `[pm]` 小节）
+### 2.3 配置项（定稿，Gateway `[pm]` 小节）
+
+内嵌于 Gateway 后，**无独立端口 / enabled / advertise_host 配置**——复用 Gateway 的 `http.port` 与 `advertise_host`。`PmConfig` 仅保留 PM 领域相关配置：
 
 ```toml
 [pm]
-enabled = true
-port = 18082
-data_dir = "<root>/data/acowork-pm"   # 默认
-advertise_host = null                  # 缺省用 Gateway 的 advertise_host
-mcp_http_path = "/mcp"                 # MCP HTTP 端点路径
-auto_inject_mcp = true                 # 自动注入 pm MCP 到每个 Agent
-agent_sync_interval_secs = 60          # 与 Gateway Agent 目录同步间隔（§9）
+data_dir = "<root>/data/acowork-pm"     # 默认 {gateway.data_dir}/acowork-pm（prepare_pm_data_dir 覆写）
+max_task_depth = 5                       # 最大嵌套深度（根 + 4 层子任务）
+max_attachment_size = 10485760           # 单附件 ≤ 10MB
+max_attachments_per_task = 20            # 单任务附件数上限
+trash_retention_days = 30                # .trash/ 归档保留天数
+index_rebuild_on_start = false           # 启动是否强制重建索引（默认增量加载）
+generate_thumbnails = true               # 图片附件自动生成缩略图
+thumbnail_max_edge = 256                 # 缩略图最长边
+auto_inject_mcp = true                   # 自动把 pm MCP 注入每个 Agent 的 catalog
+mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /api/pm 前缀）
 ```
+
+> **advertise endpoint 构造**（P4 定稿）：`http://{advertise_host}:{gw_http_port}{mcp_http_path}`，
+> 即 `http://{advertise_host}:{gw_http_port}/api/pm/mcp`。由 `Gateway::run` 在 PM 启动成功后写入
+> `GatewayState.pm_mcp_url`（[`gateway/mod.rs`](../../../core/acowork-gateway/src/gateway/mod.rs)），
+> 经 `build_available_mcps` 注入 `acowork/global/mcps` 全局资源，远程 Runtime 经
+> AgentHello/资源推送拿到后直接 HTTP 调用（见 §8）。
 
 ---
 
@@ -107,12 +120,13 @@ agent_sync_interval_secs = 60          # 与 Gateway Agent 目录同步间隔（
 // {data}/acowork-pm/projects/{project_id}/project.json
 {
   "id": "p-001",
-  "name": "示例项目",
+  "title": "示例项目",
   "description": "...",
-  "created_by": "human",              // human | agent:xxx
+  "status": "active",                  // active | archived | completed（ProjectStatus）
+  "created_by": "human",               // human | agent:xxx
   "created_at": "2026-08-30T10:00:00Z",
   "updated_at": "2026-08-30T10:00:00Z",
-  "archived": false
+  "metadata": {}                       // 额外键值对（颜色/图标/标签等 UI 偏好）
   // 不再含 tasks 数组 —— 任务都在 tasks/ 子目录下
 }
 ```
@@ -126,9 +140,9 @@ agent_sync_interval_secs = 60          # 与 Gateway Agent 目录同步间隔（
   "title": "撰写 PRD",
   "description": "...",
   "type": "task",                      // task | bug | feature | chore | checkpoint | milestone
-  "status": "in_progress",             // pending | todo | in_progress | done
-  "review_status": "approved",         // approved | pending | rejected（Agent 创建后为 pending）
-  "priority": "high",                  // low | medium | high
+  "status": "in_progress",             // pending | in_progress | submitted | done | rejected | cancelled（六态，无 todo）
+  "review_status": "approved",         // not_required | pending | approved | rejected（human 创建为 not_required；Agent 创建为 pending）
+  "priority": "high",                  // low | normal | high | urgent
   "assignee": "com.example.agent",     // 必须存在（§9 校验）
   "due_at": "2026-09-05T00:00:00Z",
   "created_by": "human",               // human | agent:xxx
@@ -195,23 +209,34 @@ agent_sync_interval_secs = 60          # 与 Gateway Agent 目录同步间隔（
 
 ## 4. 任务状态机
 
+> 定稿：**六态** `pending / in_progress / submitted / done / rejected / cancelled`（无 `todo`）。
+> 实现见 [`tree.rs::validate_transition`](../../../core/acowork-pm/src/store/tree.rs)。
+> 人类与 Agent 创建的**初始 status 均为 `pending`**，区别在 `review_status`：
+> human → `not_required`，Agent → `pending`（待人类审核）。
+
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: Agent 创建（待审核）
-    [*] --> todo: 人类创建（直接生效）
-    pending --> rejected: 人类拒绝（审核）
-    pending --> todo: 人类批准（审核）
-    todo --> in_progress: Agent 自领或人类拖动
-    in_progress --> done: Agent 提交或人类拖动
+    [*] --> pending: 创建（human/Agent；Agent 的 review_status=pending）
+    pending --> in_progress: Agent claim（自领）
+    pending --> cancelled: 取消
+    in_progress --> submitted: Agent submit（提交结果）
+    in_progress --> pending: 退回（人类）
+    in_progress --> cancelled: 取消
+    submitted --> done: 人类 review 通过（approve）
+    submitted --> rejected: 人类 review 驳回（reject）
     done --> in_progress: 退回（人类）
-    in_progress --> todo: 退回（人类）
-    rejected --> [*]
+    rejected --> pending: 重新提交前重置
+    rejected --> in_progress: 驳回后仍可自领重做
+    rejected --> cancelled: 取消
+    cancelled --> [*]
 ```
 
-- **pending**：仅 Agent 创建的任务进入；在审核通过前**不可见**于正式看板（或独立「待审核」栏展示），Agent 也不能 claim/submit。
-- **approved → todo**：人类批准后进入正式看板，可被指派 Agent claim。
-- **done**：`pm_submit_task` 提交结果（`result` + 自动追加 note）或人类拖动。
-- **退回**：done → in_progress / in_progress → todo（人类操作）。
+- **pending**：所有任务创建后的初始状态；Agent 创建的 `review_status=pending` 需人类 `review` 通过才进入正式流转（`pm_check_task` 可查审核状态），human 创建的 `review_status=not_required` 直接可被 claim。
+- **in_progress**：由 Agent `pm_claim_task` 自领（`pending → in_progress`，仅限 assignee）；依赖未满足返回 `DependencyNotSatisfied`。
+- **submitted**：Agent `pm_submit_task` 提交结果后进入（写入 `result`），等待人类 review。
+- **done / rejected**：人类 `review(approved)` 决定（`submitted → done` 或 `submitted → rejected`）。
+- **退回**：done → in_progress（人类操作）。
+- **审核流**：Agent 创建任务 → `review_status=pending` → 人类 `POST /tasks/:tid/review {approved: true/false}` → 任务进入正式流转或 rejected。`pm_submit_task` 对 `checkpoint/bug` 等需审核类型在 submitted 后同样等待 review。
 
 ---
 
@@ -222,45 +247,53 @@ stateDiagram-v2
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
-| GET | `/health` | 健康检查 | 内部 |
 | GET | `/api/pm/projects` | 项目列表（名称/描述/进度概要） | Desktop |
 | POST | `/api/pm/projects` | 新建项目 | Desktop |
-| GET | `/api/pm/projects/:id` | 项目详情（含看板任务分组） | Desktop |
+| GET | `/api/pm/projects/:id` | 项目详情 | Desktop |
+| PATCH | `/api/pm/projects/:id` | 编辑项目（标题/描述） | Desktop |
 | DELETE | `/api/pm/projects/:id` | 删除项目（级联任务，二次确认） | Desktop |
-| POST | `/api/pm/projects/:id/tasks` | 新建任务（`created_by=human` → 直接生效） | Desktop |
-| GET | `/api/pm/tasks?project_id=&assignee=&status=&review=` | 任务列表/检索 | Desktop / Agent |
-| GET | `/api/pm/tasks/:id` | 任务详情 | Desktop / Agent |
-| PATCH | `/api/pm/tasks/:id` | 编辑任务（标题/描述/优先级/截止/指派） | Desktop |
-| PATCH | `/api/pm/tasks/:id/status` | 状态流转（人类拖动/退回） | Desktop |
+| GET | `/api/pm/projects/:id/tasks` | 项目任务列表（`?status=&assignee=` 过滤） | Desktop / Agent |
+| POST | `/api/pm/projects/:id/tasks` | 新建任务（human 创建 → `review_status=not_required`） | Desktop |
+| GET | `/api/pm/tasks/:id` | 任务详情（含 `is_blocked`/`blocked_by`/`depth`/`parent_id` 派生字段） | Desktop / Agent |
+| PATCH | `/api/pm/tasks/:id` | 编辑任务（标题/描述/优先级/截止/指派/状态） | Desktop |
+| DELETE | `/api/pm/tasks/:id` | 删除任务（级联子树） | Desktop |
+| POST | `/api/pm/tasks/:id/claim` | **Agent 自领**（pending → in_progress） | Agent（x-actor） |
+| POST | `/api/pm/tasks/:id/submit` | **Agent 提交结果**（in_progress → submitted，body `{text, attachment_ids?}`） | Agent（x-actor） |
+| POST | `/api/pm/tasks/:id/review` | **人类审核**（submitted → done/rejected，body `{approved}`） | Desktop |
 | PATCH | `/api/pm/tasks/:id/parent` | **移动任务到新父下**（`parent_id=null` 提升为根任务；DFS 防环） | Desktop |
+| GET | `/api/pm/tasks/:id/children` | 直接子任务列表 | Desktop |
+| GET | `/api/pm/tasks/:id/attachments` | 附件元数据列表 | Desktop / Agent |
 | POST | `/api/pm/tasks/:id/attachments` | **上传附件**（multipart，单文件 ≤ 10MB） | Desktop / Agent |
 | GET | `/api/pm/attachments/:id` | **下载附件**（`?download=1` 强制下载，否则 inline 预览） | Desktop / Agent |
 | DELETE | `/api/pm/attachments/:id` | 删除附件 | Desktop |
-| POST | `/api/pm/tasks/:id/notes` | 追加备注 | Desktop |
-| GET | `/api/pm/agents` | 可指派 Agent 列表（供 UI 下拉 + 校验） | Desktop |
-| GET | `/api/pm/reviews?status=pending` | **待审核任务列表（Agent 创建）** | Desktop（人类） |
-| POST | `/api/pm/tasks/:id/approve` | 审核通过 → todo | Desktop（人类） |
-| POST | `/api/pm/tasks/:id/reject` | 审核拒绝 → rejected | Desktop（人类） |
+
+> **实际路由实现**：[`core/acowork-pm/src/api/routes.rs`](../../../core/acowork-pm/src/api/routes.rs)（PM router 内部不带 `/api` 前缀，Gateway `nest_service("/api/pm")` 自动补；MCP 端点在 `/api/pm/mcp`）。Desktop 经 Gateway 反代访问，Agent 走 §6 MCP HTTP 而非 REST。
 
 ---
 
 ## 6. Agent 接口（pm MCP 工具，HTTP transport）
 
-- MCP Server 端点：`http://{listen_addr}:{pm_port}/mcp`（Q3 = HTTP）。远程 Runtime 用 §8 的 advertise endpoint。
+- MCP Server 端点：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`（Q3 = HTTP，P4 定稿 advertise endpoint）。远程 Runtime 用 §8 的 advertise endpoint 直接 HTTP 调用。
 - Gateway 将 pm MCP 配置注入每个 Agent 的 `catalog` 列表（`auto_inject_mcp=true` 时），Agent 默认获得 `pm_*` 工具。
-- 每次工具调用携带 `agent_id`；服务端校验（§9），**所有状态变更工具都校验调用者与任务 assignee 一致**。
+- 身份：调用方经 **`X-MCP-Actor` header** 携带 `agent_id`（Gateway 下发 `{agent_id}` 模板，Runtime 连接时替换为实际 agent_id）；服务端校验（§9），**所有状态变更工具都校验调用者与任务 assignee 一致**。
+- 错误码：`-32001` Unauthenticated（无可信身份调变更工具）、`-32002` Forbidden（非 assignee）；业务错误（409 依赖未满足等）映射为对应 `PmError` code。
 
 | 工具 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `pm_list_projects` | — | 项目列表 | |
-| `pm_list_tasks` | `project_id?` `assignee?` `status?` | 任务列表 | Agent 自查任务主入口（含本人 pending 状态提醒） |
-| `pm_get_task` | `task_id` | 任务详情（含 notes/result/depends_on/attachments） | |
-| `pm_claim_task` | `task_id` | 成功/失败 | 自领（todo → in_progress），**仅限 assignee == 调用者**；依赖未满足返回 409 |
-| `pm_update_task` | `task_id` `status?` `note?` | 成功/失败 | 更新状态（in_progress ↔ todo）或追加备注 |
-| `pm_submit_task` | `task_id` `result` `attachment_ids?` | 成功/失败 | **提交结果**（→ done），自动追加一条 note |
-| `pm_create_task` | `project_id` `title` `description?` `assignee?` `priority?` `due?` `parent_task_id?` `type?` `depends_on?` | 新 `task_id` + `review_status=pending` | **Agent 创建 → 待人类审核**（§4）；assignee 必须存在 |
-| `pm_check_task` | `task_id` | 任务状态 + 审核状态 | Agent 查询自己创建的任务是否被批准 |
+| `pm_list_projects` | — | 项目列表 | 只读 |
+| `pm_get_project` | `project_id` | 项目详情（含任务数统计） | 只读 |
+| `pm_create_project` | `title` `description?` | 新建项目 | |
+| `pm_list_tasks` | `project_id` `assignee?` `status?` | 任务列表 | Agent 自查任务主入口（可过滤 assignee=自己） |
+| `pm_get_task` | `task_id` | 任务详情（含 is_blocked/blocked_by/depth） | 只读 |
+| `pm_create_task` | `project_id` `title` `description?` `assignee?` `priority?` `type?` `due_at?` `parent_task_id?` `depends_on?` | 新 `task_id` | **Agent 创建 → `review_status=pending` 待人类审核**（§4）；assignee 必须存在（§9.1） |
+| `pm_check_task` | `task_id` | 状态 + `review_status` | 仅创建者可查；Agent 查询自己创建的任务是否被批准 |
+| `pm_update_task` | `task_id` `title?` `description?` `status?` `priority?` `assignee?` | 更新后的任务 | 状态在 `pending / in_progress / submitted / done / rejected / cancelled` 间按状态机流转 |
+| `pm_claim_task` | `task_id` | 自领后的任务 | **pending → in_progress**，**仅限 assignee == 调用者**（-32002）；依赖未满足返回 409 |
+| `pm_submit_task` | `task_id` `text` `attachment_ids?` | 提交后的任务 | **in_progress → submitted**，写入 `result {text, attachment_ids, submitted_by}` |
+| `pm_list_my_tasks` | `status?` `limit?` | 当前调用者名下任务 | Agent 会话开始自查主入口 |
 | `pm_reparent_task` | `task_id` `new_parent_task_id?` | 成功/失败 | **移动任务到新父下**（new_parent=null 提升为根任务），DFS 防环 |
+
+> **实际工具清单**：[`core/acowork-pm/src/mcp/manifest.rs`](../../../core/acowork-pm/src/mcp/manifest.rs)（12 个工具，schema 以代码为准）。
 
 ---
 
@@ -268,23 +301,22 @@ stateDiagram-v2
 
 - `projects` 视图（替换 [AppLayout.tsx:897-903](../../../apps/acowork-desktop/src/components/layout/AppLayout.tsx#L897) 的 TODO）：
   - **左侧**：项目列表（新建/删除）。
-  - **右侧**：项目详情 + **三列看板**（ToDo / InProgress / Done），支持拖动流转、新建/编辑任务、指派 Agent、查看结果与备注。
-  - **待审核栏**：Agent 创建的任务进入「待审核」列表，人类 approve/reject。
+  - **右侧**：项目详情 + **四列看板**（pending / in_progress / submitted / done），支持新建/编辑任务、指派 Agent、查看结果。
+  - **待审核**：Agent 创建的任务 `review_status=pending` 高亮，人类 `review` approve/reject。
 - 数据获取：本地 React 组件经 Gateway 反向代理调用 REST API（`http://127.0.0.1:19876/api/pm/*`）。
-- 指派 Agent 下拉：来自 `GET /api/pm/agents`（§9），不存在的 Agent 不可选。
-- 服务离线提示：显示「项目管理服务不可用 + 重试」而非白屏。
+- 指派 Agent 下拉：数据源为 Gateway Agent 目录（`GET /api/agents` 等既有 Gateway 接口），不存在的 Agent 不可选（§9.1）。
+- 服务离线提示：显示「项目管理服务不可用 + 重试」而非白屏（`pm_service=None` 时 `/api/pm/*` 不挂载）。
 
 ---
 
 ## 8. 远程节点访问（Q7）
 
-与 doc / embed 一致（参考 ADR-055 §6.3/§6.8）：
+与 doc / embed 一致（参考 ADR-055 §6.3/§6.8；P4 已实现并 e2e 验证）：
 
-- pm 服务作为 **global scope** sidecar 部署在 Gateway 机器。
-- 对外 endpoint 用 Gateway `advertise_host` 构造：`http://{advertise_host}:{pm_port}/mcp`。
-- 下发路径：复用 MQTT 全局资源与 AgentHello 回执；远程 Runtime 直接 HTTP 调用 pm MCP。
-- REST API 面（人类）只经 Desktop → Gateway 反代访问 `127.0.0.1`，不暴露公网。
-- 安全：MCP 端点暴露后网络可达，必须做 agent_id 身份校验 + 可选 token（§9）。
+- pm 作为 **global scope** 服务**内嵌**在 Gateway 进程中，REST 面只经 Desktop → Gateway 反代访问 `127.0.0.1`，不暴露公网。
+- **MCP 端点（advertise endpoint）**：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`。用 Gateway `advertise_host` + `gw_http_port`（非 pm 独立端口，因内嵌复用 Gateway HTTP server）+ `mcp_http_path` 构造。
+- **下发链路（T4-1）**：`Gateway::run` PM 启动成功后把该 URL 写入 `GatewayState.pm_mcp_url` → `build_available_mcps` 注入全局 `acowork/global/mcps` 资源（`id=pm`，transport=HTTP，`X-MCP-Actor: {agent_id}` 模板 header，timeout=60s）→ 远程 Runtime 经 MQTT 全局资源 / AgentHello 拿到后，将 `{agent_id}` 替换为实际 agent_id，直接 HTTP 调用 pm MCP。
+- 安全：MCP 端点网络可达，必须做 agent_id 身份校验（§9.2，`X-MCP-Actor` → `-32001/-32002`）；匿名仅允许只读工具（§9.3）。
 
 ---
 
@@ -292,24 +324,22 @@ stateDiagram-v2
 
 ### 9.1 指派 Agent 校验（Q6）
 
-- **规则**：`pm_create_task` / 编辑任务时 `assignee` 必须存在于 Agent 目录；不存在返回 400/422，**不允许指派**。
-- **校验来源**：pm 服务与 Gateway 的 Agent 目录同步。
-  - 启动时拉取全量 Agent 清单缓存；
-  - 周期刷新（`agent_sync_interval_secs`）+ 操作时即时校验兜底；
-  - 校验走 Gateway HTTP 接口（`GET /api/pm/agents`，经 `http_client` 复用连接池），Gateway 是 Agent 安装/卸载的权威。
+- **规则**：`pm_create_task` / 编辑任务时 `assignee` 必须存在于 Agent 目录；不存在返回 `InvalidId`（400/422），**不允许指派**。
+- **校验来源**：[`core/acowork-gateway/src/http/pm_api.rs`](../../../core/acowork-gateway/src/http/pm_api.rs) 的 `GatewayAgentDirectory`——基于 Gateway `installed_agents`（Agent 目录权威），经共享 state 注入 pm 服务，操作时即时校验；无需轮询同步。
 
 ### 9.2 工具调用身份校验
 
 | 场景 | 规则 |
 |------|------|
-| `pm_claim_task` / `pm_submit_task` / `pm_update_task` | 调用者 `agent_id` 必须 == 任务 `assignee`；否则 403 |
+| `pm_claim_task` / `pm_submit_task` / `pm_update_task`（MCP） | 调用者 `agent_id` 必须 == 任务 `assignee`；否则 JSON-RPC `-32002` Forbidden（实现：[`mcp/mod.rs`](../../../core/acowork-pm/src/mcp/mod.rs) `CODE_FORBIDDEN`） |
+| 匿名调变更工具（无 `X-MCP-Actor`） | JSON-RPC `-32001` Unauthenticated |
 | `pm_create_task` | 不要求 assignee 是调用者（Agent 可为他人/项目建任务，但要审核）；assignee 必须存在（§9.1） |
-| 人类 REST | 经 Gateway 反代 + 会话鉴权（复用现有 Desktop 鉴权面） |
+| REST claim/submit/review | 经 Gateway 反代 + `X-Actor` header；review 仅人类（Desktop 会话鉴权面） |
 
 ### 9.3 其它安全
 
-- 路径/输入：`project_id` / `task_id` 白名单校验，防注入。
-- MCP 匿名只读：无可信身份的连接仅允许 `pm_list_*` / `pm_get_task` 只读工具。
+- 路径/输入：`project_id` / `task_id` 白名单校验（`^[pt]-[a-zA-Z0-9-]{1,62}$`），防注入。
+- MCP 匿名只读：无可信身份（无 `X-MCP-Actor`）仅允许 `pm_list_*` / `pm_get_task` / `pm_get_project` 只读工具；调变更工具返回 `-32001`。
 
 ---
 
@@ -365,40 +395,40 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 
 ### 10.6 监督 / 日志 / 备份
 
-- **监督**：pm 进程崩溃/卡死 → Gateway 指数退避重启；启动失败不阻塞 Gateway。
-- **日志**：`{data}/logs/pm.log`。
+- **监督**：内嵌于 Gateway 进程（§2.1），随 Gateway 生命周期共进退；启动失败**非致命**（`pm_service=None`，`/api/pm/*` 不挂载，不阻塞 Gateway 启动）。
+- **日志**：随 Gateway 日志（`{data}/logs/`），PM 操作打点 `tracing`（`task_id` / `project_id` / 深度等结构化字段）。
 - **备份**：`{data}/acowork-pm/` 纯文件，直接 `tar` 即备份；单项目归档 = `tar` 一个项目目录。
 
 ---
 
-## 11. 里程碑（建议）
+## 11. 里程碑（P0–P4 已完成）
 
-| 阶段 | 内容 | 交付物 |
-|------|------|--------|
-| **P0 骨架** | `core/acowork-pm` crate（CLI + axum + /health + 日志）；Gateway `[pm]` 配置 + 拉起/监督 | 服务可起停、可监督 |
-| **P1 存储 + REST** | **目录树存储**（§2.2）、数据模型（project.json / task.json）、项目/任务 CRUD、状态机、**附件上传/下载**、**父子树创建/move**、**依赖图校验**、REST API（§5）、Agent 目录同步（§9.1） | 服务端完整 |
-| **P2 Desktop projects 视图** | 项目列表 + 三列看板 + 任务编辑/拖动 + 指派下拉 + 父子树展开 + 附件预览，接入 AppLayout | 人类可用基础项目管理 |
-| **P3 Agent 接口 + 审核** | pm MCP HTTP Server（§6）、Agent 创建任务待审核 + 人类 approve/reject、catalog 自动注入；Agent 上传附件（base64+临时目录） | Agent 可自查/领/交；审核全链路 |
-| **P4 远程 + 验证** | advertise endpoint 下发、远程 Runtime 访问、端到端测试（人类建→Agent 领/交→看板刷新） | 全链路可用 |
-| **P5+（可选）** | 附件物理去重（按 sha256 复用）、全文检索、SQLite 存储层切换（TaskStore trait 替换 impl） | 规模化能力 |
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| **P0 骨架** | `core/acowork-pm` crate（axum + /health + 日志）；Gateway `[pm]` 配置 + 内嵌挂载 | ✅ 完成 |
+| **P1 存储 + REST** | **目录树存储**（§2.2）、数据模型（project.json / task.json）、项目/任务 CRUD、状态机、**附件上传/下载**、**父子树创建/move**、**依赖图校验**、REST API（§5） | ✅ 完成 |
+| **P2 Desktop projects 视图** | 项目列表 + 看板 + 任务编辑/拖动 + 指派下拉 + 父子树展开 + 附件预览，接入 AppLayout | ✅ 完成 |
+| **P3 Agent 接口 + 审核** | pm MCP HTTP Server（§6，12 工具）、Agent 创建任务待审核 + 人类 review、`acowork/global/mcps` catalog 自动注入 | ✅ 完成 |
+| **P4 远程 + 验证** | advertise endpoint 下发（`http://{advertise_host}:{gw_http_port}/api/pm/mcp`）、远程 Runtime 集成、端到端测试（人类建→Agent 领/交→看板刷新） | ✅ 完成 |
+| **P5+（可选）** | 附件物理去重（按 sha256 复用）、全文检索、SQLite 存储层切换（TaskStore trait 替换 impl） | 待定 |
 
 ---
 
-## 12. 开放问题（实施前确认）
+## 12. 决策记录（v1.0 收口，开放问题已全部决策）
 
-| 编号 | 问题 | 倾向 |
-|------|------|------|
-| OP-1 | Agent 创建任务被拒绝后，任务应「关闭（rejected）」还是「退回给 Agent 修改后重提」？ | 关闭并保留记录，Agent 可新建（简单） |
-| OP-2 | 待审核任务是否在正式看板单独列展示，还是独立 Tab？ | 独立「待审核」栏（醒目，防误操作） |
-| OP-3 | 任务「退回」是否需要限制仅人类可操作（Agent 只允许 claim/submit）？ | 退回仅人类；Agent 可自行 todo ↔ in_progress |
-| OP-4 | 是否需要「指派给所有 Agent / 指派给项目」的批量能力？ | 本版不需要（YAGNI），后续 PM Agent 迭代 |
-| OP-5 | 删父任务时子任务应「级联删除」还是「提升为顶层」？ | **默认级联删除**（`rm -rf` 任务目录，UI 二次确认）；提升为顶层为可选高级操作 |
-| OP-6 | `type=checkpoint` / `type=milestone` 与现有 `status` / `review_status` 的语义关系？ | checkpoint 复用 review_status（submit 后进 pending），milestone 不指派 Agent |
-| OP-7 | `depends_on` 是否允许跨项目依赖？ | **允许**，API 响应附带 blocker_project_id 字段方便前端跳转 |
-| OP-8 | 子任务排序方式？ | API 层按 `created_at` 升序（默认），支持 `?sort=` 参数切换 `priority` / `title` |
+> T4-4 收口：原「开放问题（实施前确认）」在 P4 全部固化，转为决策记录表。
 
-> **本轮已决策（v0.1 → v0.2 固化）**：
-> - 存储结构改为目录树（§2.2、§3.1、§10.1）
-> - 子任务使用 `children/` 物理嵌套子目录，不存 `parent_id` / `subtask_ids` 冗余字段
-> - 附件独立目录存储，二进制不入 JSON
-> - 依赖关系显式存 `depends_on`，派生字段（is_blocked / blocked_by）仅 API 响应返回
+| 编号 | 决策点 | 定稿结论 | 落点 |
+|------|--------|----------|------|
+| D-1 | Agent 创建任务被拒绝后的语义 | **关闭为 rejected** 并保留记录；Agent 可重新自领（rejected → in_progress）或新建 | §4 状态机 |
+| D-2 | 待审核任务展示方式 | 看板 `pending` 列展示，`review_status=pending` 高亮；人类 `review` 决定 | §4 / §7 |
+| D-3 | 任务「退回」权限 | 退回仅人类（done → in_progress）；Agent 只能 claim/submit | §4 / §5 `review` |
+| D-4 | 批量指派能力 | **本版不需要（YAGNI）**，后续 PM Agent 迭代 | — |
+| D-5 | 删父任务时子任务语义 | **默认级联删除**（`rm -rf` 任务目录，UI 二次确认）；提升为顶层为可选高级操作 | §3.4 / ADR-061 |
+| D-6 | `checkpoint`/`milestone` 与 review 语义 | `checkpoint` submit 后仍需 review（与普通任务一致走 submitted）；`milestone` 语义保留为 `type`，状态机统一 | §4 / manifest |
+| D-7 | `depends_on` 是否允许跨项目依赖 | **允许**；claim 时计算 `blocked_by`，未满足返回 `DependencyNotSatisfied` | §3.5 / §9.2 |
+| D-8 | 子任务排序方式 | API 层按 `created_at` 升序（默认），`fs::read_dir` 后排序 | §3.4 |
+| D-9 | MCP 身份传递 | **`X-MCP-Actor` header**（Gateway 下发 `{agent_id}` 模板，Runtime 替换为实际 agent_id） | §6 / §8 / ADR-055 |
+| D-10 | 部署形态 | **内嵌于 Gateway 进程**，`nest_service("/api/pm")` 挂载，无独立端口 | §2.1 |
+
+> **v0.1 → v0.2 已固化**：存储结构改为目录树（§2.2、§3.1、§10.1）、子任务用 `children/` 物理嵌套、附件独立目录、依赖显式存 `depends_on`（详见 ADR-061）。

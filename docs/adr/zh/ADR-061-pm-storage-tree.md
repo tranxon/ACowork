@@ -4,7 +4,7 @@
 **日期**：2026-08-31
 **决策者**：大鱼
 **前置**：
-- [设计文档 v0.2：21-pm-project-management](../design/zh/21-pm-project-management.md) §3
+- [设计文档 v1.0：21-pm-project-management](../design/zh/21-pm-project-management.md) §3
 - [开发计划 v0.3：pm-dev-plan](../plan/zh/pm-dev-plan.md)
 - [UX 设计 v0.1：22-pm-desktop-ui](../design/zh/22-pm-desktop-ui.md)
 - [ADR-051：Runtime Memory Provider 解耦](./ADR-051-runtime-memory-provider-decoupling.md)（相似的"存储抽象 + trait 解耦"思路）
@@ -336,10 +336,10 @@ sequenceDiagram
 | 阶段 | 任务 | 状态 |
 |------|------|------|
 | **P0** | scaffold `core/acowork-pm/` crate + 目录树骨架 + types + config + trait 默认实现 | ✅ 已完成 |
-| **P1** | `rebuild_index` walkdir + Project/Task CRUD + 父子树创建/删除/移动 + 路径校验 | ⏳ 待开工 |
-| **P2** | Desktop UI 集成（zustand store + 看板视图 + 父子树面板 + 附件预览）| ⏳ 待开工 |
-| **P3** | MCP `pm_*` 工具完整实现 + 依赖图 + lifecycle（claim/submit/review） | ⏳ 待开工 |
-| **P4** | E2E 测试 + 设计文档 v1.0 收口 + 部署 runbook | ⏳ 待开工 |
+| **P1** | `rebuild_index` walkdir + Project/Task CRUD + 父子树创建/删除/移动 + 路径校验 | ✅ 已完成 |
+| **P2** | Desktop UI 集成（zustand store + 看板视图 + 父子树面板 + 附件预览）| ✅ 已完成 |
+| **P3** | MCP `pm_*` 工具完整实现 + 依赖图 + lifecycle（claim/submit/review） | ✅ 已完成 |
+| **P4** | E2E 测试 + 设计文档 v1.0 收口 + 远程 advertise 链路 | ✅ 已完成（2026-09-02） |
 | **P5+** | SQLite 后端（替换 `TreePmStore`）+ 跨进程锁 | 🔮 未来 |
 
 ### 7.2 关键代码位置
@@ -390,3 +390,4 @@ sequenceDiagram
 
 **变更记录**：
 - 2026-08-31：初版（v1.0）—— 整合 P0 设计对话全部决策
+- 2026-09-02：P4 收口 —— 设计文档升 v1.0（六态状态机 / 内嵌形态 / advertise endpoint 定稿），P1–P4 实施状态标记完成
