@@ -65,8 +65,6 @@ use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::tools::output;
-
 /// Maximum file size for document reading (50 MB).
 const MAX_DOC_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -233,18 +231,18 @@ impl Tool for DocReaderTool {
 
                 return match raw {
                     Ok(text) => {
-                        let (truncated, was_truncated) = output::truncate_output(&text);
+                        // The OutputBoundedTool wrapper is the single
+                        // source of truth for the 32 KB hard cap. We
+                        // deliberately don't write a `was_truncated` hint
+                        // into `error` here — the wrapper's
+                        // TRUNCATED_OUTPUT_MARKER carries the actionable
+                        // guidance for the LLM, and only fires in the
+                        // rare case where the inner tool didn't already
+                        // truncate to fit.
                         Ok(ToolResult {
                             ok: true,
-                            content: truncated,
-                            error: if was_truncated {
-                                Some(
-                                    "Output truncated: text content exceeded the maximum output size."
-                                        .to_string(),
-                                )
-                            } else {
-                                None
-                            },
+                            content: text,
+                            error: None,
                             token_usage: None,
                         })
                     }
@@ -304,18 +302,14 @@ impl Tool for DocReaderTool {
 
         match raw {
             Ok(text) => {
-                let (truncated, was_truncated) = output::truncate_output(&text);
+                // The OutputBoundedTool wrapper is the single source of
+                // truth for the 32 KB hard cap — no per-tool truncate
+                // here. The wrapper's TRUNCATED_OUTPUT_MARKER carries
+                // the actionable guidance for the LLM.
                 Ok(ToolResult {
                     ok: true,
-                    content: truncated,
-                    error: if was_truncated {
-                        Some(
-                            "Output truncated: document content exceeded the maximum output size."
-                                .to_string(),
-                        )
-                    } else {
-                        None
-                    },
+                    content: text,
+                    error: None,
                     token_usage: None,
                 })
             }

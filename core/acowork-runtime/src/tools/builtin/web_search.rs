@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::search_backends::WebSearchEngine;
-use crate::tools::output;
 
 /// Web search tool powered by the configurable search backend system.
 ///
@@ -91,10 +90,12 @@ impl Tool for WebSearchTool {
                     .collect::<Vec<_>>()
                     .join("\n\n");
 
-                let (content, _truncated) = output::truncate_output(&joined);
+                // The OutputBoundedTool wrapper is the single source of
+                // truth for the 32 KB output cap — no per-tool
+                // truncate_output here.
                 Ok(ToolResult {
                     ok: true,
-                    content,
+                    content: joined,
                     error: None,
                     token_usage: None,
                 })

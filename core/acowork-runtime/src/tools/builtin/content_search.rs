@@ -436,12 +436,15 @@ impl Tool for ContentSearchTool {
             }
         }
 
-        // Truncate output if too large
-        let (final_output, _truncated) = output::truncate_output(&output);
+        // Semantic truncation happens here: max_results caps the array
+        // and `truncate_line` caps any single minified-JSON line. The
+        // byte-level 32 KB hard cap is the OutputBoundedTool wrapper's
+        // job — kept centralised so a future change to the cap
+        // propagates everywhere without per-tool edits.
 
         Ok(ToolResult {
             ok: true,
-            content: final_output,
+            content: output,
             error: None,
             token_usage: None,
         })
