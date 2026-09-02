@@ -216,6 +216,13 @@ pub struct HistoryManager {
     /// Model name for Tier1/Tier2 token counting precision.
     /// When `None` (not yet set), falls back to Tier3 heuristic.
     model_name: Option<String>,
+    /// ADR-060 v2 §5.4: tool_call `id` of the most recent todo_write round
+    /// spliced by `inject_todo_write_round_after_marker`. Used to enforce
+    /// JSONL-side idempotency on consecutive compressions — if the next
+    /// compression finds the same round again (because level 8 already
+    /// stripped our previous inject), we skip re-injecting and re-persisting
+    /// to avoid duplicate synthetic rows on disk.
+    last_injected_todo_call_id: Option<String>,
 }
 
 impl HistoryManager {
@@ -228,6 +235,7 @@ impl HistoryManager {
             protocol_type: ProtocolType::default(),
             counter: TokenCounter::new(),
             model_name: None,
+            last_injected_todo_call_id: None,
         }
     }
 
@@ -961,6 +969,248 @@ impl HistoryManager {
             .rev()
             .find(|(_, msg)| msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
             .map(|(i, _)| i)
+    }
+
+    // ── ADR-060 v2 §5.4: todo_write round preservation through compression ──
+
+    /// Find the last `todo_write` Assistant+Tool round in history.
+    ///
+    /// Scans messages from the end backwards. Returns `(assistant, tool)`
+    /// clones if a `todo_write` tool_call is followed by its tool result.
+    /// Returns `None` if no `todo_write` has been invoked in this session.
+    ///
+    /// The returned pair is the canonical "current todo state" — Block C's
+    /// old role is now played by these clones, which can survive compaction
+    /// via [`Self::inject_todo_write_round_after_marker`].
+    pub fn find_last_todo_write_round(&self) -> Option<(ChatMessage, ChatMessage)> {
+        // Reverse-scan for the most recent Assistant with a todo_write call.
+        let assistant_idx = self.messages.iter().rposition(|m| {
+            m.role == MessageRole::Assistant
+                && m.tool_calls.as_ref().is_some_and(|tcs| {
+                    tcs.iter().any(|tc| tc.function.name == "todo_write")
+                })
+        })?;
+
+        let assistant = self.messages[assistant_idx].clone();
+
+        // Identify the todo_write call's id (most agents emit exactly one
+        // todo_write per Assistant turn, but be defensive about the choice).
+        let todo_call_id = assistant
+            .tool_calls
+            .as_ref()?
+            .iter()
+            .find(|tc| tc.function.name == "todo_write")?
+            .id
+            .clone();
+
+        // Tool result may appear after Assistant (common) or before (some
+        // providers reorder). Scan both directions from assistant_idx.
+        let tool_idx = (assistant_idx + 1..self.messages.len())
+            .chain(0..assistant_idx)
+            .find(|&i| {
+                self.messages[i].role == MessageRole::Tool
+                    && self.messages[i].tool_call_id.as_deref() == Some(&todo_call_id)
+            })?;
+
+        Some((assistant, self.messages[tool_idx].clone()))
+    }
+
+    /// Reverse-scan variant that skips any todo_write round whose Assistant
+    /// tool_call `id` is listed in `excluded_ids`. Used to enforce JSONL-side
+    /// idempotency: if a prior compression already persisted this round, do
+    /// not write a duplicate line.
+    pub fn find_last_todo_write_round_excluding_injected(
+        &self,
+        excluded_ids: &std::collections::HashSet<String>,
+    ) -> Option<(ChatMessage, ChatMessage)> {
+        // Reverse-scan for the most recent Assistant with a todo_write call
+        // whose call id is NOT in `excluded_ids`.
+        let assistant_idx = self.messages.iter().rposition(|m| {
+            if m.role != MessageRole::Assistant {
+                return false;
+            }
+            let Some(tcs) = m.tool_calls.as_ref() else {
+                return false;
+            };
+            tcs.iter().any(|tc| {
+                tc.function.name == "todo_write" && !excluded_ids.contains(&tc.id)
+            })
+        })?;
+
+        let assistant = self.messages[assistant_idx].clone();
+
+        let todo_call_id = assistant
+            .tool_calls
+            .as_ref()?
+            .iter()
+            .find(|tc| tc.function.name == "todo_write")?
+            .id
+            .clone();
+
+        let tool_idx = (assistant_idx + 1..self.messages.len())
+            .chain(0..assistant_idx)
+            .find(|&i| {
+                self.messages[i].role == MessageRole::Tool
+                    && self.messages[i].tool_call_id.as_deref() == Some(&todo_call_id)
+            })?;
+
+        Some((assistant, self.messages[tool_idx].clone()))
+    }
+
+    /// Insert a preserved `todo_write` round right after the last compaction
+    /// summary marker.
+    ///
+    /// ADR-060 v2 §5.4: todos live in Block B as real `todo_write` tool
+    /// results. After `apply_compression` replaces the middle with a summary,
+    /// the round may have been removed from the retained tail. We splice it
+    /// back right after the marker so the next LLM call sees the current
+    /// todo state.
+    ///
+    /// Tool call_id collision with the retained tail is a hard skip (warning
+    /// logged) — the LLM would otherwise see two Tool messages with the same
+    /// id and `sanitize_messages` would drop the orphan.
+    ///
+    /// Token accounting: the injected pair's tokens are added to
+    /// `current_tokens` via `recalibrate_tokens()`. If the result exceeds
+    /// `max_tokens`, only a warning is emitted — the caller has already
+    /// committed to the compaction summary (rolling back would lose it).
+    /// Tokens may temporarily exceed budget until the next operation; this
+    /// is acceptable because the alternative is dropping the todo state,
+    /// which is more disruptive to ongoing work.
+    ///
+    /// Returns `(new_token_count, injected)`: the second element is `true`
+    /// ONLY when this call actually spliced the round into memory (i.e. the
+    /// `in_tail` collision check passed AND a marker exists). The caller
+    /// uses it as the **persistence gate**: writing the synthetic rows to
+    /// JSONL only when `injected == true` prevents duplicate `tool_call` /
+    /// `tool_result` entries from accumulating on disk across consecutive
+    /// compressions — without this gate, every compression would re-write
+    /// the same synthetic round even though `in_tail` correctly skipped
+    /// the in-memory splice.
+    pub fn inject_todo_write_round_after_marker(
+        &mut self,
+        assistant: ChatMessage,
+        tool: ChatMessage,
+    ) -> (u64, bool) {
+        // ADR-060 v2 §5.4 idempotency:
+        //
+        //   The caller hands us the last todo_write round snapshotted BEFORE
+        //   `apply_compression`. On the second consecutive compression, level
+        //   8 strips BOTH the previous marker AND our previous splice, leaving
+        //   history ≈ [sys, last_user, marker2]. The post-marker-tail check
+        //   below would correctly find nothing → splice would succeed → JSONL
+        //   accumulates duplicate synthetic rows.
+        //
+        //   The first time a round is injected, we record its tool_call_id in
+        //   `last_injected_todo_call_id`. On every subsequent call we short-
+        //   circuit: the same round was already injected in a previous
+        //   compression, so we must not append it again. The trade-off is
+        //   that on the second compression Block B has no todo_write tool
+        //   result — but the JSONL still holds the synthetic row from the
+        //   first injection, and the restorer rebuilds Block B from JSONL on
+        //   resume. Within the same process the LLM continues without todo
+        //   state for that turn, which is an accepted degradation: the
+        //   alternative (re-inject on every compression) creates unbounded
+        //   JSONL duplication that downstream consumers cannot tolerate.
+        if let Some(tcid) = tool.tool_call_id.as_deref()
+            && self.last_injected_todo_call_id.as_deref() == Some(tcid)
+        {
+            tracing::debug!(
+                tool_call_id = %tcid,
+                "ADR-060 v2 §5.4: todo_write round already injected by prior \
+                 compression — skip (JSONL holds the synthetic row for restart)"
+            );
+            return (self.current_tokens, false);
+        }
+
+        let Some(marker_idx) = self.last_compaction_index() else {
+            // No compaction marker — caller should not invoke this; safe no-op.
+            tracing::debug!(
+                "ADR-060 v2: no compaction marker found — skipping todo_write injection"
+            );
+            return (self.current_tokens, false);
+        };
+
+        // Skip if the round is already in the retained tail (caller may have
+        // re-fetched it, or `keep_last_rounds` preserved it). This preserves
+        // cache hits and avoids a duplicate tool_call_id.
+        //
+        // NOTE: idempotency-vs-prior-compression is enforced at function
+        // entry (above) so this block only handles the in-tail case where the
+        // round survives both the splice and the snapshot.
+        if let Some(tcid) = tool.tool_call_id.as_deref() {
+            let tool_in_tail = self.messages[marker_idx + 1..]
+                .iter()
+                .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some(tcid));
+            if tool_in_tail {
+                tracing::debug!(
+                    tool_call_id = %tcid,
+                    "ADR-060 v2: todo_write Tool already in retained tail — skip injection"
+                );
+                return (self.current_tokens, false);
+            }
+            // Also: if the Assistant with a matching todo_write call_id is in
+            // the tail, skip — defense against weird call orders where the
+            // Tool is removed but Assistant survived (e.g., trimming
+            // strategies that drop orphan Tools but keep their callers).
+            let assistant_call_ids: Vec<&str> = assistant
+                .tool_calls
+                .as_ref()
+                .map(|tcs| tcs.iter().map(|tc| tc.id.as_str()).collect())
+                .unwrap_or_default();
+            let assistant_in_tail = self.messages[marker_idx + 1..]
+                .iter()
+                .any(|m| {
+                    m.role == MessageRole::Assistant
+                        && m.tool_calls.as_ref().is_some_and(|tcs| {
+                            tcs.iter()
+                                .any(|tc| assistant_call_ids.contains(&tc.id.as_str()))
+                        })
+                });
+            if assistant_in_tail {
+                tracing::debug!(
+                    tool_call_id = %tcid,
+                    "ADR-060 v2: todo_write Assistant already in retained tail — skip injection"
+                );
+                return (self.current_tokens, false);
+            }
+        }
+
+        // Capture the tool_call id BEFORE we move `tool` into `messages`. We need
+        // it below to update the idempotency key.
+        let injected_tool_call_id = tool.tool_call_id.clone();
+
+        // Insert (Assistant, Tool) immediately after the marker. Order
+        // matters: the LLM expects Assistant{tool_calls} → Tool, mimicking
+        // the natural round shape. Tool before Assistant would be invalid.
+        let insert_at = marker_idx + 1;
+        {
+            let msgs = self.messages_mut();
+            msgs.insert(insert_at, tool);
+            msgs.insert(insert_at, assistant);
+        }
+
+        // Recompute token count for the new state. `recalibrate_tokens()`
+        // walks all messages — the only side effect, but it's the source of
+        // truth (avoids manual `count_message` arithmetic that could drift).
+        self.recalibrate_tokens();
+
+        if self.current_tokens > self.max_tokens {
+            tracing::warn!(
+                current_tokens = self.current_tokens,
+                max_tokens = self.max_tokens,
+                "ADR-060 v2: injected todo_write round pushed token count over budget \
+                 (compaction summary already committed — log-only)"
+            );
+        }
+
+        // ADR-060 v2 §5.4 idempotency: remember the call id we spliced so the
+        // next compression recognizes this round and skips re-injection.
+        if let Some(tcid) = injected_tool_call_id.as_deref() {
+            self.last_injected_todo_call_id = Some(tcid.to_string());
+        }
+
+        (self.current_tokens, true)
     }
 
     // ── ADR-061: 8-level degradation compression ──────────────────────
@@ -2430,5 +2680,421 @@ mod tests {
         assert!(marker.contains("tool_messages: within last 5 assistants (3)"));
         assert!(marker.contains("tokens: 1000 -> 400 (ratio 60.0%)"));
         assert!(marker.ends_with("body summary"));
+    }
+
+    // ── ADR-060 v2 §5.4: todo_write round preservation tests ───────────
+
+    /// Build an Assistant message with a single todo_write tool_call.
+    fn make_todo_write_assistant(tool_call_id: &str) -> ChatMessage {
+        ChatMessage::assistant_with_tools(
+            "",
+            vec![make_tool_call(
+                tool_call_id,
+                "todo_write",
+                "{\"todos\":[]}",
+            )],
+        )
+    }
+
+    /// Build the canonical Tool result returned by AgentLoop for todo_write.
+    fn make_todo_write_tool(tool_call_id: &str) -> ChatMessage {
+        ChatMessage::tool(
+            tool_call_id,
+            "Todo list updated (1 items, merge=false):\n- [ ] task1",
+        )
+    }
+
+    /// Insert a synthetic compaction summary marker into history.
+    ///
+    /// We bypass `apply_compression` to keep the unit tests focused on
+    /// `inject_todo_write_round_after_marker`'s contract rather than the
+    /// compression pipeline. The marker contract is what matters: any
+    /// `User` message with `name == COMPACTION_SUMMARY_NAME` will be
+    /// detected by `last_compaction_index()`.
+    fn append_marker(hm: &mut HistoryManager) {
+        let marker = ChatMessage {
+            role: MessageRole::User,
+            content: "<summary>synthetic marker</summary>".to_string(),
+            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
+            ..Default::default()
+        };
+        // Use append so token accounting stays correct.
+        hm.append(marker);
+    }
+
+    #[test]
+    fn find_returns_none_when_no_todo_write() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::User, "Hello"));
+        hm.append(make_message(MessageRole::Assistant, "Hi"));
+        assert!(
+            hm.find_last_todo_write_round().is_none(),
+            "no todo_write round in history"
+        );
+    }
+
+    #[test]
+    fn find_returns_pair_when_todo_write_present() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::User, "Build feature"));
+        let assistant_orig = make_todo_write_assistant("tc_todo_1");
+        hm.append(assistant_orig);
+        let tool_orig = make_todo_write_tool("tc_todo_1");
+        hm.append(tool_orig);
+        hm.append(make_message(MessageRole::Assistant, "Done"));
+
+        let (found_assistant, found_tool) = hm
+            .find_last_todo_write_round()
+            .expect("must find round");
+
+        // Canonical identifier: tool_call_id.
+        let ass_id = &found_assistant.tool_calls.as_ref().unwrap()[0].id;
+        assert_eq!(ass_id, "tc_todo_1");
+        assert_eq!(found_tool.tool_call_id.as_deref(), Some("tc_todo_1"));
+    }
+
+    #[test]
+    fn find_returns_latest_when_multiple_todo_writes() {
+        let mut hm = HistoryManager::new(100_000);
+        // First todo_write (older).
+        hm.append(make_todo_write_assistant("tc_old"));
+        hm.append(make_todo_write_tool("tc_old"));
+        // Some other tool work in between.
+        hm.append(ChatMessage::assistant_with_tools(
+            "thinking",
+            vec![make_tool_call("tc_other", "search", "{}")],
+        ));
+        hm.append(make_tool_result("tc_other", "result"));
+        // Second todo_write (newer) — this is what we should find.
+        hm.append(make_todo_write_assistant("tc_new"));
+        hm.append(make_todo_write_tool("tc_new"));
+
+        let (found_assistant, _) = hm.find_last_todo_write_round().unwrap();
+        let ass_id = &found_assistant.tool_calls.as_ref().unwrap()[0].id;
+        assert_eq!(ass_id, "tc_new", "must return LATEST todo_write");
+    }
+
+    #[test]
+    fn inject_skips_when_round_already_in_tail() {
+        // Scenario: compression kept the todo_write round in the retained
+        // tail (via `keep_last_rounds` or low compression level). Injecting
+        // the same round would duplicate the tool_call_id — `sanitize_messages`
+        // would drop the orphan. Inject must detect and skip.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(make_message(MessageRole::User, "Q1"));
+        hm.append(make_message(MessageRole::Assistant, "A1"));
+        // Simulate post-compression: marker inserted, retained tail starts here.
+        append_marker(&mut hm);
+        // Retained tail includes a complete todo_write round.
+        hm.append(make_todo_write_assistant("tc_in_tail"));
+        hm.append(make_todo_write_tool("tc_in_tail"));
+
+        let len_before = hm.messages().len();
+        let tokens_before = hm.token_count();
+
+        // Inject the SAME round — should be a no-op (already in tail).
+        let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
+        let (new_tokens, injected) =
+            hm.inject_todo_write_round_after_marker(assistant, tool);
+
+        assert_eq!(
+            hm.messages().len(),
+            len_before,
+            "no message inserted when round is already in retained tail"
+        );
+        assert_eq!(
+            new_tokens, tokens_before,
+            "token count unchanged on skip"
+        );
+        assert!(
+            !injected,
+            "persistence gate must signal no-op when round is in retained tail"
+        );
+    }
+
+    #[test]
+    fn inject_splices_after_marker_when_round_removed() {
+        // Scenario: compression removed the todo_write round from the
+        // retained tail (e.g., level 8 emergency or aggressive keep_last).
+        // Inject must splice the (Assistant, Tool) pair right after the
+        // marker so the next LLM call sees the current todo state.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        append_marker(&mut hm);
+        // Tail has other rounds but NOT the todo_write round.
+        hm.append(make_message(MessageRole::User, "new Q"));
+        hm.append(make_message(MessageRole::Assistant, "new A"));
+
+        let len_before = hm.messages().len();
+
+        // Build the round that was removed.
+        let removed_assistant = make_todo_write_assistant("tc_removed");
+        let removed_tool = make_todo_write_tool("tc_removed");
+
+        let (_, injected) = hm
+            .inject_todo_write_round_after_marker(removed_assistant, removed_tool);
+        assert!(injected, "splice path must signal injected=true");
+
+        let msgs = hm.messages();
+        assert_eq!(
+            msgs.len(),
+            len_before + 2,
+            "two messages inserted (Assistant + Tool)"
+        );
+
+        // Marker position; expect Assistant+Tool immediately after.
+        let marker_idx = msgs
+            .iter()
+            .position(|m| m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
+            .expect("marker present");
+        let assistant_after = &msgs[marker_idx + 1];
+        let tool_after = &msgs[marker_idx + 2];
+
+        assert_eq!(assistant_after.role, MessageRole::Assistant);
+        let ass_id = &assistant_after.tool_calls.as_ref().unwrap()[0].id;
+        assert_eq!(ass_id, "tc_removed", "injected assistant right after marker");
+        assert_eq!(tool_after.role, MessageRole::Tool);
+        assert_eq!(
+            tool_after.tool_call_id.as_deref(),
+            Some("tc_removed"),
+            "injected tool right after assistant (round order preserved)"
+        );
+
+        // Sanity: the original tail (the last user+assistant pair) is still
+        // at the end — injection happens right after the marker, BEFORE the
+        // preserved tail.
+        assert_eq!(
+            msgs.last().unwrap().content,
+            "new A",
+            "original retained tail still at the end"
+        );
+
+        // The injected Tool must have a matching Assistant in messages — no
+        // orphan for `sanitize_messages` to drop.
+        let mut cloned = msgs.to_vec();
+        let len_pre_sanitize = cloned.len();
+        HistoryManager::sanitize_messages(&mut cloned);
+        assert_eq!(
+            cloned.len(),
+            len_pre_sanitize,
+            "no orphan Tool after injection (sanitize no-op)"
+        );
+    }
+
+    #[test]
+    fn inject_skips_on_tool_call_id_collision() {
+        // Scenario: retained tail already has the same tool_call_id we'd
+        // inject (rare but possible — e.g., duplicate id from a different
+        // tool or pre-existing todo_write round). Inject must skip to avoid
+        // two Tool messages with the same id, which `sanitize_messages`
+        // would orphan-drop, losing the todo state.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        append_marker(&mut hm);
+        // Tail already contains the tool_call_id we are about to inject.
+        hm.append(make_todo_write_assistant("tc_collision"));
+        hm.append(make_todo_write_tool("tc_collision"));
+
+        let len_before = hm.messages().len();
+
+        let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
+        let (new_tokens, injected) =
+            hm.inject_todo_write_round_after_marker(assistant, tool);
+
+        assert_eq!(
+            hm.messages().len(),
+            len_before,
+            "must skip on collision (no duplicate tool_call_id)"
+        );
+        assert_eq!(
+            new_tokens,
+            hm.token_count(),
+            "tokens unchanged on collision skip"
+        );
+        assert!(
+            !injected,
+            "collision path must signal injected=false (no JSONL persistence)"
+        );
+    }
+
+    #[test]
+    fn inject_no_op_when_no_marker() {
+        // Defensive: caller invokes inject but history has never been
+        // compressed. The function must not crash and must not mutate.
+        // (In practice this is unreachable — `apply_compression` always
+        // inserts a marker when it succeeds — but the public contract
+        // requires safe no-op behavior.)
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::User, "Q"));
+        hm.append(make_todo_write_assistant("tc_only"));
+        hm.append(make_todo_write_tool("tc_only"));
+
+        let len_before = hm.messages().len();
+        let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
+        let (new_tokens, injected) =
+            hm.inject_todo_write_round_after_marker(assistant, tool);
+
+        assert_eq!(
+            hm.messages().len(),
+            len_before,
+            "no-op when no compaction marker present"
+        );
+        assert_eq!(new_tokens, hm.token_count());
+        assert!(!injected, "no-marker path must signal injected=false");
+    }
+
+    #[test]
+    fn inject_updates_token_count() {
+        // Verify `recalibrate_tokens()` is invoked and the new state
+        // reflects the injected pair. Also exercises the "splice" path
+        // (in_tail check fails, token accounting increases).
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        append_marker(&mut hm);
+        // Pre-existing tail with its own todo_write round (a different id).
+        hm.append(make_todo_write_assistant("tc_orig"));
+        hm.append(make_todo_write_tool("tc_orig"));
+        hm.append(make_message(MessageRole::Assistant, "Done"));
+
+        let tokens_before = hm.token_count();
+
+        // Inject a round with a FRESH tool_call_id (not in retained tail).
+        // Simulates "compression removed a previous todo_write round".
+        let new_assistant = make_todo_write_assistant("tc_injected");
+        let new_tool = make_todo_write_tool("tc_injected");
+        let (returned_tokens, injected) =
+            hm.inject_todo_write_round_after_marker(new_assistant, new_tool);
+
+        assert!(
+            returned_tokens > tokens_before,
+            "tokens must increase after injecting two messages (before={tokens_before}, after={returned_tokens})"
+        );
+        assert_eq!(
+            returned_tokens, hm.token_count(),
+            "returned count must match stored token_count after recalibrate"
+        );
+        assert!(
+            injected,
+            "fresh-id path must signal injected=true (gate opens for JSONL write)"
+        );
+
+        // The injected round must be present right after the marker.
+        let msgs = hm.messages();
+        let marker_idx = msgs
+            .iter()
+            .position(|m| m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
+            .unwrap();
+        let ass_id = &msgs[marker_idx + 1].tool_calls.as_ref().unwrap()[0].id;
+        assert_eq!(
+            ass_id, "tc_injected",
+            "injected round is at marker+1, marker+2"
+        );
+        assert_eq!(
+            msgs[marker_idx + 2].tool_call_id.as_deref(),
+            Some("tc_injected")
+        );
+    }
+
+    /// ADR-060 v2 §5.4: consecutive compressions must not double-inject the
+    /// same todo_write round. Level 8 strips the previously-spliced round on
+    /// the next compression, but the JSONL already holds the synthetic rows;
+    /// re-injecting would write duplicates. The manager remembers the most
+    /// recent call id and short-circuits when the caller hands it the same id
+    /// again.
+    #[test]
+    fn inject_is_idempotent_across_consecutive_compressions() {
+        // Compress once: original todo_write round gets stripped, our splice
+        // lands right after the marker.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(make_todo_write_assistant("tc_original"));
+        hm.append(make_todo_write_tool("tc_original"));
+        append_marker(&mut hm);
+        // After level 8 simulated, the original todo_write round is gone:
+        // simulate by removing it from the buffer (the history.rs path
+        // guarantees `messages[marker_idx + 1..]` is empty in that case).
+        {
+            let msgs = hm.messages_mut();
+            // Find and drop the original todo_write pair.
+            let mut remove_idxs: Vec<usize> = Vec::new();
+            for (i, m) in msgs.iter().enumerate() {
+                let is_orig_tool =
+                    m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("tc_original");
+                let is_orig_assistant = m.role == MessageRole::Assistant
+                    && m.tool_calls.as_ref().is_some_and(|tcs| {
+                        tcs.iter().any(|tc| tc.id == "tc_original")
+                    });
+                if is_orig_tool || is_orig_assistant {
+                    remove_idxs.push(i);
+                }
+            }
+            for i in remove_idxs.iter().rev() {
+                msgs.remove(*i);
+            }
+        }
+        hm.recalibrate_tokens();
+        let marker_idx = hm
+            .messages()
+            .iter()
+            .position(|m| m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
+            .unwrap();
+        assert_eq!(
+            hm.messages()[marker_idx + 1..].len(),
+            0,
+            "marker is at the very tail (simulated level 8 strip)"
+        );
+
+        // First injection: succeeds.
+        let new_assistant = make_todo_write_assistant("tc_injected");
+        let new_tool = make_todo_write_tool("tc_injected");
+        let (_tokens_1, injected_1) =
+            hm.inject_todo_write_round_after_marker(new_assistant, new_tool);
+        assert!(injected_1, "first injection must succeed");
+        let len_after_first = hm.messages().len();
+
+        // Second consecutive compression: level 8 strips our splice again
+        // (simulate by clearing the tail past the marker).
+        {
+            let msgs = hm.messages_mut();
+            msgs.truncate(marker_idx + 1);
+        }
+        hm.recalibrate_tokens();
+        assert_eq!(hm.messages()[marker_idx + 1..].len(), 0);
+
+        // Re-attempt the injection with the SAME round (the round the caller
+        // has snapshotted). Must be rejected by the idempotency gate —
+        // otherwise we'd write duplicate synthetic rows to conversation.jsonl.
+        let again_assistant = make_todo_write_assistant("tc_injected");
+        let again_tool = make_todo_write_tool("tc_injected");
+        let (_tokens_2, injected_2) =
+            hm.inject_todo_write_round_after_marker(again_assistant, again_tool);
+        assert!(
+            !injected_2,
+            "second injection of the same round must be skipped (last_injected_todo_call_id gate)"
+        );
+        assert_eq!(
+            hm.messages().len(),
+            marker_idx + 1,
+            "no messages appended on idempotency skip"
+        );
+
+        // A genuinely NEW round (different tool_call_id, e.g. user called
+        // todo_write between the two compressions) must still inject — the
+        // gate is per-call-id, not a global kill switch.
+        let fresh_assistant = make_todo_write_assistant("tc_fresh");
+        let fresh_tool = make_todo_write_tool("tc_fresh");
+        let (_tokens_3, injected_3) =
+            hm.inject_todo_write_round_after_marker(fresh_assistant, fresh_tool);
+        assert!(
+            injected_3,
+            "a NEW todo_write call (different id) must still inject — gate is per-id"
+        );
+        assert_eq!(
+            hm.messages().len(),
+            marker_idx + 3,
+            "two new messages inserted (Assistant + Tool) for the fresh round"
+        );
+        assert_eq!(len_after_first, marker_idx + 3, "sanity: first splice length matches");
     }
 }

@@ -53,6 +53,7 @@ const REUSE_WINDOW: Duration = Duration::from_millis(500);
 const RESPAWN_DELAY: Duration = Duration::from_secs(60);
 
 /// Grace period after SIGTERM before escalating to SIGKILL.
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(5);
 
 /// Shared supervisor state: current child PID + stop flag.

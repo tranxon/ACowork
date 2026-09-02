@@ -309,6 +309,24 @@ pub enum WriterCommand {
         entry: ConversationEntry,
         done: std::sync::mpsc::SyncSender<()>,
     },
+    /// ADR-060 v2 §5.4: synchronous flush — call `file.flush()` and reply on
+    /// `done` once all previously-enqueued `AppendEntry` commands have been
+    /// physically written to disk. Used by the compact-and-inject path to
+    /// guarantee the synthetic `tool_call` / `tool_result` rows appended
+    /// after the compaction event are durable before `compact_history_if_needed`
+    /// returns, so a process restart immediately after compaction does not
+    /// race the writer and lose the round.
+    ///
+    /// Without this handshake, the writer is fire-and-forget and the test
+    /// harness (and any caller that depends on post-compaction durability)
+    /// could observe a JSONL file that does not yet contain the injected
+    /// round — `restore_history_from_jsonl` would then return just the
+    /// compaction marker, and the canonical todo state would be lost.
+    ///
+    /// As with `AppendCompactionEntry`, `tokio::oneshot` is safe here because
+    /// the writer awaits via `blocking_recv` and the caller's `.await` on the
+    /// returned receiver hops back to the async runtime context.
+    Flush { done: oneshot::Sender<()> },
     /// Flush and shut down the writer.
     Shutdown(oneshot::Sender<()>),
 }
@@ -428,6 +446,21 @@ impl ConversationWriter {
                     }
                     let _ = tx.send(());
                     break;
+                }
+                WriterCommand::Flush { done } => {
+                    // ADR-060 v2 §5.4: drain any pending AppendEntry commands
+                    // first by the simple fact that this arm is reached AFTER
+                    // them in FIFO channel order — we are the single consumer
+                    // thread. Then `flush()` so the OS commits the writes.
+                    if let Err(e) = self.file.flush() {
+                        tracing::error!(
+                            "Failed to flush conversation file on Flush command: {}",
+                            e
+                        );
+                    }
+                    // Always reply, even on failure, so the caller never
+                    // deadlocks waiting for a `done` that never arrives.
+                    let _ = done.send(());
                 }
             }
         }
@@ -1068,6 +1101,29 @@ impl ConversationSession {
                 e
             ),
         }
+    }
+
+    /// ADR-060 v2 §5.4: synchronous flush — block until all previously
+    /// enqueued `AppendEntry` commands (including any `tool_call` /
+    /// `tool_result` rows appended via `append_message_with_id`) have been
+    /// physically written to the JSONL file.
+    ///
+    /// The compact-and-inject path calls this AFTER
+    /// `append_compaction_event` to guarantee the synthetic rows
+    /// appended for the injected todo_write round are durable on disk
+    /// before `compact_history_if_needed` returns. Without it, a process
+    /// restart immediately after compaction would race the writer thread
+    /// and the restorer would lose the round (it lands before the
+    /// compaction marker in the JSONL).
+    pub async fn flush_pending(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel::<()>();
+        if let Err(e) = self.sender.send(WriterCommand::Flush { done: tx }) {
+            return Err(crate::error::RuntimeError::Io(std::io::Error::other(
+                format!("flush send failed: {e}"),
+            )));
+        }
+        let _ = rx.await;
+        Ok(())
     }
 
     /// Return the session ID.

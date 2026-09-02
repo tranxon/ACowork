@@ -1231,27 +1231,27 @@ impl SessionManager {
         //    guaranteed to be consistent here because `write_meta` refuses to
         //    re-create a meta file once its JSONL is gone (see
         //    `ConversationSession::write_meta`).
-        if let Some((latest_id, _)) = self.latest_session() {
-            if latest_id == session_id {
-                match crate::conversation::find_latest_session(&conversations_dir) {
-                    Some(new_id) => {
-                        let title = read_session_meta(&conversations_dir, &new_id)
-                            .ok()
-                            .and_then(|m| m.title);
-                        self.set_latest_session(new_id.clone(), title);
-                        tracing::info!(
-                            session_id = %session_id,
-                            new_latest = %new_id,
-                            "Deleted session was latest; recomputed latest from disk"
-                        );
-                    }
-                    None => {
-                        *self.latest_session.write().unwrap() = None;
-                        tracing::info!(
-                            session_id = %session_id,
-                            "Deleted session was latest; no sessions remain, cleared latest"
-                        );
-                    }
+        if let Some((latest_id, _)) = self.latest_session()
+            && latest_id == session_id
+        {
+            match crate::conversation::find_latest_session(&conversations_dir) {
+                Some(new_id) => {
+                    let title = read_session_meta(&conversations_dir, &new_id)
+                        .ok()
+                        .and_then(|m| m.title);
+                    self.set_latest_session(new_id.clone(), title);
+                    tracing::info!(
+                        session_id = %session_id,
+                        new_latest = %new_id,
+                        "Deleted session was latest; recomputed latest from disk"
+                    );
+                }
+                None => {
+                    *self.latest_session.write().unwrap() = None;
+                    tracing::info!(
+                        session_id = %session_id,
+                        "Deleted session was latest; no sessions remain, cleared latest"
+                    );
                 }
             }
         }
