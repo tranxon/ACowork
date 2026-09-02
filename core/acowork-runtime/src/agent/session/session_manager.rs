@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,6 +103,17 @@ pub struct SessionManagerConfig {
     /// `GET/PUT /sessions/{sid}/config` without going through the
     /// serial inference queue.
     pub session_configs: Option<crate::usecases::SharedSessionConfigs>,
+
+    /// ADR-063: the agent's `.agent` package directory (where
+    /// `prompts/<file>.md` lives). Populated by
+    /// `build_session_manager_config` from `AgentBootContext.loaded.package_dir`;
+    /// `enable_debug_mode` passes it to `RuntimeDebugService::new_with_agent`
+    /// so the L2 reload endpoint can re-read the 9 canonical filenames
+    /// on demand. Empty `PathBuf` (= `Default::default()`) means no
+    /// package configured — pre-R7 tests that exercise the trait
+    /// without the reload path stay green; production wiring always
+    /// sets this.
+    pub package_dir: PathBuf,
 }
 
 impl Default for SessionManagerConfig {
@@ -124,6 +136,9 @@ impl Default for SessionManagerConfig {
             session_snapshots: None,
             latest_session: None,
             session_configs: None,
+            // ADR-063: empty default keeps pre-R7 tests green; production
+            // wiring always populates this in `build_session_manager_config`.
+            package_dir: PathBuf::new(),
         }
     }
 }
@@ -366,6 +381,13 @@ pub struct SessionManager {
     latest_session: SharedLatestSession,
     /// ADR-047: Shared session config map for `SessionConfigService`.
     session_configs: crate::usecases::SharedSessionConfigs,
+    /// ADR-063: the agent's `.agent` package directory. See
+    /// `SessionManagerConfig::package_dir` for the rationale; copied out
+    /// at construction so `enable_debug_mode` can hand it to
+    /// `RuntimeDebugService::new_with_agent` without holding onto the
+    /// whole config (which owns the `chunk_tx` mpsc Sender consumed
+    /// elsewhere).
+    package_dir: PathBuf,
 }
 
 impl SessionManager {
@@ -381,6 +403,11 @@ impl SessionManager {
             .session_configs
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(HashMap::new())));
+
+        // ADR-063: clone out the package directory BEFORE `config` is
+        // moved into `self.config` (struct literal consumes it). Same
+        // pattern as the two Arc clones above.
+        let package_dir = config.package_dir.clone();
 
         Self {
             core,
@@ -404,6 +431,7 @@ impl SessionManager {
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
             latest_session,
             session_configs,
+            package_dir,
         }
     }
 
@@ -1194,6 +1222,40 @@ impl SessionManager {
             }
         }
 
+        // 4. If the deleted session was the "latest", recompute the latest
+        //    from the remaining sessions on disk (or clear it if none remain).
+        //    Without this, `/sessions/latest` keeps returning the deleted
+        //    session_id and the frontend tries to resume a session whose
+        //    JSONL is gone — the exact "deleted session reloaded as latest"
+        //    failure. `find_latest_session` scans the meta files, which are
+        //    guaranteed to be consistent here because `write_meta` refuses to
+        //    re-create a meta file once its JSONL is gone (see
+        //    `ConversationSession::write_meta`).
+        if let Some((latest_id, _)) = self.latest_session()
+            && latest_id == session_id
+        {
+            match crate::conversation::find_latest_session(&conversations_dir) {
+                Some(new_id) => {
+                    let title = read_session_meta(&conversations_dir, &new_id)
+                        .ok()
+                        .and_then(|m| m.title);
+                    self.set_latest_session(new_id.clone(), title);
+                    tracing::info!(
+                        session_id = %session_id,
+                        new_latest = %new_id,
+                        "Deleted session was latest; recomputed latest from disk"
+                    );
+                }
+                None => {
+                    *self.latest_session.write().unwrap() = None;
+                    tracing::info!(
+                        session_id = %session_id,
+                        "Deleted session was latest; no sessions remain, cleared latest"
+                    );
+                }
+            }
+        }
+
         tracing::info!(session_id = %session_id, "SessionManager: deleted session");
     }
 
@@ -1691,6 +1753,39 @@ After installation, ask the user to re-enable the MCP server.",
         }
     }
 
+    /// ADR-063 §3.7.6: replace the main-dialog system prompt agent-wide.
+    ///
+    /// Called by `gateway_loop::dispatch_inbound` when the L2 reload
+    /// endpoint (`POST /agents/{id}/prompts/reload`) rebuilds the main
+    /// dialog system prompt from `prompts/*.md` (including the required
+    /// `system.md`). Mirrors the `apply_runtime_config_override` /
+    /// `apply_builtin_tools_enabled` policy — the system prompt is
+    /// **agent-scoped**, so one system-level message updates:
+    ///
+    /// 1. the shared `SessionManagerConfig.system_prompt` template — so
+    ///    sessions opened LATER inherit the new value, and
+    /// 2. every active session's `ContextBuilder` via the
+    ///    `SessionMessage::UpdateSystemPrompt` broadcast — so the next
+    ///    `build_chat_request` uses the new prompt without a restart.
+    pub fn apply_system_prompt(&mut self, system_prompt: &str) {
+        tracing::info!(
+            prompt_len = system_prompt.len(),
+            "SessionManager: applying main-dialog system prompt (template sync + broadcast)"
+        );
+        // Step 1: rewrite the shared template for future sessions.
+        self.config.system_prompt = system_prompt.to_string();
+        // Step 2: push to every active session's ContextBuilder.
+        let failed = self.broadcast(SessionMessage::UpdateSystemPrompt {
+            system_prompt: system_prompt.to_string(),
+        });
+        if !failed.is_empty() {
+            tracing::warn!(
+                failed_sessions = failed.len(),
+                "apply_system_prompt: some sessions missed the broadcast (likely closed)"
+            );
+        }
+    }
+
     // ── ADR-030 C3: dynamic builtin tool registration (SidecarEndpointUpdate) ──
     //
     // When a sidecar's state changes (LSP relay became ready, sidecar
@@ -1985,12 +2080,39 @@ After installation, ask the user to re-enable the MCP server.",
             conv.set_reasoning_effort_raw(effort_str);
 
             let delta = crate::agent::session_config::SessionConfigDelta {
-                model: Some(model),
-                provider,
+                model: Some(model.clone()),
+                provider: provider.clone(),
                 ..Default::default()
             };
             conv.apply_config(&delta);
         }
+
+        // Mirror the switched model/provider into the per-session snapshot so
+        // the next `current_model_and_provider()` call — invoked by
+        // `build_initial_session_state` for newly created sessions — sees the
+        // switched value immediately instead of the stale value written when
+        // the session was created.
+        //
+        // Regression background: `apply_llm_effects` updates
+        // `session.set_model` / `set_provider` (in-memory SessionState) but
+        // does NOT touch the SessionRuntimeSnapshot. The snapshot is only
+        // refreshed by `AgentLoop::emit_session_state`, which fires on the
+        // next status transition — far too late for a `create_session` that
+        // happens right after the switch. Result: new sessions fall back to
+        // `global_provider_list.first()` (default provider, e.g. minimax)
+        // because the filter in `current_model_and_provider()` drops every
+        // session whose snapshot.model is still None.
+        if let Some(mut snap) = self
+            .sessions
+            .get(session_id)
+            .and_then(|h| h.snapshot.write().ok())
+        {
+            snap.model = Some(model);
+            if let Some(ref provider) = provider {
+                snap.provider = Some(provider.clone());
+            }
+        }
+
         Ok(())
     }
 
@@ -2383,10 +2505,69 @@ After installation, ask the user to re-enable the MCP server.",
     /// snapshot, preventing cross-contamination when different providers
     /// expose identically-named models (e.g. "gpt-4" in both OpenAI and Azure).
     ///
-    /// Falls back to the first (model, provider) from `global_provider_list`.
+    /// Resolution order (each only consulted if the previous returned None):
+    ///   1. The most recently active session's
+    ///      [`crate::conversation::ConversationSession`] meta. `apply_config`
+    ///      updates the conv **synchronously** (memory + disk + MQTT) on
+    ///      every model/provider switch — through either
+    ///      `SessionConfigService::apply_config` (the production path in
+    ///      `gateway_loop`) or `route_model_switch` (the slot-fallback
+    ///      path). Conv is the canonical source of truth and is always
+    ///      current immediately after a switch.
+    ///   2. The most recently active session's [`SessionRuntimeSnapshot`]
+    ///      mirror — refreshed by `AgentLoop::emit_session_state`. This
+    ///      is best-effort and lags by one emit cycle (a status
+    ///      transition boundary), so a switch that has only just
+    ///      persisted to conv may not yet appear in the snapshot. Kept
+    ///      as a defensive second-level lookup so old code paths and
+    ///      tests that don't populate `session_configs` still resolve.
+    ///   3. The first `(provider, model)` from `global_provider_list`.
+    ///
     /// Returns `(None, None)` only when no provider is configured at all.
     pub fn current_model_and_provider(&self) -> (Option<String>, Option<String>) {
-        // 1. Try the most recently active session that has both model and provider set.
+        // Level 1: ConversationSession meta (always up-to-date — the
+        // canonical source of truth, mutated synchronously by
+        // `apply_config` on every config change including model and
+        // provider switches via `SessionConfigService::apply_config`).
+        //
+        // This MUST come before the snapshot lookup: the snapshot mirror
+        // is only refreshed by `emit_session_state` (one AgentLoop turn
+        // later), so a brand-new `create_session` called immediately
+        // after a model switch would otherwise see the snapshot's stale
+        // pre-switch value and a new session would inherit the wrong
+        // model. With conv first, the switched value is observed
+        // synchronously.
+        //
+        // The lifetime is constrained to this block so the
+        // `RwLockReadGuard` on `session_configs` doesn't conflict with
+        // the immutable borrow of `self.sessions`.
+        let from_conv = {
+            let configs_guard = self.session_configs.read().ok();
+            match configs_guard.as_deref() {
+                Some(configs) => self
+                    .sessions
+                    .values()
+                    .filter_map(|handle| {
+                        let conv = configs.get(&handle.session_id)?;
+                        let model = conv.model()?;
+                        let provider = conv.provider()?;
+                        let ts = *handle.last_active_at.lock().ok()?;
+                        Some((ts, model, provider))
+                    })
+                    .max_by_key(|(ts, _, _)| *ts)
+                    .map(|(_, m, p)| (m, p)),
+                None => None,
+            }
+        };
+        if let Some((model, provider)) = from_conv {
+            return (Some(model), Some(provider));
+        }
+
+        // Level 2: snapshot mirror (best-effort — read latency is lower
+        // when it IS current, but it lags behind conv by one emit
+        // cycle). Kept as a defensive fallback for code paths and
+        // tests that build sessions without going through
+        // `SessionConfigService`.
         if let Some((model, provider)) = self
             .sessions
             .values()
@@ -2403,7 +2584,7 @@ After installation, ask the user to re-enable the MCP server.",
             return (Some(model), Some(provider));
         }
 
-        // 2. Fall back to the first provider+model from the global provider list.
+        // Level 3: global provider list.
         let list = self.core.global_provider_list.read().unwrap();
         let provider = list.first().map(|p| p.id.clone());
         let model = list
@@ -2627,6 +2808,19 @@ After installation, ask the user to re-enable the MCP server.",
 
         // Step 3: synchronously set workspace_id + current_work_dir + JSONL persist.
         self.set_session_workspace(session_id, &effective_workspace_id);
+
+        // Step 3.5: propagate the switch to the per-agent default so NEWLY
+        // CREATED sessions inherit the user's last selected workspace.
+        //
+        // Regression fix (ADR-040 migration): before ADR-040 the Gateway
+        // owned `agent_workspaces.json` and wrote `is_current`/`last_active`
+        // on every workspace switch; the runtime read that flag at startup
+        // to seed `default_workspace_id`. ADR-040 moved persistence into
+        // the runtime but the switch path only updated the session — the
+        // flag was never written again, so every new session fell back to
+        // `__agent_home__`. Sessions (their persisted meta) are the source
+        // of truth now: the default follows the switch directly.
+        self.set_default_workspace_id(&effective_workspace_id);
 
         // Step 4: push per-session workspace context + prompt file to the SessionTask.
         self.update_session_workspace_context(session_id);
@@ -2880,9 +3074,21 @@ After installation, ask the user to re-enable the MCP server.",
         // service reads from `debug_controllers` and `debug_event_senders`
         // on every call, so future session registrations still work —
         // we don't snapshot the maps.
-        let debug_svc = Arc::new(crate::usecases::RuntimeDebugService::new(
+        //
+        // ADR-063: use the 4-arg `new_with_agent` constructor so the
+        // service can fulfil `reload_prompts` requests (L2 reload). The
+        // `agent_core` slot is an `Arc<RwLock<Option<Arc<AgentCore>>>>`
+        // because `SessionManager::core` is the canonical `Arc<AgentCore>`
+        // template that `Clone for AgentCore` clones from — every running
+        // session's `AgentCore` share the same `Arc<RwLock<Option<String>>>`
+        // inner fields, so writing here propagates to every live session.
+        let agent_core_slot: Arc<std::sync::RwLock<Option<Arc<AgentCore>>>> =
+            Arc::new(std::sync::RwLock::new(Some(self.core.clone())));
+        let debug_svc = Arc::new(crate::usecases::RuntimeDebugService::new_with_agent(
             self.debug_controllers.clone(),
             self.debug_event_senders.clone(),
+            agent_core_slot,
+            self.package_dir.clone(),
         ));
         self.debug_service = Some(debug_svc);
 
@@ -3909,5 +4115,276 @@ mod tests {
             }
             other => panic!("expected Errored, got {other:?}"),
         }
+    }
+
+    // ── New-session workspace inheritance (ADR-040 regression) ────────
+    //
+    // Bug history: before ADR-040 the Gateway wrote `is_current` /
+    // `last_active` into `agent_workspaces.json` on every workspace
+    // switch, and the runtime seeded `default_workspace_id` from that
+    // flag at startup. ADR-040 moved workspace persistence into the
+    // runtime but `route_workspace_switch` only updated the session —
+    // the flag was never written again, so every new session fell back
+    // to `__agent_home__` no matter what the user had selected last.
+    //
+    // Fix: the switch now propagates to `default_workspace_id` (the
+    // per-agent in-memory default for new sessions). New sessions must
+    // inherit the last selected workspace; switching back to agent home
+    // must reset the default as well.
+    #[tokio::test]
+    async fn workspace_switch_sets_default_for_new_sessions() {
+        let config = crate::config::RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.ws_inherit"
+            version = "1.0.0"
+            name = "Test ws inherit"
+            description = "Pin new-session workspace inheritance"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+
+        let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new_for_test(vec![
+            crate::tools::workspace_resolver::WorkspaceDir {
+                id: "ws-1".to_string(),
+                path: "/tmp/ws-1".to_string(),
+                access: crate::tools::workspace_resolver::WorkspaceAccess::ReadWrite,
+                last_active: false,
+                prompt_file: None,
+            },
+        ])));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(resolver);
+
+        // Fresh manager: default is agent home.
+        assert_eq!(manager.default_workspace_id, "__agent_home__");
+
+        // User switches session S1 to ws-1 → the per-agent default follows.
+        let s1 = manager.create_session().await.unwrap();
+        manager.route_workspace_switch(&s1, "ws-1");
+        assert_eq!(manager.default_workspace_id, "ws-1");
+
+        // A brand-new session inherits ws-1 instead of agent home.
+        let s2 = manager.create_session().await.unwrap();
+        assert_eq!(manager.session_workspace_id(&s2), "ws-1");
+
+        // Switching back to agent home resets the default for the next
+        // new session too.
+        manager.route_workspace_switch(&s1, "__agent_home__");
+        assert_eq!(manager.default_workspace_id, "__agent_home__");
+        let s3 = manager.create_session().await.unwrap();
+        assert_eq!(manager.session_workspace_id(&s3), "__agent_home__");
+    }
+
+    // ── New-session model/provider inheritance (regression test) ──────
+    //
+    // Bug history: `route_model_switch` persisted the new model/provider to
+    // the session meta via `conv.apply_config` and queued an
+    // `apply_llm_effects` for the SessionTask, but `apply_llm_effects` only
+    // updates `session.set_model` / `set_provider` (the in-memory
+    // SessionState). It does NOT update the SessionRuntimeSnapshot. The
+    // snapshot is refreshed by `AgentLoop::emit_session_state` on the next
+    // status transition — far too late for the next `create_session`.
+    //
+    // Symptom: a user switches the current session to model A, then
+    // creates a new session. The new session's `build_initial_session_state`
+    // calls `current_model_and_provider()`, whose filter drops every
+    // session whose snapshot.model is still None, falling back to
+    // `global_provider_list.first()` (the default provider, e.g. minimax).
+    //
+    // Fix: `route_model_switch` mirrors the switched model/provider into
+    // the snapshot synchronously. This test pins that contract end-to-end:
+    // switch → snapshot reflects → next new session inherits.
+    #[tokio::test]
+    async fn model_switch_updates_snapshot_for_new_sessions() {
+        let config = crate::config::RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.model_inherit"
+            version = "1.0.0"
+            name = "Test model inherit"
+            description = "Pin new-session model inheritance"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+
+        let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new_for_test(
+            Vec::new(),
+        )));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(resolver);
+
+        let s1 = manager.create_session().await.unwrap();
+
+        // Pre-condition: without a configured global provider list the
+        // session snapshot starts empty. (The mock provider isn't in
+        // global_provider_list, so current_model_and_provider() returns
+        // (None, None).)
+        let pre = manager
+            .snapshot_session_state(&s1)
+            .expect("s1 snapshot exists");
+        assert_eq!(pre.model, None);
+        assert_eq!(pre.provider, None);
+
+        // User switches S1 to model-A / provider-X.
+        manager
+            .route_model_switch(&s1, "model-A".to_string(), Some("provider-X".to_string()))
+            .unwrap();
+
+        // The per-session snapshot must reflect the switch IMMEDIATELY
+        // (no waiting for the next AgentLoop emit).
+        let after = manager
+            .snapshot_session_state(&s1)
+            .expect("s1 snapshot exists");
+        assert_eq!(after.model.as_deref(), Some("model-A"));
+        assert_eq!(after.provider.as_deref(), Some("provider-X"));
+
+        // And `current_model_and_provider()` (used by the next session's
+        // `build_initial_session_state`) returns the switched pair.
+        assert_eq!(
+            manager.current_model_and_provider(),
+            (Some("model-A".to_string()), Some("provider-X".to_string()))
+        );
+
+        // A brand-new session inherits the switched model/provider —
+        // not the stale fallback.
+        let s2 = manager.create_session().await.unwrap();
+        let s2_snap = manager
+            .snapshot_session_state(&s2)
+            .expect("s2 snapshot exists");
+        assert_eq!(s2_snap.model.as_deref(), Some("model-A"));
+        assert_eq!(s2_snap.provider.as_deref(), Some("provider-X"));
+    }
+
+    // ── Delete-latest regression (orphan meta / stale latest marker) ──
+    //
+    // Bug history: `delete_session` removed the meta + JSONL files but
+    // never touched the in-memory `latest_session` marker. Deleting the
+    // current latest session left `/sessions/latest` pointing at a session
+    // whose JSONL was gone; the frontend then tried to resume it and
+    // failed. Fix: after deleting, if the deleted session was the latest,
+    // recompute it from the remaining meta files on disk (or clear it when
+    // none remain). This test pins that contract.
+    #[tokio::test]
+    async fn delete_session_recomputes_latest_when_deleting_latest() {
+        use crate::conversation::{SessionMeta, write_session_meta};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = crate::config::RuntimeConfig {
+            work_dir: dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.delete_latest"
+            version = "1.0.0"
+            name = "Test delete latest"
+            description = "Pin latest-session cleanup on delete"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+
+        // Seed a surviving session on disk (meta + jsonl) so the recompute
+        // has something to find.
+        let survivor_id = "20260101_000000_survivor";
+        let conversations_dir = dir.path().join("conversations");
+        std::fs::create_dir_all(conversations_dir.join("meta")).unwrap();
+        std::fs::write(conversations_dir.join(format!("{}.jsonl", survivor_id)), "").unwrap();
+        write_session_meta(
+            &conversations_dir,
+            &SessionMeta {
+                version: 3, // CONVERSATION_FORMAT_VERSION
+                session_id: survivor_id.to_string(),
+                agent_id: "com.test.delete_latest".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                title: Some("Survivor".to_string()),
+                workspace_id: None,
+                model: None,
+                provider: None,
+                reasoning_effort: None,
+                temperature: None,
+                todos: None,
+                message_count: 0,
+                last_active_at: "2026-01-01T00:00:00Z".to_string(),
+                tokens: None,
+                last_compaction_offset: None,
+                corrupted: false,
+            },
+        )
+        .unwrap();
+
+        // Simulate the buggy state: latest points at a session that is
+        // about to be deleted.
+        manager.set_latest_session("doomed".to_string(), None);
+        assert_eq!(
+            manager.latest_session().map(|(id, _)| id),
+            Some("doomed".to_string())
+        );
+
+        // Delete the doomed session (not in memory; files absent).
+        manager.delete_session("doomed").await;
+
+        // The latest marker must be recomputed to the surviving session —
+        // NOT left pointing at the deleted one.
+        let latest = manager.latest_session();
+        assert_eq!(
+            latest.as_ref().map(|(id, _)| id.as_str()),
+            Some(survivor_id),
+            "latest must be recomputed from disk after deleting the latest session"
+        );
+        assert_eq!(
+            latest.and_then(|(_, title)| title),
+            Some("Survivor".to_string())
+        );
+
+        // Deleting the last remaining session clears latest entirely.
+        manager.delete_session(survivor_id).await;
+        assert_eq!(manager.latest_session(), None);
     }
 }

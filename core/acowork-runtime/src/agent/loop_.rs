@@ -619,6 +619,62 @@ impl AgentLoop {
             .unwrap_or_default()
     }
 
+    /// Wait out a retry backoff while listening for a user "Retry Now"
+    /// (`ContinueExecution`) or `Stop` on the inbound channel — the same
+    /// semantics as the original inline long-retry wait, extracted so the
+    /// bounded long retry and the persistent network-recovery retry can
+    /// share it.
+    ///
+    /// Returns:
+    /// - `true`  → resume the iteration loop (timeout elapsed, or the user
+    ///   chose to retry immediately)
+    /// - `false` → the user stopped, or the inbound channel closed (session
+    ///   already transitioned to Idle)
+    async fn wait_for_retry_or_user(&mut self, wait_ms: u64) -> bool {
+        let long_wait = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
+        tokio::pin!(long_wait);
+
+        loop {
+            tokio::select! {
+                _ = &mut long_wait => {
+                    // Time's up — auto resume
+                    tracing::info!(
+                        wait_ms,
+                        "Retry wait completed, auto-resuming"
+                    );
+                    self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
+                    return true;
+                }
+                msg = self.inbound_rx.recv() => {
+                    match msg {
+                        Some(InboundMessage::ContinueExecution { .. }) => {
+                            tracing::info!("User chose to retry immediately");
+                            self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
+                            return true;
+                        }
+                        Some(InboundMessage::Stop { .. }) => {
+                            tracing::info!("User stopped during retry wait");
+                            self.transition_status(SessionStatus::Idle);
+                            return false;
+                        }
+                        Some(InboundMessage::UserOperation(user_op)) => {
+                            self.apply_user_op(&user_op);
+                        }
+                        Some(other) => {
+                            self.session.deferred_inbound.push(other);
+                        }
+                        None => {
+                            // Channel closed — stop
+                            tracing::info!("Inbound channel closed during retry wait");
+                            self.transition_status(SessionStatus::Idle);
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Run the agent loop for a single user message.
     ///
     /// Appends the user message to history and persists to JSONL,
@@ -1016,11 +1072,22 @@ impl AgentLoop {
             }
 
             // ①-⑧ Execute single iteration (shared with debug mode)
-            // With iteration-level retry for retryable stream errors.
-            const MAX_ITERATION_RETRIES: u32 = 3;
-            const MAX_LONG_RETRIES: u32 = 3;
+            // With iteration-level retry for retryable errors, plus a
+            // persistent-recovery tier for transient network failures that
+            // outlast the bounded budget (root cause: 2026-09-02 03:33).
+            //
+            // The retry policy lives in `agent::retry::decide_retry_action`
+            // so it can be unit-tested as a pure function. The loop only owns
+            // the side effects (sleeping, transitioning session status,
+            // surfacing RetryPauseInfo).
+            use crate::agent::retry::{
+                decide_retry_action, RetryAction, MAX_LONG_RETRIES,
+            };
             let mut iteration_retries = 0u32;
             let mut long_retry_count = 0u32;
+            // Consecutive persistent (post-budget) network-recovery waits.
+            // Drives the exponential backoff for transient network errors.
+            let mut persistent_retries = 0u32;
             let iteration_result = loop {
                 match self
                     .execute_single_iteration(
@@ -1032,136 +1099,6 @@ impl AgentLoop {
                     .await
                 {
                     Ok(result) => break result,
-                    Err(RuntimeError::StreamError(ref err))
-                        if err.retryable && iteration_retries < MAX_ITERATION_RETRIES =>
-                    {
-                        iteration_retries += 1;
-                        let backoff = std::time::Duration::from_millis(
-                            1000 * 2u64.pow(iteration_retries - 1),
-                        );
-                        let backoff = backoff.min(std::time::Duration::from_secs(10));
-                        tracing::warn!(
-                            iteration,
-                            retry = iteration_retries,
-                            max_retries = MAX_ITERATION_RETRIES,
-                            error = %err.message,
-                            backoff_ms = backoff.as_millis(),
-                            "Retryable stream error, retrying iteration"
-                        );
-                        tokio::time::sleep(backoff).await;
-                        continue;
-                    }
-                    Err(RuntimeError::StreamError(ref err))
-                        if err.retryable && long_retry_count < MAX_LONG_RETRIES =>
-                    {
-                        long_retry_count += 1;
-                        // Enter paused state with 5-minute retry info.
-                        // The frontend RetryWaitBanner shows a countdown and
-                        // "Retry Now" button; the user can skip the wait or
-                        // let the timer expire for automatic retry.
-                        // reason: None — retry_info already disambiguates this
-                        // pause from iteration-limit / loop-detected / debug.
-                        self.transition_status(SessionStatus::Paused {
-                            iteration: Some(iteration),
-                            max_iterations: Some(self.core.config.max_iterations),
-                            retry_info: Some(
-                                crate::agent::session_state::RetryPauseInfo {
-                                    wait_ms: 5 * 60 * 1000,
-                                    attempt: long_retry_count,
-                                    max_attempts: MAX_LONG_RETRIES,
-                                    provider: current_model.clone(),
-                                },
-                            ),
-                            reason: None,
-                            message: None,
-                        });
-                        tracing::warn!(
-                            iteration,
-                            long_retry = long_retry_count,
-                            max_long_retries = MAX_LONG_RETRIES,
-                            error = %err.message,
-                            "Retryable stream error, entering long retry wait (5 min)"
-                        );
-
-                        // Wait for 5 minutes, ContinueExecution, or Stop.
-                        // Uses tokio::select! to await the first of:
-                        //   - 5-minute timeout (auto-retry)
-                        //   - inbound ContinueExecution (user clicked Retry Now)
-                        //   - inbound Stop (user stopped the session)
-                        let long_wait =
-                            tokio::time::sleep(std::time::Duration::from_secs(5 * 60));
-                        tokio::pin!(long_wait);
-
-                        loop {
-                            tokio::select! {
-                                _ = &mut long_wait => {
-                                    // Time's up — auto resume
-                                    tracing::info!(
-                                        "Long retry wait completed, auto-resuming"
-                                    );
-                                    self.transition_status(
-                                        SessionStatus::LlmAwaitingFirstChunk,
-                                    );
-                                    break;
-                                }
-                                msg = self.inbound_rx.recv() => {
-                                    match msg {
-                                        Some(InboundMessage::ContinueExecution { .. }) => {
-                                            tracing::info!(
-                                                "User chose to retry immediately"
-                                            );
-                                            self.transition_status(
-                                                SessionStatus::LlmAwaitingFirstChunk,
-                                            );
-                                            break;
-                                        }
-                                        Some(InboundMessage::Stop { .. }) => {
-                                            tracing::info!(
-                                                "User stopped during retry wait"
-                                            );
-                                            self.transition_status(
-                                                SessionStatus::Idle,
-                                            );
-                                            return Err(
-                                                RuntimeError::StreamError(
-                                                    err.clone(),
-                                                ),
-                                            );
-                                        }
-                                        Some(InboundMessage::UserOperation(
-                                            user_op,
-                                        )) => {
-                                            self.apply_user_op(&user_op);
-                                        }
-                                        Some(other) => {
-                                            self.session
-                                                .deferred_inbound
-                                                .push(other);
-                                        }
-                                        None => {
-                                            // Channel closed — stop
-                                            tracing::info!(
-                                                "Inbound channel closed during \
-                                                 retry wait"
-                                            );
-                                            self.transition_status(
-                                                SessionStatus::Idle,
-                                            );
-                                            return Err(
-                                                RuntimeError::StreamError(
-                                                    err.clone(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Reset short retry counter and try again
-                        iteration_retries = 0;
-                        continue;
-                    }
                     Err(RuntimeError::LoopDetected(msg)) => {
                         // Loop detection: inject system warning into history,
                         // reset detector, pause, and wait for ContinueExecution.
@@ -1250,10 +1187,137 @@ impl AgentLoop {
                         }
                     }
                     Err(e) => {
-                        // ADR-014: Streaming → Idle on non-retryable error
-                        // or all retry attempts exhausted
-                        self.transition_status(SessionStatus::Idle);
-                        return Err(e);
+                        // Apply the retry policy. The policy decides which
+                        // retry tier (fast/long/persistent) to use, or to
+                        // give up. The loop owns the side effects.
+                        match decide_retry_action(
+                            &e,
+                            iteration_retries,
+                            long_retry_count,
+                            persistent_retries,
+                        ) {
+                            RetryAction::FastRetry {
+                                backoff_ms,
+                                attempt,
+                                max_attempts,
+                            } => {
+                                iteration_retries = attempt;
+                                tracing::warn!(
+                                    iteration,
+                                    retry = attempt,
+                                    max_retries = max_attempts,
+                                    error = %e,
+                                    backoff_ms,
+                                    "Retryable error, retrying iteration"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms))
+                                    .await;
+                                continue;
+                            }
+                            RetryAction::LongRetry {
+                                wait_ms,
+                                attempt,
+                                max_attempts,
+                            } => {
+                                long_retry_count = attempt;
+                                // Enter paused state with retry info. The
+                                // frontend RetryWaitBanner shows a countdown
+                                // and "Retry Now" button; the user can skip
+                                // the wait or let the timer expire for
+                                // automatic retry. reason: None —
+                                // retry_info already disambiguates this
+                                // pause from iteration-limit / loop-detected
+                                // / debug.
+                                self.transition_status(SessionStatus::Paused {
+                                    iteration: Some(iteration),
+                                    max_iterations: Some(self.core.config.max_iterations),
+                                    retry_info: Some(
+                                        crate::agent::session_state::RetryPauseInfo {
+                                            wait_ms,
+                                            attempt,
+                                            max_attempts,
+                                            provider: current_model.clone(),
+                                        },
+                                    ),
+                                    reason: None,
+                                    message: None,
+                                });
+                                tracing::warn!(
+                                    iteration,
+                                    long_retry = attempt,
+                                    max_long_retries = max_attempts,
+                                    error = %e,
+                                    "Retryable error, entering long retry wait"
+                                );
+                                // Wait for the timer, ContinueExecution, or
+                                // Stop. tokio::select! awaits the first of:
+                                //   - timeout (auto-retry)
+                                //   - inbound ContinueExecution (user clicked
+                                //     "Retry Now")
+                                //   - inbound Stop (user stopped the session)
+                                if !self.wait_for_retry_or_user(wait_ms).await {
+                                    // User stopped or channel closed — surface
+                                    // the original error (session already →
+                                    // Idle).
+                                    return Err(e);
+                                }
+                                // Reset short retry counter and try again.
+                                iteration_retries = 0;
+                                continue;
+                            }
+                            RetryAction::Persistent {
+                                wait_ms,
+                                attempt,
+                            } => {
+                                // Bounded fast + long budgets are exhausted,
+                                // but the error is still a transient network /
+                                // transport failure. Do NOT give up and enter
+                                // Idle — the machine may be asleep or the
+                                // network temporarily down (root cause of the
+                                // 2026-09-02 03:33 session death). Keep
+                                // retrying with exponential backoff (5m → 10m
+                                // → 20m → 30m cap) until the network
+                                // recovers, the user stops, or a
+                                // non-retryable error surfaces.
+                                long_retry_count = 0;
+                                iteration_retries = 0;
+                                persistent_retries = attempt;
+                                self.transition_status(SessionStatus::Paused {
+                                    iteration: Some(iteration),
+                                    max_iterations: Some(self.core.config.max_iterations),
+                                    retry_info: Some(
+                                        crate::agent::session_state::RetryPauseInfo {
+                                            wait_ms,
+                                            attempt,
+                                            max_attempts: MAX_LONG_RETRIES,
+                                            provider: current_model.clone(),
+                                        },
+                                    ),
+                                    reason: None,
+                                    message: None,
+                                });
+                                tracing::warn!(
+                                    iteration,
+                                    error = %e,
+                                    persistent_retry = attempt,
+                                    wait_ms,
+                                    "Transient network error outlasted retry \
+                                     budget; retrying with exponential backoff \
+                                     (won't enter Idle)"
+                                );
+                                if !self.wait_for_retry_or_user(wait_ms).await {
+                                    return Err(e);
+                                }
+                                continue;
+                            }
+                            RetryAction::GiveUp => {
+                                // Non-retryable error (auth/quota/tool/etc.) —
+                                // transition to Idle and surface the error.
+                                // ADR-014: Streaming → Idle.
+                                self.transition_status(SessionStatus::Idle);
+                                return Err(e);
+                            }
+                        }
                     }
                 }
             };

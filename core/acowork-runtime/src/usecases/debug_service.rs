@@ -106,4 +106,19 @@ pub trait DebugService: Send + Sync {
     /// `debugger.reExecute` — re-run the current iteration with any
     /// pending patches applied.
     async fn re_execute(&self, session_id: &str) -> Result<ReExecuteOutcome, DebugError>;
+
+    /// ADR-063 §3.7.5 L2 reload — re-read every `prompts/<file>.md` from
+    /// disk and overwrite the per-agent `AgentCore` `Arc<RwLock<Option<String>>>`
+    /// fields so the next LLM call uses the new directive. **Agent-wide**
+    /// (not per-session) because `AgentCore` is shared across every
+    /// session of the same agent. The Debug panel calls this after
+    /// `PUT /agents/{id}/prompts/{name}`; Phase C also calls it when
+    /// DevMode is enabled so an existing install's edits take effect
+    /// without a Runtime restart.
+    ///
+    /// Errors are surfaced as `DebugError::Internal` — the failure mode
+    /// here is filesystem (`prompts/` missing mid-reload, IO error).
+    /// The HTTP transport maps `Internal` → 422 (see ADR-048 §error
+    /// mapping table in `http/debug.rs`).
+    async fn reload_prompts(&self) -> Result<(), DebugError>;
 }

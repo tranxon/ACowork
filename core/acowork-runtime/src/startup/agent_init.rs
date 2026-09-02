@@ -232,6 +232,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         match crate::http::RuntimeHttpServer::start_with_bind_port(
             bind_port,
             std::path::PathBuf::from(&config.work_dir),
+            // ADR-063: the agent's `.agent` package directory holds
+            // `prompts/<file>.md` — distinct from `work_dir` (runtime
+            // state). Wired into HttpState so the `/agents/{id}/prompts*`
+            // routes can resolve canonical filenames under
+            // `<package_dir>/prompts/`.
+            loaded.package_dir.clone(),
             loaded.manifest.agent_id.clone(),
             session_snapshots.clone(),
             latest_session.clone(),
@@ -252,6 +258,14 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             debug_service_slot.clone(),
             workspace_resolver.clone(),
             session_manager_slot.clone(),
+            // ADR-063 §3.7.5 L2 reload: the HTTP reload handler
+            // (`POST /agents/{id}/prompts/reload`) reads the live
+            // `AgentCore` Arc through this slot. Phase B
+            // (`session_init.rs`) populates it once `AgentCore::new`
+            // completes. The slot is currently None at Phase A; the
+            // reload handler returns 503 (same late-bind pattern as
+            // every other shared resource) until Phase B finishes.
+            agent_core_shared.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -485,6 +499,34 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             "Loaded agent-specific compaction prompt from prompts/summary.md"
         );
     }
+
+    // ADR-063: 8 additional package-level prompt overrides. Each is loaded
+    // from `prompts/<file>.md` independently — missing files yield `None`
+    // and the LLM call site falls back to the built-in constant. We log at
+    // debug level (not info) because the absence of an override is the
+    // common case for the v1 .agent packages shipped today.
+    let load_or_trace = |filename: &'static str, ctx_desc: &'static str| {
+        let loaded =
+            crate::package::prompt_builder::load_optional_prompt(&loaded.package_dir, filename);
+        if let Some(ref p) = loaded {
+            tracing::debug!(
+                filename,
+                ctx_desc,
+                prompt_len = p.len(),
+                "ADR-063: loaded package-level prompt override"
+            );
+        }
+        loaded
+    };
+    let search_prompt = load_or_trace("search.md", "SEARCH_SYSTEM_PROMPT");
+    let compact_template = load_or_trace("compact-template.md", "COMPACT_PROMPT");
+    let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
+    let extraction_prompt = load_or_trace("extraction.md", "EXTRACTION_SYSTEM_PROMPT (grafeo)");
+    let conflict_classification_prompt =
+        load_or_trace("conflict-classification.md", "CONFLICT_CLASSIFICATION_PROMPT (grafeo)");
+    let generalization_prompt =
+        load_or_trace("generalization.md", "GENERALIZATION_PROMPT (grafeo)");
+    let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
     let skills_dir = loaded.package_dir.join("skills");
@@ -1103,6 +1145,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_tool_specs,
         system_prompt,
         compaction_prompt,
+        // ADR-063: 7 additional package-level overrides (Phase A loaded
+        // each from `prompts/<file>.md`; see load_or_trace above). Wired
+        // through `AgentBootContext` so Phase B's session_init.rs can
+        // inject them into `AgentCore` as `Arc<RwLock<Option<String>>>`.
+        search_prompt,
+        compact_template,
+        title_prompt,
+        extraction_prompt,
+        conflict_classification_prompt,
+        generalization_prompt,
+        abstention_prompt,
         memory_session,
         mcp_notifier,
         workspace_resolver,

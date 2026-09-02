@@ -337,7 +337,28 @@ pub(crate) async fn phase_b_init_session(
         // so Gateway and Standalone modes share the same resolution; `None`
         // (no file) means the built-in COMPACTION_SYSTEM_PROMPT fallback is
         // used at compaction time.
-        c.compaction_prompt = ctx.compaction_prompt.clone();
+        //
+        // ADR-063 §3.7.5: wrap in `Arc<RwLock<Option<String>>>` so the
+        // L2 reload (`DebugService::reload_prompts`) can write through
+        // any Arc<AgentCore> clone held by a running session. Phase B
+        // is the single injection point for Gateway mode — see
+        // `cli.rs` (Standalone mode) for the symmetric Standalone path.
+        *c.compaction_prompt.write().unwrap() = ctx.compaction_prompt.clone();
+
+        // ADR-063: 7 additional package-level prompt overrides. Phase A
+        // loaded each `prompts/<file>.md` into the matching field on
+        // `AgentBootContext`; here we mirror the Phase B injection
+        // pattern (RwLock write — Phase B is the only writer before
+        // sessions are spawned, so no contention with the LLM call
+        // sites' read guards). `None` is the normal "no override" state.
+        *c.search_prompt.write().unwrap() = ctx.search_prompt.clone();
+        *c.compact_template.write().unwrap() = ctx.compact_template.clone();
+        *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
+        *c.extraction_prompt.write().unwrap() = ctx.extraction_prompt.clone();
+        *c.conflict_classification_prompt.write().unwrap() =
+            ctx.conflict_classification_prompt.clone();
+        *c.generalization_prompt.write().unwrap() = ctx.generalization_prompt.clone();
+        *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
 
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).
@@ -770,17 +791,28 @@ pub(crate) async fn phase_b_init_session(
 
     session_manager.set_resolver(ctx.workspace_resolver.clone());
 
-    if let Some(ws_id) = ctx
+    // Seed the per-agent default workspace for NEW sessions. Sessions are
+    // the source of truth (their meta persists the user's last selection),
+    // so the resumed latest session's workspace_id wins; the disk
+    // `last_active` flag is kept only as a fallback for legacy data written
+    // by the pre-ADR-040 Gateway. Nothing else: the default is intentionally
+    // NOT persisted at agent level — it is inherited from the session meta
+    // at startup and updated from `route_workspace_switch` at runtime.
+    let inherited_ws = conversation_session
+        .as_ref()
+        .and_then(|c| c.workspace_id());
+    let fallback_ws = ctx
         .workspace_resolver
         .read()
         .unwrap()
         .last_active_workspace_id()
-    {
-        let ws_id_owned = ws_id.to_owned();
-        session_manager.set_default_workspace_id(&ws_id_owned);
+        .map(|s| s.to_owned());
+    if let Some(ws_id) = inherited_ws.clone().or(fallback_ws) {
+        session_manager.set_default_workspace_id(&ws_id);
         tracing::info!(
-            default_workspace_id = %ws_id_owned,
-            "SessionManager: initialized default workspace from last_active"
+            default_workspace_id = %ws_id,
+            inherited_from_session = inherited_ws.is_some(),
+            "SessionManager: initialized default workspace from latest session meta (or last_active fallback)"
         );
     }
 

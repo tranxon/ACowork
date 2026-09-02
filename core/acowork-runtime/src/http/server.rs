@@ -201,8 +201,34 @@ pub type SharedSessionManagerSlot =
 /// State shared with HTTP handlers.
 #[derive(Clone)]
 pub(crate) struct HttpState {
-    work_dir: PathBuf,
-    agent_id: String,
+    pub(crate) work_dir: PathBuf,
+    /// ADR-063: the agent's `.agent` package directory (where
+    /// `prompts/<file>.md` lives). Distinct from `work_dir` — the work
+    /// directory holds runtime state (sessions, attachments) while the
+    /// package directory holds the declared directives (manifest.toml,
+    /// prompts/, skills/). `prompts/*.md` PUT reads/writes go through
+    /// this path; Phase A loads the 9 overrides from here via
+    /// `load_optional_prompt`.
+    pub(crate) package_dir: PathBuf,
+    pub(crate) agent_id: String,
+    /// Late-bind slot for the `AgentCore` Arc. Created empty in Phase A
+    /// and cloned into the HTTP server alongside the other late-bind
+    /// resources; populated by Phase B (`session_init.rs` line ~715) once
+    /// `AgentCore::new` completes.
+    ///
+    /// Used by the L2 reload handler (`POST /agents/{id}/prompts/reload`
+    /// in `http::prompts`) to push the on-disk `prompts/<file>.md`
+    /// content back into the live `Arc<RwLock<Option<String>>>` fields
+    /// without going through the per-session Debug controllers — the
+    /// reload is a **package-level** operation, not a debug-session one,
+    /// so it must work even when DevMode is disabled.
+    ///
+    /// Type mirrors `SharedRagProvider` / `SharedConsolidationTimer`:
+    /// `Arc<std::sync::RwLock<Option<Arc<AgentCore>>>>`. Sync `RwLock`
+    /// (not `tokio::Mutex`) because the reload only holds the lock for
+    /// the duration of a `clone()` — the actual writes go through the
+    /// per-field `Arc<RwLock<Option<String>>>` inside `AgentCore`.
+    pub(crate) agent_core: SharedAgentCore,
     /// Shell risk rules — loaded at startup; updated in-place by PUT
     /// `/agents/{id}/shell-risk-rules` so live sessions pick up new rules
     /// without a restart. Write via `Arc<RwLock>` because the state is
@@ -328,9 +354,16 @@ impl RuntimeHttpServer {
     /// (rather than bundling everything in a single config struct) to keep
     /// resource lifetimes explicit at the call site and to avoid coupling
     /// the HTTP module to startup-phase internals.
+    ///
+    /// ADR-063: `package_dir` is the agent's `.agent` package directory,
+    /// distinct from `work_dir` (which holds runtime state). The two
+    /// `/agents/{id}/prompts*` routes mount under this server via
+    /// [`crate::http::prompts::prompts_routes`] and resolve every override
+    /// through `<package_dir>/prompts/<file>.md`.
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         work_dir: PathBuf,
+        package_dir: PathBuf,
         agent_id: String,
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
@@ -351,11 +384,13 @@ impl RuntimeHttpServer {
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
         session_manager_slot: SharedSessionManagerSlot,
+        agent_core: SharedAgentCore,
     ) -> Result<Self, RuntimeHttpServerError> {
         // Historical behaviour: random loopback port.
         Self::start_with_bind_port(
             0,
             work_dir,
+            package_dir,
             agent_id,
             session_snapshots,
             latest_session,
@@ -376,6 +411,7 @@ impl RuntimeHttpServer {
             debug_service,
             workspace_resolver,
             session_manager_slot,
+            agent_core,
         )
         .await
     }
@@ -390,6 +426,7 @@ impl RuntimeHttpServer {
     pub async fn start_with_bind_port(
         bind_port: u16,
         work_dir: PathBuf,
+        package_dir: PathBuf,
         agent_id: String,
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
@@ -410,6 +447,7 @@ impl RuntimeHttpServer {
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
         session_manager_slot: SharedSessionManagerSlot,
+        agent_core: SharedAgentCore,
     ) -> Result<Self, RuntimeHttpServerError> {
         // ADR-058: the workspace FS watcher set is created here so the
         // HTTP state and the boot context share exactly one Arc. It is
@@ -427,6 +465,7 @@ impl RuntimeHttpServer {
             .unwrap_or_default();
         let state = HttpState {
             work_dir,
+            package_dir,
             agent_id,
             shell_risk_rules: Arc::new(std::sync::RwLock::new(shell_risk_rules)),
             session_snapshots,
@@ -448,6 +487,7 @@ impl RuntimeHttpServer {
             debug_service,
             workspace_resolver,
             session_manager_slot,
+            agent_core,
             workspace_watchers: workspace_watchers.clone(),
         };
 
@@ -643,6 +683,15 @@ impl RuntimeHttpServer {
             // `AttachmentService::PayloadTooLarge`) remains the source
             // of truth for user-facing limits.
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
+            // ADR-063: mount the 3 prompt override routes
+            // (`/agents/{id}/prompts`, `/agents/{id}/prompts/{name}` GET+PUT)
+            // via `prompts::prompts_routes`. Lives in its own sub-router so
+            // the 3 handlers + their tests are self-contained and don't
+            // bloat this 6800-line server.rs. Merging must happen BEFORE
+            // `.with_state(state)` — axum applies state only to the
+            // primary router; a `.merge()` after `.with_state()` is a
+            // type error.
+            .merge(crate::http::prompts::prompts_routes())
             .with_state(state);
         // Diagnostic: confirms the migration route was wired into the Router
         // during this build. Runs once at server boot. If this log never
@@ -2352,7 +2401,10 @@ impl UpdateAgentConfigRequest {
 /// (agent not yet ready, Phase A pre-Phase D startup race) logs a
 /// warning and returns. The on-disk file written by the UseCase layer
 /// remains authoritative and is re-read at the next boot.
-async fn dispatch_agent_level_config(
+/// `pub(crate)` so the L2 reload endpoint (`http::prompts`) can push the
+/// rebuilt main-dialog system prompt through the same agent-level pipeline
+/// (ADR-063 §3.7.6 hot-reload).
+pub(crate) async fn dispatch_agent_level_config(
     state: &HttpState,
     label: &str,
     msg: InboundMessage,
@@ -3328,6 +3380,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -3348,6 +3401,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -3435,6 +3489,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -3455,6 +3510,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .unwrap();
@@ -3596,6 +3652,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -3616,6 +3673,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -3661,6 +3719,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -3681,6 +3740,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -3805,6 +3865,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -3825,6 +3886,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -3974,6 +4036,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -3994,6 +4057,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4181,6 +4245,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -4201,6 +4266,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4373,6 +4439,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -4393,6 +4460,7 @@ mod tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4546,6 +4614,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -4566,6 +4635,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4647,6 +4717,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
@@ -4667,6 +4738,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_resolver.clone(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -4797,6 +4869,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -4817,6 +4890,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5290,6 +5364,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5310,6 +5385,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5417,6 +5493,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5437,6 +5514,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5608,6 +5686,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5628,6 +5707,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5666,6 +5746,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5686,6 +5767,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5739,6 +5821,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5759,6 +5842,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5799,6 +5883,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5819,6 +5904,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5890,6 +5976,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5910,6 +5997,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -5969,6 +6057,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -5989,6 +6078,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6046,6 +6136,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             snapshots,
             latest,
@@ -6066,6 +6157,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6219,6 +6311,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6239,6 +6332,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6338,6 +6432,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6358,6 +6453,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6424,6 +6520,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6444,6 +6541,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6525,6 +6623,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.agent".to_string(),
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
@@ -6545,6 +6644,7 @@ mod tests {
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
                     session_manager_slot,
+                    std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6643,6 +6743,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.debug_enable".to_string(),
             snapshots,
             latest,
@@ -6663,6 +6764,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot.clone(),
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");
@@ -6760,6 +6862,7 @@ mod tests {
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
+            temp_dir.clone(),
             "com.test.no_sm".to_string(),
             snapshots,
             latest,
@@ -6780,6 +6883,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
             session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
         .expect("server should start");

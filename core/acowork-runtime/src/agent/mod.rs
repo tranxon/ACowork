@@ -20,6 +20,7 @@ pub mod loop_interaction;
 pub mod loop_llm;
 pub mod loop_memory;
 pub mod loop_session;
+pub mod retry;
 pub mod llm_availability;
 pub mod loop_tools;
 pub use llm_availability::{LlmAvailability, LlmAvailabilityRegistry};

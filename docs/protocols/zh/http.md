@@ -634,6 +634,30 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 | POST | `/api/agents/{id}/workspaces/copy` | 复制文件/目录 | `/workspaces/copy` |
 | POST | `/api/agents/{id}/workspaces/rename` | 原子重命名 file/dir | `/workspaces/rename` |
 
+### 5.6 包级 LLM Prompt 覆盖 (Prompts)
+
+> **ADR-063**：agent 包可声明 9 个 LLM prompt override 文件（`prompts/<name>.md`），由
+> Runtime 在 Phase A（`agent_init`）一次性加载到 `AgentBootContext`，Phase B（`session_init`）
+> 注入到 `AgentCore`，运行时调用点通过 `Arc<RwLock<Option<String>>>` accessor 读取。
+> Debug 面板可列出/编辑/保存/重载 — 重载端点走 `/debug/{*rest}` wildcard，由 R7（ADR-048 §D8）
+> 转发。
+>
+> 9 个 canonical 文件名：`summary`、`fallback`、`search`、`compact-template`、`title`、
+> `extraction`、`conflict-classification`、`generalization`、`abstention`（均位于包内
+> `prompts/` 子目录）。Runtime 是白名单 + 路径校验的唯一权威，Gateway 仅做透明反代。
+
+| 方法 | 路径 | 用途 | Runtime 路径 |
+|---|---|---|---|
+| GET | `/api/agents/{id}/prompts` | 列出 9 项 override 状态（`overridden`、`size_bytes`、`fallback_constant`） | `/agents/{id}/prompts` |
+| GET | `/api/agents/{id}/prompts/{name}` | 读取单个 prompt（metadata + content；未 override 时 `content=null`） | `/agents/{id}/prompts/{name}` |
+| PUT | `/api/agents/{id}/prompts/{name}` | 写入 prompt（原子 rename；返回 `reload_required: true`） | `/agents/{id}/prompts/{name}` |
+| POST | `/api/agents/{id}/debug/prompts/reload` | 重载所有 9 项到 `AgentCore` Arc（R7，由 `/debug/{*rest}` wildcard 转发） | `/api/debug/prompts/reload` |
+
+> **安全约束**：`{name}` 必须为 9 个 canonical 之一，大小写敏感；路径穿越（`..`、`/`、`\`）
+> 会被 Runtime 拒绝（404）。PUT body 是 `{content: string}`，单文件 ≤ 1 MiB，空内容
+> 或纯空白 → 400。原子写入（`tmp` + `rename`）保证崩溃时不留半截文件。详见
+> `core/acowork-runtime/src/http/prompts.rs` 与 ADR-063 §3.5。
+
 ---
 
 ## 6. 静态文件服务（直接流式返回原始字节）

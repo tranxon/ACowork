@@ -372,7 +372,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             // This prevents the stale "online=true" window where the
             // ChatPanel keeps showing the session input after the
             // Runtime is gone.
-            const gateway_says_alive = !!meta.running;
+            // Distributed liveness: the Runtime may run on a remote node, so
+            // the process-based `running` flag is not always observable from
+            // this desktop (the Gateway's PID check only sees local agents).
+            // Treat the network signal too — `connected` already merges the
+            // MQTT online view (see Gateway `list_agents`). Only force
+            // offline when BOTH the process signal and the network signal
+            // say the agent is gone; the MQTT `agent_status` handler further
+            // double-checks offline transitions against `/health`.
+            const gateway_says_alive = !!meta.running || !!meta.connected;
             next[meta.agent_id] = {
               ...existing,
               meta,

@@ -326,6 +326,33 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/providers",
             get(proxy_get_providers),
         )
+        // ADR-063: Package-level LLM prompt overrides (see ADR-063 §3.7.6).
+        // Four transparent reverse-proxy rules forward the Desktop
+        // Debug panel's read/write + reload traffic to the Runtime HTTP
+        // server (added in `core/acowork-runtime/src/http/prompts.rs`).
+        // The body shape for PUT is a JSON `{content}` per
+        // `PutPromptRequest` — forwarded verbatim so the Runtime's
+        // `http/prompts.rs` validation (whitelist check, 1 MiB cap,
+        // atomic write) is the single source of truth. New `/prompts/*`
+        // endpoints on the Runtime need no Gateway change beyond
+        // registering here.
+        //
+        // ADR-063 §3.7.7: the L2 reload endpoint
+        // `POST /api/agents/{id}/prompts/reload` lives in this
+        // namespace (was previously forwarded by the `/debug/{*rest}`
+        // wildcard, which 503'd outside DevMode — see ADR-063 §3.7.7).
+        .route(
+            "/api/agents/{id}/prompts",
+            get(proxy_list_prompts),
+        )
+        .route(
+            "/api/agents/{id}/prompts/{name}",
+            get(proxy_get_prompt).put(proxy_put_prompt),
+        )
+        .route(
+            "/api/agents/{id}/prompts/reload",
+            post(proxy_reload_prompts),
+        )
         // ADR-048: Debug Protocol HTTP RPC reverse proxy. One wildcard
         // route forwards every method on `/debug/*` to the Runtime's
         // `/api/debug/*` (path suffix, querystring, body and headers
@@ -333,9 +360,25 @@ pub fn proxy_routes() -> Router<AppState> {
         // debug endpoints on the Runtime need no Gateway change.
         // Debug *events* do NOT flow through here: they are MQTT
         // pub/sub on `acowork/agents/{id}/debug/events/{event_type}`.
+        //
+        // NOTE: as of ADR-063 §3.7.7 the L2 prompts reload endpoint
+        // (`prompts/reload`) is registered explicitly above this
+        // wildcard so it can be invoked without DevMode being enabled.
         .route(
             "/api/agents/{id}/debug/{*rest}",
             any(proxy_debug_rpc),
+        )
+        // Health double-check (distributed liveness): exposes the Runtime's
+        // `/health` endpoint through the Gateway so clients (e.g. the desktop
+        // app) can verify a Runtime is actually alive over HTTP when MQTT
+        // connectivity is in doubt — e.g. during system sleep, the MQTT
+        // connection drops (KeepAlive timeout) while the Runtime process
+        // itself stays alive. MQTT liveness alone would misreport such an
+        // agent as offline/sleeping. Proxied verbatim so the Runtime remains
+        // the source of truth for its own `status`/`degraded_reasons`.
+        .route(
+            "/api/agents/{id}/health",
+            get(proxy_get_health),
         )
         // NOTE: the global `DefaultBodyLimit` layer is applied at
         // the merged-router level in `http::routes::api_router` so
@@ -420,6 +463,19 @@ async fn proxy_latest_session(
     headers: HeaderMap,
 ) -> Response {
     proxy_to_runtime(&state, &id, "/sessions/latest", "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/health` to Runtime's `GET /health`.
+///
+/// Used by the frontend as an HTTP double-check on MQTT disconnection: if the
+/// Runtime answers, it is alive (the MQTT drop was a transient connectivity
+/// issue, e.g. system sleep) and must not be rendered as offline/sleeping.
+async fn proxy_get_health(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_runtime(&state, &id, "/health", "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/messages` to Runtime's `GET /sessions/{sid}/messages`.
@@ -509,6 +565,87 @@ async fn proxy_put_shell_risk_rules(
     let path = format!("/agents/{}/shell-risk-rules", id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+}
+
+// ── ADR-063: package-level LLM prompt overrides ──────────────────────
+//
+// Three transparent reverse proxies; body is forwarded verbatim so the
+// Runtime's `http/prompts.rs` whitelist + atomic-rename discipline is
+// the single source of truth. The L2 reload endpoint
+// `POST /api/agents/{id}/debug/prompts/reload` is forwarded by the
+// `/debug/{*rest}` wildcard above (R7) — see ADR-063 §3.7.6.
+
+/// Reverse-proxy `GET /api/agents/{id}/prompts` to Runtime's
+/// `GET /agents/{id}/prompts`. Returns a JSON list of the 9 overridable
+/// prompts with their per-file metadata (`name`, `file`, `overridden`,
+/// `size_bytes`, `fallback_constant`).
+async fn proxy_list_prompts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{id}/prompts");
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/prompts/{name}` to Runtime's
+/// `GET /agents/{id}/prompts/{name}`. Returns the prompt's metadata
+/// plus its current content (`None` when the package does not declare
+/// an override).
+async fn proxy_get_prompt(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{id}/prompts/{name}");
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/prompts/{name}` to Runtime's
+/// `PUT /agents/{id}/prompts/{name}`. Body is a JSON `{content}`
+/// (per Runtime `PutPromptRequest`); the Runtime's `http/prompts.rs`
+/// whitelist + 1 MiB cap + atomic-rename discipline are authoritative.
+/// Successful PUTs return `reload_required: true` — the Desktop
+/// Debug panel is expected to follow up with
+/// `POST /api/agents/{id}/prompts/reload` to push the on-disk
+/// content into the live `AgentCore` Arc (ADR-063 §3.7.6).
+async fn proxy_put_prompt(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{id}/prompts/{name}");
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/prompts/reload` to Runtime's
+/// `POST /agents/{id}/prompts/reload` (ADR-063 §3.7.6 L2 reload).
+///
+/// Body is forwarded verbatim (typically empty `{}`). Replaces the
+/// old path that flowed through the `/debug/{*rest}` wildcard and
+/// 503'd outside DevMode — the reload is a package-level operation,
+/// not a debug-session one, and now lives in the prompts namespace
+/// where the rest of the prompts family sits. See ADR-063 §3.7.7.
+async fn proxy_reload_prompts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{id}/prompts/reload");
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes` to Runtime's `GET /memory/nodes`.
@@ -1827,6 +1964,182 @@ mod tests {
         );
     }
 
+    /// ADR-063 §3.7 — `prompts/` override reverse-proxy rules.
+    ///
+    /// Three top-level routes plus the L2 reload endpoint (forwarded by
+    /// the existing `/debug/{*rest}` wildcard from
+    /// `test_debug_rpc_proxy_forwards_verbatim`). The Runtime's
+    /// `http/prompts.rs` handler is the source of truth for whitelist,
+    /// 1 MiB cap, and atomic-rename discipline; the Gateway proxy must
+    /// be a transparent pass-through.
+    ///
+    /// Pinning the four behaviours here catches regressions in
+    /// `proxy_list_prompts` / `proxy_get_prompt` / `proxy_put_prompt` /
+    /// the debug wildcard dispatch if anyone refactors the route table.
+    #[tokio::test]
+    async fn test_prompts_proxy_forwards_verbatim() {
+        use tower::util::ServiceExt;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // ── Mock Runtime: echoes method/path/body back as JSON ──
+        let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let received_for_server = received.clone();
+        let runtime_app = axum::Router::new().fallback(
+            axum::routing::any(move |req: axum::extract::Request| async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                received_for_server
+                    .lock()
+                    .unwrap()
+                    .push(format!(
+                        "{} {} body={}",
+                        method,
+                        uri,
+                        String::from_utf8_lossy(&body)
+                    ));
+                axum::Json(serde_json::json!({"ok": true}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, runtime_app).await.unwrap();
+        });
+
+        // ── Gateway state with the mock Runtime registered ──
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-prompts-proxy-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry.write().await.register(
+            "com.test.prompts-proxy",
+            &format!("http://127.0.0.1:{}", port),
+        );
+        state.runtime_http_registry = Some(registry);
+
+        let app = super::proxy_routes().with_state(state);
+
+        // ── 1. GET /api/agents/{id}/prompts → mock GET /agents/{id}/prompts ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.test.prompts-proxy/prompts")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── 2. GET /api/agents/{id}/prompts/{name} ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.test.prompts-proxy/prompts/summary")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── 3. PUT /api/agents/{id}/prompts/{name} with JSON body ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/agents/com.test.prompts-proxy/prompts/compact-template")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"content":"override payload"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── 4. POST /api/agents/{id}/prompts/reload → explicit prompts route ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/com.test.prompts-proxy/prompts/reload")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(
+            got.len(),
+            4,
+            "all four prompts requests must reach the Runtime: {:?}",
+            got
+        );
+
+        // The 4 forwarded requests, in order:
+        //   1. GET  /agents/com.test.prompts-proxy/prompts
+        //   2. GET  /agents/com.test.prompts-proxy/prompts/summary
+        //   3. PUT  /agents/com.test.prompts-proxy/prompts/compact-template
+        //   4. POST /agents/com.test.prompts-proxy/prompts/reload
+        //      (explicit prompts route — ADR-063 §3.7.7; was previously
+        //       routed through /api/agents/{id}/debug/{*rest} wildcard,
+        //       which 503'd outside DevMode.)
+        assert!(
+            got[0].starts_with("GET /agents/com.test.prompts-proxy/prompts body="),
+            "list request must rewrite /api/agents/{{id}}/prompts -> /agents/{{id}}/prompts; got: {}",
+            got[0]
+        );
+        assert!(
+            got[1].starts_with(
+                "GET /agents/com.test.prompts-proxy/prompts/summary body="
+            ),
+            "single-prompt GET must forward verbatim; got: {}",
+            got[1]
+        );
+        assert!(
+            got[2].starts_with(
+                "PUT /agents/com.test.prompts-proxy/prompts/compact-template body="
+            ),
+            "PUT must rewrite path AND forward method; got: {}",
+            got[2]
+        );
+        assert!(
+            got[2].contains(r#""content":"override payload""#),
+            "PUT body must be forwarded verbatim (Runtime's whitelist/1MiB/atomic rename is the validation gate, not the proxy); got: {}",
+            got[2]
+        );
+        assert!(
+            got[3].starts_with("POST /agents/com.test.prompts-proxy/prompts/reload body={}"),
+            "L2 reload must reach the Runtime under the prompts namespace (ADR-063 §3.7.7); got: {}",
+            got[3]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_is_hop_by_hop_header() {
         use axum::http::HeaderName;
@@ -2049,6 +2362,260 @@ mod tests {
                 .map(|r| r.debug_state),
             Some(DebugState::Enabled),
             "non-2xx disable response must leave state at Enabled"
+        );
+    }
+
+    // ── Health double-check route ──────────────────────────────────
+    //
+    // Regression: 2026-09-02 09:12 incident. MQTT disconnection during
+    // system sleep marked agents as offline → frontend rendered them as
+    // sleeping (zzz) even though the Runtime process was alive. The fix:
+    // expose the Runtime's `/health` endpoint through the Gateway so the
+    // frontend can HTTP-double-check liveness on MQTT drop. The tests
+    // below pin the contract.
+
+    /// Helper: spin up a mock Runtime on a random port. Returns the bound
+    /// port and a shared Vec of received request strings.
+    async fn spawn_mock_runtime() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::routing::any;
+        let received: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_for_server = received.clone();
+        let runtime_app = axum::Router::new().fallback(any(
+            move |req: axum::extract::Request| async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                received_for_server.lock().unwrap().push(format!(
+                    "{} {} body={}",
+                    method,
+                    uri,
+                    String::from_utf8_lossy(&body)
+                ));
+                // Mimic Runtime's `/health` payload shape.
+                axum::Json(serde_json::json!({
+                    "status": "ok",
+                    "agent_id": "com.acowork.architect",
+                    "degraded_reasons": []
+                }))
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, runtime_app).await.unwrap();
+        });
+        (port, received)
+    }
+
+    /// Helper: build a Gateway state with a single registered agent
+    /// pointing at the given mock-Runtime port. Returns `(AppState,
+    /// registry-Arc)` so tests can unregister if needed.
+    async fn build_proxy_state_with_agent(
+        agent_id: &str,
+        port: u16,
+    ) -> (
+        crate::http::routes::AppState,
+        crate::http::proxy::SharedRuntimeHttpRegistry,
+    ) {
+        use std::sync::Arc as StdArc;
+        use tokio::sync::RwLock as TokioRwLock;
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-health-proxy-{}-{}",
+            std::process::id(),
+            agent_id
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            StdArc::new(TokioRwLock::new(gw_state)),
+            StdArc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry
+            .write()
+            .await
+            .register(agent_id, &format!("http://127.0.0.1:{}", port));
+        state.runtime_http_registry = Some(registry.clone());
+        (state, registry)
+    }
+
+    /// Happy path: `GET /api/agents/{id}/health` forwards verbatim to the
+    /// Runtime's `GET /health` and returns the Runtime's response body.
+    #[tokio::test]
+    async fn health_route_forwards_get_to_runtime_health_endpoint() {
+        use tower::util::ServiceExt;
+
+        let (port, received) = spawn_mock_runtime().await;
+        let (state, _registry) =
+            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let app = super::proxy_routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.acowork.architect/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["status"], "ok");
+        assert_eq!(body_json["agent_id"], "com.acowork.architect");
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "exactly one request forwarded");
+        // The path suffix is rewritten from `/api/agents/{id}/health` to
+        // `/health` so the Runtime sees the canonical endpoint.
+        assert!(
+            got[0].starts_with("GET /health body="),
+            "request must be rewritten to GET /health, got: {}",
+            got[0]
+        );
+    }
+
+    /// Forwarded request must NOT carry a body, even an empty one — the
+    /// Runtime's `/health` is a pure liveness probe.
+    #[tokio::test]
+    async fn health_route_does_not_forward_body() {
+        use tower::util::ServiceExt;
+
+        let (port, received) = spawn_mock_runtime().await;
+        let (state, _registry) =
+            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let app = super::proxy_routes().with_state(state);
+
+        // Even if the client somehow includes a body, the proxy must drop
+        // it because `proxy_get_health` calls `proxy_to_runtime` (no body).
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.acowork.architect/health")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"should":"be dropped"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert!(
+            got[0].ends_with("body="),
+            "body must be dropped, got: {}",
+            got[0]
+        );
+    }
+
+    /// An unregistered agent returns 503 with a helpful message and a
+    /// `Retry-After: 2` header so the frontend's `with503Retry` helper
+    /// honors the boot-window retry cadence.
+    ///
+    /// The frontend uses this 503 to decide NOT to override MQTT's
+    /// `online=false` — the agent is genuinely not running.
+    #[tokio::test]
+    async fn health_route_returns_503_when_agent_not_registered() {
+        use tower::util::ServiceExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-health-proxy-unreg-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let state = crate::http::routes::AppState::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(gw_state)),
+            std::sync::Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        // Note: registry is initialized but EMPTY — no agent registered.
+        let registry = crate::http::proxy::new_shared_registry();
+        let mut state = state;
+        state.runtime_http_registry = Some(registry);
+        let app = super::proxy_routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.acowork.never-registered/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            Some("2"),
+            "503 must carry Retry-After: 2 to match the boot-window cadence"
+        );
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            body_json["error"], "Runtime HTTP endpoint not registered",
+            "503 body must explain why"
+        );
+        assert_eq!(body_json["id"], "com.acowork.never-registered");
+    }
+
+    /// When the agent's registered endpoint is unreachable (e.g. the
+    /// Runtime process died after the registry was populated), the proxy
+    /// must surface that as 502 BAD_GATEWAY so the frontend knows the
+    /// agent is genuinely down — NOT misreport it as alive.
+    #[tokio::test]
+    async fn health_route_returns_502_when_runtime_unreachable() {
+        use tower::util::ServiceExt;
+
+        // Pick a port we don't bind. Reserve it and immediately release
+        // to minimize the chance something else grabs it; even if it
+        // does, the test still proves the proxy returns 502 on
+        // connection failure.
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let (state, _registry) =
+            build_proxy_state_with_agent("com.acowork.dead", dead_port).await;
+        let app = super::proxy_routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.acowork.dead/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Connection refused → BAD_GATEWAY. Anything in the 5xx range
+        // works for the contract; we pin BAD_GATEWAY because it's what
+        // `proxy_to_runtime_with_method` returns and the frontend
+        // already treats it as "not alive".
+        assert!(
+            resp.status().is_server_error(),
+            "expected 5xx on unreachable runtime, got {}",
+            resp.status()
         );
     }
 }

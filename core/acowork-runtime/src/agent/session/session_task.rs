@@ -65,6 +65,15 @@ pub enum SessionMessage {
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },
+    /// ADR-063 §3.7.6: replace the main-dialog system prompt in this
+    /// session's `ContextBuilder`. Produced by
+    /// `SessionManager::apply_system_prompt` (triggered by the L2 reload
+    /// endpoint after it rebuilds the prompt from `prompts/*.md`,
+    /// including the required `system.md`). The next `build_chat_request`
+    /// uses the new value — no agent restart needed.
+    UpdateSystemPrompt {
+        system_prompt: String,
+    },
     /// ADR-030 C3: Sidecar came online (LSP relay became ready, embed model
     /// switched, ...) and we want to surface a new builtin tool to this
     /// session. Carries a pre-decorated `BuiltinToolEntry` so each session
@@ -211,6 +220,10 @@ impl std::fmt::Debug for SessionMessage {
                     "enabled_count",
                     &entries.iter().filter(|e| e.enabled).count(),
                 )
+                .finish(),
+            SessionMessage::UpdateSystemPrompt { system_prompt } => f
+                .debug_struct("UpdateSystemPrompt")
+                .field("prompt_len", &system_prompt.len())
                 .finish(),
             SessionMessage::AddDynamicBuiltinTool { entry } => f
                 .debug_struct("AddDynamicBuiltinTool")
@@ -1163,6 +1176,17 @@ impl SessionTask {
                         &mut context_builder,
                         entries,
                     );
+                }
+                Some(SessionMessage::UpdateSystemPrompt { system_prompt }) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        prompt_len = system_prompt.len(),
+                        "SessionTask: updating main-dialog system prompt (ADR-063 hot-reload)"
+                    );
+                    // Replace the main-dialog system prompt in the
+                    // ContextBuilder. The next `build_chat_request` picks
+                    // up the new value — no agent restart needed.
+                    context_builder.set_system_prompt(system_prompt);
                 }
                 // ── ADR-030 C3: dynamic builtin tool add/remove ──────
                 //

@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use acowork_core::providers::traits::ChatMessage;
+use acowork_core::providers::traits::{ChatMessage, MessageRole};
 use tokio::sync::Notify;
 
 use super::DebugHandles;
@@ -28,6 +28,38 @@ use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
 use crate::util::text::TextPreview;
+
+/// ADR-060 v2: extract the latest `todo_write` tool result content from the
+/// request messages.
+///
+/// Replaces the removed `ContextBuilder::todo_context()` getter. Todo state
+/// lives in Block B's real `todo_write` tool results; the debug panel
+/// surfaces it by scanning backwards through messages. The section key
+/// (`"todo_context"`) is preserved so the UI client contract is unchanged.
+fn latest_todo_write_content(messages: &[ChatMessage]) -> Option<String> {
+    // Reverse-scan: find the LATEST Assistant with a todo_write tool_call.
+    let todo_call_id = messages.iter().rev().find_map(|m| {
+        if m.role != MessageRole::Assistant {
+            return None;
+        }
+        m.tool_calls.as_ref().and_then(|tcs| {
+            tcs.iter()
+                .find(|tc| tc.function.name == "todo_write")
+                .map(|tc| tc.id.clone())
+        })
+    })?;
+    // Match the Tool result (Tool normally follows the Assistant; scan
+    // backwards from the end to find it robustly).
+    messages.iter().rev().find_map(|m| {
+        if m.role == MessageRole::Tool
+            && m.tool_call_id.as_deref() == Some(todo_call_id.as_str())
+        {
+            Some(m.content.clone())
+        } else {
+            None
+        }
+    })
+}
 
 // ── Debug Observer Implementation ─────────────────────────────────────
 
@@ -443,16 +475,12 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             content: messages_meta,
         });
 
-        // Block C — dynamic todo snapshot (ADR-060 §6.2).
-        //
-        // `todo_context` is no longer a system-prompt sub-item: build()
-        // emits it as an independent User-role message (with an Ephemeral
-        // cache breakpoint) AFTER the history block, so its updates never
-        // invalidate the stable Block A/B cache prefix. Section key and
-        // content are unchanged (patchContext compatibility); only the
-        // grouping/label moved to mirror the new build() layout.
-        if let Some(todos) = req.context_builder.todo_context() {
-            named.push(NamedSection::new("todo_context", todos.to_string(), req.model));
+        // ADR-060 v2: todo state lives in Block B's real `todo_write` tool
+        // results. Surface the latest one in the debug panel via the same
+        // `"todo_context"` section key so client-side rendering keeps
+        // working (no UI contract change).
+        if let Some(todos) = latest_todo_write_content(req.history.messages()) {
+            named.push(NamedSection::new("todo_context", todos, req.model));
         }
 
         let sections = ContextSnapshotSections { sections: named };

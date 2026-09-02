@@ -9,6 +9,7 @@
 
 pub mod debug;
 pub mod memory_query;
+pub mod prompts;
 pub mod server;
 
 pub use server::{

@@ -223,6 +223,26 @@ pub(crate) async fn phase_c_spawn_subsystems(
             debug_port,
             "Phase C DevMode activation outcome"
         );
+
+        // ADR-063 §3.7.5 L2 reload: when DevMode is enabled at startup,
+        // re-read every `prompts/<file>.md` from disk into the
+        // canonical `AgentCore`'s `Arc<RwLock<Option<String>>>` fields
+        // so the next LLM call uses the on-disk directives even if
+        // Phase B loaded stale content (e.g. operator edited a file
+        // between Phase A scan and Phase B injection). This is a
+        // **single** reload — the Debug panel's PUT-then-RELOAD flow
+        // is the live-editing path; this is the startup-seal path.
+        if let Some(debug_svc) = ctx.debug_service_slot.lock().await.as_ref() {
+            match debug_svc.reload_prompts().await {
+                Ok(()) => tracing::info!(
+                    "ADR-063 Phase C reload_prompts: 9 LLM prompt overrides refreshed from disk"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "ADR-063 Phase C reload_prompts failed; runtime continues with the Phase A loaded content"
+                ),
+            }
+        }
     }
 
     // ADR-040: gRPC hello_config MCP catalog sync removed.
