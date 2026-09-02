@@ -734,6 +734,14 @@ impl AgentLoop {
                         .core
                         .compression_ratio_threshold
                         .unwrap_or(MIN_COMPRESSION_RATIO);
+                    // ADR-060 v2 §5.4: the injected round must be persisted to
+                    // JSONL AFTER `append_compaction_event` (so the synthetic
+                    // rows land AFTER the compaction offset and the restorer
+                    // picks them up on resume). Hoist it out of the apply
+                    // match — the inner arm can only mutate it.
+                    let mut injected_round_for_persistence: Option<
+                        (acowork_core::providers::traits::ChatMessage, acowork_core::providers::traits::ChatMessage),
+                    > = None;
                     let (level, removed) = match self
                         .session
                         .history
@@ -741,6 +749,15 @@ impl AgentLoop {
                     {
                         Ok(plan) => {
                             let level = plan.level;
+
+                            // ADR-060 v2 §5.4: snapshot the last todo_write
+                            // round BEFORE `apply_compression` may remove it
+                            // from history. We splice it back after the marker
+                            // post-mutation if it is no longer in the
+                            // retained tail.
+                            let pending_todo_write_inject =
+                                self.session.history.find_last_todo_write_round();
+
                             match self
                                 .session
                                 .history
@@ -755,6 +772,56 @@ impl AgentLoop {
                                         removed_messages = outcome.removed_messages,
                                         "ADR-061: 8-level compression plan applied"
                                     );
+
+                                    // ADR-060 v2 §5.4: idempotent — inject
+                                    // skips if the round is already in the
+                                    // retained tail (preserves cache hit +
+                                    // avoids duplicate tool_call_id); splices
+                                    // after the marker if removed. The
+                                    // synthetic rows are persisted AFTER
+                                    // `append_compaction_event` below (it
+                                    // blocks until the compaction offset is
+                                    // committed, so the subsequent
+                                    // append_message_with_id commands land
+                                    // AFTER it in the JSONL).
+                                    //
+                                    // `inject_todo_write_round_after_marker`
+                                    // returns `(tokens, injected)`: the
+                                    // second element is `true` only when the
+                                    // splice actually happened. We use it as
+                                    // the JSONL persistence gate — skipping
+                                    // the append_message_with_id calls when
+                                    // the in-memory splice was skipped
+                                    // prevents duplicate synthetic rows on
+                                    // disk across consecutive compressions.
+                                    if let Some((assistant, tool)) =
+                                        pending_todo_write_inject
+                                    {
+                                        // ADR-060 v2 §5.4: idempotency is
+                                        // enforced inside
+                                        // `inject_todo_write_round_after_marker`
+                                        // by the `last_injected_todo_call_id`
+                                        // gate. On the first compression of a
+                                        // session with a todo_write round, it
+                                        // splices and signals `injected=true`,
+                                        // and the caller persists the synthetic
+                                        // rows to JSONL below. On every
+                                        // subsequent compression the gate
+                                        // refuses re-injection — preventing
+                                        // unbounded JSONL duplication.
+                                        let (_, injected) = self
+                                            .session
+                                            .history
+                                            .inject_todo_write_round_after_marker(
+                                                assistant.clone(),
+                                                tool.clone(),
+                                            );
+                                        if injected {
+                                            injected_round_for_persistence =
+                                                Some((assistant, tool));
+                                        }
+                                    }
+
                                     (level, outcome.removed_messages)
                                 }
                                 Err(e) => {
@@ -815,7 +882,86 @@ impl AgentLoop {
                             before_tokens: current_tokens,
                             after_tokens: new_tokens,
                         };
+                        // Sync handshake — the writer has seeked, written the
+                        // compaction entry, and updated `last_compaction_offset`
+                        // by the time this returns. The subsequent
+                        // `append_message_with_id` calls for the injected
+                        // round therefore land AFTER the compaction offset in
+                        // the JSONL, so the restorer picks them up on resume.
                         conversation.append_compaction_event(&marker_text, meta);
+
+                        // ADR-060 v2 §5.4: persist the injected round to JSONL
+                        // so the canonical todo state survives a process
+                        // restart. Without these rows the restorer would find
+                        // only the compaction marker post-restart (everything
+                        // pre-compact is skipped), and the next chat round
+                        // would lose its todo reference.
+                        //
+                        // The format mirrors the normal chat flow's
+                        // `tool_call` / `tool_result` rows (loop_tools.rs:1100)
+                        // so the restorer can merge them identically on
+                        // resume — `tool_call` rows fold into the previous
+                        // assistant's `tool_calls` list (or synthesize an
+                        // empty assistant if none exists), and `tool_result`
+                        // rows become standalone Tool messages whose
+                        // `tool_call_id` matches the assistant's tool_calls
+                        // (verified by the orphan-tool sanitiser).
+                        if let Some((assistant, tool)) =
+                            injected_round_for_persistence.take()
+                        {
+                            if let Some(tool_calls) = &assistant.tool_calls {
+                                for tc in tool_calls {
+                                    let call_meta = serde_json::json!({
+                                        "tool_name": tc.function.name,
+                                        "tool_call_id": tc.id,
+                                    });
+                                    let call_id = format!(
+                                        "inject-call-{}",
+                                        uuid::Uuid::new_v4().simple()
+                                    );
+                                    conversation.append_message_with_id(
+                                        "tool_call",
+                                        &tc.function.arguments,
+                                        Some(call_meta),
+                                        Some(call_id),
+                                    );
+                                }
+                            }
+                            let result_meta = serde_json::json!({
+                                "tool_call_id": tool
+                                    .tool_call_id
+                                    .clone()
+                                    .unwrap_or_default(),
+                                "tool_name": tool
+                                    .name
+                                    .clone()
+                                    .unwrap_or_else(|| {
+                                        "todo_write".to_string()
+                                    }),
+                            });
+                            let result_id = format!(
+                                "inject-result-{}",
+                                uuid::Uuid::new_v4().simple()
+                            );
+                            conversation.append_message_with_id(
+                                "tool_result",
+                                &tool.content,
+                                Some(result_meta),
+                                Some(result_id),
+                            );
+
+                            // Synchronous flush — blocks until the writer
+                            // thread has physically committed the synthetic
+                            // rows above. Without this, a process restart
+                            // immediately after compaction could race the
+                            // writer and lose the round.
+                            if let Err(e) = conversation.flush_pending().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "ADR-060 v2: flush_pending after inject failed — restart may not see injected round"
+                                );
+                            }
+                        }
                     }
 
                     // Write compaction summary to Grafeo
@@ -1026,8 +1172,8 @@ impl AgentLoop {
         context_builder: &mut crate::agent::context::ContextBuilder,
         current_model: &str,
     ) -> acowork_core::providers::traits::ChatRequest {
-        // Inject current todo list into system prompt before building
-        context_builder.set_todo_context(self.session.format_todos());
+        // ADR-060 v2: `set_todo_context` removed — todo state is carried by the
+        // most recent real `todo_write` tool result in Block B history.
         let caps = self.get_model_capabilities(current_model);
         let max_output_limit = self.core.max_output_tokens_limit_for_model(current_model);
 
@@ -1686,24 +1832,21 @@ mod tests {
 
     #[test]
     fn build_chat_request_block_layout_b_contains_current_and_d_duplicate() {
-        // ADR-060 §5.5/§7.3: Block B is the full append-only history — it
-        // INCLUDES the current user message — and Block D is a byte-identical
-        // duplicate staged by `run_inner`. Request order: A → B → C → D.
+        // ADR-060 v2 §5.5/§7.3: Block B is the full append-only history —
+        // it INCLUDES the current user message — and Block D is a
+        // byte-identical duplicate staged by `run_inner`. Request order:
+        // A → B → D (Block C removed in v2).
         let mut loop_ = build_loop();
         loop_.session.history.append(ChatMessage::user("First turn"));
         loop_.session.history.append(ChatMessage::assistant("First reply"));
         let current = ChatMessage::user("Second turn");
         loop_.session.history.append(current.clone());
         loop_.pending_user_message = Some(current.clone());
-        // Block C source: session todo snapshot.
-        loop_.session.update_todos(
-            vec![crate::agent::session_state::TodoItem {
-                id: "t1".to_string(),
-                content: "Task 1".to_string(),
-                status: crate::agent::session_state::TodoStatus::Pending,
-            }],
-            false,
-        );
+        // ADR-060 v2: setting todos via SessionState no longer affects the
+        // request layout (todo state lives in Block B history, surfaced by
+        // the most recent `todo_write` tool result). Kept commented for
+        // context — verify the request layout is independent of todo state.
+        // loop_.session.update_todos(vec![TodoItem { ... }], false);
 
         let mut builder = ContextBuilder::new("Kernel".to_string());
         let request = loop_.build_chat_request(&mut builder, "test-model");
@@ -1712,7 +1855,7 @@ mod tests {
         assert_eq!(request.messages[0].role, MessageRole::System);
         assert!(
             !request.messages[0].content.contains("Todo Task List"),
-            "Block A must not contain the dynamic todo snapshot"
+            "Block A must not contain a todo snapshot"
         );
 
         // Block B: history turns present, including the current user message.
@@ -1724,15 +1867,15 @@ mod tests {
             "Block B must include the current user message"
         );
 
-        // Block C: User role (never System), todo snapshot, after Block B.
-        let block_c = request
-            .messages
-            .iter()
-            .find(|m| m.content.contains("Todo Task List"))
-            .unwrap();
-        assert_eq!(
-            block_c.role, MessageRole::User,
-            "Block C must use User role (ADR-060 §5.4)"
+        // ADR-060 v2: NO Block C. The "## Todo Task List" header must not
+        // appear in the request (todo state is carried by Block B's real
+        // todo_write tool results, not a synthetic tail snapshot).
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|m| m.content.contains("Todo Task List")),
+            "ADR-060 v2: no Block C — todo state lives in Block B"
         );
 
         // Block D (last): byte-identical duplicate of the staged message.

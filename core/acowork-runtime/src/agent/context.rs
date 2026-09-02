@@ -48,9 +48,6 @@ pub struct ContextBuilder {
     /// Skill instructions override (for debug patching and runtime config).
     /// Injected into system prompt after identity and before memory sections.
     skill_instructions: Option<String>,
-    /// Todo list context for injection into the system prompt.
-    /// Set by AgentLoop before each build() from SessionState.todos.
-    todo_context: Option<String>,
     /// Reasoning effort level for the LLM request.
     /// Resolved from ModelCapabilitiesInfo.default_reasoning_effort in
     /// `build_chat_request()` each iteration (supports mid-session model switch).
@@ -82,7 +79,6 @@ impl ContextBuilder {
             ambiguous_confirmation_hint: None,
             abstention_prompt: None,
             skill_instructions: None,
-            todo_context: None,
             reasoning_effort: None,
             thinking_mode: None,
             temperature: None,
@@ -287,12 +283,6 @@ impl ContextBuilder {
         }
     }
 
-    /// Set todo list context for injection into the system prompt.
-    /// Pass `None` to clear the todo section (when the list is empty).
-    pub fn set_todo_context(&mut self, text: Option<String>) {
-        self.todo_context = text;
-    }
-
     /// Clear skill instructions, removing them from the system prompt.
     /// Called when a ChatMessage arrives without a skill command, preventing
     /// stale skill instructions from leaking across conversation turns.
@@ -342,7 +332,6 @@ impl ContextBuilder {
                     "environment" => self.set_environment_override(content),
                     "skill_instructions" => self.set_skill_instructions(content),
                     "workspace_prompt_file" => self.set_workspace_prompt_file(Some(content)),
-                    "todo_context" => self.set_todo_context(Some(content)),
                     "ambiguous_confirmation_hint" => {
                         self.set_ambiguous_confirmation_hint(content);
                     }
@@ -362,7 +351,6 @@ impl ContextBuilder {
                 ResolvedPatch::Clear => match key.as_str() {
                     "environment" => self.set_environment_override(String::new()),
                     "workspace_prompt_file" => self.set_workspace_prompt_file(None),
-                    "todo_context" => self.set_todo_context(None),
                     "ambiguous_confirmation_hint" => self.clear_ambiguous_confirmation_hint(),
                     _ => unreachable!("resolve_patch only yields Clear for clearable sections"),
                 },
@@ -417,7 +405,7 @@ impl ContextBuilder {
     ///
     /// ADR-054: debug patch empty-string clearing semantics — an empty
     /// string patch removes the section so `build()` omits it entirely
-    /// (consistent with `workspace_prompt_file` / `todo_context`).
+    /// (consistent with `workspace_prompt_file`).
     pub fn clear_ambiguous_confirmation_hint(&mut self) {
         self.ambiguous_confirmation_hint = None;
     }
@@ -429,15 +417,6 @@ impl ContextBuilder {
     /// disambiguation questions" blind spot).
     pub fn ambiguous_confirmation_hint(&self) -> Option<&str> {
         self.ambiguous_confirmation_hint.as_deref()
-    }
-
-    /// Get the todo list context text, if set.
-    ///
-    /// ADR-054: exposed so the debug snapshot can surface this section
-    /// (previously invisible — a common "why is the agent looping on a
-    /// stale todo list" blind spot).
-    pub fn todo_context(&self) -> Option<&str> {
-        self.todo_context.as_deref()
     }
 
     // ── Section accessors for debug ContextSnapshot ──
@@ -486,12 +465,19 @@ impl ContextBuilder {
 
     /// Build the complete ChatRequest for the LLM.
     ///
-    /// ADR-060: output is reorganized into four cache-friendly blocks:
+    /// ADR-060 v2: output is reorganized into three cache-friendly blocks:
     /// - Block A: static system kernel (single SystemMessage + ephemeral breakpoint)
-    /// - Block B: append-only conversation history
-    /// - Block C: dynamic todo snapshot (User role, own breakpoint)
+    /// - Block B: append-only conversation history — carries real
+    ///   `todo_write` tool results, which are the canonical todo state
+    ///   source (a full todo list embedded as a Block C tail snapshot
+    ///   would shift every turn and never hit the cache).
     /// - Block D: current user message, passed explicitly by the caller
     ///   (`None` during tool-loop iterations / debug replay — see §5.5).
+    ///
+    /// Note: Block C (dynamic todo snapshot at tail) was removed in
+    /// ADR-060 v2. Todos survive compaction via the
+    /// `HistoryManager::inject_todo_write_round_after_marker` post-step
+    /// applied in `loop_context.rs::compact_history_if_needed`.
     pub fn build(
         &self,
         manifest: &AgentManifest,
@@ -504,7 +490,9 @@ impl ContextBuilder {
 
         // ── Block A: static kernel (ADR-060 §5.2) ──
         // Byte-stable across iterations: no dynamic block (retrieved_memory,
-        // todo_context, ambiguous_confirmation_hint) is embedded here.
+        // abstention_prompt) is embedded here. Todo state lives in Block B's
+        // history (real `todo_write` tool results); ambiguous_confirmation_hint
+        // is intentionally not injected this round.
         let mut system_content = self.system_prompt.clone();
 
         // 2. Identity context (if available)
@@ -555,10 +543,9 @@ impl ContextBuilder {
             system_content.push_str(&format!("\n\n## Workspace Prompt File\n{prompt_file}"));
         }
 
-        // ADR-060: `todo_context` and `ambiguous_confirmation_hint` moved OUT
-        // of Block A (dynamic content would invalidate the whole stable
-        // prefix). Todo now lives in Block C; the hint is not injected this
-        // round (ADR-060 §5.2).
+        // ADR-060 v2: `todo_context` removed entirely (todos live in Block B
+        // history via real `todo_write` tool results); ambiguous_confirmation_hint
+        // is not injected this round (ADR-060 §5.2).
 
         // 3.5 Tool definitions are passed separately in ChatRequest
 
@@ -584,20 +571,12 @@ impl ContextBuilder {
                 .cloned(),
         );
 
-        // ── Block C: dynamic todo snapshot (ADR-060 §5.4) ──
-        // User role: avoids Anthropic system-elevation overwrite and
-        // MiniMax/o1 "system must be first" constraints; consecutive user
-        // messages are auto-merged by Anthropic/OpenAI without semantic loss.
-        if let Some(ref todos) = self.todo_context {
-            messages.push(ChatMessage {
-                role: MessageRole::User,
-                content: format!(
-                    "## Todo Task List\nThis is your todo task list. If any task status needs updating, use the `todo_write` tool to update it. If nothing needs updating, just do nothing and keep quiet.\n\n{todos}"
-                ),
-                cache_control: Some(CacheControl::Ephemeral),
-                ..Default::default()
-            });
-        }
+        // ADR-060 v2: Block C (dynamic todo snapshot at tail) was removed. The
+        // full todo list (~hundreds of tokens) embedded as a tail snapshot
+        // would shift position every turn as Block B grows, never hitting
+        // the prompt cache. Todos now live in Block B (real `todo_write`
+        // tool results in history) and survive compaction via the
+        // `inject_todo_write_round_after_marker` post-step.
 
         // ── Block D: current user message (ADR-060 §5.5) ──
         // Explicitly passed by the caller — never inferred from the history
@@ -813,7 +792,7 @@ pub enum ResolvedPatch {
     /// Tool definitions — validated as a JSON array.
     ToolDefinitions(Vec<serde_json::Value>),
     /// Section cleared: `build()` falls back (environment → auto-detect;
-    /// workspace_prompt_file / todo_context / ambiguous_confirmation_hint → omitted).
+    /// workspace_prompt_file / ambiguous_confirmation_hint → omitted).
     Clear,
 }
 
@@ -859,7 +838,7 @@ pub fn resolve_patch(
         // ADR-054 step 3 sections: empty string clears (consistent clearing
         // semantics across all three — previously ambiguous_confirmation_hint
         // had none).
-        "workspace_prompt_file" | "todo_context" | "ambiguous_confirmation_hint" => match value {
+        "workspace_prompt_file" | "ambiguous_confirmation_hint" => match value {
             PatchValue::Text { value } if value.is_empty() => Ok(ResolvedPatch::Clear),
             PatchValue::Text { value } => Ok(ResolvedPatch::Text(value.clone())),
             _ => Err(patch_type_mismatch(key, "text", value)),
@@ -996,17 +975,13 @@ mod tests {
 
         let mut builder = ContextBuilder::new("base".to_string())
             .with_override_model("gpt-4".to_string());
-        builder.set_todo_context(Some("task A".to_string()));
         builder.set_ambiguous_confirmation_hint("hint".to_string());
         builder.set_workspace_prompt_file(Some("CLAUDE.md content".to_string()));
 
-        // Empty string clears all three ADR-054 step-3 sections consistently.
+        // Empty string clears the ADR-054 step-3 sections consistently.
+        // ADR-060 v2: `todo_context` removed — Block C is gone.
         let patches = PatchSet {
             patches: HashMap::from([
-                (
-                    "todo_context".to_string(),
-                    PatchValue::Text { value: String::new() },
-                ),
                 (
                     "ambiguous_confirmation_hint".to_string(),
                     PatchValue::Text { value: String::new() },
@@ -1019,7 +994,6 @@ mod tests {
         };
         builder.apply_patches(&patches).expect("clear must succeed");
 
-        assert!(builder.todo_context().is_none(), "todo_context cleared");
         assert!(
             builder.ambiguous_confirmation_hint().is_none(),
             "ambiguous_confirmation_hint cleared"
@@ -1034,34 +1008,26 @@ mod tests {
         let history = HistoryManager::new(10000);
         let request = builder.build(&manifest, &history, None, None, 32_768);
         let system = &request.messages[0].content;
-        assert!(!system.contains("Todo Task List"), "todo omitted");
         assert!(
             !system.contains("Memory Conflicts Needing Confirmation"),
             "ambiguous hint omitted"
         );
         assert!(!system.contains("Workspace Prompt File"), "prompt file omitted");
-        // ADR-060: cleared todo must not appear as a Block C message either.
-        assert!(
-            !request
-                .messages
-                .iter()
-                .any(|m| m.content.contains("Todo Task List")),
-            "todo omitted from Block C after clear"
-        );
     }
 
     // ── ADR-060: Block A/B/C/D layout ──
 
     #[test]
-    fn test_build_block_layout_a_b_c_d() {
+    fn test_build_block_layout_a_b_d() {
+        // ADR-060 v2: Block C removed — output is A/B/D only (todo state lives
+        // in Block B's real `todo_write` tool results).
         let manifest = test_manifest();
         let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("First turn"));
         history.append(ChatMessage::assistant("First reply"));
 
-        let mut builder = ContextBuilder::new("Kernel".to_string())
+        let builder = ContextBuilder::new("Kernel".to_string())
             .with_override_model("gpt-4".to_string());
-        builder.set_todo_context(Some("- task1\n- task2".to_string()));
 
         // Block D: current user message (explicitly passed).
         let current = ChatMessage::user("Second turn");
@@ -1073,7 +1039,7 @@ mod tests {
             request.messages[0].cache_control,
             Some(acowork_core::providers::traits::CacheControl::Ephemeral)
         );
-        // Block A must NOT contain dynamic todo content.
+        // Block A must NOT contain todo content (todo lives in Block B history).
         assert!(!request.messages[0].content.contains("Todo Task List"));
         // Block A must NOT contain the ambiguous hint section.
         assert!(!request.messages[0].content.contains("Memory Conflicts"));
@@ -1084,22 +1050,9 @@ mod tests {
         assert_eq!(request.messages[2].role, MessageRole::Assistant);
         assert_eq!(request.messages[2].content, "First reply");
 
-        // [3] Block C: todo snapshot — User role (never System), breakpoint set.
-        assert_eq!(request.messages.len(), 5);
-        let block_c = &request.messages[3];
-        assert_eq!(
-            block_c.role, MessageRole::User,
-            "Block C must use User role (ADR-060 §5.4)"
-        );
-        assert!(block_c.content.contains("Todo Task List"));
-        assert!(block_c.content.contains("task1"));
-        assert_eq!(
-            block_c.cache_control,
-            Some(acowork_core::providers::traits::CacheControl::Ephemeral)
-        );
-
-        // [4] Block D: exact duplicate of the current user message.
-        let block_d = &request.messages[4];
+        // [3] Block D: exact duplicate of the current user message.
+        assert_eq!(request.messages.len(), 4);
+        let block_d = &request.messages[3];
         assert_eq!(block_d.role, MessageRole::User);
         assert_eq!(block_d.content, current.content);
         assert_eq!(block_d.cache_control, current.cache_control);
@@ -1128,15 +1081,14 @@ mod tests {
         ));
         history.append(ChatMessage::tool("toolu_1", "ok"));
 
-        let mut builder = ContextBuilder::new("Kernel".to_string())
+        let builder = ContextBuilder::new("Kernel".to_string())
             .with_override_model("gpt-4".to_string());
-        builder.set_todo_context(Some("- t".to_string()));
 
         let request = builder.build(&manifest, &history, None, None, 32_768);
-        // [0] A, [1..3] B, [4] C — no D.
-        assert_eq!(request.messages.len(), 5);
-        assert_eq!(request.messages[4].role, MessageRole::User);
-        assert!(request.messages[4].content.contains("Todo Task List"));
+        // [0] A, [1..3] B — no D, no C (ADR-060 v2).
+        assert_eq!(request.messages.len(), 4);
+        assert_eq!(request.messages[3].role, MessageRole::Tool);
+        assert_eq!(request.messages[3].content, "ok");
     }
 
     // ── G9: Abstention guidance injection ──
@@ -1181,23 +1133,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_todo_snapshot_byte_stable_across_builds() {
-        // ADR-060 §5.4: unchanged todo content must produce byte-identical
-        // Block C across builds (deterministic format_todos contract).
-        let manifest = test_manifest();
-        let history = HistoryManager::new(10000);
-        let mut builder = ContextBuilder::new("Kernel".to_string())
-            .with_override_model("gpt-4".to_string());
-        builder.set_todo_context(Some("- stable item".to_string()));
-
-        let r1 = builder.build(&manifest, &history, None, None, 32_768);
-        let r2 = builder.build(&manifest, &history, None, None, 32_768);
-        let c1 = r1.messages.iter().find(|m| m.content.contains("Todo Task List")).unwrap();
-        let c2 = r2.messages.iter().find(|m| m.content.contains("Todo Task List")).unwrap();
-        assert_eq!(c1.content, c2.content, "Block C bytes must be deterministic");
-        assert_eq!(r1.messages[0].content, r2.messages[0].content, "Block A bytes must be deterministic");
-    }
+    // ADR-060 v2: Block C removed — todo snapshot byte-stability test no longer
+    // applies. Block A byte-stability is already covered by existing tests.
 
     #[test]
     fn apply_patches_rejects_type_mismatch_and_non_array_tools() {

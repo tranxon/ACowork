@@ -38,10 +38,10 @@ export const SECTION_LABELS: Record<string, string> = {
   // ADR-051 P3: this section is the AUTO-INJECTED memory (retrieve_and_inject
   // runs every user turn before the LLM call) — it is NOT a memory_recall
   // tool call, so the chat conversation will not show it as a tool step.
-  retrieved_memory: "Retrieved Memory (auto-injected)",
+  retrieved_memory: "Retrieved Memory",
   identity_context: "Identity Context",
   // ADR-054 step 3: sections previously merged/lost, now standalone.
-  workspace_prompt_file: "Workspace Prompt File (CLAUDE.md / AGENTS.md)",
+  workspace_prompt_file: "Workspace Prompt File",
   // ADR-060: Block C — an independent User-role message (Ephemeral cache
   // breakpoint) emitted AFTER the history block, not a system-prompt
   // sub-item anymore. Content/key unchanged; only grouping/label moved.

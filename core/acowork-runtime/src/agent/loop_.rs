@@ -1288,7 +1288,7 @@ impl AgentLoop {
                                     retry_info: Some(
                                         crate::agent::session_state::RetryPauseInfo {
                                             wait_ms,
-                                            attempt: attempt,
+                                            attempt,
                                             max_attempts: MAX_LONG_RETRIES,
                                             provider: current_model.clone(),
                                         },
