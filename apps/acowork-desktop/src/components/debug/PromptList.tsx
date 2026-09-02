@@ -229,7 +229,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
           (chevron + count on the left toggle the body; reload button on
           the right stops propagation so it doesn't toggle). The body
           uses a thin border-t to separate from the header when open. */}
-      <div className="mt-1 rounded border border-zinc-200 bg-white/60 dark:border-zinc-700 dark:bg-zinc-900/60">
+      <div className="mt-1 rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
         <div className="flex w-full items-center gap-2 px-3 py-2">
           <button
             type="button"
