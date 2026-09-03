@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::error::Result;
+use crate::agent::session_state::TodoItem;
 use acowork_core::providers::traits::UsageInfo;
 
 /// Format version for the JSONL conversation file.
@@ -92,9 +93,10 @@ pub struct CompactionEventMeta {
     /// Last entry id covered by the summary (inclusive).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub compacted_to_id: String,
-    /// Number of trailing rounds preserved in memory after compaction.
-    /// Used by the restorer to validate the replay window.
-    pub keep_last_rounds: usize,
+    /// ADR-061: compression level (1-8) applied by this compaction event.
+    /// Diagnostic only; the restorer anchors on the event's *position* in
+    /// the log, not on this value.
+    pub level: u8,
     /// Compaction model used (diagnostic only).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
@@ -249,6 +251,14 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
+    // ── ADR-060: todo snapshot (Block C source) ──
+    /// Current task list snapshot, persisted so a session restart restores
+    /// the todo list (ADR-060 §6.1). `None` when no task has been written.
+    /// Written only by [`ConversationSession::set_todos`] — the single
+    /// persistence owner; `SessionState` mirrors it in memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<Vec<TodoItem>>,
+
     // ── Runtime statistics (updated by AgentLoop) ──
     pub message_count: u64,
     pub last_active_at: String,
@@ -299,6 +309,24 @@ pub enum WriterCommand {
         entry: ConversationEntry,
         done: std::sync::mpsc::SyncSender<()>,
     },
+    /// ADR-060 v2 §5.4: synchronous flush — call `file.flush()` and reply on
+    /// `done` once all previously-enqueued `AppendEntry` commands have been
+    /// physically written to disk. Used by the compact-and-inject path to
+    /// guarantee the synthetic `tool_call` / `tool_result` rows appended
+    /// after the compaction event are durable before `compact_history_if_needed`
+    /// returns, so a process restart immediately after compaction does not
+    /// race the writer and lose the round.
+    ///
+    /// Without this handshake, the writer is fire-and-forget and the test
+    /// harness (and any caller that depends on post-compaction durability)
+    /// could observe a JSONL file that does not yet contain the injected
+    /// round — `restore_history_from_jsonl` would then return just the
+    /// compaction marker, and the canonical todo state would be lost.
+    ///
+    /// As with `AppendCompactionEntry`, `tokio::oneshot` is safe here because
+    /// the writer awaits via `blocking_recv` and the caller's `.await` on the
+    /// returned receiver hops back to the async runtime context.
+    Flush { done: oneshot::Sender<()> },
     /// Flush and shut down the writer.
     Shutdown(oneshot::Sender<()>),
 }
@@ -419,6 +447,21 @@ impl ConversationWriter {
                     let _ = tx.send(());
                     break;
                 }
+                WriterCommand::Flush { done } => {
+                    // ADR-060 v2 §5.4: drain any pending AppendEntry commands
+                    // first by the simple fact that this arm is reached AFTER
+                    // them in FIFO channel order — we are the single consumer
+                    // thread. Then `flush()` so the OS commits the writes.
+                    if let Err(e) = self.file.flush() {
+                        tracing::error!(
+                            "Failed to flush conversation file on Flush command: {}",
+                            e
+                        );
+                    }
+                    // Always reply, even on failure, so the caller never
+                    // deadlocks waiting for a `done` that never arrives.
+                    let _ = done.send(());
+                }
             }
         }
     }
@@ -488,6 +531,12 @@ pub struct ConversationSession {
     reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Per-session temperature override, persisted in meta file.
     temperature: std::sync::Mutex<Option<f32>>,
+    /// ADR-060: todo snapshot mirror (Block C source).
+    ///
+    /// The single persistence owner is [`ConversationSession`] — the
+    /// runtime-side `SessionState.todos` mirrors into this via
+    /// [`Self::set_todos`]; no double-writer.
+    todos: std::sync::Mutex<Option<Vec<TodoItem>>>,
     /// ADR-027: snapshot + cumulative token counts (raw Provider values).
     /// `None` means no LLM call has been recorded yet.
     tokens: std::sync::Mutex<Option<SessionTokens>>,
@@ -606,6 +655,7 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            todos: self.todos.lock().ok().and_then(|t| t.clone()),
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
             tokens,
@@ -733,7 +783,20 @@ impl ConversationSession {
     /// Write the current in-memory state to the per-session meta file.
     ///
     /// Also updates `last_meta_write` timestamp for cooldown tracking.
+    ///
+    /// # Deleted-session guard
+    ///
+    /// If the session's JSONL file no longer exists, the session has been
+    /// deleted (or pruned) and the meta file must NOT be re-created. Without
+    /// this guard, a detached tail-distillation task holding the last
+    /// `Arc<ConversationSession>` would re-write the meta file *after*
+    /// `SessionManager::delete_session` removed it, leaving an orphaned meta
+    /// entry that the next startup scan treats as the "latest" session —
+    /// which then fails to resume because its JSONL is gone.
     fn write_meta(&self) {
+        if !self.session_file_path.exists() {
+            return;
+        }
         let meta = self.build_meta();
         if let Err(e) = write_session_meta(&self.conversations_dir, &meta) {
             tracing::warn!(
@@ -816,6 +879,7 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(config.provider),
             reasoning_effort: std::sync::Mutex::new(None),
             temperature: std::sync::Mutex::new(None),
+            todos: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
@@ -908,6 +972,7 @@ impl ConversationSession {
                 provider: std::sync::Mutex::new(meta.provider),
                 reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
                 temperature: std::sync::Mutex::new(meta.temperature),
+                todos: std::sync::Mutex::new(meta.todos),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 message_count: AtomicU64::new(meta.message_count),
                 last_meta_write: std::sync::Mutex::new(Instant::now()),
@@ -1036,6 +1101,29 @@ impl ConversationSession {
                 e
             ),
         }
+    }
+
+    /// ADR-060 v2 §5.4: synchronous flush — block until all previously
+    /// enqueued `AppendEntry` commands (including any `tool_call` /
+    /// `tool_result` rows appended via `append_message_with_id`) have been
+    /// physically written to the JSONL file.
+    ///
+    /// The compact-and-inject path calls this AFTER
+    /// `append_compaction_event` to guarantee the synthetic rows
+    /// appended for the injected todo_write round are durable on disk
+    /// before `compact_history_if_needed` returns. Without it, a process
+    /// restart immediately after compaction would race the writer thread
+    /// and the restorer would lose the round (it lands before the
+    /// compaction marker in the JSONL).
+    pub async fn flush_pending(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel::<()>();
+        if let Err(e) = self.sender.send(WriterCommand::Flush { done: tx }) {
+            return Err(crate::error::RuntimeError::Io(std::io::Error::other(
+                format!("flush send failed: {e}"),
+            )));
+        }
+        let _ = rx.await;
+        Ok(())
     }
 
     /// Return the session ID.
@@ -1232,6 +1320,46 @@ impl ConversationSession {
         tracing::info!(
             session_id = %self.session_id,
             "Session temperature persisted to meta file"
+        );
+    }
+
+    /// Return the persisted todo list, if any (ADR-060 §6.1).
+    pub fn todos(&self) -> Option<Vec<TodoItem>> {
+        self.todos.lock().ok().and_then(|t| t.clone())
+    }
+
+    /// Persist the todo snapshot to the meta file (ADR-060 §6.1).
+    ///
+    /// Data flow: `todo_write` tool → `SessionState::update_todos()` →
+    /// this method (sync mirror). `ConversationSession` is the single
+    /// persistence owner; `SessionState` never writes meta directly.
+    ///
+    /// Write policy: content-equal updates skip the write entirely; changed
+    /// updates persist IMMEDIATELY (metadata-mutation semantics, same as
+    /// title/model/provider — `META_WRITE_COOLDOWN_MS` guards only the
+    /// high-frequency `append_message` path). Immediate write guarantees
+    /// the first `todo_write` after session creation survives a kill within
+    /// the cooldown window (ADR-060 §6.1: restart must restore todos).
+    pub fn set_todos(&self, todos: &[TodoItem]) {
+        {
+            let mut slot = self.todos.lock().unwrap_or_else(|e| e.into_inner());
+            // Skip the write when the content is unchanged — a byte-stable
+            // todo list must not touch the meta file (ADR-060 §5.4/§6.1).
+            if slot.as_deref() == Some(todos) {
+                return;
+            }
+            *slot = if todos.is_empty() {
+                None
+            } else {
+                Some(todos.to_vec())
+            };
+        }
+        // Changed content → persist immediately (metadata mutation).
+        self.write_meta();
+        tracing::debug!(
+            session_id = %self.session_id,
+            todo_count = todos.len(),
+            "Todo snapshot persisted to meta file"
         );
     }
 
@@ -1507,6 +1635,7 @@ impl Clone for ConversationSession {
                 self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             ),
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
+            todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
             last_meta_write: std::sync::Mutex::new(
@@ -2464,6 +2593,66 @@ mod tests {
     }
 
     #[test]
+    fn write_meta_skips_when_jsonl_deleted() {
+        // Regression: `ConversationSession::write_meta` used to rewrite the
+        // per-session meta file unconditionally. A detached distill task
+        // holding an `Arc<ConversationSession>` could therefore re-create a
+        // meta file for a session whose JSONL had already been deleted by
+        // `SessionManager::delete_session`. On the next startup the orphan
+        // meta was scanned as the "latest" session and resume failed because
+        // the JSONL was gone. Fix: `write_meta` now returns early when the
+        // JSONL file no longer exists.
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path();
+        let session_id = generate_session_id();
+
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            &session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+
+        let conversations_dir = work_dir.join("conversations");
+        let jsonl_path = conversations_dir.join(format!("{}.jsonl", session_id));
+        let meta_path = conversations_dir
+            .join("meta")
+            .join(format!("{}.json", session_id));
+
+        // Pre-condition: both files exist after creation.
+        assert!(jsonl_path.exists());
+        assert!(meta_path.exists());
+
+        // Shut down the writer so the JSONL handle is released (required
+        // to delete the file on Windows), then simulate the delete path:
+        // `SessionManager::delete_session` removes BOTH the JSONL and the
+        // meta file. The guard must then prevent `write_meta` from
+        // re-creating the orphan meta.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            session.close().await.unwrap();
+        });
+        std::fs::remove_file(&jsonl_path).unwrap();
+        std::fs::remove_file(&meta_path).unwrap();
+        assert!(!jsonl_path.exists());
+        assert!(!meta_path.exists());
+
+        // The guard must prevent the meta file from being re-created.
+        session.write_meta();
+        assert!(
+            !meta_path.exists(),
+            "write_meta must not re-create a meta file once its JSONL is gone"
+        );
+    }
+
+    #[test]
     fn test_find_latest_session() {
         let temp_dir = TempDir::new().unwrap();
         let conv_dir = temp_dir.path().join("conversations");
@@ -2500,6 +2689,7 @@ mod tests {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                todos: None,
                 message_count: 0,
                 last_active_at: ts.clone(),
                 tokens: None,
@@ -2701,6 +2891,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            todos: None,
             message_count: 0,
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             tokens: None,
@@ -3129,6 +3320,7 @@ mod tests {
             provider: Some("openai".to_string()),
             reasoning_effort: None,
             temperature: Some(0.7),
+            todos: None,
             message_count: 5,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),
             tokens: Some(SessionTokens {
@@ -3164,6 +3356,69 @@ mod tests {
         assert_eq!(meta.tokens, None, "old JSON without tokens field should default to None");
         assert_eq!(meta.model, None);
         assert_eq!(meta.provider, None);
+        assert_eq!(meta.todos, None, "pre-ADR-060 JSON without todos field should default to None");
+    }
+
+    #[test]
+    fn test_todos_persist_across_resume() {
+        // ADR-060 §6.1: the todo snapshot survives a session restart —
+        // `set_todos` writes meta immediately (metadata-mutation policy,
+        // no cooldown swallow even right after `new`), and `resume`
+        // hydrates it back into the session.
+        let temp_dir = TempDir::new().unwrap();
+        let sid = "20260503_090000_todos";
+        let committed = Arc::new(AtomicUsize::new(0));
+
+        let (session, _cfg_rx, _state_rx) = ConversationSession::new(
+            temp_dir.path(),
+            sid,
+            SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            committed,
+        )
+        .unwrap();
+
+        let items = vec![
+            TodoItem {
+                id: "t1".to_string(),
+                content: "First task".to_string(),
+                status: crate::agent::session_state::TodoStatus::InProgress,
+            },
+            TodoItem {
+                id: "t2".to_string(),
+                content: "Second task".to_string(),
+                status: crate::agent::session_state::TodoStatus::Pending,
+            },
+        ];
+        session.set_todos(&items);
+
+        // Restart: a fresh session resumes from the persisted meta file.
+        let (resumed, _cfg_rx, _state_rx) = ConversationSession::resume(
+            temp_dir.path(),
+            sid,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        assert_eq!(
+            resumed.todos(),
+            Some(items),
+            "todos must be restored from meta after session restart"
+        );
+
+        // Clearing the list also persists: an emptied todo list resumes as None.
+        resumed.set_todos(&[]);
+        let (resumed2, _cfg_rx, _state_rx) = ConversationSession::resume(
+            temp_dir.path(),
+            sid,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        assert_eq!(resumed2.todos(), None, "emptied todo list must persist as None");
     }
 
     // ── raw-entry pagination tests ───────────────────────────────
@@ -3360,7 +3615,7 @@ mod tests {
             metadata: Some(serde_json::json!({
                 "compacted_from_id": "first-id",
                 "compacted_to_id": "last-id",
-                "keep_last_rounds": 3,
+                "level": 1,
                 "model": "test-model",
                 "before_tokens": 1000u64,
                 "after_tokens": 200u64,

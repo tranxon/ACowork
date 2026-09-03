@@ -76,8 +76,8 @@ pub(crate) async fn phase_b_init_session(
             loop {
                 {
                     let cache_read = cache.read().await;
-                    if let Some(ref available) = cache_read.providers {
-                        if let Some(found) = available.providers.iter().find_map(|p| {
+                    if let Some(ref available) = cache_read.providers
+                        && let Some(found) = available.providers.iter().find_map(|p| {
                             if p.api_key.is_empty() {
                                 None
                             } else {
@@ -85,9 +85,9 @@ pub(crate) async fn phase_b_init_session(
                                     .first()
                                     .map(|m| (p.id.clone(), m.id.clone()))
                             }
-                        }) {
-                            break Some(found);
-                        }
+                        })
+                    {
+                        break Some(found);
                     }
                 }
                 if grace_start.elapsed() >= cache_grace {
@@ -296,6 +296,25 @@ pub(crate) async fn phase_b_init_session(
         active_tools,
     ));
 
+    // ADR-061 §13.4: warn (not reject) when the boot model's effective
+    // input budget cannot run the 8-level compression loop. Warning only —
+    // a hard rejection here would block agent startup entirely (e.g.
+    // onboarding with a small-window model); `model_switch` stays a hard
+    // rejection so the user gets a clear error when actively picking one.
+    {
+        let boot_model = conversation_session.as_ref().and_then(|c| c.model());
+        if let Some(model) = boot_model
+            && let Some(caps) = core.get_model_capabilities(&model)
+            && let Err(e) = crate::agent::compression_constants::validate_model_budget(&caps)
+        {
+            tracing::warn!(
+                model = %model,
+                error = %e,
+                "ADR-061: boot model below MIN_BUDGET_FOR_AGENT (compression loop will not run efficiently)"
+            );
+        }
+    }
+
     // ADR-046: build the attachment blob store up front so we can both
     // inject it into `AgentCore` (so SessionTask's image-derivation
     // pipeline can read image bytes — see `attachment_to_image.rs`) and
@@ -318,7 +337,28 @@ pub(crate) async fn phase_b_init_session(
         // so Gateway and Standalone modes share the same resolution; `None`
         // (no file) means the built-in COMPACTION_SYSTEM_PROMPT fallback is
         // used at compaction time.
-        c.compaction_prompt = ctx.compaction_prompt.clone();
+        //
+        // ADR-063 §3.7.5: wrap in `Arc<RwLock<Option<String>>>` so the
+        // L2 reload (`DebugService::reload_prompts`) can write through
+        // any Arc<AgentCore> clone held by a running session. Phase B
+        // is the single injection point for Gateway mode — see
+        // `cli.rs` (Standalone mode) for the symmetric Standalone path.
+        *c.compaction_prompt.write().unwrap() = ctx.compaction_prompt.clone();
+
+        // ADR-063: 7 additional package-level prompt overrides. Phase A
+        // loaded each `prompts/<file>.md` into the matching field on
+        // `AgentBootContext`; here we mirror the Phase B injection
+        // pattern (RwLock write — Phase B is the only writer before
+        // sessions are spawned, so no contention with the LLM call
+        // sites' read guards). `None` is the normal "no override" state.
+        *c.search_prompt.write().unwrap() = ctx.search_prompt.clone();
+        *c.compact_template.write().unwrap() = ctx.compact_template.clone();
+        *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
+        *c.extraction_prompt.write().unwrap() = ctx.extraction_prompt.clone();
+        *c.conflict_classification_prompt.write().unwrap() =
+            ctx.conflict_classification_prompt.clone();
+        *c.generalization_prompt.write().unwrap() = ctx.generalization_prompt.clone();
+        *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
 
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).
@@ -565,6 +605,9 @@ pub(crate) async fn phase_b_init_session(
                 dirty = true;
             }
             c.context_window_override = updated.context_window;
+            // ADR-061: compression ratio threshold — None = built-in default
+            // (0.90), no manifest/fallback chain, so no dirty-write here.
+            c.compression_ratio_threshold = updated.compression_ratio_threshold;
 
             // ── temperature: manifest.llm.temperature → 0.3 ─────────
             if updated.temperature.is_none() {
@@ -635,14 +678,11 @@ pub(crate) async fn phase_b_init_session(
             }
         }
 
-        // ADR-052: Inject the shared abandon/retrieve queues from the
-        // boot context into AgentCore. These are the same queue instances
-        // that were passed to the context_abandon/context_retrieve tools
-        // in agent_init.rs. The AgentLoop reads them from core and drains
-        // them each iteration.
-        c.abandon_queue = ctx.abandon_queue.clone();
+        // ADR-061 §10.2: inject the shared retrieve queue from the boot
+        // context into AgentCore — the same instance passed to the
+        // `context_retrieve` tool in agent_init.rs. The AgentLoop reads
+        // it from core and drains it each iteration.
         c.retrieve_queue = ctx.retrieve_queue.clone();
-        c.tool_compression_enabled_override = agent_cfg.tool_compression_enabled;
 
         // ADR-046: Publish attachment blob store to the HTTP server's
         // late-bind slot. The same `Arc` instance is shared with
@@ -751,17 +791,28 @@ pub(crate) async fn phase_b_init_session(
 
     session_manager.set_resolver(ctx.workspace_resolver.clone());
 
-    if let Some(ws_id) = ctx
+    // Seed the per-agent default workspace for NEW sessions. Sessions are
+    // the source of truth (their meta persists the user's last selection),
+    // so the resumed latest session's workspace_id wins; the disk
+    // `last_active` flag is kept only as a fallback for legacy data written
+    // by the pre-ADR-040 Gateway. Nothing else: the default is intentionally
+    // NOT persisted at agent level — it is inherited from the session meta
+    // at startup and updated from `route_workspace_switch` at runtime.
+    let inherited_ws = conversation_session
+        .as_ref()
+        .and_then(|c| c.workspace_id());
+    let fallback_ws = ctx
         .workspace_resolver
         .read()
         .unwrap()
         .last_active_workspace_id()
-    {
-        let ws_id_owned = ws_id.to_owned();
-        session_manager.set_default_workspace_id(&ws_id_owned);
+        .map(|s| s.to_owned());
+    if let Some(ws_id) = inherited_ws.clone().or(fallback_ws) {
+        session_manager.set_default_workspace_id(&ws_id);
         tracing::info!(
-            default_workspace_id = %ws_id_owned,
-            "SessionManager: initialized default workspace from last_active"
+            default_workspace_id = %ws_id,
+            inherited_from_session = inherited_ws.is_some(),
+            "SessionManager: initialized default workspace from latest session meta (or last_active fallback)"
         );
     }
 
@@ -817,11 +868,7 @@ pub(crate) async fn phase_b_init_session(
         || agent_cfg.context_window.is_some()
         || agent_cfg.system_prompt_override.is_some()
         || agent_cfg.shell_approval_threshold.is_some()
-        || agent_cfg.approval_timeout_secs.is_some()
-        // ADR-052: include tool_compression_enabled in the override
-        // detection so a user-set value in agent_config.json is applied
-        // to the SessionManager override cache at boot.
-        || agent_cfg.tool_compression_enabled.is_some();
+        || agent_cfg.approval_timeout_secs.is_some();
     if has_overrides {
         tracing::info!(
             max_output_tokens = ?agent_cfg.max_output_tokens,

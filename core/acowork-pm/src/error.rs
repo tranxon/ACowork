@@ -333,7 +333,7 @@ mod tests {
                 from: "a".into(),
                 to: "b".into(),
             },
-            PmError::Io(io::Error::new(io::ErrorKind::Other, "x")),
+            PmError::Io(io::Error::other("x")),
             PmError::Multipart("x".into()),
             PmError::Image("x".into()),
             PmError::Internal("x".into()),

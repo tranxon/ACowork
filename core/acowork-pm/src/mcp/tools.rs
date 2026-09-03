@@ -350,12 +350,12 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
     let a: Args = parse_args("pm_create_task", args)?;
 
     // 设计 §9.1：assignee 必须存在
-    if let Some(assignee) = &a.assignee {
-        if !state.agent_dir.agent_exists(assignee).await {
-            return Err(PmError::BadRequest(format!(
-                "assignee agent not found in agent directory: {assignee}"
-            )));
-        }
+    if let Some(assignee) = &a.assignee
+        && !state.agent_dir.agent_exists(assignee).await
+    {
+        return Err(PmError::BadRequest(format!(
+            "assignee agent not found in agent directory: {assignee}"
+        )));
     }
 
     let input = CreateTask {

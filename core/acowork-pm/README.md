@@ -69,18 +69,24 @@ cargo build -p acowork-pm --features image-thumb
 # 测试
 cargo test -p acowork-pm
 
-# 运行（需先启动 Gateway 反向代理）
-cargo run -p acowork-gateway  # 内置 PM API 路由
+# 独立运行（ADR-064：独立进程，默认端口 18082）
+cargo run -p acowork-pm -- --data-dir ./data --port 18082
+
+# 生产形态：由 Gateway supervisor 拉起 + 反向代理（无需手动启动）
+cargo run -p acowork-gateway
 ```
 
-PM 服务**不独立运行**——通过 Gateway 暴露，由 Gateway 监督生命周期。
+PM 服务以**独立进程**运行（ADR-064）——由 Gateway supervisor 管理生命周期
+（spawn / monitor / restart），`/api/pm/*` 经 Gateway 反向代理暴露。独立调试时
+可 `cargo run -p acowork-pm` 直接 serve 全量路由（REST + MCP + `/health`）。
 
 ## 依赖关系
 
 ```text
-acowork-pm ──uses──▶ acowork-core    (共享错误/health 类型)
-                ──▶ acowork-gateway  (运行时由 Gateway 监督 + 反向代理)
+acowork-pm ──uses──▶ acowork-core    (共享错误/health/supervisor 类型)
+                ──▶ Gateway HTTP    (运行时经 HTTP 查询 /api/agents 校验 assignee)
                 ──▶ (无 storage crate 依赖，目录树直接走 tokio::fs)
 ```
 
 PM 服务**不**依赖 acowork-memory / acowork-grafeo —— 存储层走目录树，独立演进。
+Gateway **不编译** PM 代码（`cargo tree -p acowork-gateway` 不含 `acowork-pm`）。

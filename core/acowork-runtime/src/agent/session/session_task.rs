@@ -65,6 +65,15 @@ pub enum SessionMessage {
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },
+    /// ADR-063 §3.7.6: replace the main-dialog system prompt in this
+    /// session's `ContextBuilder`. Produced by
+    /// `SessionManager::apply_system_prompt` (triggered by the L2 reload
+    /// endpoint after it rebuilds the prompt from `prompts/*.md`,
+    /// including the required `system.md`). The next `build_chat_request`
+    /// uses the new value — no agent restart needed.
+    UpdateSystemPrompt {
+        system_prompt: String,
+    },
     /// ADR-030 C3: Sidecar came online (LSP relay became ready, embed model
     /// switched, ...) and we want to surface a new builtin tool to this
     /// session. Carries a pre-decorated `BuiltinToolEntry` so each session
@@ -121,10 +130,24 @@ pub enum SessionMessage {
     /// via SidecarEndpointUpdate(Embed, non-empty endpoint)).
     /// The session rebuilds its ONNX embedding provider with the new
     /// endpoint/model/dimension.
+    ///
+    /// ADR-s1: when `embed_provider_id` is `Some`, the endpoint/model
+    /// above refer to a cloud OpenAI-compatible embedding service
+    /// (volcengine / dashscope / siliconflow / …) instead of the local
+    /// ONNX sidecar. The session constructs a
+    /// `RemoteEmbeddingProvider` and authenticates with `embed_api_key`.
+    /// When `embed_provider_id` is `None`, behaviour is unchanged —
+    /// the endpoint is the local ONNX service.
     UpdateEmbedConfig {
         embed_endpoint: String,
         embed_model_id: String,
         embed_dimension: usize,
+        /// Active cloud provider ID (e.g. "volcengine"). `None` keeps
+        /// the local ONNX path.
+        embed_provider_id: Option<String>,
+        /// Decrypted API key for `embed_provider_id`. Empty / `None`
+        /// for the local ONNX path.
+        embed_api_key: Option<String>,
     },
     /// Disable the embedding provider (hot-push from Gateway via
     /// SidecarEndpointUpdate(Embed, empty endpoint)). The session clears
@@ -198,6 +221,10 @@ impl std::fmt::Debug for SessionMessage {
                     &entries.iter().filter(|e| e.enabled).count(),
                 )
                 .finish(),
+            SessionMessage::UpdateSystemPrompt { system_prompt } => f
+                .debug_struct("UpdateSystemPrompt")
+                .field("prompt_len", &system_prompt.len())
+                .finish(),
             SessionMessage::AddDynamicBuiltinTool { entry } => f
                 .debug_struct("AddDynamicBuiltinTool")
                 .field("name", &entry.name())
@@ -239,11 +266,15 @@ impl std::fmt::Debug for SessionMessage {
                 embed_endpoint,
                 embed_model_id,
                 embed_dimension,
+                embed_provider_id,
+                embed_api_key,
             } => f
                 .debug_struct("UpdateEmbedConfig")
                 .field("embed_endpoint", embed_endpoint)
                 .field("embed_model_id", embed_model_id)
                 .field("embed_dimension", embed_dimension)
+                .field("embed_provider_id", embed_provider_id)
+                .field("embed_api_key_redacted", &embed_api_key.as_ref().map(|_| "***"))
                 .finish(),
             SessionMessage::DisableEmbedConfig => {
                 f.debug_tuple("DisableEmbedConfig").finish()
@@ -292,6 +323,46 @@ pub(crate) struct SessionTask {
 // `AgentLoop::write_attached_items` and rendered by the frontend from
 // the JSONL metadata. The Runtime no longer reads uploaded file bytes
 // or assembles complex prompt prefixes — see ADR-046 §2.4.
+
+/// ADR-047: apply deferred LLM-side effects when the session config
+/// version has advanced since the last poll.
+///
+/// Called (a) at the top of the SessionTask main loop — the original
+/// turn-boundary site — and (b) immediately before processing any
+/// inbound message that can drive an agent-loop run (ChatMessage,
+/// ContinueExecution, debug replay). Without (b), a config change
+/// (model_switch / reasoning_effort / workspace_switch) landing while
+/// the task is blocked in `select!` was only applied AFTER the next
+/// run finished — every LLM call of that run still used the stale
+/// provider ("switched model but usage still hits the old provider").
+fn apply_pending_config_effects(
+    agent_loop: &mut AgentLoop,
+    context_builder: &mut ContextBuilder,
+    session_id: &str,
+    last_config_version: &mut u64,
+    last_config_snapshot: &mut crate::agent::session_config::SessionConfigSnapshot,
+) {
+    if let Some(conv) = agent_loop.session.conversation.as_ref() {
+        let current_version = conv.config_version();
+        if current_version != *last_config_version {
+            let snapshot = conv.config_snapshot();
+            tracing::info!(
+                session_id = %session_id,
+                old_version = *last_config_version,
+                new_version = current_version,
+                "SessionTask: config version changed, applying LLM-side effects"
+            );
+            crate::agent::session_config::llm_effects::apply_llm_effects(
+                agent_loop,
+                context_builder,
+                &snapshot,
+                last_config_snapshot,
+            );
+            *last_config_snapshot = snapshot;
+            *last_config_version = current_version;
+        }
+    }
+}
 
 impl SessionTask {
     /// Create a new SessionTask with the given shared core, session state,
@@ -613,26 +684,18 @@ impl SessionTask {
 
         loop {
             // ── ADR-047: Check if config was mutated during previous turn ──
-            if let Some(conv) = agent_loop.session.conversation.as_ref() {
-                let current_version = conv.config_version();
-                if current_version != last_config_version {
-                    let snapshot = conv.config_snapshot();
-                    tracing::info!(
-                        session_id = %session_id,
-                        old_version = last_config_version,
-                        new_version = current_version,
-                        "SessionTask: config version changed, applying LLM-side effects"
-                    );
-                    crate::agent::session_config::llm_effects::apply_llm_effects(
-                        &mut agent_loop,
-                        &mut context_builder,
-                        &snapshot,
-                        &last_config_snapshot,
-                    );
-                    last_config_snapshot = snapshot;
-                    last_config_version = current_version;
-                }
-            }
+            // Applied both here (turn boundary after a run) and before every
+            // inbound message (see the `apply_pending_config_effects` call
+            // before `match msg`), so a config change landing while the task
+            // waits in `select!` is picked up BEFORE the next run starts —
+            // not after it finishes.
+            apply_pending_config_effects(
+                &mut agent_loop,
+                &mut context_builder,
+                &session_id,
+                &mut last_config_version,
+                &mut last_config_snapshot,
+            );
 
             // Use tokio::select! to await inbound messages, rewind
             // notifications, and resume notifications — all sourced
@@ -673,6 +736,17 @@ impl SessionTask {
                                 tracing::info!(
                                     session_id = %session_id,
                                     "Debug: resume/step notify — restarting agent loop"
+                                );
+                                // ADR-047: apply any config changes that
+                                // landed while the run was paused before
+                                // replaying (same rationale as the
+                                // ChatMessage path).
+                                apply_pending_config_effects(
+                                    &mut agent_loop,
+                                    &mut context_builder,
+                                    &session_id,
+                                    &mut last_config_version,
+                                    &mut last_config_snapshot,
                                 );
                                 // Apply rewind/patches before run
                                 agent_loop.core.debug_observer.apply_rewind_and_patches(
@@ -738,6 +812,20 @@ impl SessionTask {
             } else {
                 inbound_rx.recv().await
             };
+
+            // ADR-047: Re-check the config version before handling ANY
+            // inbound message. A model_switch / reasoning_effort /
+            // workspace_switch that landed while this task was blocked in
+            // `select!` must be applied before the next run (ChatMessage /
+            // ContinueExecution / debug replay) — otherwise the run still
+            // executes against the stale LLM provider.
+            apply_pending_config_effects(
+                &mut agent_loop,
+                &mut context_builder,
+                &session_id,
+                &mut last_config_version,
+                &mut last_config_snapshot,
+            );
 
             // Note: msg is now Option<SessionMessage> directly (no
             // Ok/Err wrapper from the old timeout pattern).
@@ -1039,36 +1127,14 @@ impl SessionTask {
                         max_iterations = ?overrides.max_iterations,
                         temperature = ?overrides.temperature,
                         context_window = ?overrides.context_window,
-                        tool_compression_enabled = ?overrides.tool_compression_enabled,
                         "SessionTask: applying runtime config overrides"
                     );
-                    // Capture before the move; `apply_runtime_config`
-                    // does not take ownership of the overrides.
-                    let tool_compression_toggled = overrides.tool_compression_enabled.is_some();
-                    let tool_compression_new = overrides.tool_compression_enabled;
-
+                    // ADR-061 §10.2: the `tool_compression_enabled`
+                    // branch (platform-tools sync + ContextBuilder
+                    // rebuild) is deleted — `context_retrieve` is
+                    // always registered, so no tool_definitions change
+                    // can originate from runtime-config pushes anymore.
                     agent_loop.apply_runtime_config(&overrides);
-
-                    // ADR-052 hot-reload: when `tool_compression_enabled`
-                    // flipped, `AgentCore.apply_runtime_config` already
-                    // mutated `builtin_tools` and rebuilt `all_tools`
-                    // (the dispatch list). Here we additionally rebuild
-                    // `ContextBuilder.tool_definitions` so the LLM sees
-                    // the new set on the next `build_chat_request` —
-                    // mirroring the `apply_builtin_tools_update` path
-                    // below, which rebuilds both sides atomically.
-                    if tool_compression_toggled {
-                        rebuild_context_tool_definitions(
-                            &agent_loop.core.builtin_tools,
-                            &mut context_builder,
-                        );
-                        tracing::info!(
-                            session_id = %session_id,
-                            new_enabled = ?tool_compression_new,
-                            active_specs = agent_loop.core.builtin_tools.len(),
-                            "SessionTask: platform tools synced to ContextBuilder"
-                        );
-                    }
 
                     // Push updated state to frontend immediately so the
                     // ResultsPanel temperature display reflects the new value
@@ -1110,6 +1176,17 @@ impl SessionTask {
                         &mut context_builder,
                         entries,
                     );
+                }
+                Some(SessionMessage::UpdateSystemPrompt { system_prompt }) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        prompt_len = system_prompt.len(),
+                        "SessionTask: updating main-dialog system prompt (ADR-063 hot-reload)"
+                    );
+                    // Replace the main-dialog system prompt in the
+                    // ContextBuilder. The next `build_chat_request` picks
+                    // up the new value — no agent restart needed.
+                    context_builder.set_system_prompt(system_prompt);
                 }
                 // ── ADR-030 C3: dynamic builtin tool add/remove ──────
                 //
@@ -1278,12 +1355,18 @@ impl SessionTask {
                     embed_endpoint,
                     embed_model_id,
                     embed_dimension,
+                    embed_provider_id,
+                    embed_api_key,
                 }) => {
+                    let cloud_provider_label =
+                        embed_provider_id.as_deref().unwrap_or("<local-onnx>");
                     tracing::info!(
                         session_id = %session_id,
                         endpoint = %embed_endpoint,
                         model_id = %embed_model_id,
                         dimension = embed_dimension,
+                        cloud_provider = cloud_provider_label,
+                        has_api_key = embed_api_key.is_some(),
                         "SessionTask: updating embedding provider"
                     );
 
@@ -1301,74 +1384,83 @@ impl SessionTask {
                         .map(|admin| admin.embedding_dim() != embed_dimension)
                         .unwrap_or(false);
 
+                    // S1-5c: cloud embedding provider needs the API key to
+                    // authenticate. For local ONNX, the key is unused and we
+                    // pass None to keep the original call shape.
+                    let api_key_ref = embed_api_key.as_deref();
+
                     if needs_migration
                         && let Some(ref admin) = agent_loop.core.memory_admin
                     {
-                            let admin = admin.clone();
-                            let old_dim = admin.embedding_dim();
-                            tracing::info!(
-                                old_dim,
-                                new_dim = embed_dimension,
-                                "Embedding dimension changed, starting migration"
+                        let admin = admin.clone();
+                        let old_dim = admin.embedding_dim();
+                        tracing::info!(
+                            old_dim,
+                            new_dim = embed_dimension,
+                            "Embedding dimension changed, starting migration"
+                        );
+
+                        // Build a temporary provider for the migration
+                        // re-embedding. We use the new provider directly
+                        // (not the fallback chain) to ensure consistent
+                        // embeddings during migration.
+                        let migration_provider =
+                            crate::embedding::remote::RemoteEmbeddingProvider::with_config_and_timeouts(
+                                &embed_endpoint,
+                                api_key_ref,
+                                &embed_model_id,
+                                embed_dimension,
+                                &agent_loop.core.config.timeouts,
                             );
+                        let migration_provider =
+                            std::sync::Arc::new(migration_provider)
+                                as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
 
-                            // Build a temporary provider for the migration
-                            // re-embedding. We use the new ONNX provider directly
-                            // (not the fallback chain) to ensure consistent
-                            // embeddings during migration.
-                            let migration_provider =
-                                crate::embedding::remote::RemoteEmbeddingProvider::with_config_and_timeouts(
-                                    &embed_endpoint,
-                                    None,
-                                    &embed_model_id,
-                                    embed_dimension,
-                                    &agent_loop.core.config.timeouts,
-                                );
-                            let migration_provider =
-                                std::sync::Arc::new(migration_provider)
-                                    as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
-
-                            // Bridge async embed into a sync closure for
-                            // MemoryAdminService::migrate_embedding_dimension.
-                            let handle = tokio::runtime::Handle::current();
-                            let provider_for_fn = migration_provider.clone();
-                            let embed_fn = move |text: &str| -> Option<Vec<f32>> {
-                                let text_owned = text.to_string();
-                                match handle.block_on(provider_for_fn.embed(&text_owned)) {
-                                    Ok(vec) => Some(vec),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "Re-embedding failed during migration, skipping node"
-                                        );
-                                        None
-                                    }
-                                }
-                            };
-
-                            match admin.migrate_embedding_dimension(&embed_fn, embed_dimension) {
-                                Ok(stats) => {
-                                    tracing::info!(
-                                        rebuilt = stats.rebuilt,
-                                        skipped = stats.skipped_no_embedding + stats.skipped_no_content,
-                                        errors = stats.errors,
-                                        "Embedding migration complete"
-                                    );
-                                }
+                        // Bridge async embed into a sync closure for
+                        // MemoryAdminService::migrate_embedding_dimension.
+                        let handle = tokio::runtime::Handle::current();
+                        let provider_for_fn = migration_provider.clone();
+                        let embed_fn = move |text: &str| -> Option<Vec<f32>> {
+                            let text_owned = text.to_string();
+                            match handle.block_on(provider_for_fn.embed(&text_owned)) {
+                                Ok(vec) => Some(vec),
                                 Err(e) => {
-                                    tracing::error!(
+                                    tracing::warn!(
                                         error = %e,
-                                        "Embedding migration failed, vector search may be broken"
+                                        "Re-embedding failed during migration, skipping node"
                                     );
+                                    None
                                 }
                             }
+                        };
+
+                        match admin.migrate_embedding_dimension(&embed_fn, embed_dimension) {
+                            Ok(stats) => {
+                                tracing::info!(
+                                    rebuilt = stats.rebuilt,
+                                    skipped = stats.skipped_no_embedding + stats.skipped_no_content,
+                                    errors = stats.errors,
+                                    "Embedding migration complete"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "Embedding migration failed, vector search may be broken"
+                                );
+                            }
+                        }
                     }
 
-                    // Build the new ONNX provider.
+                    // Build the new embedding provider (local ONNX or cloud).
+                    // `RemoteEmbeddingProvider::with_config_and_timeouts` already
+                    // supports any OpenAI-compatible `/v1/embeddings` endpoint
+                    // with optional API key — for local ONNX, the api_key is
+                    // None and the sidecar runs without auth.
                     let new_onnx_provider =
                         crate::embedding::remote::RemoteEmbeddingProvider::with_config_and_timeouts(
                             &embed_endpoint,
-                            None,
+                            api_key_ref,
                             &embed_model_id,
                             embed_dimension,
                             &agent_loop.core.config.timeouts,

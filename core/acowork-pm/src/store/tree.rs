@@ -698,20 +698,20 @@ impl PmStore for TreePmStore {
                 .by_id
                 .iter()
                 .filter(|(_, e)| {
-                    if let Some(pid) = &filter.project_id {
-                        if &e.project_id != pid {
-                            return false;
-                        }
+                    if let Some(pid) = &filter.project_id
+                        && &e.project_id != pid
+                    {
+                        return false;
                     }
-                    if let Some(st) = filter.status {
-                        if e.status != st {
-                            return false;
-                        }
+                    if let Some(st) = filter.status
+                        && e.status != st
+                    {
+                        return false;
                     }
-                    if let Some(a) = &filter.assignee {
-                        if e.assignee.as_deref() != Some(a.as_str()) {
-                            return false;
-                        }
+                    if let Some(a) = &filter.assignee
+                        && e.assignee.as_deref() != Some(a.as_str())
+                    {
+                        return false;
                     }
                     true
                 })
@@ -774,7 +774,7 @@ impl PmStore for TreePmStore {
             task.assignee = input.assignee.clone().flatten();
         }
         if input.due_at.is_some() {
-            task.due_at = input.due_at.clone().flatten();
+            task.due_at = input.due_at.flatten();
         }
         if let Some(deps) = input.depends_on {
             for dep in &deps {
@@ -864,7 +864,7 @@ impl PmStore for TreePmStore {
                     .get(parent_id)
                     .cloned()
                     .ok_or_else(|| PmError::TaskNotFound(parent_id.to_string()))?;
-                if &parent.project_id != &entry.project_id {
+                if parent.project_id != entry.project_id {
                     return Err(PmError::InvalidId(format!(
                         "parent {} is not in project {}",
                         parent_id, entry.project_id
@@ -1279,10 +1279,11 @@ mod tests {
 
     fn test_config() -> PmConfig {
         let dir = tempdir().unwrap();
-        let mut cfg = PmConfig::default();
-        cfg.data_dir = dir.path().to_path_buf();
-        cfg.index_rebuild_on_start = false;
-        cfg
+        PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        }
     }
 
     fn create_task_input(title: &str) -> CreateTask {
@@ -1873,9 +1874,11 @@ mod tests {
 
         // 用具名临时目录(便于断言物理路径)
         let dir = tempdir().unwrap();
-        let mut cfg = PmConfig::default();
-        cfg.data_dir = dir.path().to_path_buf();
-        cfg.index_rebuild_on_start = false;
+        let cfg = PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
         let store = TreePmStore::new(cfg).await.unwrap();
 
         let p = store

@@ -380,13 +380,31 @@ pub struct AgentLoop {
     /// retained across iterations).
     pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
 
-    /// ADR-052: Shared queue for `context_abandon` tool requests.
+    /// ADR-060: The current user message, staged by `run_inner` and passed
+    /// explicitly to `ContextBuilder::build()` as Block D (see ADR-060 §5.5).
     ///
-    /// The tool writes `tool_call_id` strings here; the agent loop drains
-    /// them before the next `build_chat_request` via
-    /// `drain_abandon_queue()`.
-    pub(crate) abandon_queue:
-        crate::agent::context_compression::AbandonQueue,
+    /// ## Lifecycle
+    ///
+    /// 1. **Staged** at the top of `run_inner` when a new user message is
+    ///    appended to history (non-replay path).
+    /// 2. **Consumed** by `build_chat_request` calls before any tool executes:
+    ///    the message is passed to `build()` as Block D (a clone), while the
+    ///    original stays in history as part of Block B.
+    /// 3. **Cleared** once tool results are appended to history during the
+    ///    request's tool loop (ADR-060 §5.5: later iterations carry NO
+    ///    Block D — the user message already lives in Block B), and on the
+    ///    debug-replay path (`replay=true`), where the message is already
+    ///    in history. The next `run_inner` (new user input) re-stages it.
+    pub(crate) pending_user_message: Option<ChatMessage>,
+
+    /// ADR-060 §6.3: whether auto-inject has already run for this session.
+    ///
+    /// `auto_inject_enabled` (default false, per-agent opt-in via manifest
+    /// `[memory.quality].auto_inject_enabled = true`) triggers at most
+    /// once, on the session's FIRST user message; later turns skip the
+    /// retrieval. Explicit `memory_recall` tool calls use an independent
+    /// path and do not touch this flag.
+    pub(crate) memory_retrieved_for_session: bool,
 
     /// ADR-052: Shared queue for `context_retrieve` tool requests.
     ///
@@ -453,7 +471,6 @@ impl AgentLoop {
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
         let mut loop_ = Self {
-            abandon_queue: core.abandon_queue.clone(),
             retrieve_queue: core.retrieve_queue.clone(),
             core,
             session_core,
@@ -468,6 +485,8 @@ impl AgentLoop {
             pending_interrupt: None,
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
+            pending_user_message: None,
+            memory_retrieved_for_session: false,
             compress_action_rx: None,
         };
         // Initialize persistent model ratio store from agent config dir.
@@ -524,7 +543,6 @@ impl AgentLoop {
             mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let approval_handle = ApprovalHandle::new(approval_tx);
         let mut session_loop = Self {
-            abandon_queue: core.abandon_queue.clone(),
             retrieve_queue: core.retrieve_queue.clone(),
             core,
             session_core,
@@ -539,6 +557,8 @@ impl AgentLoop {
             pending_interrupt: None,
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
+            pending_user_message: None,
+            memory_retrieved_for_session: false,
             compress_action_rx: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -597,6 +617,62 @@ impl AgentLoop {
             .map(|s| s.to_string())
             .or_else(|| self.session.model.clone())
             .unwrap_or_default()
+    }
+
+    /// Wait out a retry backoff while listening for a user "Retry Now"
+    /// (`ContinueExecution`) or `Stop` on the inbound channel — the same
+    /// semantics as the original inline long-retry wait, extracted so the
+    /// bounded long retry and the persistent network-recovery retry can
+    /// share it.
+    ///
+    /// Returns:
+    /// - `true`  → resume the iteration loop (timeout elapsed, or the user
+    ///   chose to retry immediately)
+    /// - `false` → the user stopped, or the inbound channel closed (session
+    ///   already transitioned to Idle)
+    async fn wait_for_retry_or_user(&mut self, wait_ms: u64) -> bool {
+        let long_wait = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
+        tokio::pin!(long_wait);
+
+        loop {
+            tokio::select! {
+                _ = &mut long_wait => {
+                    // Time's up — auto resume
+                    tracing::info!(
+                        wait_ms,
+                        "Retry wait completed, auto-resuming"
+                    );
+                    self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
+                    return true;
+                }
+                msg = self.inbound_rx.recv() => {
+                    match msg {
+                        Some(InboundMessage::ContinueExecution { .. }) => {
+                            tracing::info!("User chose to retry immediately");
+                            self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
+                            return true;
+                        }
+                        Some(InboundMessage::Stop { .. }) => {
+                            tracing::info!("User stopped during retry wait");
+                            self.transition_status(SessionStatus::Idle);
+                            return false;
+                        }
+                        Some(InboundMessage::UserOperation(user_op)) => {
+                            self.apply_user_op(&user_op);
+                        }
+                        Some(other) => {
+                            self.session.deferred_inbound.push(other);
+                        }
+                        None => {
+                            // Channel closed — stop
+                            tracing::info!("Inbound channel closed during retry wait");
+                            self.transition_status(SessionStatus::Idle);
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Run the agent loop for a single user message.
@@ -680,6 +756,12 @@ impl AgentLoop {
         // request begins.
         let _cancel_handle = self.session_core.begin_new_request();
 
+        // ADR-060 §5.5: the debug-replay path (user message already in
+        // history) must NOT carry a Block D — clear any stale staging.
+        if replay {
+            self.pending_user_message = None;
+        }
+
         // ADR-014: Idle → Streaming
         // ADR-049: Streaming is split into LlmAwaitingFirstChunk / LlmStreaming /
         // ToolExecuting. The HTTP request is about to be sent here, so we are
@@ -692,11 +774,16 @@ impl AgentLoop {
             // ADR-011: reset compaction flag — new user input means new content since last compaction
             self.session.is_compacted = false;
             if let Some(parts) = content_parts {
-                self.session
-                    .history
-                    .append(ChatMessage::user_multimodal(user_message, parts));
+                let msg = ChatMessage::user_multimodal(user_message, parts);
+                // ADR-060 §5.5: stage the current user message so
+                // `build_chat_request` can pass it as Block D.
+                self.pending_user_message = Some(msg.clone());
+                self.session.history.append(msg);
             } else {
-                self.session.history.append(ChatMessage::user(user_message));
+                let msg = ChatMessage::user(user_message);
+                // ADR-060 §5.5: stage the current user message (Block D).
+                self.pending_user_message = Some(msg.clone());
+                self.session.history.append(msg);
             }
 
             // Persist user message to JSONL with frontend-generated ID
@@ -924,7 +1011,7 @@ impl AgentLoop {
                             iteration = 0; // Reset counter
 
                             // Trim history before resuming to avoid context window overflow
-                            self.trim_history_to_budget(&current_model);
+                            self.trim_history_to_budget(&current_model).await;
 
                             break; // Resume main loop
                         }
@@ -943,7 +1030,7 @@ impl AgentLoop {
                                     );
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    self.trim_history_to_budget(&current_model);
+                                    self.trim_history_to_budget(&current_model).await;
                                     break;
                                 }
                                 crate::agent::inbound::UserOp::StopLoop { reason } => {
@@ -985,11 +1072,22 @@ impl AgentLoop {
             }
 
             // ①-⑧ Execute single iteration (shared with debug mode)
-            // With iteration-level retry for retryable stream errors.
-            const MAX_ITERATION_RETRIES: u32 = 3;
-            const MAX_LONG_RETRIES: u32 = 3;
+            // With iteration-level retry for retryable errors, plus a
+            // persistent-recovery tier for transient network failures that
+            // outlast the bounded budget (root cause: 2026-09-02 03:33).
+            //
+            // The retry policy lives in `agent::retry::decide_retry_action`
+            // so it can be unit-tested as a pure function. The loop only owns
+            // the side effects (sleeping, transitioning session status,
+            // surfacing RetryPauseInfo).
+            use crate::agent::retry::{
+                decide_retry_action, RetryAction, MAX_LONG_RETRIES,
+            };
             let mut iteration_retries = 0u32;
             let mut long_retry_count = 0u32;
+            // Consecutive persistent (post-budget) network-recovery waits.
+            // Drives the exponential backoff for transient network errors.
+            let mut persistent_retries = 0u32;
             let iteration_result = loop {
                 match self
                     .execute_single_iteration(
@@ -1001,136 +1099,6 @@ impl AgentLoop {
                     .await
                 {
                     Ok(result) => break result,
-                    Err(RuntimeError::StreamError(ref err))
-                        if err.retryable && iteration_retries < MAX_ITERATION_RETRIES =>
-                    {
-                        iteration_retries += 1;
-                        let backoff = std::time::Duration::from_millis(
-                            1000 * 2u64.pow(iteration_retries - 1),
-                        );
-                        let backoff = backoff.min(std::time::Duration::from_secs(10));
-                        tracing::warn!(
-                            iteration,
-                            retry = iteration_retries,
-                            max_retries = MAX_ITERATION_RETRIES,
-                            error = %err.message,
-                            backoff_ms = backoff.as_millis(),
-                            "Retryable stream error, retrying iteration"
-                        );
-                        tokio::time::sleep(backoff).await;
-                        continue;
-                    }
-                    Err(RuntimeError::StreamError(ref err))
-                        if err.retryable && long_retry_count < MAX_LONG_RETRIES =>
-                    {
-                        long_retry_count += 1;
-                        // Enter paused state with 5-minute retry info.
-                        // The frontend RetryWaitBanner shows a countdown and
-                        // "Retry Now" button; the user can skip the wait or
-                        // let the timer expire for automatic retry.
-                        // reason: None — retry_info already disambiguates this
-                        // pause from iteration-limit / loop-detected / debug.
-                        self.transition_status(SessionStatus::Paused {
-                            iteration: Some(iteration),
-                            max_iterations: Some(self.core.config.max_iterations),
-                            retry_info: Some(
-                                crate::agent::session_state::RetryPauseInfo {
-                                    wait_ms: 5 * 60 * 1000,
-                                    attempt: long_retry_count,
-                                    max_attempts: MAX_LONG_RETRIES,
-                                    provider: current_model.clone(),
-                                },
-                            ),
-                            reason: None,
-                            message: None,
-                        });
-                        tracing::warn!(
-                            iteration,
-                            long_retry = long_retry_count,
-                            max_long_retries = MAX_LONG_RETRIES,
-                            error = %err.message,
-                            "Retryable stream error, entering long retry wait (5 min)"
-                        );
-
-                        // Wait for 5 minutes, ContinueExecution, or Stop.
-                        // Uses tokio::select! to await the first of:
-                        //   - 5-minute timeout (auto-retry)
-                        //   - inbound ContinueExecution (user clicked Retry Now)
-                        //   - inbound Stop (user stopped the session)
-                        let long_wait =
-                            tokio::time::sleep(std::time::Duration::from_secs(5 * 60));
-                        tokio::pin!(long_wait);
-
-                        loop {
-                            tokio::select! {
-                                _ = &mut long_wait => {
-                                    // Time's up — auto resume
-                                    tracing::info!(
-                                        "Long retry wait completed, auto-resuming"
-                                    );
-                                    self.transition_status(
-                                        SessionStatus::LlmAwaitingFirstChunk,
-                                    );
-                                    break;
-                                }
-                                msg = self.inbound_rx.recv() => {
-                                    match msg {
-                                        Some(InboundMessage::ContinueExecution { .. }) => {
-                                            tracing::info!(
-                                                "User chose to retry immediately"
-                                            );
-                                            self.transition_status(
-                                                SessionStatus::LlmAwaitingFirstChunk,
-                                            );
-                                            break;
-                                        }
-                                        Some(InboundMessage::Stop { .. }) => {
-                                            tracing::info!(
-                                                "User stopped during retry wait"
-                                            );
-                                            self.transition_status(
-                                                SessionStatus::Idle,
-                                            );
-                                            return Err(
-                                                RuntimeError::StreamError(
-                                                    err.clone(),
-                                                ),
-                                            );
-                                        }
-                                        Some(InboundMessage::UserOperation(
-                                            user_op,
-                                        )) => {
-                                            self.apply_user_op(&user_op);
-                                        }
-                                        Some(other) => {
-                                            self.session
-                                                .deferred_inbound
-                                                .push(other);
-                                        }
-                                        None => {
-                                            // Channel closed — stop
-                                            tracing::info!(
-                                                "Inbound channel closed during \
-                                                 retry wait"
-                                            );
-                                            self.transition_status(
-                                                SessionStatus::Idle,
-                                            );
-                                            return Err(
-                                                RuntimeError::StreamError(
-                                                    err.clone(),
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Reset short retry counter and try again
-                        iteration_retries = 0;
-                        continue;
-                    }
                     Err(RuntimeError::LoopDetected(msg)) => {
                         // Loop detection: inject system warning into history,
                         // reset detector, pause, and wait for ContinueExecution.
@@ -1191,7 +1159,7 @@ impl AgentLoop {
                                     // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    self.trim_history_to_budget(&current_model);
+                                    self.trim_history_to_budget(&current_model).await;
                                     break; // Resume main loop
                                 }
                                 Some(InboundMessage::Stop { reason }) => {
@@ -1219,10 +1187,137 @@ impl AgentLoop {
                         }
                     }
                     Err(e) => {
-                        // ADR-014: Streaming → Idle on non-retryable error
-                        // or all retry attempts exhausted
-                        self.transition_status(SessionStatus::Idle);
-                        return Err(e);
+                        // Apply the retry policy. The policy decides which
+                        // retry tier (fast/long/persistent) to use, or to
+                        // give up. The loop owns the side effects.
+                        match decide_retry_action(
+                            &e,
+                            iteration_retries,
+                            long_retry_count,
+                            persistent_retries,
+                        ) {
+                            RetryAction::FastRetry {
+                                backoff_ms,
+                                attempt,
+                                max_attempts,
+                            } => {
+                                iteration_retries = attempt;
+                                tracing::warn!(
+                                    iteration,
+                                    retry = attempt,
+                                    max_retries = max_attempts,
+                                    error = %e,
+                                    backoff_ms,
+                                    "Retryable error, retrying iteration"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms))
+                                    .await;
+                                continue;
+                            }
+                            RetryAction::LongRetry {
+                                wait_ms,
+                                attempt,
+                                max_attempts,
+                            } => {
+                                long_retry_count = attempt;
+                                // Enter paused state with retry info. The
+                                // frontend RetryWaitBanner shows a countdown
+                                // and "Retry Now" button; the user can skip
+                                // the wait or let the timer expire for
+                                // automatic retry. reason: None —
+                                // retry_info already disambiguates this
+                                // pause from iteration-limit / loop-detected
+                                // / debug.
+                                self.transition_status(SessionStatus::Paused {
+                                    iteration: Some(iteration),
+                                    max_iterations: Some(self.core.config.max_iterations),
+                                    retry_info: Some(
+                                        crate::agent::session_state::RetryPauseInfo {
+                                            wait_ms,
+                                            attempt,
+                                            max_attempts,
+                                            provider: current_model.clone(),
+                                        },
+                                    ),
+                                    reason: None,
+                                    message: None,
+                                });
+                                tracing::warn!(
+                                    iteration,
+                                    long_retry = attempt,
+                                    max_long_retries = max_attempts,
+                                    error = %e,
+                                    "Retryable error, entering long retry wait"
+                                );
+                                // Wait for the timer, ContinueExecution, or
+                                // Stop. tokio::select! awaits the first of:
+                                //   - timeout (auto-retry)
+                                //   - inbound ContinueExecution (user clicked
+                                //     "Retry Now")
+                                //   - inbound Stop (user stopped the session)
+                                if !self.wait_for_retry_or_user(wait_ms).await {
+                                    // User stopped or channel closed — surface
+                                    // the original error (session already →
+                                    // Idle).
+                                    return Err(e);
+                                }
+                                // Reset short retry counter and try again.
+                                iteration_retries = 0;
+                                continue;
+                            }
+                            RetryAction::Persistent {
+                                wait_ms,
+                                attempt,
+                            } => {
+                                // Bounded fast + long budgets are exhausted,
+                                // but the error is still a transient network /
+                                // transport failure. Do NOT give up and enter
+                                // Idle — the machine may be asleep or the
+                                // network temporarily down (root cause of the
+                                // 2026-09-02 03:33 session death). Keep
+                                // retrying with exponential backoff (5m → 10m
+                                // → 20m → 30m cap) until the network
+                                // recovers, the user stops, or a
+                                // non-retryable error surfaces.
+                                long_retry_count = 0;
+                                iteration_retries = 0;
+                                persistent_retries = attempt;
+                                self.transition_status(SessionStatus::Paused {
+                                    iteration: Some(iteration),
+                                    max_iterations: Some(self.core.config.max_iterations),
+                                    retry_info: Some(
+                                        crate::agent::session_state::RetryPauseInfo {
+                                            wait_ms,
+                                            attempt,
+                                            max_attempts: MAX_LONG_RETRIES,
+                                            provider: current_model.clone(),
+                                        },
+                                    ),
+                                    reason: None,
+                                    message: None,
+                                });
+                                tracing::warn!(
+                                    iteration,
+                                    error = %e,
+                                    persistent_retry = attempt,
+                                    wait_ms,
+                                    "Transient network error outlasted retry \
+                                     budget; retrying with exponential backoff \
+                                     (won't enter Idle)"
+                                );
+                                if !self.wait_for_retry_or_user(wait_ms).await {
+                                    return Err(e);
+                                }
+                                continue;
+                            }
+                            RetryAction::GiveUp => {
+                                // Non-retryable error (auth/quota/tool/etc.) —
+                                // transition to Idle and surface the error.
+                                // ADR-014: Streaming → Idle.
+                                self.transition_status(SessionStatus::Idle);
+                                return Err(e);
+                            }
+                        }
                     }
                 }
             };
@@ -1409,6 +1504,23 @@ impl AgentLoop {
         current_model: &str,
     ) -> Result<IterationResult> {
         // ── ① Debug observer hooks + resume ──
+        // ADR-048: drain any bypass-injected debug handles written by
+        // SessionManager while this loop was running (the mid-loop
+        // `EnableDebugMode` path — see `push_debug_mode_to_existing_sessions`).
+        // The channel is held at the AgentCore level because the observer
+        // slot's `set_pending_injection` is a no-op while the observer is
+        // `Production`; draining here and injecting a DevMode observer lets
+        // a debug panel opened mid-iteration take effect on the very next
+        // iteration instead of waiting for the SessionTask message loop
+        // (which is blocked inside `run()`).
+        if let Some(handles) = self.core.take_pending_debug_handles() {
+            tracing::info!(
+                session_id = ?self.session_core.session_id.as_deref(),
+                "AgentLoop: mid-loop bypass-injected debug handles → enabling DevMode observer"
+            );
+            let observer = crate::debug::DebugObserverImpl::new(handles);
+            self.core.set_debug_mode(observer);
+        }
         self.core.debug_observer.check_pending_injection();
         let debug_iter = self
             .core
@@ -1427,12 +1539,10 @@ impl AgentLoop {
         // trigger) and manual mode (where manual commands are the only way).
         self.drain_compress_actions();
 
-        // ADR-052: Drain LLM-initiated abandon/retrieve queues.
-        // These replace the old auto-compress trigger. The LLM calls
-        // context_abandon / context_retrieve tools, which push into these
-        // queues. We drain them here so the in-place modifications are
-        // visible to build_chat_request in the same iteration.
-        self.drain_abandon_queue();
+        // ADR-061 §10.2: only the retrieve queue is drained here —
+        // `context_abandon` is no longer registered, so its queue and
+        // drainer are deleted. The in-place modifications are visible to
+        // build_chat_request in the same iteration.
         self.drain_retrieve_queue();
 
         // ── ② Budget + context build ──
@@ -1441,9 +1551,9 @@ impl AgentLoop {
             .on_phase_enter(crate::debug::protocol::DebugPhase::BudgetCheck)
             .await;
         self.check_budget_and_warn()?;
-        self.trim_history_to_budget(current_model);
+        self.trim_history_to_budget(current_model).await;
         let mut chat_request = self.build_chat_request(context_builder, current_model);
-        if self.check_context_overflow_and_trim(current_model) {
+        if self.check_context_overflow_and_trim(current_model).await {
             chat_request = self.build_chat_request(context_builder, current_model);
         }
         self.core
@@ -1587,7 +1697,7 @@ impl AgentLoop {
 
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
         self.persist_and_emit_tool_results(&deduped_calls, &tool_contents);
-        self.pre_trim_for_tool_results(&tool_contents, current_model);
+        self.pre_trim_for_tool_results(&tool_contents, current_model).await;
 
         // ── ⑧.25 Context-aware tool result trimming ──
         // After pre-trim removed old history, also truncate individual
@@ -1628,6 +1738,12 @@ impl AgentLoop {
                 self.session.history.append(msg);
             }
         }
+
+        // ── ⑧.9 Clear the staged user message (ADR-060 §5.5) ──
+        // Tool results now form the request tail; later tool-loop iterations
+        // build WITHOUT Block D (the current user message stays in Block B
+        // only). The next `run_inner` with a new user input re-stages it.
+        self.pending_user_message = None;
 
         // ── ⑨ Post-execution loop detection ──
         self.post_check_loop_detection(&deduped_calls, &tool_contents, &blocked_info)?;
@@ -1709,41 +1825,9 @@ impl AgentLoop {
         did_work
     }
 
-    /// ADR-052: Drain the abandon queue, replacing tool results with placeholders.
-    ///
-    /// Called at the start of each iteration (after `drain_compress_actions`,
-    /// before `build_chat_request`). Each entry in the queue is a
-    /// `tool_call_id` that the LLM requested to abandon via the
-    /// `context_abandon` tool. The actual replacement is done in-place by
-    /// `HistoryManager::abandon_tool_result()`.
-    ///
-    /// Returns `true` if any replacements were made (caller may want to
-    /// recalibrate tokens - but this method already does it).
-    pub(crate) fn drain_abandon_queue(&mut self) -> bool {
-        let mut ids = self.abandon_queue.lock().unwrap();
-        if ids.is_empty() {
-            return false;
-        }
-        let mut did_work = false;
-        while let Some(tool_call_id) = ids.pop_front() {
-            let compressed = self.session.history.abandon_tool_result(&tool_call_id);
-            if compressed > 0 {
-                tracing::info!(tool_call_id = %tool_call_id, "context_abandon: replaced with placeholder");
-                did_work = true;
-            } else {
-                tracing::debug!(tool_call_id = %tool_call_id, "context_abandon: no matching tool result (already compressed or not found)");
-            }
-        }
-        drop(ids); // release lock before recalibrate
-        if did_work {
-            self.session.history.recalibrate_tokens();
-        }
-        did_work
-    }
-
     /// ADR-052: Drain the retrieve queue, restoring original tool result content.
     ///
-    /// Called at the start of each iteration (after `drain_abandon_queue`,
+    /// Called at the start of each iteration (after `drain_compress_actions`,
     /// before `build_chat_request`). Each entry is a `(tool_call_id,
     /// original_content)` pair that the LLM requested to retrieve via the
     /// `context_retrieve` tool. The restoration is done in-place by
@@ -3583,7 +3667,7 @@ mod tests {
         );
     }
 
-    // ── ADR-052: drain_abandon_queue / drain_retrieve_queue tests ──────
+    // ── ADR-052: drain_retrieve_queue tests ────────────────────────────
 
     /// Helper: build a minimal AgentLoop for drain tests. We use the standard
     /// `AgentLoop::new()` constructor with default config + mock provider, then
@@ -3608,105 +3692,6 @@ mod tests {
             tool_call_id: Some(tool_call_id.to_string()),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn test_drain_abandon_queue_empty_returns_false() {
-        // ADR-052 §3.3.3: empty queue returns false without recalibrate_tokens
-        let mut agent_loop = make_loop_for_drain_tests();
-        let tokens_before = agent_loop.session.history.token_count();
-
-        let did_work = agent_loop.drain_abandon_queue();
-        assert!(!did_work, "empty queue should return false");
-
-        let tokens_after = agent_loop.session.history.token_count();
-        assert_eq!(
-            tokens_before, tokens_after,
-            "empty drain should not call recalibrate_tokens (no token changes)"
-        );
-    }
-
-    #[test]
-    fn test_drain_abandon_queue_replaces_and_recalibrates() {
-        // ADR-052 §3.3.3: non-empty queue drains, calls abandon_tool_result,
-        // and recalibrate_tokens.
-        let mut agent_loop = make_loop_for_drain_tests();
-        let big = "x".repeat(5000);
-        agent_loop
-            .history_mut()
-            .append(make_tool_message_for_drain(&big, "toolu_abc"));
-        agent_loop
-            .history_mut()
-            .append(make_tool_message_for_drain(&big, "toolu_def"));
-        let tokens_before = agent_loop.session.history.token_count();
-        assert!(tokens_before > 0);
-
-        // Push two abandon requests
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_abc".to_string());
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_def".to_string());
-
-        let did_work = agent_loop.drain_abandon_queue();
-        assert!(did_work, "non-empty queue should return true");
-
-        // Both messages replaced with placeholders
-        let msgs = agent_loop.session.history.messages();
-        assert!(msgs[0].content.starts_with("[Tool result compressed."));
-        assert!(msgs[1].content.starts_with("[Tool result compressed."));
-
-        // recalibrate_tokens was called - token count should drop significantly
-        let tokens_after = agent_loop.session.history.token_count();
-        assert!(
-            tokens_after < tokens_before,
-            "recalibrate_tokens should reflect new content: before={tokens_before}, after={tokens_after}"
-        );
-
-        // Queue is now empty
-        assert!(agent_loop.abandon_queue.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_drain_abandon_queue_missing_id_returns_false_work_done() {
-        // ADR-052 §3.3.3: if all IDs in the queue are unknown, did_work=false
-        // (no recalibrate triggered).
-        let mut agent_loop = make_loop_for_drain_tests();
-        agent_loop
-            .history_mut()
-            .append(make_tool_message_for_drain("some content", "toolu_known"));
-        let tokens_before = agent_loop.session.history.token_count();
-
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_unknown_1".to_string());
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_unknown_2".to_string());
-
-        let did_work = agent_loop.drain_abandon_queue();
-        assert!(
-            !did_work,
-            "all-unknown IDs should leave did_work=false (no recalibrate)"
-        );
-
-        // Content unchanged
-        let msgs = agent_loop.session.history.messages();
-        assert_eq!(msgs[0].content, "some content");
-        let tokens_after = agent_loop.session.history.token_count();
-        assert_eq!(
-            tokens_before, tokens_after,
-            "no recalibrate should have happened"
-        );
     }
 
     #[test]
@@ -3797,21 +3782,19 @@ mod tests {
     }
 
     #[test]
-    fn test_drain_abandon_then_retrieve_round_trip() {
-        // ADR-052 §3.2.3: the abandon↔retrieve symmetry forms a closed loop.
+    fn test_drain_retrieve_queue_round_trip() {
+        // ADR-061 §10.2: the `context_abandon` tool is no longer
+        // registered, so the queue-driven abandon side of this loop is
+        // gone; the history-level `abandon_tool_result` still produces
+        // the placeholder that `context_retrieve` restores.
         let mut agent_loop = make_loop_for_drain_tests();
         let original = "Round-trip test content".repeat(50);
         agent_loop
             .history_mut()
             .append(make_tool_message_for_drain(&original, "toolu_rt"));
 
-        // Cycle 1: abandon
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_rt".to_string());
-        assert!(agent_loop.drain_abandon_queue());
+        // Cycle 1: abandon (history level)
+        assert_eq!(agent_loop.history_mut().abandon_tool_result("toolu_rt"), 1);
         assert!(agent_loop.session.history.messages()[0]
             .content
             .starts_with("[Tool result compressed."));
@@ -3826,12 +3809,7 @@ mod tests {
         assert_eq!(agent_loop.session.history.messages()[0].content, original);
 
         // Cycle 3: re-abandon (close the loop)
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_rt".to_string());
-        assert!(agent_loop.drain_abandon_queue());
+        assert_eq!(agent_loop.history_mut().abandon_tool_result("toolu_rt"), 1);
         assert!(agent_loop.session.history.messages()[0]
             .content
             .starts_with("[Tool result compressed."));

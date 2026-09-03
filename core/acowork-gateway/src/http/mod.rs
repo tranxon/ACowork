@@ -18,7 +18,7 @@ pub mod mcp_catalog_api;
 pub mod memory_api;
 pub mod models_api;
 pub mod nodes_api;
-pub mod pm_api;
+pub mod pm_proxy;
 pub mod publish_api;
 pub mod routes;
 pub mod server;

@@ -32,7 +32,9 @@
 
 ### 2.1 现状：统一提示词的问题
 
-`COMPACTION_SYSTEM_PROMPT`（`prompt.rs:18`，~950 字符）定义了输出格式（`<summary>` / `<entities>` / `<triples>` 三块）、语言规则与硬性约束。它适用于**通用**摘要，但无法回答：
+`COMPACTION_SYSTEM_PROMPT`（`prompt.rs:18`，~850 字符）定义了输出格式（`<summary>` + `<user_intent>` 两块）、语言规则与硬性约束。它适用于**通用**摘要，但无法回答：
+
+> **2026-XX-XX 修订**：原 `<triples>` / `<entities>` 块已在 M3 改造中撤销（详见 ADR-057 §0.2 triples-removed 决策说明）；本文档历史描述保留作决策记录。
 
 - 软件工程师 agent：摘要必须保留 `core/acowork-runtime/src/...` 这样的文件路径与函数名，否则下次会话无法续工。
 - 项目管理 agent：摘要必须保留决策人、截止时间、风险项。

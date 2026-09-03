@@ -247,7 +247,7 @@ impl ConsolidationScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeNode, KnowledgeSubType};
+    use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeNode, KnowledgeSubType, PrivacyLevel};
 
     fn test_store() -> Arc<Mutex<GrafeoStore>> {
         Arc::new(Mutex::new(GrafeoStore::new_in_memory().unwrap()))
@@ -351,6 +351,8 @@ mod tests {
                 created_at: old_time(),
                 updated_at: old_time(),
                 metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
             };
             s.store_knowledge(&node).unwrap();
         }
@@ -395,6 +397,8 @@ mod tests {
                     created_at: old_time(),
                     updated_at: old_time(),
                     metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
                 };
                 s.store_knowledge(&node).unwrap();
             }
@@ -463,6 +467,8 @@ mod tests {
                     created_at: old_time(),
                     updated_at: old_time(),
                     metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
                 };
                 s.store_knowledge(&node).unwrap();
             }

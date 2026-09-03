@@ -131,8 +131,12 @@ fn extract_zip_package(zip_path: &Path) -> Result<PathBuf> {
     Ok(extract_dir)
 }
 
-/// Load and parse manifest.toml from package directory
-fn load_manifest(package_dir: &Path) -> Result<AgentManifest> {
+/// Load and parse manifest.toml from package directory.
+///
+/// `pub(crate)` so the L2 reload endpoint (`http::prompts`) can re-read
+/// the manifest to resolve the skill mode when rebuilding the main-dialog
+/// system prompt (ADR-063 §3.7.6 hot-reload).
+pub(crate) fn load_manifest(package_dir: &Path) -> Result<AgentManifest> {
     let manifest_path = package_dir.join("manifest.toml");
 
     if !manifest_path.exists() {

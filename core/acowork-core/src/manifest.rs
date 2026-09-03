@@ -332,6 +332,10 @@ pub struct MemoryConfig {
     /// Retention period in days
     #[serde(default)]
     pub retention_days: Option<u32>,
+    /// Memory quality overrides (ADR-062 D2), parsed from the
+    /// `[memory.quality]` manifest section.
+    #[serde(default)]
+    pub quality: Option<ManifestMemoryQuality>,
 }
 
 impl Default for MemoryConfig {
@@ -339,12 +343,120 @@ impl Default for MemoryConfig {
         Self {
             enabled: default_memory_enabled(),
             retention_days: None,
+            quality: None,
         }
     }
 }
 
 fn default_memory_enabled() -> bool {
     true
+}
+
+/// Optional memory-quality overrides from the `.agent` manifest
+/// `[memory.quality]` section (ADR-062 D2).
+///
+/// Every field is optional: a present field overrides the matching default in
+/// `acowork_memory::quality::MemoryQualityConfig`; an absent field keeps the
+/// default ("zero-config = current behaviour"). This type lives in
+/// `acowork-core` (which cannot depend on `acowork-memory`) and is converted to
+/// the memory-layer config at the runtime boundary (see
+/// `From<ManifestMemoryQuality> for MemoryQualityConfig`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestMemoryQuality {
+    /// Enable per-turn auto-injection of retrieved memories (default: false,
+    /// per-agent opt-in). When enabled, the first user message of each
+    /// session triggers one `retrieve_and_inject` (ADR-060 §6.3). Rationale
+    /// for OFF by default: the LLM already recalls memories via the explicit
+    /// `memory_recall` tool on the same user-message query, so auto-inject
+    /// would duplicate that context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_inject_enabled: Option<bool>,
+    /// Exclude Dormant nodes from retrieval results (default: true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_dormant: Option<bool>,
+    /// Minimum RRF-domain score for retrieval results (default: 0.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_score: Option<f32>,
+    /// Graph-expansion parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_expand: Option<ManifestGraphExpandQuality>,
+    /// Edge-weight formula parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_weight: Option<ManifestEdgeWeightQuality>,
+    /// PageRank boost weight (default: 0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagerank_weight: Option<f64>,
+    /// Dedup similarity thresholds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup: Option<ManifestDedupQuality>,
+    /// Consolidation confidence gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consolidation: Option<ManifestConsolidationQuality>,
+    /// Enable keyword participation in retrieval (default: false; benchmark
+    /// gated per ADR-062 D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyword_index: Option<bool>,
+}
+
+/// Manifest mirror of `acowork_memory::quality::GraphExpandQuality`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestGraphExpandQuality {
+    /// Early-stop score thresholds per hop (default: [0.1, 0.15, 0.2]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early_stop_thresholds: Option<Vec<f32>>,
+    /// Minimum edge weight for graph expansion (default: 0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_edge_weight: Option<f32>,
+    /// Decay factor applied per hop (default: 0.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decay_per_hop: Option<f64>,
+}
+
+/// Manifest mirror of `acowork_memory::quality::EdgeWeightQuality`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestEdgeWeightQuality {
+    /// Recency decay constant per day (default: 0.01).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lambda: Option<f64>,
+    /// Maximum edge strength (default: 0.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap: Option<f32>,
+}
+
+/// Manifest mirror of `acowork_memory::quality::DedupQuality`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestDedupQuality {
+    /// Knowledge dedup cosine-similarity threshold (default: 0.95).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_threshold: Option<f32>,
+    /// Procedural dedup cosine-similarity threshold (default: 0.90).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_threshold: Option<f32>,
+}
+
+/// Manifest mirror of `acowork_memory::quality::ConsolidationQuality`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestConsolidationQuality {
+    /// Confidence above which instant extraction creates a node as Active
+    /// (default: 0.85).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_active_threshold: Option<f32>,
+    /// Confidence above which offline consolidation upgrades Pending → Active
+    /// (default: 0.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_upgrade_threshold: Option<f32>,
+    /// Confidence above which experience generalization upgrades Pending →
+    /// Active (ProceduralNode path, default: 0.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generalization_active_threshold: Option<f32>,
+    /// Confidence below which offline consolidation marks a node Dormant
+    /// (default: 0.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dormant_confidence: Option<f32>,
+    /// Minimum age (hours) before a Pending node is eligible for offline
+    /// consolidation (default: 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_pending_age_hours: Option<u64>,
 }
 
 /// Tool declaration in manifest

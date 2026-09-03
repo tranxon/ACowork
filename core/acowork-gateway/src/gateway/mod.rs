@@ -581,43 +581,70 @@ impl Gateway {
         let http_config = self.config.http.clone();
         let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
 
-        // ADR-061: 构造 PM 项目管理服务（目录树存储 + 索引重建）。
+        // ADR-064: PM 已从 Gateway 解耦为独立进程 `acowork-pm`。
         //
-        // 失败**非致命**：Gateway 继续运行，`/api/pm/*` 路由仅在 Some 时挂载
-        // （server.rs 通过 `gateway_state.pm_service` 读取）。PM 数据默认位于
-        // `{data_dir}/acowork-pm`（`prepare_pm_data_dir` 已在 config 解析时处理）。
+        // Gateway 不再内嵌 PM（删除 `acowork-pm` 依赖），改为：
+        //   1. `pm_supervisor` spawn 独立进程并轮询 `/health`（失败指数退避重启）；
+        //   2. `/api/pm/*` 由 `http::pm_proxy` 反向代理到 `127.0.0.1:{pm_port}`。
         //
-        // 注入 Gateway 侧 Agent 目录（§9.1）：`pm_create_task` 指派 assignee
-        // 时校验其存在于 `installed_agents`。共享 state 的 read 锁只在校验瞬间
-        // 持有，不跨 await 点，无死锁风险。
-        let agent_dir: Arc<dyn acowork_pm::AgentDirectory> = Arc::new(
-            crate::http::pm_api::GatewayAgentDirectory::new(shared_state.clone()),
-        );
-        match acowork_pm::PmService::with_agent_directory(self.config.pm.clone(), agent_dir).await {
-            Ok(svc) => {
-                let arc = Arc::new(svc);
-                let pm_mcp_url = if self.config.pm.auto_inject_mcp {
-                    Some(format!(
-                        "http://{}:{}{}",
-                        shared_state.read().await.advertise_host.clone(),
-                        http_config.port,
-                        self.config.pm.mcp_http_path
-                    ))
-                } else {
-                    None
-                };
-                let mut gw = shared_state.write().await;
-                gw.pm_service = Some(arc);
-                gw.pm_mcp_url = pm_mcp_url.clone();
-                tracing::info!(
-                    data_dir = %self.config.pm.data_dir.display(),
-                    pm_mcp_url = pm_mcp_url.as_deref().unwrap_or("<disabled>"),
-                    "PM service started (ADR-061)"
-                );
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "PM service failed to start — /api/pm/* not mounted");
-            }
+        // 失败**非致命**：PM 无法启动时 Gateway 继续运行，`/api/pm/*` 返回 503。
+        // PM 数据目录独立为 `$HOME/.acowork/acowork-pm/`（与 gateway/node 平级）。
+        if self.config.pm.enabled {
+            let pm_bin = std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    exe.parent().map(|p| {
+                        let bin_name = if cfg!(windows) {
+                            "acowork-pm.exe"
+                        } else {
+                            "acowork-pm"
+                        };
+                        p.join(bin_name)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let bin_name = if cfg!(windows) {
+                        "acowork-pm.exe"
+                    } else {
+                        "acowork-pm"
+                    };
+                    std::path::PathBuf::from(bin_name)
+                });
+            let supervisor_cfg = crate::lifecycle::pm_supervisor::PmSupervisorConfig {
+                pm_bin,
+                port: self.config.pm.port,
+                port_file: data_dir_path.join("pm.port"),
+                log_dir: data_dir_path.join("logs"),
+                gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
+                // ADR-064 Phase 3: PM 经 Gateway HTTP 查询 `/api/agents`（AgentDirectory）。
+                gateway_url: Some(format!("http://127.0.0.1:{}", http_config.port)),
+            };
+            crate::lifecycle::pm_supervisor::start_pm_supervisor(
+                supervisor_cfg,
+                shared_state.clone(),
+            );
+            tracing::info!(
+                port = self.config.pm.port,
+                enabled = true,
+                "PM supervisor started (ADR-064)"
+            );
+        } else {
+            tracing::info!("PM supervisor disabled (pm.enabled=false)");
+        }
+
+        // pm_mcp_url: MCP 端点经 Gateway 反代暴露（Desktop 走 /api/pm/mcp）。
+        {
+            let mut gw = shared_state.write().await;
+            gw.pm_mcp_url = if self.config.pm.auto_inject_mcp {
+                Some(format!(
+                    "http://{}:{}{}",
+                    gw.advertise_host.clone(),
+                    http_config.port,
+                    self.config.pm.mcp_http_path
+                ))
+            } else {
+                None
+            };
         }
 
         // Rebuild resource cache from MCP catalog at startup.
@@ -797,6 +824,14 @@ impl Gateway {
             // Clone before the move-closure; the original stays
             // available for the HTTP server below.
             let operation_store_for_dispatch = operation_store_shared.clone();
+            // ADR-059 §7.2 replay guard: shared across every dispatch
+            // message (a per-message guard would never see the live
+            // online signal that the stale replay check needs).
+            let node_replay_guard = Arc::new(crate::mqtt::dispatch::NodeReplayGuard::default());
+            // Clone before the move-closure: the callback is `move` and
+            // would otherwise consume the original, which must stay
+            // available for `set_replay_guard` after connect.
+            let node_replay_guard_for_cb = node_replay_guard.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
@@ -811,6 +846,7 @@ impl Gateway {
                 let node_tokens_for_cb = node_tokens_for_dispatch.clone();
                 let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
+                let node_replay_guard_for_cb = node_replay_guard_for_cb.clone();
                  tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
@@ -831,6 +867,7 @@ impl Gateway {
                         auth_enabled: auth_enabled_for_dispatch,
                         bootstrap_registry: Some(bootstrap_registry_for_cb),
                         operation_store: Some(operation_store_for_cb),
+                        node_replay_guard: node_replay_guard_for_cb,
                     };
                     crate::mqtt::dispatch::handle_message(&topic, &payload, &dispatch_ctx);
                 });
@@ -861,6 +898,11 @@ impl Gateway {
                 Ok(c) => {
                     tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
                     let client = Arc::new(c.clone());
+                    // ADR-059 §7.2: attach the replay guard so the poll
+                    // task stamps gateway (re)connections — dispatch uses
+                    // the stamp to suppress stale retained replays after
+                    // sleep/wake reconnects.
+                    c.set_replay_guard(node_replay_guard.clone());
                     // Backfill the dispatch slot so the status re-publish
                     // path can call `publish_envelope`. Until now the
                     // slot was `None` and dispatch silently dropped
@@ -1363,7 +1405,7 @@ mod tests {
             advertise_host: None,
             node_proxy_port: None,
             node_lsp_relay_port: None,
-            pm: acowork_pm::PmConfig::default(),
+            pm: crate::config::PmConfig::default(),
         }
     }
 

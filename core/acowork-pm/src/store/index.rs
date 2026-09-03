@@ -79,10 +79,10 @@ impl TaskIndex {
         if let Some(set) = self.by_project.get_mut(&entry.project_id) {
             set.remove(task_id);
         }
-        if let Some(assignee) = &entry.assignee {
-            if let Some(set) = self.by_assignee.get_mut(assignee) {
-                set.remove(task_id);
-            }
+        if let Some(assignee) = &entry.assignee
+            && let Some(set) = self.by_assignee.get_mut(assignee)
+        {
+            set.remove(task_id);
         }
         if let Some(set) = self.by_status.get_mut(&entry.status) {
             set.remove(task_id);

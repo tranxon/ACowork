@@ -428,7 +428,10 @@ impl SessionCore {
         let content = sl.accumulated_content.clone();
         let role = sl.role.clone();
         let message_id = sl.message_id.clone();
-        tracing::info!(
+        // LOG-001: fires per streaming line flush (multiple per turn) and
+        // only mirrors an operation that already emits RecordComplete with
+        // the same role/content — no debugging value. Demoted to DEBUG.
+        tracing::debug!(
             role = %role,
             content_len = content.len(),
             has_conversation = conversation.is_some(),
@@ -450,7 +453,9 @@ impl SessionCore {
             // record_complete all share one stable id.
             conv.append_message_with_id(&role, &content, metadata, Some(message_id.clone()));
             self.streaming_flush_count.fetch_add(1, Ordering::Relaxed);
-            tracing::info!(
+            // LOG-001: same rationale as the "flushing line" log above —
+            // fires per flush, value carried by RecordComplete. DEBUG.
+            tracing::debug!(
                 role = %role,
                 content_len = content.len(),
                 "ADR-022 flush_streaming_line: wrote to JSONL"

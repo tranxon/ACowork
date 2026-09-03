@@ -8,6 +8,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
     middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use axum::extract::Request;
@@ -113,7 +114,10 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
     response
 }
 
-/// Build the HTTP router with all routes
+/// Build the HTTP router with all routes.
+///
+/// ADR-064: PM 不再内嵌（`nest_service` 已删除），`/api/pm/*` 由
+/// [`crate::http::pm_proxy::pm_proxy_routes`] 反向代理到独立进程。
 pub fn build_router(state: AppState) -> Router {
     // CORS — permissive for all deployments.
     //
@@ -165,9 +169,13 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::nodes_api::nodes_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
+        .merge(crate::embedding_providers::embedding_providers_routes())
         .merge(crate::http::fs_browse::fs_routes())
         .merge(crate::http::global_resources_api::global_resources_routes())
         .merge(crate::http::proxy::proxy_routes())
+        // ADR-064: PM 独立进程反向代理（`/api/pm/*` → `127.0.0.1:{pm_port}/*`）。
+        // PM 未就绪时返回 503（带 Retry-After），Desktop `with503Retry` 退避重试。
+        .merge(crate::http::pm_proxy::pm_proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
         .with_state(state)
@@ -183,26 +191,6 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
-}
-
-/// Build the HTTP router with all routes, merging the PM service router
-/// (ADR-061) under the public `/api/pm/*` prefix.
-///
-/// `pm_service` is the shared PM service handle constructed by
-/// `Gateway::run`; it is `None` until PM has started (or when it failed
-/// to start — PM is non-fatal, the Gateway keeps running).
-pub fn build_router_with_pm(
-    state: AppState,
-    pm_service: Option<Arc<acowork_pm::PmService>>,
-) -> Router {
-    let router = build_router(state);
-    match pm_service {
-        Some(pm) => router.nest_service("/api/pm", crate::http::pm_api::pm_routes(pm)),
-        None => {
-            tracing::warn!("PM service handle is None — /api/pm/* routes not mounted");
-            router
-        }
-    }
 }
 
 // ── Health check (liveness-only) ─────────────────────────────────────
@@ -356,7 +344,7 @@ impl OperationAck {
 pub async fn check_expected_version(
     state: &AppState,
     expected_version: Option<u64>,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<(), ApiError> {
     let Some(expected) = expected_version else {
         // No precondition — the mutation proceeds optimistically.
         return Ok(());
@@ -387,108 +375,116 @@ pub struct ApiError {
     /// unaffected); present for `dependency_not_ready` /
     /// `resource_version_conflict` etc. so clients can retry without
     /// parsing human-readable text.
+    ///
+    /// Boxed so the `Err` variant of every handler signature stays small:
+    /// `StructuredErrorBody` carries ~10 `Option<...>` fields and is
+    /// ~232 bytes inline. Boxing shrinks `ApiError` from ~248 B to ~40 B,
+    /// which keeps `cargo clippy -D warnings` (`result_large_err`) quiet
+    /// on every `Result<Json<X>, ApiError>` handler signature. Wire
+    /// format is identical — `Box<T>: Serialize` derefs to `T` for
+    /// `serde_json`, and `#[serde(skip_serializing_if = "Option::is_none")]`
+    /// still hides absent values.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub structured: Option<StructuredErrorBody>,
+    pub structured: Option<Box<StructuredErrorBody>>,
+}
+
+/// Handler errors return [`ApiError`] directly (no `(StatusCode,
+/// Json<ApiError>)` tuple wrapper). [`ApiError::code`] carries the
+/// intended HTTP status as a u16, which this impl decodes back into
+/// an `http::StatusCode` for axum's response pipeline.
+///
+/// Keeping the `Err` variant small (≈ 80 bytes: String + u16 +
+/// Option<StructuredErrorBody>) instead of a ~256-byte tuple
+/// `(StatusCode, Json<ApiError>)` satisfies `cargo clippy -D warnings`
+/// (`result_large_err`) without forcing every handler to thread a
+/// `Box<...>` through `?`.
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        // `code` is the canonical u16 representation of the intended
+        // status. Defensively fall back to 500 if a future helper ever
+        // forgets to populate it, so the client still gets a valid
+        // HTTP response rather than axum panicking on a status-code
+        // conversion.
+        let status = StatusCode::from_u16(self.code)
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(self)).into_response()
+    }
 }
 
 impl ApiError {
-    pub fn not_found(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::NOT_FOUND,
-            Json(Self {
-                error: msg.to_string(),
-                code: 404,
-                structured: None,
-            }),
-        )
+    pub fn not_found(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 404,
+            structured: None,
+        }
     }
 
-    pub fn bad_request(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(Self {
-                error: msg.to_string(),
-                code: 400,
-                structured: None,
-            }),
-        )
+    pub fn bad_request(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 400,
+            structured: None,
+        }
     }
 
     /// ADR-056: unprocessable entity — the request is well-formed but the
     /// referenced entity does not exist (e.g. `default_compact_model`
     /// pointing at an unknown provider_id / model_id). Mirrors the 422
     /// contract in ADR-056 §4.1.
-    pub fn unprocessable_entity(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(Self {
-                error: msg.to_string(),
-                code: 422,
-                structured: None,
-            }),
-        )
+    pub fn unprocessable_entity(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 422,
+            structured: None,
+        }
     }
 
-    pub fn internal(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(Self {
-                error: msg.to_string(),
-                code: 500,
-                structured: None,
-            }),
-        )
+    pub fn internal(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 500,
+            structured: None,
+        }
     }
 
-    pub fn unauthorized(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(Self {
-                error: msg.to_string(),
-                code: 401,
-                structured: None,
-            }),
-        )
+    pub fn unauthorized(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 401,
+            structured: None,
+        }
     }
 
-    pub fn service_unavailable(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(Self {
-                error: msg.to_string(),
-                code: 503,
-                structured: None,
-            }),
-        )
+    pub fn service_unavailable(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 503,
+            structured: None,
+        }
     }
 
     /// ADR-059 §2.3: conflict — the request depends on a resource that
     /// is not ready yet (e.g. installing onto a Node whose control
     /// plane has not announced `NodeReady`). The client should retry
     /// once `GET /api/bootstrap` reports `phase = READY`.
-    pub fn conflict(msg: &str) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::CONFLICT,
-            Json(Self {
-                error: msg.to_string(),
-                code: 409,
-                structured: None,
-            }),
-        )
+    pub fn conflict(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 409,
+            structured: None,
+        }
     }
 
     /// ADR-059 §6.3: structured conflict — HTTP 409 whose body carries
     /// a protocol-level [`StructuredErrorBody`] (e.g.
     /// `resource_version_conflict` with both version numbers).
-    pub fn conflict_structured(body: StructuredErrorBody) -> (StatusCode, Json<Self>) {
-        (
-            StatusCode::CONFLICT,
-            Json(Self {
-                error: format!("{:?}", body.code),
-                code: 409,
-                structured: Some(body),
-            }),
-        )
+    pub fn conflict_structured(body: StructuredErrorBody) -> Self {
+        Self {
+            error: format!("{:?}", body.code),
+            code: 409,
+            structured: Some(Box::new(body)),
+        }
     }
 }
 

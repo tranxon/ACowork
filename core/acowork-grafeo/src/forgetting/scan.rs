@@ -29,7 +29,9 @@ use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::types::{NodeStatus, labels};
 
-use super::decay::{DecayConfig, compute_decay_score};
+use acowork_memory::DecayConfig;
+
+use super::decay::compute_decay_score;
 
 /// Labels that participate in decay scanning.
 /// Autobiographical nodes are skipped (always Active).
@@ -75,10 +77,10 @@ impl GrafeoStore {
                         .and_then(|v| v.as_int64())
                         .unwrap_or(0) as u32;
 
-                    let hours_since = last_accessed
+                    let days_since = last_accessed
                         .and_then(|ts| {
                             DateTime::from_timestamp_micros(ts.as_micros())
-                                .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                                .map(|dt| (now - dt).num_seconds() as f64 / 86400.0)
                         })
                         .unwrap_or_else(|| {
                             // Fallback to created_at if last_accessed is missing.
@@ -87,12 +89,12 @@ impl GrafeoStore {
                                 .and_then(|v| v.as_timestamp())
                                 .and_then(|ts| {
                                     DateTime::from_timestamp_micros(ts.as_micros())
-                                        .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                                        .map(|dt| (now - dt).num_seconds() as f64 / 86400.0)
                                 })
                                 .unwrap_or(0.0)
                         });
 
-                    let score = compute_decay_score(config, importance, hours_since, access_count);
+                    let score = compute_decay_score(config, importance, days_since, access_count);
 
                     if score < config.dormant_threshold {
                         self.transition_to_dormant(node_id)?;
@@ -141,10 +143,10 @@ impl GrafeoStore {
                         .and_then(|v| v.as_int64())
                         .unwrap_or(0) as u32;
 
-                    let hours_since = last_accessed
+                    let days_since = last_accessed
                         .and_then(|ts| {
                             DateTime::from_timestamp_micros(ts.as_micros())
-                                .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                                .map(|dt| (now - dt).num_seconds() as f64 / 86400.0)
                         })
                         .unwrap_or_else(|| {
                             node.properties
@@ -152,12 +154,12 @@ impl GrafeoStore {
                                 .and_then(|v| v.as_timestamp())
                                 .and_then(|ts| {
                                     DateTime::from_timestamp_micros(ts.as_micros())
-                                        .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                                        .map(|dt| (now - dt).num_seconds() as f64 / 86400.0)
                                 })
                                 .unwrap_or(0.0)
                         });
 
-                    let score = compute_decay_score(config, importance, hours_since, access_count);
+                    let score = compute_decay_score(config, importance, days_since, access_count);
 
                     if score < config.dormant_threshold {
                         candidates.push((node_id, score));
@@ -246,7 +248,7 @@ mod tests {
         store: &GrafeoStore,
         label: &str,
         importance: f64,
-        hours_old: f64,
+        days_old: f64,
         access_count: i64,
     ) -> NodeId {
         let now = SystemTime::now()
@@ -254,7 +256,7 @@ mod tests {
             .unwrap_or_default()
             .as_micros() as i64;
         let created_ts = grafeo_common::types::Timestamp::from_micros(
-            now - (hours_old * 3600.0 * 1_000_000.0) as i64,
+            now - (days_old * 86400.0 * 1_000_000.0) as i64,
         );
 
         store
@@ -277,7 +279,7 @@ mod tests {
         let config = DecayConfig::default();
 
         // Create a very old node with low importance -> should become Dormant.
-        let _old = create_test_node(&store, labels::KNOWLEDGE, 0.2, 24.0 * 60.0, 0);
+        let _old = create_test_node(&store, labels::KNOWLEDGE, 0.2, 60.0, 0);
         // Create a fresh node with high importance -> should stay Active.
         let _fresh = create_test_node(&store, labels::KNOWLEDGE, 0.9, 0.0, 0);
 
@@ -310,7 +312,7 @@ mod tests {
         let store = test_store();
         let config = DecayConfig::default();
 
-        let _old = create_test_node(&store, labels::KNOWLEDGE, 0.2, 24.0 * 60.0, 0);
+        let _old = create_test_node(&store, labels::KNOWLEDGE, 0.2, 60.0, 0);
         let _fresh = create_test_node(&store, labels::KNOWLEDGE, 0.9, 0.0, 0);
 
         let candidates = store.get_dormant_candidates(&config).unwrap();
@@ -401,11 +403,11 @@ mod tests {
         let config = DecayConfig::default();
 
         // Create a node and manually transition it to Dormant.
-        let n1 = create_test_node(&store, labels::KNOWLEDGE, 0.2, 24.0 * 60.0, 0);
+        let n1 = create_test_node(&store, labels::KNOWLEDGE, 0.2, 60.0, 0);
         store.transition_to_dormant(n1).unwrap();
 
         // Create another old, low-importance node that is still Active.
-        let n2 = create_test_node(&store, labels::KNOWLEDGE, 0.2, 24.0 * 60.0, 0);
+        let n2 = create_test_node(&store, labels::KNOWLEDGE, 0.2, 60.0, 0);
 
         // Run scan — should only transition n2 (Active → Dormant), skip n1 (already Dormant).
         let count = store.run_decay_scan(&config).unwrap();
@@ -441,7 +443,7 @@ mod tests {
         let store = test_store();
 
         // Create a node that would go Dormant.
-        let node_id = create_test_node(&store, labels::KNOWLEDGE, 0.4, 24.0 * 100.0, 0);
+        let node_id = create_test_node(&store, labels::KNOWLEDGE, 0.4, 100.0, 0);
 
         let config = DecayConfig::default();
         let count = store.run_decay_scan(&config).unwrap();

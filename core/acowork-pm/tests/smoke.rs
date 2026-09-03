@@ -32,8 +32,10 @@ fn config_projects_dir_is_under_data_dir() {
 #[tokio::test]
 async fn store_constructs_with_tempdir() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut cfg = PmConfig::default();
-    cfg.data_dir = tmp.path().to_path_buf();
+    let cfg = PmConfig {
+        data_dir: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
 
     let store = acowork_pm::TreePmStore::new(cfg)
         .await

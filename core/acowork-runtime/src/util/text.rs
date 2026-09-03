@@ -58,6 +58,47 @@ pub fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
     &input[..end]
 }
 
+/// Return the largest byte index `<= at` that lies on a `is_char_boundary`,
+/// then return the substring starting there.
+///
+/// Used by head+tail truncation: we want the **last** `tail_bytes` bytes, so
+/// we compute `start = len - tail_bytes` and slice from there — but if that
+/// byte lands in the middle of a multi-byte UTF-8 sequence (CJK 3-byte char,
+/// emoji 4-byte char), `&input[start..]` panics with
+/// `byte index N is not a char boundary`. Walking **down** to the previous
+/// char boundary is the safe fix.
+///
+/// Behaviour:
+/// - `at >= input.len()` → `input.len()` (whole string)
+/// - `at == 0` → `0`
+/// - `at` already on a boundary → `at`
+/// - Otherwise → nearest `< at` char boundary (never panics)
+///
+/// Does not allocate.
+pub fn tail_slice_from(input: &str, at: usize) -> &str {
+    let total = input.len();
+    if at > total {
+        // 防御：调用方传了超过 len() 的 byte index，fallback 返回原文
+        // （不应该 panic）
+        return input;
+    }
+    if at == total {
+        // 从 byte total 开始到末尾 → 空（与 `&input[total..]` 等价且安全）
+        return "";
+    }
+    if at == 0 {
+        return "";
+    }
+    let mut start = at;
+    if input.is_char_boundary(start) {
+        return &input[start..];
+    }
+    while start > 0 && !input.is_char_boundary(start) {
+        start -= 1;
+    }
+    &input[start..]
+}
+
 /// 字符安全的预览视图，专为 `tracing` field 设计。
 ///
 /// 通过 `Display` 实现，按字符（不是字节）截断，附加 `…(truncated, N chars)`
@@ -232,10 +273,70 @@ mod tests {
         assert_eq!(truncate_utf8(s, 2), "");
         assert_eq!(truncate_utf8(s, 1), "");
         // 混合：CJK 3 字节 + ASCII 1 字节
-        let mixed = "中a"; // 3 + 1 = 4 字节
+        let mixed = "中a"; // 3 + 1 = 4 ���节
         assert_eq!(truncate_utf8(mixed, 3), "中");
         assert_eq!(truncate_utf8(mixed, 2), "");
         assert_eq!(truncate_utf8(mixed, 1), "");
+    }
+
+    // ── tail_slice_from ───────────────────────────────────────────
+
+    #[test]
+    fn tail_slice_from_ascii_at_boundary() {
+        let s = "hello world"; // 11 bytes, all ASCII
+        // at == 0 → empty
+        assert_eq!(tail_slice_from(s, 0), "");
+        // at == 5 (start of " world") → " world" (with leading space)
+        assert_eq!(tail_slice_from(s, 5), " world");
+        // at == 6 (start of "world") → "world" (no leading space)
+        assert_eq!(tail_slice_from(s, 6), "world");
+        // at == len → empty (nothing from end of string onward)
+        assert_eq!(tail_slice_from(s, 11), "");
+    }
+
+    #[test]
+    fn tail_slice_from_at_past_end_returns_whole() {
+        // 保护：at > input.len() 不应 panic
+        let s = "abc";
+        assert_eq!(tail_slice_from(s, 100), "abc");
+    }
+
+    #[test]
+    fn tail_slice_from_cjk_floors_to_prev_boundary() {
+        // "中文abc" — 9 bytes
+        // byte layout: 0..3 中, 3..6 文, 6..7 a, 7..8 b, 8..9 c
+        let s = "中文abc";
+        // at == 8 (mid-char: 'b' is 1 byte, but byte 8 is mid 'b'? no — byte 7..8 is 'b')
+        // at == 7 is exact boundary (start of 'b')
+        assert_eq!(tail_slice_from(s, 7), "bc");
+        // at == 5 落在 '文' 中间 → 回退到 3 (start of 文) → "文abc"
+        assert_eq!(tail_slice_from(s, 5), "文abc");
+        // at == 4 落在 '文' 中间 → 回退到 3 → "文abc"
+        assert_eq!(tail_slice_from(s, 4), "文abc");
+        // at == 2 落在 '中' 中间 → 回退到 0 → "中文abc"
+        assert_eq!(tail_slice_from(s, 2), "中文abc");
+    }
+
+    #[test]
+    fn tail_slice_from_emoji_4byte_safe() {
+        // "😀😁😂" — 3 emojis × 4 bytes = 12 bytes
+        // byte layout: 0..4 😀, 4..8 😁, 8..12 😂
+        let s = "😀😁😂";
+        // at == 8 (exact boundary, start of 😂) → "😂"
+        assert_eq!(tail_slice_from(s, 8), "😂");
+        // at == 10 落在 😂 中间 → 回退到 8 → "😂"
+        assert_eq!(tail_slice_from(s, 10), "😂");
+        // at == 5 落在 😁 中间 → 回退到 4 → "😁😂"
+        assert_eq!(tail_slice_from(s, 5), "😁😂");
+    }
+
+    #[test]
+    fn tail_slice_from_does_not_panic_on_mid_multibyte() {
+        // 这个调用如果用 `&s[..at]` 会 panic（byte index N is not a char boundary）
+        // 是 head+tail 截断的核心 panic 防御
+        let s = "中文abc";
+        let _ = tail_slice_from(s, 4);
+        let _ = tail_slice_from(s, 1);
     }
 
     // ── Preview ───────────────────────────────────────────────────
@@ -270,8 +371,14 @@ mod tests {
         let p = Preview::new("中文测试", 2);
         assert_eq!(format!("{p:?}"), format!("{p}"));
         let out = format!("{p:?}");
-        assert!(out.starts_with("中文"), "Debug must render preview text, got: {out}");
-        assert!(!out.contains("Preview {"), "Debug must not leak internal struct, got: {out}");
+        assert!(
+            out.starts_with("中文"),
+            "Debug must render preview text, got: {out}"
+        );
+        assert!(
+            !out.contains("Preview {"),
+            "Debug must not leak internal struct, got: {out}"
+        );
     }
 
     #[test]

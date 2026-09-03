@@ -41,7 +41,6 @@ pub mod error;
 pub mod fs_browse;
 pub mod identity;
 pub mod package;
-pub mod power;
 pub mod process;
 pub mod proxy;
 pub mod service;

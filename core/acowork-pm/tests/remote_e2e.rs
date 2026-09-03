@@ -43,9 +43,11 @@ impl AgentDirectory for WhitelistDir {
 /// 返回 (公开 base URL, tempdir 句柄)。MCP 端点 = `{base}/mcp`。
 async fn start_remote_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let mut cfg = PmConfig::default();
-    cfg.data_dir = tmp.path().to_path_buf();
-    cfg.index_rebuild_on_start = false;
+    let cfg = PmConfig {
+        data_dir: tmp.path().to_path_buf(),
+        index_rebuild_on_start: false,
+        ..Default::default()
+    };
 
     let agent_dir: Arc<dyn AgentDirectory> =
         Arc::new(WhitelistDir(vec!["agent-remote".to_string()]));

@@ -20,6 +20,9 @@ impl GrafeoStore {
     ///
     /// These are candidates for the offline consolidation pipeline.
     pub fn get_unconsolidated_episodes(&self, limit: usize) -> Result<Vec<crate::types::Episode>> {
+        // Clamp to the GQL int64 range — a raw usize::MAX literal is rejected
+        // by the engine with a syntax error.
+        let limit = limit.min(i64::MAX as usize);
         let session = self.db.session();
         // Note: GQL ORDER BY / WHERE returns bare Int64 IDs instead of full node maps
         // in the current grafeo-engine version. Fetch all and filter/sort in Rust.

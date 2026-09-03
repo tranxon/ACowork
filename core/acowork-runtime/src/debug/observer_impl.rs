@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use acowork_core::providers::traits::ChatMessage;
+use acowork_core::providers::traits::{ChatMessage, MessageRole};
 use tokio::sync::Notify;
 
 use super::DebugHandles;
@@ -28,6 +28,38 @@ use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
 use crate::util::text::TextPreview;
+
+/// ADR-060 v2: extract the latest `todo_write` tool result content from the
+/// request messages.
+///
+/// Replaces the removed `ContextBuilder::todo_context()` getter. Todo state
+/// lives in Block B's real `todo_write` tool results; the debug panel
+/// surfaces it by scanning backwards through messages. The section key
+/// (`"todo_context"`) is preserved so the UI client contract is unchanged.
+fn latest_todo_write_content(messages: &[ChatMessage]) -> Option<String> {
+    // Reverse-scan: find the LATEST Assistant with a todo_write tool_call.
+    let todo_call_id = messages.iter().rev().find_map(|m| {
+        if m.role != MessageRole::Assistant {
+            return None;
+        }
+        m.tool_calls.as_ref().and_then(|tcs| {
+            tcs.iter()
+                .find(|tc| tc.function.name == "todo_write")
+                .map(|tc| tc.id.clone())
+        })
+    })?;
+    // Match the Tool result (Tool normally follows the Assistant; scan
+    // backwards from the end to find it robustly).
+    messages.iter().rev().find_map(|m| {
+        if m.role == MessageRole::Tool
+            && m.tool_call_id.as_deref() == Some(todo_call_id.as_str())
+        {
+            Some(m.content.clone())
+        } else {
+            None
+        }
+    })
+}
 
 // ── Debug Observer Implementation ─────────────────────────────────────
 
@@ -383,14 +415,18 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             ));
         }
 
+        // 2.5c Abstention guidance (G9) — same slot as the ambiguous hint.
+        if let Some(prompt) = req.context_builder.abstention_prompt() {
+            named.push(NamedSection::new(
+                "abstention_prompt",
+                prompt.to_string(),
+                req.model,
+            ));
+        }
+
         // 2.6 Skill instructions
         if let Some(skills) = req.context_builder.skill_instructions() {
             named.push(NamedSection::new("skill_instructions", skills.to_string(), req.model));
-        }
-
-        // 2.7 Todo list — NEW in ADR-054 step 3.
-        if let Some(todos) = req.context_builder.todo_context() {
-            named.push(NamedSection::new("todo_context", todos.to_string(), req.model));
         }
 
         // 3. Environment (override wins, else auto-detect)
@@ -398,7 +434,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             .context_builder
             .environment_override()
             .map(|s| s.to_string())
-            .unwrap_or_else(crate::agent::context::detect_environment_text);
+            .unwrap_or_else(|| crate::agent::context::detect_environment_text().to_string());
         named.push(NamedSection::new("environment", env_text, req.model));
 
         // 3.2 Workspace prompt file (CLAUDE.md / AGENTS.md) — NEW standalone
@@ -438,6 +474,14 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             key: "messages".to_string(),
             content: messages_meta,
         });
+
+        // ADR-060 v2: todo state lives in Block B's real `todo_write` tool
+        // results. Surface the latest one in the debug panel via the same
+        // `"todo_context"` section key so client-side rendering keeps
+        // working (no UI contract change).
+        if let Some(todos) = latest_todo_write_content(req.history.messages()) {
+            named.push(NamedSection::new("todo_context", todos, req.model));
+        }
 
         let sections = ContextSnapshotSections { sections: named };
 

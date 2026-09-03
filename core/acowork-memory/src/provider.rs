@@ -18,38 +18,17 @@ use std::time::Duration;
 
 use acowork_core::error::Result;
 use async_trait::async_trait;
-
-use acowork_core::EmbeddingProvider;
+use chrono::{DateTime, Utc};
 
 use crate::consolidation::{
     EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
 };
+use crate::quality::MemoryQualityConfig;
 use crate::types::{
-    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, DistilledEpisode, Episode,
-    KnowledgeNode, MemoryQuery, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
+    MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
-
-/// Result of [`MemoryProvider::ingest_distilled_triples`].
-///
-/// ADR-057 §4.4: encapsulates the full P0 landing pipeline outcome — the
-/// created episode ID, the IDs of the grounded `KnowledgeNode`s, and a
-/// count of heuristic conflicts detected during landing.
-///
-/// `episode_id == 0` is returned by the trait default implementation
-/// (which does not have access to the underlying NodeId and therefore
-/// cannot establish the cross-layer edge). Real providers (Grafeo) return
-/// the actual NodeId so callers can trace downstream.
-#[derive(Debug, Clone)]
-pub struct IngestResult {
-    /// Node ID of the created `Episodic` node (0 if the trait default impl ran).
-    pub episode_id: u64,
-    /// Node IDs of the `KnowledgeNode`s created from this episode's triples
-    /// (in the order they were landed).
-    pub knowledge_ids: Vec<u64>,
-    /// Number of heuristic conflicts detected while landing the triples.
-    pub conflicts_detected: usize,
-}
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
 ///
@@ -277,6 +256,39 @@ pub trait MemoryProvider: Send + Sync {
     /// not exist.
     fn get_node_session_id(&self, node_id: u64) -> Result<Option<String>>;
 
+    /// Get the lifecycle status of a node.
+    ///
+    /// Used by the retrieval pipeline to exclude Dormant nodes from final
+    /// results (ADR-062 D1) while allowing them to remain as graph-expansion
+    /// seeds — Dormant nodes can still bridge to Active nodes via edges.
+    ///
+    /// Returns `None` if the node does not exist or has no status property.
+    fn get_node_status(&self, node_id: u64) -> Result<Option<NodeStatus>>;
+
+    /// Get the creation timestamp of a node.
+    ///
+    /// Used by the retrieval pipeline to apply time-range filters
+    /// (`MemoryFilters.time_range`) — e.g. the `memory_recall` tool's
+    /// `since`/`until` parameters ("memories created after X").
+    ///
+    /// Returns `None` if the node does not exist or has no timestamp.
+    fn get_node_created_at(&self, node_id: u64) -> Result<Option<DateTime<Utc>>>;
+
+    /// Push the agent's memory quality configuration to the provider
+    /// (ADR-062 D2).
+    ///
+    /// The provider uses this to parameterize quality thresholds that were
+    /// previously hardcoded in the storage engine: dedup thresholds,
+    /// consolidation confidence gates, graph-expansion decay, and the
+    /// edge-weight formula. Implementations MUST behave identically to the
+    /// pre-configuration defaults when this is never called ("zero-config =
+    /// current behaviour", ADR-062 §4.2).
+    ///
+    /// Typically invoked once at provider initialization with the agent's
+    /// `MemoryQualityConfig`; the same config is embedded in
+    /// `MemoryManagerConfig.quality` for the retrieval side.
+    fn apply_quality_config(&self, config: &MemoryQualityConfig) -> Result<()>;
+
     /// Apply PageRank topology boost to re-rank retrieval scores.
     ///
     /// Modifies `scores` in-place: `new_score = original * (1 - weight) +
@@ -317,98 +329,4 @@ pub trait MemoryProvider: Send + Sync {
         gen_config: Option<&GeneralizationConfig>,
     ) -> Result<OfflineConsolidationResult>;
 
-    // ── ADR-057 P0: Compaction distillation landing pipeline ────────────
-    //
-    // The unified landing entry point for a `DistilledEpisode`. The Provider
-    // implementation is responsible for:
-    //   1. Storing the episodic node.
-    //   2. Grounding each Triple into a KnowledgeNode via the instant
-    //      pipeline (`process_memory_store`): object-aware dedup, conflict
-    //      detection with `conflict_group_id`, Active ≥ 0.85 / Pending
-    //      dispatch.
-    //   3. Establishing the `source_episode_id` reverse-link (D4).
-    //   4. Creating cross-layer `Episodic -[SOURCED_FROM]-> Knowledge` edges
-    //      (D9) — `graph_expand` then reaches knowledge via these edges.
-
-    /// Ingest a distilled episode and land its triples into the semantic layer.
-    ///
-    /// P0 contract (ADR-057 §4.4):
-    /// - Episode is stored *synchronously* (the summary text is always
-    ///   retrievable; triples are best-effort).
-    /// - Each Triple becomes a KnowledgeNode with `sub_type` + `confidence`
-    ///   supplied by the LLM (`Triple` is extended in D7/D8).
-    /// - `source_episode_id` is set on each created KnowledgeNode so the
-    ///   reverse link is traceable.
-    /// - Cross-layer edges (`Episodic -[SOURCED_FROM]-> Knowledge`) are
-    ///   created so `graph_expand` reaches knowledge from episode seeds.
-    ///
-    /// Default implementation: stores the episode (embedding the summary when
-    /// a provider is supplied), then calls `process_memory_store` per triple.
-    /// The default implementation cannot stamp `source_episode_id` or create
-    /// cross-layer edges (the trait-level `store_episode` returns
-    /// `Result<()>`, not the `NodeId`), so `episode_id` is reported as `0`.
-    /// Storage engines that know the underlying `NodeId` (Grafeo) MUST
-    /// override this method to complete D4/D9.
-    async fn ingest_distilled_triples(
-        &self,
-        episode: &DistilledEpisode,
-        embedding_provider: Option<&dyn EmbeddingProvider>,
-    ) -> Result<IngestResult> {
-        // Embed the summary when a provider is available; a failed embedding
-        // degrades to storing without a vector (D1 — episode never lost).
-        let episode_embedding = match embedding_provider {
-            Some(prov) => prov.embed(&episode.summary).await.ok(),
-            None => None,
-        };
-
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert(
-            "source_session_id".to_string(),
-            serde_json::Value::String(episode.source_session_id.clone()),
-        );
-        let ep = Episode {
-            session_id: episode.session_id.clone(),
-            turn_index: 0,
-            role: "distilled".to_string(),
-            content: episode.summary.clone(),
-            embedding: episode_embedding,
-            timestamp: chrono::Utc::now(),
-            consolidated: false,
-            metadata,
-            importance: 0.7,
-        };
-        self.store_episode(&ep)?;
-
-        // Ground each triple via the existing instant pipeline. The default
-        // impl has no NodeId, so `source_episode_id` stays `None` (the D4
-        // reverse link is provider-internal — see the GrafeoStore override).
-        let mut knowledge_ids = Vec::with_capacity(episode.triples.len());
-        let mut conflicts_detected = 0usize;
-        for triple in &episode.triples {
-            let content = format!("{} {} {}", triple.subject, triple.predicate, triple.object);
-            let input = MemoryStoreInput {
-                content,
-                sub_type: triple.sub_type.clone(),
-                subject: Some(triple.subject.clone()),
-                predicate: Some(triple.predicate.clone()),
-                object: Some(triple.object.clone()),
-                confidence: Some(triple.confidence),
-                source_episode_id: None,
-                embedding: None,
-                autobiographical: None,
-            };
-            if let Some(result) = self.process_memory_store(&input)? {
-                knowledge_ids.push(result.node_id);
-                conflicts_detected += result.conflict_resolutions.len();
-                // Trait default has no episode ID, so the cross-layer
-                // edge cannot be created — Grafeo override does it.
-            }
-        }
-
-        Ok(IngestResult {
-            episode_id: 0,
-            knowledge_ids,
-            conflicts_detected,
-        })
-    }
 }

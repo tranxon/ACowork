@@ -13,6 +13,7 @@ import {
     updateUser,
     activateUser,
     fetchActiveUser,
+    verifyAgentHealth,
 } from "./gateway-api";
 import type { BackendUserProfile } from "./types";
 
@@ -149,5 +150,78 @@ describe("fetchActiveUser", () => {
         const active = await fetchActiveUser("http://gw");
 
         expect(active?.user_id).toBe(PROFILE.user_id);
+    });
+});
+
+// ── verifyAgentHealth (distributed liveness double-check) ────────────────
+//
+// Regression: 2026-09-02 09:12 incident. MQTT disconnection during
+// system sleep marked agents as offline and the desktop rendered them
+// as sleeping (zzz). The fix probes the Runtime's `/health` endpoint
+// through the Gateway reverse-proxy on every MQTT `online=false` event;
+// a 2xx answer overrides back to online.
+
+describe("verifyAgentHealth (HTTP double-check on MQTT disconnect)", () => {
+    it("returns true on a 2xx response and targets the Gateway health proxy", async () => {
+        mockFetchOnce({ status: "ok" }, 200);
+        const alive = await verifyAgentHealth("com.acowork.architect", 3000, "http://gw");
+        expect(alive).toBe(true);
+        expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe("http://gw/api/agents/com.acowork.architect/health");
+        expect(calls[0].init?.method).toBeUndefined(); // GET is the fetch default
+    });
+
+    it("returns false on a 503 response (Runtime not registered)", async () => {
+        mockFetchOnce({ error: "Runtime HTTP endpoint not registered" }, 503);
+        const alive = await verifyAgentHealth("com.acowork.never-registered", 3000, "http://gw");
+        expect(alive).toBe(false);
+    });
+
+    it("returns false on a 502 BAD_GATEWAY (Runtime died after registry populated)", async () => {
+        mockFetchOnce({ error: "upstream unreachable" }, 502);
+        const alive = await verifyAgentHealth("com.acowork.dead", 3000, "http://gw");
+        expect(alive).toBe(false);
+    });
+
+    it("returns false on a 404 (route not configured — would be a Gateway bug)", async () => {
+        mockFetchOnce({ error: "not found" }, 404);
+        const alive = await verifyAgentHealth("com.acowork.architect", 3000, "http://gw");
+        expect(alive).toBe(false);
+    });
+
+    it("returns false when fetch itself throws (network unreachable, DNS, etc.)", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))),
+        );
+        const alive = await verifyAgentHealth("com.acowork.architect", 3000, "http://gw");
+        expect(alive).toBe(false);
+    });
+
+    it("returns false when the request is aborted by the timeout (Runtime slow)", async () => {
+        // fetch returns a promise that never resolves before the AbortController
+        // fires — the function must catch that and return false, never hang.
+        vi.stubGlobal(
+            "fetch",
+            vi.fn((_url: string | URL, init?: RequestInit) => {
+                return new Promise((_resolve, reject) => {
+                    const signal = init?.signal as AbortSignal | undefined;
+                    signal?.addEventListener("abort", () => {
+                        reject(new DOMException("Aborted", "AbortError"));
+                    });
+                });
+            }),
+        );
+        // Use a short timeout so the test doesn't actually wait 3s.
+        const alive = await verifyAgentHealth("com.acowork.architect", 50, "http://gw");
+        expect(alive).toBe(false);
+    });
+
+    it("URL-encodes the agent_id so reverse-domain dots don't confuse the path", async () => {
+        mockFetchOnce({ status: "ok" }, 200);
+        await verifyAgentHealth("com.acowork.senior-engineer", 3000, "http://gw");
+        expect(calls[0].url).toBe(
+            "http://gw/api/agents/com.acowork.senior-engineer/health",
+        );
     });
 });

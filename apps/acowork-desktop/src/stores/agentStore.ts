@@ -40,12 +40,13 @@ export interface AgentProfileSettings {
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
-  /** ADR-052: Whether context_retrieve + context_abandon tools are registered.
-   *  Undefined = use default (true). Boot-only: takes effect on next session restore. */
-  toolCompressionEnabled?: boolean;
   /** Idle (auto-sleep) timeout in seconds before the Runtime self-terminates.
    *  0 = never sleep. Undefined = use manifest default or system default (1800). */
   idleTimeoutSecs?: number;
+  /** ADR-061: minimum compression ratio for context compaction levels 1-7
+   *  (0.05–0.95, expressed as the SAVED share). 0.90 = compress until at
+   *  most 10% remains (e.g. 200K → 20K). Undefined = use built-in default (0.90). */
+  compressionRatioThreshold?: number;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
@@ -59,7 +60,6 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
-  toolCompressionEnabled: undefined,
   idleTimeoutSecs: undefined,
 };
 
@@ -124,14 +124,17 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     globalMaxTokens: typeof s.globalMaxTokens === "number" ? s.globalMaxTokens : undefined,
     activeModel: typeof s.activeModel === "string" ? s.activeModel : undefined,
     activeProvider: typeof s.activeProvider === "string" ? s.activeProvider : undefined,
-    toolCompressionEnabled:
-      typeof s.toolCompressionEnabled === "boolean"
-        ? s.toolCompressionEnabled
-        : undefined,
     // idleTimeoutSecs: number >= 0 (0 = never sleep). Undefined = use manifest default.
     idleTimeoutSecs:
       typeof s.idleTimeoutSecs === "number" && s.idleTimeoutSecs >= 0
         ? s.idleTimeoutSecs
+        : undefined,
+    // compressionRatioThreshold: 0.05–0.95 (saved share). Undefined = built-in default.
+    compressionRatioThreshold:
+      typeof s.compressionRatioThreshold === "number" &&
+      s.compressionRatioThreshold >= 0.05 &&
+      s.compressionRatioThreshold <= 0.95
+        ? s.compressionRatioThreshold
         : undefined,
   };
 }
@@ -369,7 +372,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             // This prevents the stale "online=true" window where the
             // ChatPanel keeps showing the session input after the
             // Runtime is gone.
-            const gateway_says_alive = !!meta.running;
+            // Distributed liveness: the Runtime may run on a remote node, so
+            // the process-based `running` flag is not always observable from
+            // this desktop (the Gateway's PID check only sees local agents).
+            // Treat the network signal too — `connected` already merges the
+            // MQTT online view (see Gateway `list_agents`). Only force
+            // offline when BOTH the process signal and the network signal
+            // say the agent is gone; the MQTT `agent_status` handler further
+            // double-checks offline transitions against `/health`.
+            const gateway_says_alive = !!meta.running || !!meta.connected;
             next[meta.agent_id] = {
               ...existing,
               meta,

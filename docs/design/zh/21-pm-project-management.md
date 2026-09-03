@@ -5,9 +5,9 @@
 > 关联 PRD：[`docs/prd/zh/prd-doc-pm.md`](../../prd/zh/prd-doc-pm.md)（§5 项目管理）
 > 关联设计：[`04-gateway.md`](./04-gateway.md)、[`14-desktop-app.md`](./14-desktop-app.md)、[`22-pm-desktop-ui.md`](./22-pm-desktop-ui.md)
 > 关联 ADR：[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）、[`ADR-061-pm-storage-tree.md`](../../adr/zh/ADR-061-pm-storage-tree.md)（目录树存储选型）
-> 实现仓库：[`core/acowork-pm`](../../../core/acowork-pm/) + [`core/acowork-gateway/src/http/pm_api.rs`](../../../core/acowork-gateway/src/http/pm_api.rs)
+> 实现仓库：[`core/acowork-pm`](../../../core/acowork-pm/) + [`core/acowork-gateway/src/http/pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs)
 >
-> **一句话**：`acowork-pm` 是 Gateway 托管的本地项目管理服务，管理对象为 **Agent**——人类经 Desktop 看板管理项目与任务；Agent 经 HTTP MCP 工具自查、自领、提交任务；Agent 创建的任务须经人类审核后生效。
+> **一句话**：`acowork-pm` 是 Gateway 监督的独立本地项目管理服务，管理对象为 **Agent**——人类经 Desktop 看板管理项目与任务；Agent 经 HTTP MCP 工具自查、自领、提交任务；Agent 创建的任务须经人类审核后生效。
 
 ---
 
@@ -19,7 +19,7 @@
 2. 任务指派对象为 **Agent**；Agent 通过 MCP 工具自查、自领、更新、提交任务。
 3. **Agent 创建的任务须经人类审核后生效**（`review_status=pending`），防止垃圾任务污染看板；人类创建的任务 `review_status=not_required` 直接生效。
 4. 指派 Agent 必须校验存在，不存在不能指派。
-5. 内嵌于 Gateway 进程托管；支持远程节点访问。
+5. 独立进程托管（ADR-064，Gateway supervisor + 反代）；支持远程节点访问。
 
 ### 1.2 已决结论（PRD §10 开放问题固化）
 
@@ -41,20 +41,22 @@
 ### 2.1 组件形态
 
 - 独立 Rust crate：`core/acowork-pm/`，axum HTTP 服务，实现 PM 领域逻辑（存储、状态机、MCP 工具、REST handler）。
-- **内嵌于 Gateway 进程**（非独立进程，无独立端口）：`Gateway::run` 启动时 `PmService::with_agent_directory(config.pm, agent_dir).await` 异步构造，router 经 [`core/acowork-gateway/src/http/pm_api.rs`](../../../core/acowork-gateway/src/http/pm_api.rs) 的 `pm_routes()` 以 `nest_service("/api/pm", ...)` 挂载进 Gateway HTTP server（`{gw_http_port}` 同端口，**不带** `/api` 前缀，`nest_service` 自动补）。
-- 公开路径统一为 **`/api/pm/*`**（REST）与 **`/api/pm/mcp`**（MCP HTTP），与 Gateway 既有 `/api/*` 路由隔离。
-- 启动失败**非致命**：`pm_service` 为 `None` 时 `/api/pm/*` 不挂载，Gateway 照常运行（`pm_api.rs` 模块注释 + [`gateway/mod.rs`](../../../core/acowork-gateway/src/gateway/mod.rs) §PM 启动）。
+- **独立进程**（ADR-064）：`acowork-pm` 独立二进制，独立端口（默认 `18082`，冲突自动递增），由 Gateway supervisor 管理生命周期（spawn / monitor / restart，复用 `acowork-core::supervisor`）。Gateway **不再编译 PM 代码**（`cargo tree -p acowork-gateway` 不含 `acowork-pm`），`/api/pm/*` 由 [`core/acowork-gateway/src/http/pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) **反向代理**到 `127.0.0.1:{pm_port}/*`（剥离 `/api/pm` 前缀）。
+- 公开路径统一为 **`/api/pm/*`**（REST）与 **`/api/pm/mcp`**（MCP HTTP），与 Gateway 既有 `/api/*` 路由隔离；Desktop 与远程 Agent 两端均经 Gateway 反代，**无感知**。
+- 启动失败**非致命**：PM 进程未就绪时 `/api/pm/*` 返回 **503**（带 `Retry-After: 2`，Desktop `with503Retry` 退避重试），Gateway 照常运行。
 - 只暴露 REST API + MCP HTTP 端点，不内置前端。
 
 ### 2.2 数据目录布局（Q8）
 
 **采用目录树结构** —— 一个项目 = 一棵完整目录树，物理嵌套即父子关系，字面 = 逻辑。
 
+> ⚠️ **2026-09-02 更新**：PM 迁出为独立进程（[ADR-064](../adr/zh/ADR-064-pm-standalone-process.md)），数据目录**独立于 Gateway**，与 `acowork-gateway/`、`acowork-node/` 平级：
+
 ```
-<root>/data/
-├── models/  packages/  logs/ …      # Gateway 自身数据（现有，平行共存）
-├── acowork-doc/                      # 在线文档库（见 20 号设计）
-└── acowork-pm/                       # ← 本服务数据根（新增）
+$HOME/.acowork/
+├── acowork-gateway/                 # Gateway 数据（vault, packages, data/）
+├── acowork-node/                    # Node Agent 数据（identity, packages, logs）
+└── acowork-pm/                      # ← PM 数据根（独立，平级）
     └── projects/
         └── {project_id}/              # 一个项目 = 一个完整目录
             ├── project.json           # 仅项目元数据（不再含 tasks 数组）
@@ -78,13 +80,17 @@
         └── {project_id}.archived-{ts}/
 ```
 
+> 开发期无存量数据，**无迁移需求**（见 ADR-064 §数据目录）。
+
 ### 2.3 配置项（定稿，Gateway `[pm]` 小节）
 
-内嵌于 Gateway 后，**无独立端口 / enabled / advertise_host 配置**——复用 Gateway 的 `http.port` 与 `advertise_host`。`PmConfig` 仅保留 PM 领域相关配置：
+> ⚠️ **2026-09-02 更新**：PM 迁出为独立进程（[ADR-064](../adr/zh/ADR-064-pm-standalone-process.md)），恢复**独立端口**配置；`data_dir` 独立于 Gateway（`$HOME/.acowork/acowork-pm/`），不再由 `prepare_pm_data_dir` 覆写。
 
 ```toml
 [pm]
-data_dir = "<root>/data/acowork-pm"     # 默认 {gateway.data_dir}/acowork-pm（prepare_pm_data_dir 覆写）
+enabled = true                           # 是否由 Gateway supervisor 拉起（默认 true）
+port = 18082                             # 独立端口（冲突自动递增）
+data_dir = "$HOME/.acowork/acowork-pm"   # 独立数据目录（与 acowork-gateway/acowork-node 平级）
 max_task_depth = 5                       # 最大嵌套深度（根 + 4 层子任务）
 max_attachment_size = 10485760           # 单附件 ≤ 10MB
 max_attachments_per_task = 20            # 单任务附件数上限
@@ -96,11 +102,11 @@ auto_inject_mcp = true                   # 自动把 pm MCP 注入每个 Agent �
 mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /api/pm 前缀）
 ```
 
-> **advertise endpoint 构造**（P4 定稿）：`http://{advertise_host}:{gw_http_port}{mcp_http_path}`，
+> **advertise endpoint 构造**（P4 定稿，迁出后不变）：`http://{advertise_host}:{gw_http_port}{mcp_http_path}`，
 > 即 `http://{advertise_host}:{gw_http_port}/api/pm/mcp`。由 `Gateway::run` 在 PM 启动成功后写入
 > `GatewayState.pm_mcp_url`（[`gateway/mod.rs`](../../../core/acowork-gateway/src/gateway/mod.rs)），
 > 经 `build_available_mcps` 注入 `acowork/global/mcps` 全局资源，远程 Runtime 经
-> AgentHello/资源推送拿到后直接 HTTP 调用（见 §8）。
+> AgentHello/资源推送拿到后直接 HTTP 调用（见 §8）。Gateway 反代 `/api/pm/mcp` → PM 内部 `/mcp`。
 
 ---
 
@@ -243,7 +249,7 @@ stateDiagram-v2
 ## 5. REST API 设计
 
 > 公开前缀 `/api/pm`；错误统一 JSON `{"error": {...}}`。
-> **Desktop 访问路径**：经 Gateway 反向代理 `{gw}/api/pm/...`，Gateway 剥掉 `/api/pm` 前缀转发到 pm 服务内部路径（**不带** `/api` 前缀，由 `nest_service("/api/pm")` 挂载；保持单入口 + 鉴权点）。Agent 不调 REST，走 §6 MCP HTTP。
+> **Desktop 访问路径**：经 Gateway 反向代理 `{gw}/api/pm/...`，Gateway 剥掉 `/api/pm` 前缀转发到 pm 服务内部路径（**不带** `/api` 前缀，由 [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代；保持单入口 + 鉴权点）。Agent 不调 REST，走 §6 MCP HTTP。
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
@@ -267,7 +273,7 @@ stateDiagram-v2
 | GET | `/api/pm/attachments/:id` | **下载附件**（`?download=1` 强制下载，否则 inline 预览） | Desktop / Agent |
 | DELETE | `/api/pm/attachments/:id` | 删除附件 | Desktop |
 
-> **实际路由实现**：[`core/acowork-pm/src/api/routes.rs`](../../../core/acowork-pm/src/api/routes.rs)（PM router 内部不带 `/api` 前缀，Gateway `nest_service("/api/pm")` 自动补；MCP 端点在 `/api/pm/mcp`）。Desktop 经 Gateway 反代访问，Agent 走 §6 MCP HTTP 而非 REST。
+> **实际路由实现**：[`core/acowork-pm/src/api/routes.rs`](../../../core/acowork-pm/src/api/routes.rs)（PM router 内部不带 `/api` 前缀，Gateway [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代时剥离；MCP 端点在 `/api/pm/mcp`）。Desktop 经 Gateway 反代访问，Agent 走 §6 MCP HTTP 而非 REST。
 
 ---
 
@@ -313,10 +319,10 @@ stateDiagram-v2
 
 与 doc / embed 一致（参考 ADR-055 §6.3/§6.8；P4 已实现并 e2e 验证）：
 
-- pm 作为 **global scope** 服务**内嵌**在 Gateway 进程中，REST 面只经 Desktop → Gateway 反代访问 `127.0.0.1`，不暴露公网。
-- **MCP 端点（advertise endpoint）**：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`。用 Gateway `advertise_host` + `gw_http_port`（非 pm 独立端口，因内嵌复用 Gateway HTTP server）+ `mcp_http_path` 构造。
+- pm 作为 **global scope** 服务以**独立进程**运行（ADR-064），REST 面只经 Desktop → Gateway 反代访问 `127.0.0.1`，不暴露公网。
+- **MCP 端点（advertise endpoint）**：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`。用 Gateway `advertise_host` + `gw_http_port`（经 Gateway 反代，非 pm 独立端口）+ `mcp_http_path` 构造。
 - **下发链路（T4-1）**：`Gateway::run` PM 启动成功后把该 URL 写入 `GatewayState.pm_mcp_url` → `build_available_mcps` 注入全局 `acowork/global/mcps` 资源（`id=pm`，transport=HTTP，`X-MCP-Actor: {agent_id}` 模板 header，timeout=60s）→ 远程 Runtime 经 MQTT 全局资源 / AgentHello 拿到后，将 `{agent_id}` 替换为实际 agent_id，直接 HTTP 调用 pm MCP。
-- 安全：MCP 端点网络可达，必须做 agent_id 身份校验（§9.2，`X-MCP-Actor` → `-32001/-32002`）；匿名仅允许只读工具（§9.3）。
+- 安全：MCP 端点网络可达，必须做 agent_id 身份校验（§9.2，`X-MCP-Actor` → `-32001/-32002`）；匿名仅允许只读工具（§9.3）。`X-MCP-Actor` 由 Gateway 反代时校验（agent_id ∈ `installed_agents` 才透传，否则剥离为匿名），杜绝客户端伪造。
 
 ---
 
@@ -325,7 +331,7 @@ stateDiagram-v2
 ### 9.1 指派 Agent 校验（Q6）
 
 - **规则**：`pm_create_task` / 编辑任务时 `assignee` 必须存在于 Agent 目录；不存在返回 `InvalidId`（400/422），**不允许指派**。
-- **校验来源**：[`core/acowork-gateway/src/http/pm_api.rs`](../../../core/acowork-gateway/src/http/pm_api.rs) 的 `GatewayAgentDirectory`——基于 Gateway `installed_agents`（Agent 目录权威），经共享 state 注入 pm 服务，操作时即时校验；无需轮询同步。
+- **校验来源**（ADR-064 Phase 3）：[`core/acowork-pm/src/mcp/agent_dir.rs`](../../../core/acowork-pm/src/mcp/agent_dir.rs) 的 `HttpAgentDirectory`——PM 独立进程后不再共享 Gateway 内存 state，改为经 HTTP 查询 Gateway `GET /api/agents`（Agent 目录权威）。**启动拉全量 + 周期刷新**（`--agent-sync-interval-secs`，默认 60s）+ **即时校验兜底**（缓存 miss 时直接 `GET /api/agents/{id}` 即时确认，恢复计划 v0.3 T1-11）。
 
 ### 9.2 工具调用身份校验
 
@@ -395,9 +401,9 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 
 ### 10.6 监督 / 日志 / 备份
 
-- **监督**：内嵌于 Gateway 进程（§2.1），随 Gateway 生命周期共进退；启动失败**非致命**（`pm_service=None`，`/api/pm/*` 不挂载，不阻塞 Gateway 启动）。
-- **日志**：随 Gateway 日志（`{data}/logs/`），PM 操作打点 `tracing`（`task_id` / `project_id` / 深度等结构化字段）。
-- **备份**：`{data}/acowork-pm/` 纯文件，直接 `tar` 即备份；单项目归档 = `tar` 一个项目目录。
+- **监督**（ADR-064）：PM 为**独立进程**，由 Gateway supervisor（[`core/acowork-gateway/src/lifecycle/pm_supervisor.rs`](../../../core/acowork-gateway/src/lifecycle/pm_supervisor.rs)）管理生命周期——spawn / `/health` 探活 / 指数退避重启（复用 `acowork-core::supervisor`）。PM 崩溃自动重启；Gateway 崩溃后 PM 经 ADR-018 健康看门狗超时自退出（避免孤儿进程）。启动失败**非致命**：PM 未就绪时 `/api/pm/*` 返回 503，不阻塞 Gateway。
+- **日志**：PM 子进程 stderr 重定向到 `{gateway.data_dir}/logs/pm.log`，PM 操作打点 `tracing`（`task_id` / `project_id` / 深度等结构化字段）。
+- **备份**：`$HOME/.acowork/acowork-pm/` 纯文件，直接 `tar` 即备份；单项目归档 = `tar` 一个项目目录。
 
 ---
 
@@ -405,7 +411,7 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| **P0 骨架** | `core/acowork-pm` crate（axum + /health + 日志）；Gateway `[pm]` 配置 + 内嵌挂载 | ✅ 完成 |
+| **P0 骨架** | `core/acowork-pm` crate（axum + /health + 日志）；Gateway `[pm]` 配置 + 独立进程 supervisor + 反代（ADR-064） | ✅ 完成 |
 | **P1 存储 + REST** | **目录树存储**（§2.2）、数据模型（project.json / task.json）、项目/任务 CRUD、状态机、**附件上传/下载**、**父子树创建/move**、**依赖图校验**、REST API（§5） | ✅ 完成 |
 | **P2 Desktop projects 视图** | 项目列表 + 看板 + 任务编辑/拖动 + 指派下拉 + 父子树展开 + 附件预览，接入 AppLayout | ✅ 完成 |
 | **P3 Agent 接口 + 审核** | pm MCP HTTP Server（§6，12 工具）、Agent 创建任务待审核 + 人类 review、`acowork/global/mcps` catalog 自动注入 | ✅ 完成 |
@@ -429,6 +435,6 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 | D-7 | `depends_on` 是否允许跨项目依赖 | **允许**；claim 时计算 `blocked_by`，未满足返回 `DependencyNotSatisfied` | §3.5 / §9.2 |
 | D-8 | 子任务排序方式 | API 层按 `created_at` 升序（默认），`fs::read_dir` 后排序 | §3.4 |
 | D-9 | MCP 身份传递 | **`X-MCP-Actor` header**（Gateway 下发 `{agent_id}` 模板，Runtime 替换为实际 agent_id） | §6 / §8 / ADR-055 |
-| D-10 | 部署形态 | **内嵌于 Gateway 进程**，`nest_service("/api/pm")` 挂载，无独立端口 | §2.1 |
+| D-10 | 部署形态 | ~~**内嵌于 Gateway 进程**，`nest_service("/api/pm")` 挂载，无独立端口~~ ⚠️ **已被 [ADR-064](../adr/zh/ADR-064-pm-standalone-process.md) 推翻**：PM 独立进程，Gateway 仅 supervisor + 反代 | §2.1 |
 
 > **v0.1 → v0.2 已固化**：存储结构改为目录树（§2.2、§3.1、§10.1）、子任务用 `children/` 物理嵌套、附件独立目录、依赖显式存 `depends_on`（详见 ADR-061）。

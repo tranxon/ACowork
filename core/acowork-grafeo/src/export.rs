@@ -12,7 +12,7 @@ use acowork_core::packaging::PackageOptions;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::types::labels;
-use crate::types::{AutobiographicalNode, Episode, KnowledgeNode, ProceduralNode};
+use crate::types::{AutobiographicalNode, Episode, KnowledgeNode, PrivacyLevel, ProceduralNode};
 
 // ---------------------------------------------------------------------------
 // FilteredNode
@@ -36,18 +36,14 @@ pub struct FilteredNode {
 
 /// Determine whether a KnowledgeNode is considered "Public" or "Private".
 ///
-/// The privacy level is stored in `node.metadata["privacy"]` as a string:
-/// - `"Public"` → public knowledge
-/// - `"Personal"` or `"Sensitive"` → private knowledge
+/// Uses the typed `privacy` field (`PrivacyLevel`):
+/// - `Public` → public knowledge
+/// - `Personal` or `Sensitive` → private knowledge
 ///
-/// If the privacy field is absent, the node defaults to **Private** for
-/// safety (conservative default: exclude when in doubt).
+/// Old nodes without a persisted `privacy` property deserialize to the
+/// conservative default `Personal` (excluded when in doubt).
 fn knowledge_privacy_is_public(node: &KnowledgeNode) -> bool {
-    node.metadata
-        .get("privacy")
-        .and_then(|v| v.as_str())
-        .map(|s| s == "Public")
-        .unwrap_or(false)
+    matches!(node.privacy, PrivacyLevel::Public)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +164,7 @@ impl GrafeoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AutobioCategory, KnowledgeSubType, NodeStatus};
+    use crate::types::{AutobioCategory, KnowledgeSubType, NodeStatus, PrivacyLevel};
     use std::collections::HashMap;
 
     fn test_dt() -> chrono::DateTime<chrono::Utc> {
@@ -194,6 +190,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata,
+            privacy: PrivacyLevel::Public,
+            importance: 0.5,
         }
     }
 
@@ -216,6 +214,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata,
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }
     }
 
@@ -238,6 +238,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata,
+            privacy: PrivacyLevel::Sensitive,
+            importance: 0.5,
         }
     }
 
@@ -288,6 +290,7 @@ mod tests {
             status: NodeStatus::Active,
             created_at: test_dt(),
             updated_at: test_dt(),
+            source: "user_statement".to_string(),
             metadata: HashMap::new(),
         }
     }
@@ -465,6 +468,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         assert!(
             !knowledge_privacy_is_public(&no_privacy),

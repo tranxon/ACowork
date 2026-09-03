@@ -514,6 +514,150 @@ pub struct EmbeddingModelsFile {
     pub models: Vec<EmbeddingModelEntry>,
 }
 
+// ── Cloud Embedding Provider types (参考 LLM ProviderListFile 风格) ──────
+
+/// A single model definition inside a cloud embedding provider catalog.
+///
+/// Distinct from [`EmbeddingModelEntry`] which describes LOCAL ONNX models
+/// (with hf_repo / onnx_file / pooling_strategy). Cloud models only need
+/// dimensions + context — there is no file to download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingProviderModelDef {
+    /// Model identifier as expected by the provider API
+    /// (e.g. "doubao-embedding", "text-embedding-v3", "BAAI/bge-m3")
+    pub id: String,
+    /// Human-readable display name
+    #[serde(default)]
+    pub name: String,
+    /// Embedding vector dimension — REQUIRED. Switching models with a
+    /// different dimension than the current memory store triggers the
+    /// existing embedding dimension migration flow.
+    pub dimensions: u32,
+    /// Maximum input token length (context window)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    /// Supported input modalities (e.g. ["text"])
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedding_modalities: Vec<String>,
+}
+
+/// A cloud embedding provider catalog entry (mirrors the shape of
+/// `offline_embedding_providers.json`). Independent from the LLM
+/// [`ProviderListItem`] — embedding providers do not need
+/// `tool_call`, `reasoning`, `cost.matrix`, `knowledge`, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingProviderDef {
+    /// Stable provider identifier (e.g. "volcengine", "dashscope")
+    pub id: String,
+    /// Human-readable display name (e.g. "字节火山方舟")
+    #[serde(default)]
+    pub name: String,
+    /// OpenAI-compatible base URL (e.g. "https://ark.cn-beijing.volces.com/api/v3")
+    pub api: String,
+    /// Protocol marker — always "openai-compatible" for now
+    #[serde(default = "default_embedding_protocol")]
+    pub protocol: String,
+    /// Environment variable names that hold the API key (informational;
+    /// the actual key is stored encrypted in Vault)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// Optional documentation URL
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    /// Models offered by this provider, keyed by model id
+    pub models: std::collections::HashMap<String, EmbeddingProviderModelDef>,
+    /// True if this entry was added by the user (persisted to
+    /// `data_dir/user_embedding_providers.json`). False for bundled
+    /// catalog entries from `offline_embedding_providers.json`.
+    /// Set by the merged loader; defaults to false on deserialize so
+    /// legacy catalog files keep working.
+    #[serde(default)]
+    pub custom: bool,
+}
+
+fn default_embedding_protocol() -> String {
+    "openai-compatible".to_string()
+}
+
+/// Versioned cloud embedding provider catalog loaded from
+/// `assets/offline_embedding_providers.json` at startup.
+///
+/// Independent from [`EmbeddingModelsFile`] (LOCAL ONNX models). Both
+/// lists coexist — the UI shows them as two distinct sections.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EmbeddingProviderCatalog {
+    /// Monotonic version counter
+    pub version: u64,
+    /// All known cloud embedding providers, keyed by provider id
+    pub providers: std::collections::HashMap<String, EmbeddingProviderDef>,
+}
+
+/// One user-added cloud embedding provider, persisted to
+/// `data_dir/user_embedding_providers.json`.
+///
+/// Mirrors the catalog entry shape but stripped of fields the user is
+/// unlikely to fill in correctly (`env`, `doc`). The user MUST provide
+/// `api` (OpenAI-compatible base URL) and at least one model entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserEmbeddingProviderEntry {
+    /// Stable provider id (e.g. "custom-my-proxy"). Must be unique
+    /// across user-added entries AND must not collide with any id in
+    /// the bundled [`EmbeddingProviderCatalog`].
+    pub id: String,
+    /// Human-readable display name (e.g. "My GPT Proxy")
+    #[serde(default)]
+    pub name: String,
+    /// OpenAI-compatible base URL (e.g. "https://api.example.com/v1")
+    pub api: String,
+    /// Models offered by this provider, keyed by model id. Each model
+    /// MUST have `dimensions > 0`.
+    pub models: std::collections::HashMap<String, EmbeddingProviderModelDef>,
+}
+
+/// Top-level wrapper for `data_dir/user_embedding_providers.json`.
+///
+/// Versioned for future schema migrations.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserEmbeddingProviderList {
+    pub version: u64,
+    pub providers: Vec<UserEmbeddingProviderEntry>,
+}
+
+/// The user's currently-active cloud embedding selection.
+///
+/// Persisted to `data_dir/active_embedding_provider.json` (user-writable).
+/// `None` (file missing) means the user has not selected a cloud
+/// embedding provider — Runtime continues to use the local ONNX service.
+///
+/// When set, the Gateway publishes this selection via `AgentHello`
+/// (see [`crate::protocol::HelloPayload::embed_provider_id`] and
+/// [`crate::protocol::HelloPayload::embed_api_key`]) so Runtime can
+/// construct a `RemoteEmbeddingProvider` against the cloud endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ActiveEmbeddingProvider {
+    /// Provider id (e.g. "volcengine"). Must match a key in the catalog.
+    pub provider_id: String,
+    /// Model id within the provider (e.g. "doubao-embedding"). Must
+    /// match a model id under that provider in the catalog.
+    pub model_id: String,
+    /// Embedding dimension of the selected model. Copied from the
+    /// catalog at selection time so Runtime doesn't need the catalog
+    /// to construct the provider.
+    pub dimension: u32,
+    /// Base URL copied from the catalog at selection time. Frozen so
+    /// a later catalog change cannot silently redirect Runtime's
+    /// outbound traffic.
+    pub base_url: String,
+    /// Whether an API key is currently stored in Vault for this
+    /// provider. `false` means Runtime should treat the provider as
+    /// unavailable (the key is never sent over the wire in this case).
+    #[serde(default)]
+    pub has_api_key: bool,
+    /// When this selection was made (ISO 8601, UTC)
+    #[serde(default)]
+    pub selected_at: String,
+}
+
 /// ── User Identity types ──
 /// A single user's identity profile.
 ///
@@ -862,10 +1006,6 @@ pub enum GatewayRequest {
         /// ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<AgentToolEntry>).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_all_json: Option<String>,
-        /// ADR-052: Whether context_retrieve + context_abandon tools are
-        /// registered. `None` = not set / use default (true).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_compression_enabled: Option<bool>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -959,6 +1099,27 @@ pub enum GatewayResponse {
         /// None when the embedding service is not running.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         embed_dimension: Option<usize>,
+
+        // ── Cloud Embedding Provider (optional, 参考 LLM provider 模式) ──
+        /// Active cloud embedding provider id (e.g. "volcengine",
+        /// "dashscope", "siliconflow"). `None` when the user has not
+        /// selected a cloud provider — Runtime continues to use the
+        /// local ONNX service via `embed_endpoint`.
+        ///
+        /// When present, Runtime should construct a
+        /// `RemoteEmbeddingProvider` against `embed_endpoint` (which
+        /// will carry the cloud base URL instead of the local one)
+        /// and authenticate with `embed_api_key`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        embed_provider_id: Option<String>,
+        /// Decrypted API key for `embed_provider_id`. NEVER persisted to
+        /// disk by Runtime — same security contract as the search / chat
+        /// provider keys in the same message.
+        ///
+        /// Empty when no key is configured (Runtime should treat the
+        /// provider as unavailable in that case).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        embed_api_key: Option<String>,
 
         // ── LSP Relay ──
         /// LSP Relay HTTP endpoint (e.g. "http://127.0.0.1:19878").
@@ -1231,12 +1392,6 @@ pub enum GatewayResponse {
         /// None means don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_enabled: Option<Vec<String>>,
-        /// ADR-052: Whether context_retrieve + context_abandon tools are
-        /// registered. None means "keep current value" (no change).
-        /// Boot-only: changes take effect at the next session restore
-        /// or process restart.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_compression_enabled: Option<bool>,
     },
     /// Query config request (Gateway → Runtime)
     ///

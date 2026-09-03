@@ -16,9 +16,10 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
     routing::post,
 };
+#[cfg(test)]
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
@@ -55,7 +56,7 @@ pub struct VaultStatusResponse {
 /// vault data itself did not change.
 pub async fn lock_vault(
     State(state): State<AppState>,
-) -> Result<Json<VaultStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<VaultStatusResponse>, ApiError> {
     let mut gw = state.gateway_state.write().await;
     if !gw.vault.is_unlocked() {
         return Err(ApiError::bad_request("Vault is already locked"));
@@ -80,7 +81,7 @@ pub async fn lock_vault(
 pub async fn unlock_vault(
     State(state): State<AppState>,
     Json(body): Json<UnlockVaultRequest>,
-) -> Result<Json<VaultStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<VaultStatusResponse>, ApiError> {
     if body.password.is_empty() {
         return Err(ApiError::bad_request("password must not be empty"));
     }
@@ -182,7 +183,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let resp = rt.block_on(lock_vault(State(state.clone())));
         assert!(resp.is_err());
-        assert_eq!(resp.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(resp.unwrap_err().code, StatusCode::BAD_REQUEST.as_u16());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -201,7 +202,7 @@ mod tests {
         };
         let resp = rt.block_on(unlock_vault(State(state.clone()), Json(req)));
         assert!(resp.is_err());
-        assert_eq!(resp.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(resp.unwrap_err().code, StatusCode::BAD_REQUEST.as_u16());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

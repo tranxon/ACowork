@@ -7,10 +7,11 @@
 //! historical conversations) where calling the LLM against pre-existing
 //! episodes is still useful.
 //
-//
 //   The `run_offline_consolidation_with_generalization` Step-2 LLM
-//   extraction has been deleted (ADR-057 C7); new episodes are routed
-//   through `ingest_distilled_triples` instead.
+//   extraction has been deleted (ADR-057 C7), and the synchronous
+//   compaction-time triples pipeline was removed entirely
+//   (ADR-057 triples-removed). This module is now used only by
+//   manual reprocessing / batch-import callers.
 //
 //! Design: `docs/05-memory.md` §4.3
 #[cfg(test)]
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{GrafeoError, Result};
 use crate::grafeo::GrafeoStore;
-use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus};
+use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
 
 // ---------------------------------------------------------------------------
 // LLM abstraction (re-exported from acowork-memory)
@@ -60,9 +61,10 @@ pub struct ExtractionResult {
     /// Source episode IDs that were processed (now typed as `NodeId`).
     ///
     /// ADR-057 C6: callers now pass the Grafeo `NodeId` of each episode, so
-    /// `KnowledgeNode::source_episode_id` can be set during landing — this is
-    /// the `Episodic -> Knowledge` reverse link that the new SOURCED_FROM edge
-    /// complements for forward graph_expand traversal.
+    /// `KnowledgeNode::source_episode_id` can be set during landing — the
+    /// reverse `Episodic -> Knowledge` link for manual reprocessing paths
+    /// (the compaction-time `SOURCED_FROM` edge was removed with ADR-057
+    /// triples-removed).
     pub source_episode_ids: Vec<NodeId>,
     /// Extracted triples.
     pub triples: Vec<ExtractedTriple>,
@@ -134,14 +136,14 @@ impl GrafeoStore {
     /// - The episode identifier is now a Grafeo [`NodeId`] (not a free-form
     ///   `String`). The typed identifier is propagated into
     ///   [`KnowledgeNode::source_episode_id`] so the reverse
-    ///   `Episodic -> Knowledge` link is established at landing time (D4).
+    ///   `Episodic -> Knowledge` link is recorded at landing time.
     /// - Each triple is screened against existing active knowledge via
     ///   `is_duplicate_knowledge` (cosine > 0.95 AND `(subject, predicate)`
     ///   match). Duplicates are skipped (and not counted as
     ///   `triples_extracted`).
     ///
-    /// This method is no longer called from the offline consolidation loop
-    /// (C7 deletes the Step-2 LLM extraction). It remains available for manual
+    /// This method is not called from compaction or the offline consolidation
+    /// loop (ADR-057 C7 + triples-removed). It remains available for manual
     /// reprocessing and batch-import scenarios.
     pub async fn extract_triples(
         &self,
@@ -253,6 +255,8 @@ impl GrafeoStore {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 metadata: HashMap::new(),
+                privacy: PrivacyLevel::Personal,
+                importance: 0.5,
             };
 
             self.store_knowledge(&node)?;
@@ -469,6 +473,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }];
 
         assert!(has_potential_conflict(&triple, &existing));
@@ -501,6 +507,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }];
 
         assert!(!has_potential_conflict(&triple, &existing));
@@ -533,6 +541,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }];
 
         assert!(has_potential_conflict(&triple, &existing));
@@ -636,6 +646,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&existing).unwrap();
 

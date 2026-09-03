@@ -11,6 +11,11 @@ description = "Project & Task management service — directory-tree storage, dep
 name = "acowork_pm"
 path = "src/lib.rs"
 
+# ADR-064: standalone process binary (spawned/supervised by the Gateway).
+[[bin]]
+name = "acowork-pm"
+path = "src/main.rs"
+
 [features]
 default = []
 # Generate thumbnails for image attachments on upload
@@ -59,8 +64,10 @@ ignore.workspace = true
 regex.workspace = true
 
 # Configuration
-directories.workspace = true
 toml.workspace = true
+
+# CLI (standalone process entry, ADR-064)
+clap.workspace = true
 
 # MIME type detection (attachment uploads)
 mime_guess = "2"

@@ -85,5 +85,19 @@ else
     echo -e "${YELLOW}        acowork-node binary not found — node topology disabled${NC}"
 fi
 
+# Bundle PM service binary (sibling of acowork-gateway, ADR-064).
+# The Gateway supervisor locates it via `current_exe().parent().join("acowork-pm")`;
+# without this copy the PM supervisor logs "acowork-pm binary not found" and
+# `/api/pm/*` returns 503 (project management unavailable).
+PM_BIN="$WORKSPACE_ROOT/target/release/acowork-pm"
+if [ -f "$PM_BIN" ]; then
+    cp "$PM_BIN" "$BIN_DIR/acowork-pm"
+    echo -e "${GREEN}Bundled PM service binary: $PM_BIN${NC}"
+else
+    echo -e "${YELLOW}WARN: acowork-pm not found at $PM_BIN.${NC}"
+    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Without it, /api/pm/* returns 503 (PM unavailable).${NC}"
+fi
+
 cd "$DESKTOP_DIR"
 npm run tauri build

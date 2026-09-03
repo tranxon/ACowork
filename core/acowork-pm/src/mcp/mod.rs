@@ -51,6 +51,7 @@
 //!
 //! [`docs/design/zh/21-pm-project-management.md`](../../docs/design/zh/21-pm-project-management.md) §6 / §8 / §9
 
+pub mod agent_dir;
 pub mod manifest;
 pub mod tools;
 
@@ -330,9 +331,11 @@ mod tests {
         agent_dir: Arc<dyn AgentDirectory>,
     ) -> (McpState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = PmConfig::default();
-        cfg.data_dir = tmp.path().to_path_buf();
-        cfg.index_rebuild_on_start = false;
+        let cfg = PmConfig {
+            data_dir: tmp.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
         let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
         (McpState { store, agent_dir }, tmp)
     }

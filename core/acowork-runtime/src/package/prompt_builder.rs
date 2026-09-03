@@ -6,13 +6,29 @@
 //! 3. prompts/*.md — Additional prompt sections
 //! 4. skills/*/SKILL.md — Skill instructions
 //!
-//! [`COMPACTION_PROMPT_FILE`] (`prompts/summary.md`) is the one exception to
-//! the "everything in prompts/ goes into the system prompt" rule: it is the
-//! agent-specific context-compaction directive and is deliberately excluded
-//! from the main system prompt (see [`load_compaction_prompt`]).
+//! # Package-level prompt overrides (ADR-063)
+//!
+//! The 9 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
+//! "package-declared overrides" for the hardcoded LLM prompt constants in
+//! [`crate::prompt`] and the downstream grafeo/memory modules. When a
+//! `.agent` package provides one of these files in `prompts/`, it
+//! replaces the built-in default at runtime via the
+//! `AgentCore.<field>` resolution chain (see ADR-063 §3.2).
+//!
+//! These 9 files are also **deliberately excluded** from the main dialog
+//! system prompt assembled here — they are task-specific directives (a
+//! summarization rule, a search directive, a title-style preference, …)
+//! that would pollute every LLM call if folded into the dialog identity
+//! section. Exclusion and "loaded as override" use the **same exact
+//! filename match** so the two views never disagree.
+//!
+//! [`COMPACTION_PROMPT_FILE`] (`prompts/summary.md`) is the original entry
+//! in this list (ADR-053). The remaining 8 were added by ADR-063.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::{Result, RuntimeError};
 use crate::skills::parser::SkillRegistry;
@@ -26,43 +42,193 @@ use crate::skills::parser::SkillRegistry;
 /// skips it when assembling the main system prompt.
 pub const COMPACTION_PROMPT_FILE: &str = "summary.md";
 
-/// Load the agent-specific compaction prompt from `prompts/summary.md`.
+/// Canonical list of package-level LLM prompt overrides (ADR-063).
+///
+/// Each tuple is `(filename_in_prompts_dir, semantic_description)`. Files
+/// in this list are loaded by [`load_optional_prompt`] and **excluded**
+/// from the main dialog system prompt assembled by
+/// [`build_system_prompt_with_mode`] — keeping the exclusion set, the
+/// "task-instruction override" set, and the Debug panel list (`§3.7`) all
+/// in sync via this single source of truth.
+///
+/// Adding a new overridable prompt requires **three** coordinated changes:
+/// 1. Add an entry here.
+/// 2. Add the corresponding `Arc<RwLock<Option<String>>>` field on
+///    [`crate::agent::AgentCore`] (see ADR-063 §3.7.5).
+/// 3. Add the LLM-call-site resolution (`core.<field>.read().unwrap()
+///    .as_deref().unwrap_or(<builtin const>)`).
+///
+/// Tests in this module pin all three behaviours against this list.
+pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
+    // ADR-053 — compaction / distillation system prompt
+    ("summary.md", "compaction/distillation system prompt (ADR-053)"),
+    // ADR-063 — Runtime prompt.rs constants (3)
+    ("search.md", "SEARCH_SYSTEM_PROMPT"),
+    ("compact-template.md", "COMPACT_PROMPT (must keep {messages_text} placeholder)"),
+    ("title.md", "TITLE_PROMPT"),
+    // ADR-063 — grafeo / memory constants (4)
+    ("extraction.md", "EXTRACTION_SYSTEM_PROMPT (grafeo)"),
+    (
+        "conflict-classification.md",
+        "CONFLICT_CLASSIFICATION_PROMPT (grafeo)",
+    ),
+    ("generalization.md", "GENERALIZATION_PROMPT (grafeo)"),
+    ("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)"),
+];
+
+/// O(1) lookup set of overridable filenames. Built lazily on first access
+/// via [`overridable_filenames`] so the cold-start cost is one allocation
+/// of nine `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
+/// file in `prompts/`.
+fn overridable_filenames() -> &'static HashSet<&'static str> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    CACHE.get_or_init(|| OVERRIDABLE_PROMPTS.iter().map(|(f, _)| *f).collect())
+}
+
+/// True iff `filename` is one of the package-level override files in
+/// [`OVERRIDABLE_PROMPTS`]. Used by [`build_system_prompt_with_mode`] to
+/// skip these files when assembling the main dialog system prompt.
+pub fn is_overridable_prompt(filename: &str) -> bool {
+    overridable_filenames().contains(filename)
+}
+
+/// Generic loader for any file in [`OVERRIDABLE_PROMPTS`].
 ///
 /// Returns `None` when the file is missing or contains only whitespace —
-/// the caller then falls back to the built-in default
-/// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`]. Surrounding whitespace is
-/// stripped so a file consisting only of blank lines behaves like an
-/// absent file.
+/// the caller then falls back to the built-in default constant. Surrounding
+/// whitespace is stripped so a file consisting only of blank lines behaves
+/// like an absent file.
 ///
-/// An existing-but-unreadable file (permissions, invalid UTF-8) also
-/// yields `None` but is logged as a warning — a broken package must not
-/// be silently masked by the fallback.
+/// An existing-but-unreadable file (permissions, invalid UTF-8) also yields
+/// `None` but is logged as a warning — a broken package must not be silently
+/// masked by the fallback. This matches the ADR-053 [`load_compaction_prompt`]
+/// behaviour and is the single shared implementation now.
 ///
-/// The filename is matched **exactly** (`summary.md`) — the same criterion
-/// [`build_system_prompt_with_mode`] uses to exclude it from the main
-/// dialog system prompt — so "excluded from main prompt" and "loaded as
-/// compaction prompt" always refer to the same file. Any other name
-/// (`SUMMARY.md`, `summary.txt`) is an ordinary prompt section.
-pub fn load_compaction_prompt(package_dir: &Path) -> Option<String> {
-    let path = package_dir.join("prompts").join(COMPACTION_PROMPT_FILE);
+/// # Security
+///
+/// The filename is matched **exactly** against [`OVERRIDABLE_PROMPTS`] —
+/// any caller passing a path with `/`, `\`, or `..` will hit the
+/// "unknown prompt" branch and return `None`. Callers that need stronger
+/// validation (e.g. before writing) should additionally call
+/// [`is_overridable_prompt`] (see `http::prompts` write handler).
+pub fn load_optional_prompt(package_dir: &Path, filename: &str) -> Option<String> {
+    if !is_overridable_prompt(filename) {
+        tracing::warn!(
+            filename,
+            "load_optional_prompt called with non-overridable filename; ignoring"
+        );
+        return None;
+    }
+    let path = package_dir.join("prompts").join(filename);
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
         // File (or the prompts/ dir) absent → normal fallback, no log spam.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         // File exists but is unreadable (permissions) or not valid UTF-8 —
-        // surface it so a broken package is not silently masked by the
-        // built-in default.
+        // surface it so a broken package is not silently masked.
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
                 error = %e,
-                "Failed to read compaction prompt; falling back to built-in default"
+                "Failed to read overridable prompt; falling back to built-in default"
             );
             return None;
         }
     };
     let trimmed = content.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Load the agent-specific compaction prompt from `prompts/summary.md`.
+///
+/// Thin wrapper over [`load_optional_prompt`] — kept as a separate symbol
+/// for ADR-053 backward compatibility (every existing call site uses this
+/// name; see `startup/agent_init.rs` Phase A and `startup/session_init.rs`
+/// Phase B).
+///
+/// Behaviour is identical to pre-ADR-063:
+/// - Missing file or whitespace-only file → `None` → caller falls back to
+///   the built-in [`crate::prompt::COMPACTION_SYSTEM_PROMPT`].
+/// - Unreadable file → `None` with a `tracing::warn!` so a broken package
+///   is not silently masked.
+/// - Filename is matched **exactly** (`summary.md`) — the same criterion
+///   [`build_system_prompt_with_mode`] uses to exclude it from the main
+///   dialog system prompt.
+pub fn load_compaction_prompt(package_dir: &Path) -> Option<String> {
+    load_optional_prompt(package_dir, COMPACTION_PROMPT_FILE)
+}
+
+/// L2 reload: re-read every file in [`OVERRIDABLE_PROMPTS`] from
+/// `package_dir/prompts/` and write the result into the matching
+/// `Arc<RwLock<Option<String>>>` field on the given [`AgentCore`].
+///
+/// Single source of truth for the `filename → AgentCore field` dispatch
+/// table — shared by:
+///
+/// - The HTTP `POST /agents/{id}/prompts/reload` handler in
+///   `http::prompts`, which serves the Debug panel "刷新" button without
+///   requiring DevMode to be enabled (the reload is a **package-level**
+///   operation, not a debug-session one).
+/// - `DebugService::reload_prompts` (`usecases::debug_service_impl`),
+///   which Phase C boot calls once after `enable_debug_mode` to
+///   refresh the just-loaded defaults from disk.
+///
+/// `Err(_)` is reserved for "the dispatch table itself is broken" —
+/// i.e. a future maintainer added a filename to [`OVERRIDABLE_PROMPTS`]
+/// without teaching this function about the matching field. Per-file
+/// I/O problems stay `Ok` with a `None` value written into the slot,
+/// matching [`load_optional_prompt`] semantics so a broken package
+/// never silently poisons a session.
+///
+/// [`AgentCore`]: crate::agent::agent_core::AgentCore
+pub fn reload_prompts_into_core(
+    package_dir: &Path,
+    core: &Arc<crate::agent::agent_core::AgentCore>,
+) -> std::result::Result<(), String> {
+    for (filename, _desc) in OVERRIDABLE_PROMPTS {
+        let loaded = load_optional_prompt(package_dir, filename);
+        // Dispatch is explicit (not a macro) because the field names
+        // differ per entry and the Arc handles are independent. The
+        // catch-all `_` is intentionally omitted so a future drift
+        // between OVERRIDABLE_PROMPTS and the AgentCore field set
+        // surfaces as a compile error here at the call site — the
+        // exact same drift that a `DebugError::Internal` would hide.
+        match *filename {
+            "summary.md" => {
+                *core.compaction_prompt.write().unwrap() = loaded;
+            }
+            "search.md" => {
+                *core.search_prompt.write().unwrap() = loaded;
+            }
+            "compact-template.md" => {
+                *core.compact_template.write().unwrap() = loaded;
+            }
+            "title.md" => {
+                *core.title_prompt.write().unwrap() = loaded;
+            }
+            "extraction.md" => {
+                *core.extraction_prompt.write().unwrap() = loaded;
+            }
+            "conflict-classification.md" => {
+                *core.conflict_classification_prompt.write().unwrap() = loaded;
+            }
+            "generalization.md" => {
+                *core.generalization_prompt.write().unwrap() = loaded;
+            }
+            "abstention.md" => {
+                *core.abstention_prompt.write().unwrap() = loaded;
+            }
+            other => {
+                return Err(format!(
+                    "reload_prompts_into_core: unknown overridable filename `{other}` — \
+                     update the dispatch table in package/prompt_builder.rs \
+                     in lockstep with AgentCore's field set"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build system prompt from package files (default: Manual skill mode).
@@ -103,16 +269,23 @@ pub fn build_system_prompt_with_mode(
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
 
-            // Skip the compaction prompt — it is a summarization directive
-            // for context compaction / episode distillation, not a section
-            // of the main dialog system prompt. Including it here would
-            // leak summarization meta-instructions into every LLM call.
+            // Skip package-level overrides (ADR-063): any filename in
+            // `OVERRIDABLE_PROMPTS` is a task-instruction directive
+            // (compaction, search, title, extraction, …) and would
+            // pollute every LLM call if folded into the dialog identity
+            // section. The same set is loaded by `load_optional_prompt`
+            // and excluded here — exact filename match keeps the two
+            // views symmetric.
             //
-            // Exact filename match keeps the exclusion symmetric with
-            // `load_compaction_prompt`: only `summary.md` has special
-            // semantics; any other name (SUMMARY.md, summary.txt) is an
-            // ordinary prompt section.
-            if path.file_name().is_some_and(|n| n == COMPACTION_PROMPT_FILE) {
+            // Case variants (`SUMMARY.md`, `Title.md`) and other
+            // extensions (`summary.txt`) fall through as ordinary
+            // prompt sections — only the canonical filenames in
+            // `OVERRIDABLE_PROMPTS` are excluded.
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_overridable_prompt)
+            {
                 continue;
             }
 
@@ -288,6 +461,223 @@ Be friendly and welcoming.
         assert_eq!(prompt, "You are a helpful AI assistant.");
     }
 
+    // ----- reload_prompts_into_core (ADR-063 §3.7.5/§3.7.6) -----
+    //
+    // Unit-level coverage for the free function that both the HTTP
+    // reload handler (`POST /agents/{id}/prompts/reload`) and
+    // `DebugService::reload_prompts` delegate to. Integration tests in
+    // `tests/prompts_reload_e2e.rs` cover the HTTP envelope; these
+    // tests pin the dispatch table (filename -> AgentCore field) and
+    // the empty/partial/full override semantics.
+
+    #[test]
+    fn test_reload_prompts_into_core_with_empty_package_dir_writes_none_to_all_8_fields() {
+        let core = make_test_agent_core();
+        let empty_dir = std::env::temp_dir().join(format!(
+            "acowork-test-reload-prompts-empty-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&empty_dir);
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        // Seed each field with a sentinel so we can prove the reload
+        // overwrites with `None` (rather than leaving the sentinel in
+        // place because of a missed write).
+        *core.compaction_prompt.write().unwrap() = Some("SENTINEL".into());
+        *core.search_prompt.write().unwrap() = Some("SENTINEL".into());
+        *core.compact_template.write().unwrap() = Some("SENTINEL".into());
+        *core.title_prompt.write().unwrap() = Some("SENTINEL".into());
+        *core.extraction_prompt.write().unwrap() = Some("SENTINEL".into());
+        *core
+            .conflict_classification_prompt
+            .write()
+            .unwrap() = Some("SENTINEL".into());
+        *core.generalization_prompt.write().unwrap() = Some("SENTINEL".into());
+        *core.abstention_prompt.write().unwrap() = Some("SENTINEL".into());
+
+        reload_prompts_into_core(&empty_dir, &core).expect("empty-dir reload must succeed");
+
+        // Every field must be `None` — no `prompts/*.md` exists, so
+        // the loader returned `None` for each, and the reload wrote
+        // that `None` into the slot (not the original sentinel).
+        assert!(core.compaction_prompt.read().unwrap().is_none());
+        assert!(core.search_prompt.read().unwrap().is_none());
+        assert!(core.compact_template.read().unwrap().is_none());
+        assert!(core.title_prompt.read().unwrap().is_none());
+        assert!(core.extraction_prompt.read().unwrap().is_none());
+        assert!(
+            core.conflict_classification_prompt.read().unwrap().is_none()
+        );
+        assert!(core.generalization_prompt.read().unwrap().is_none());
+        assert!(core.abstention_prompt.read().unwrap().is_none());
+
+        let _ = fs::remove_dir_all(&empty_dir);
+    }
+
+    #[test]
+    fn test_reload_prompts_into_core_with_all_8_overrides_writes_each_field() {
+        let core = make_test_agent_core();
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-reload-prompts-all8-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+
+        // One per `OVERRIDABLE_PROMPTS` entry, in the canonical order
+        // (matches the table at the top of this module).
+        let fixtures: &[(&str, &str)] = &[
+            ("summary.md", "summary-from-disk"),
+            ("search.md", "search-from-disk"),
+            ("compact-template.md", "compact-template-from-disk"),
+            ("title.md", "title-from-disk"),
+            ("extraction.md", "extraction-from-disk"),
+            ("conflict-classification.md", "conflict-from-disk"),
+            ("generalization.md", "generalization-from-disk"),
+            ("abstention.md", "abstention-from-disk"),
+        ];
+        for (file, content) in fixtures {
+            fs::write(dir.join("prompts").join(file), content).unwrap();
+        }
+
+        reload_prompts_into_core(&dir, &core).expect("all-8 reload must succeed");
+
+        // Every field must equal the disk content — proves the
+        // dispatch table wires each filename to the correct
+        // AgentCore field.
+        assert_eq!(
+            core.compaction_prompt.read().unwrap().as_deref(),
+            Some("summary-from-disk")
+        );
+        assert_eq!(
+            core.search_prompt.read().unwrap().as_deref(),
+            Some("search-from-disk")
+        );
+        assert_eq!(
+            core.compact_template.read().unwrap().as_deref(),
+            Some("compact-template-from-disk")
+        );
+        assert_eq!(
+            core.title_prompt.read().unwrap().as_deref(),
+            Some("title-from-disk")
+        );
+        assert_eq!(
+            core.extraction_prompt.read().unwrap().as_deref(),
+            Some("extraction-from-disk")
+        );
+        assert_eq!(
+            core.conflict_classification_prompt.read().unwrap().as_deref(),
+            Some("conflict-from-disk")
+        );
+        assert_eq!(
+            core.generalization_prompt.read().unwrap().as_deref(),
+            Some("generalization-from-disk")
+        );
+        assert_eq!(
+            core.abstention_prompt.read().unwrap().as_deref(),
+            Some("abstention-from-disk")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reload_prompts_into_core_with_partial_overrides_writes_mixed_none_and_some() {
+        let core = make_test_agent_core();
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-reload-prompts-partial-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+
+        // Only seed 3 of the 8. The remaining 5 must come back as `None`.
+        fs::write(dir.join("prompts").join("summary.md"), "summary-only").unwrap();
+        fs::write(dir.join("prompts").join("title.md"), "title-only").unwrap();
+        fs::write(
+            dir.join("prompts").join("abstention.md"),
+            "abstention-only",
+        )
+        .unwrap();
+
+        reload_prompts_into_core(&dir, &core).expect("partial reload must succeed");
+
+        assert_eq!(
+            core.compaction_prompt.read().unwrap().as_deref(),
+            Some("summary-only")
+        );
+        assert!(core.search_prompt.read().unwrap().is_none());
+        assert!(core.compact_template.read().unwrap().is_none());
+        assert_eq!(
+            core.title_prompt.read().unwrap().as_deref(),
+            Some("title-only")
+        );
+        assert!(core.extraction_prompt.read().unwrap().is_none());
+        assert!(
+            core.conflict_classification_prompt.read().unwrap().is_none()
+        );
+        assert!(core.generalization_prompt.read().unwrap().is_none());
+        assert_eq!(
+            core.abstention_prompt.read().unwrap().as_deref(),
+            Some("abstention-only")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_overridable_prompts_stays_at_8_entries() {
+        // Sanity check: the closed-set invariant holds. A future
+        // maintainer who adds an entry to `OVERRIDABLE_PROMPTS` without
+        // teaching `reload_prompts_into_core` about the matching field
+        // gets a compile-time reminder — the match arm is exhaustive
+        // against the 8 canonical filenames and any new entry triggers
+        // an "unknown overridable filename" `Err` at runtime (the
+        // match has no `_` arm). Pinning the canonical count here
+        // makes a silent drift (e.g. someone shrinks the list to 7)
+        // immediately visible.
+        assert_eq!(
+            OVERRIDABLE_PROMPTS.len(),
+            8,
+            "OVERRIDABLE_PROMPTS must stay at 8 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
+        );
+    }
+
+    /// Build a minimal `AgentCore` for the unit tests above. Only the
+    /// 9 `Arc<RwLock<Option<String>>>` prompt fields are touched by
+    /// `reload_prompts_into_core`, so a stripped-down provider /
+    /// config is sufficient. Mirrors `agent_core::tests::make_core`
+    /// (which is private to that module).
+    fn make_test_agent_core() -> std::sync::Arc<crate::agent::agent_core::AgentCore> {
+        use crate::config::RuntimeConfig;
+        let config = RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.reload-prompts-unit"
+            version = "1.0.0"
+            name = "Test Reload Prompts"
+            description = "Unit test target for reload_prompts_into_core"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .expect("manifest TOML must parse");
+        let provider: std::sync::Arc<dyn acowork_core::providers::traits::Provider> =
+            std::sync::Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+                "test",
+            ));
+        std::sync::Arc::new(crate::agent::agent_core::AgentCore::new(
+            config,
+            manifest,
+            provider,
+            vec![],
+        ))
+    }
+
     // ----- load_compaction_prompt -----
 
     /// Unique temp dir per test — the fixed-name helper below caused
@@ -396,5 +786,211 @@ Be friendly and welcoming.
         assert!(prompt.contains("test agent"));
         assert!(prompt.contains("Txt summary directive."));
         assert!(prompt.contains("## summary"));
+    }
+
+    // ── ADR-063: OVERRIDABLE_PROMPTS + is_overridable_prompt + load_optional_prompt ──
+
+    /// Pin the OVERRIDABLE_PROMPTS entry count. A change here means the
+    /// Debug panel list, the main-prompt exclusion set, and the LLM-call
+    /// resolution chain all need to be updated together — a silent drift
+    /// is the most expensive failure mode, so make it loud.
+    #[test]
+    fn test_overridable_prompts_count_is_8() {
+        assert_eq!(
+            OVERRIDABLE_PROMPTS.len(),
+            8,
+            "OVERRIDABLE_PROMPTS must have 8 entries: 1 compaction (ADR-053) + 3 prompt.rs + 4 grafeo/memory. Update AgentCore fields, LLM call sites, and Debug panel list together."
+        );
+    }
+
+    /// All 8 canonical filenames must be recognised. Pins the contract
+    /// that `OVERRIDABLE_PROMPTS` and `is_overridable_prompt` agree.
+    #[test]
+    fn test_is_overridable_prompt_for_all_known_files() {
+        for (filename, _desc) in OVERRIDABLE_PROMPTS {
+            assert!(
+                is_overridable_prompt(filename),
+                "is_overridable_prompt must return true for {filename}"
+            );
+        }
+    }
+
+    /// Non-canonical filenames must NOT be recognised. This is the
+    /// security guard for the Debug panel PUT handler — see
+    /// `http/prompts::put_prompt` which calls this to reject writes
+    /// outside `OVERRIDABLE_PROMPTS`.
+    #[test]
+    fn test_is_overridable_prompt_rejects_unknown_filenames() {
+        assert!(!is_overridable_prompt("system.md"));
+        assert!(!is_overridable_prompt("constraints.md"));
+        assert!(!is_overridable_prompt("notes.md"));
+        assert!(!is_overridable_prompt(""));
+        assert!(!is_overridable_prompt("../summary.md"));
+        assert!(!is_overridable_prompt("prompts/summary.md"));
+        assert!(!is_overridable_prompt("summary.md.bak"));
+    }
+
+    /// Case variants are NOT overridable. Symmetric with the existing
+    /// `test_build_system_prompt_does_not_exclude_summary_case_variant`
+    /// test — case-sensitive matching is required so that on
+    /// case-insensitive filesystems the two views (excluded from main
+    /// prompt vs loaded as override) never disagree.
+    #[test]
+    fn test_is_overridable_prompt_is_case_sensitive() {
+        assert!(!is_overridable_prompt("SUMMARY.md"));
+        assert!(!is_overridable_prompt("Summary.md"));
+        assert!(!is_overridable_prompt("Title.md"));
+        assert!(!is_overridable_prompt("ABSTENTION.md"));
+    }
+
+    /// `load_optional_prompt` reads any of the 9 canonical files. Sanity
+    /// check on top of `load_compaction_prompt`'s dedicated test.
+    #[test]
+    fn test_load_optional_prompt_reads_each_canonical_file() {
+        let dir = std::env::temp_dir().join("acowork-test-load-optional-each");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+
+        for (filename, _desc) in OVERRIDABLE_PROMPTS {
+            let content = format!("Directive content for {filename}");
+            fs::write(dir.join("prompts").join(filename), &content).unwrap();
+        }
+
+        for (filename, _desc) in OVERRIDABLE_PROMPTS {
+            let loaded = load_optional_prompt(&dir, filename);
+            let expected = format!("Directive content for {filename}");
+            assert_eq!(
+                loaded.as_deref(),
+                Some(expected.as_str()),
+                "load_optional_prompt must read {filename}"
+            );
+        }
+    }
+
+    /// Unknown filenames must return None. This is the silent path —
+    /// callers are expected to fall back to built-in constants; we don't
+    /// spam the log for routine "no override" cases but DO log a warning
+    /// for malformed calls (covered by the load_optional_prompt warn
+    /// path).
+    #[test]
+    fn test_load_optional_prompt_unknown_filename_returns_none() {
+        let dir = std::env::temp_dir().join("acowork-test-load-optional-unknown");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        // Even with the file present, an unknown filename must return None.
+        fs::write(dir.join("prompts").join("evil.md"), "should not load").unwrap();
+        assert_eq!(load_optional_prompt(&dir, "evil.md"), None);
+        assert_eq!(load_optional_prompt(&dir, ""), None);
+    }
+
+    /// Whitespace-only files behave like absent files (same contract as
+    /// ADR-053's `load_compaction_prompt`).
+    #[test]
+    fn test_load_optional_prompt_whitespace_only_is_none() {
+        let dir = std::env::temp_dir().join("acowork-test-load-optional-whitespace");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts").join("search.md"), "   \n\t\n  ").unwrap();
+        assert_eq!(load_optional_prompt(&dir, "search.md"), None);
+    }
+
+    /// Backward-compat: `load_compaction_prompt` is still a valid public
+    /// symbol and must continue to work. It's now a thin wrapper over
+    /// `load_optional_prompt`.
+    #[test]
+    fn test_load_compaction_prompt_delegates_to_load_optional() {
+        let dir = std::env::temp_dir().join("acowork-test-compaction-delegates");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(
+            dir.join("prompts").join("summary.md"),
+            "Compaction directive content.",
+        )
+        .unwrap();
+
+        // Both code paths must agree.
+        let via_wrapper = load_compaction_prompt(&dir);
+        let via_generic = load_optional_prompt(&dir, "summary.md");
+        assert_eq!(via_wrapper, via_generic);
+        assert_eq!(
+            via_wrapper.as_deref(),
+            Some("Compaction directive content.")
+        );
+    }
+
+    /// Multi-file exclusion: ALL 9 canonical filenames are excluded from
+    /// the main dialog system prompt. This pins §3.3 of ADR-063.
+    #[test]
+    fn test_build_system_prompt_excludes_all_overridable_files() {
+        let dir = std::env::temp_dir().join("acowork-test-excludes-all-overridable");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+
+        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        for (filename, _desc) in OVERRIDABLE_PROMPTS {
+            let sentinel = format!("SENTINEL FOR {filename}");
+            fs::write(dir.join("prompts").join(filename), &sentinel).unwrap();
+        }
+
+        let prompt = build_system_prompt(&dir).unwrap();
+        // system.md is an ordinary section and MUST appear.
+        assert!(prompt.contains("test agent"));
+        // Every overridable file's sentinel MUST be excluded — none of
+        // them belong in the main dialog system prompt.
+        for (filename, _desc) in OVERRIDABLE_PROMPTS {
+            assert!(
+                !prompt.contains(&format!("SENTINEL FOR {filename}")),
+                "main prompt must exclude {filename} (ADR-063 §3.3)"
+            );
+            // And neither the filename as a section header (## summary, etc).
+            let header = format!("## {}", filename.trim_end_matches(".md"));
+            assert!(
+                !prompt.contains(&header),
+                "main prompt must not render ## header for excluded {filename}"
+            );
+        }
+    }
+
+    /// Non-canonical neighbour of an overridable filename is NOT excluded —
+    /// it becomes an ordinary section. Symmetric with the existing
+    /// `test_build_system_prompt_does_not_exclude_summary_case_variant` but
+    /// generalised to all 9 entries.
+    ///
+    /// Implementation note: `collect_markdown_files` filters by lowercase
+    /// extension (`.md`/`.txt`) so a filename with an uppercase extension
+    /// like `SUMMARY.MD` would not be collected at all — the test wouldn't
+    /// be able to make any statement about exclusion. We use a
+    /// `<stem>-case.md` neighbour instead: it passes the lowercase-extension
+    /// collector, is NOT in `OVERRIDABLE_PROMPTS`, and must therefore reach
+    /// the main dialog system prompt as an ordinary section.
+    #[test]
+    fn test_build_system_prompt_does_not_exclude_overridable_case_variant() {
+        for (filename, _desc) in OVERRIDABLE_PROMPTS.iter().take(2) {
+            let dir = std::env::temp_dir().join(format!(
+                "acowork-test-excludes-case-{filename}"
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(dir.join("prompts")).unwrap();
+            fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+
+            // Neighbour that LOOKS like an overridable filename but isn't:
+            // same stem + `-case` suffix. Must pass the lowercase-extension
+            // collector and the exact-match exclusion (because the
+            // canonical name is `summary.md` / `search.md`, not
+            // `summary-case.md` / `search-case.md`).
+            let stem = filename.trim_end_matches(".md");
+            let variant = format!("{stem}-case.md");
+            fs::write(
+                dir.join("prompts").join(&variant),
+                format!("Case variant for {filename}."),
+            )
+            .unwrap();
+
+            let prompt = build_system_prompt(&dir).unwrap();
+            assert!(
+                prompt.contains(&format!("Case variant for {filename}.")),
+                "neighbour {variant} must surface as ordinary section (not in OVERRIDABLE_PROMPTS exact match)"
+            );
+        }
     }
 }

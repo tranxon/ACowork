@@ -11,6 +11,11 @@
 //!      the new process restores `READY` (ADR-059 §7.2 re-delivery);
 //!   3. LWT `status=offline` while ready demotes the phase back to
 //!      `BOOTING` until the Node re-announces.
+//!   4. Sleep/wake reconnect: the gateway re-subscribes while stale
+//!      retained snapshots (offline + empty NodeReady) are still being
+//!      replayed; the node re-announces live online + NodeReady around
+//!      the same time — bootstrap must reach READY and STAY READY
+//!      (ADR-059 §7.2 replay guard).
 //!
 //! The dispatch surface mirrors `gateway/mod.rs` — a Gateway MQTT client
 //! whose callback routes every message through
@@ -58,10 +63,24 @@ async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool 
     cond()
 }
 
+/// Surface bundle returned by [`build_surface_full`] — everything the
+/// wake-reconnect test needs to rebuild the Gateway client (simulating
+/// a soft-restart) while keeping the SAME replay guard and dispatch
+/// callback across the rebuild.
+struct TestSurface {
+    orchestrator: Arc<BootstrapOrchestrator>,
+    gw_client: GatewayMqttClient,
+    guard: Arc<dispatch::NodeReplayGuard>,
+    dispatch_slot: Arc<tokio::sync::Mutex<Option<Arc<GatewayMqttClient>>>>,
+    callback: acowork_gateway::mqtt::MqttMessageCallback,
+}
+
 /// Build the dispatch surface: registry (only the subsystem under
 /// test), orchestrator, shared GatewayState, and a Gateway MQTT client
-/// whose callback routes messages through the real dispatcher.
-async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttClient) {
+/// whose callback routes messages through the real dispatcher. Also
+/// wires the ADR-059 §7.2 replay guard so every ConnAck stamps the
+/// replay window.
+async fn build_surface_full(port: u16) -> TestSurface {
     let registry = SubsystemReadinessRegistry::new_shared();
     let orchestrator = BootstrapOrchestrator::new("test-instance".to_string(), registry.clone());
     // Register only the subsystem under test — the full startup sequence
@@ -78,6 +97,10 @@ async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttCli
     let agent_registry = acowork_gateway::mqtt::agent_registry::new_shared_registry();
     let node_registry = acowork_gateway::mqtt::node_registry::new_shared_registry();
     let operation_store = OperationStore::new_shared();
+    // ADR-059 §7.2: one guard shared by the dispatch context AND every
+    // Gateway client incarnation (the poll task stamps it on ConnAck).
+    let guard = Arc::new(dispatch::NodeReplayGuard::default());
+    let guard_for_cb = guard.clone();
     let reg_for_cb = registry.clone();
     let state_for_cb = gw_state.clone();
     let http_reg_for_cb = runtime_http_registry.clone();
@@ -95,6 +118,7 @@ async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttCli
         let agent_reg = agent_reg_for_cb.clone();
         let node_reg = node_reg_for_cb.clone();
         let op_store = op_store_for_cb.clone();
+        let replay_guard_for_cb = guard_for_cb.clone();
         tokio::spawn(async move {
             let client = slot.lock().await.clone();
             dispatch::handle_plaintext_message(
@@ -108,20 +132,36 @@ async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttCli
                     state,
                     bootstrap_registry: Some(reg),
                     operation_store: Some(op_store),
+                    node_replay_guard: replay_guard_for_cb,
                     ..Default::default()
                 },
             );
         });
     });
 
-    let gw_client = GatewayMqttClient::new_publisher_with_callback("127.0.0.1", port, callback)
-        .await
-        .expect("gateway client should connect");
+    let gw_client =
+        GatewayMqttClient::new_publisher_with_callback("127.0.0.1", port, callback.clone())
+            .await
+            .expect("gateway client should connect");
+    gw_client.set_replay_guard(guard.clone());
     *dispatch_slot.lock().await = Some(Arc::new(gw_client.clone()));
     // Let the ConnAck subscription round settle before the node speaks.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    (orchestrator, gw_client)
+    TestSurface {
+        orchestrator,
+        gw_client,
+        guard,
+        dispatch_slot,
+        callback,
+    }
+}
+
+/// Build the dispatch surface (backwards-compatible wrapper for the
+/// readiness lifecycle tests that only need orchestrator + client).
+async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttClient) {
+    let surface = build_surface_full(port).await;
+    (surface.orchestrator, surface.gw_client)
 }
 
 /// Open a raw MQTT client that impersonates a Node publishing its
@@ -141,6 +181,24 @@ async fn node_publisher(port: u16, client_id: &str) -> AsyncClient {
     });
     // Give the CONNECT packet time to flush.
     tokio::time::sleep(Duration::from_millis(100)).await;
+    client
+}
+
+/// Open a raw MQTT client that impersonates a Node WITHOUT the CONNECT
+/// settle delay — the wake test needs the re-announcement to race the
+/// gateway's retained replay (the sleep in [`node_publisher`] would let
+/// the replay finish first and the race would never happen).
+async fn fast_node_publisher(port: u16, client_id: &str) -> AsyncClient {
+    let mut opts = MqttOptions::new(client_id, "127.0.0.1", port);
+    opts.set_keep_alive(Duration::from_secs(5));
+    let (client, mut eventloop) = AsyncClient::new(opts, 32);
+    tokio::spawn(async move {
+        loop {
+            if eventloop.poll().await.is_err() {
+                break;
+            }
+        }
+    });
     client
 }
 
@@ -348,4 +406,199 @@ async fn node_ready_with_mismatched_node_id_is_ignored() {
     drop(node);
     drop(gw_client);
     drop(broker);
+}
+
+/// 5. Sleep/wake reconnect (ADR-059 §7.2): after the OS wakes the
+/// machine, the Gateway and the node reconnect around the same instant.
+/// The new Gateway client re-subscribes and rumqttd replays the stale
+/// retained snapshot (status=offline + empty NodeReady) — possibly
+/// AFTER the node's live re-announcement (status=online + NodeReady)
+/// has already restored READY. The replay guard must suppress those
+/// stale replays: bootstrap must reach READY and STAY READY. (The bug:
+/// the late replay demoted the node back to BOOTING with no recovery
+/// mechanism, so the desktop showed "syncing LLM config" forever.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wake_reconnect_stale_replay_does_not_stall_bootstrap() {
+    let port = unique_port("wake");
+    let broker = start_broker("127.0.0.1", port).expect("broker should start");
+    let surface = build_surface_full(port).await;
+
+    // Phase 1 — steady state: node announces online + NodeReady → READY.
+    let node = node_publisher(port, "node:verify-node-wake").await;
+    node.publish(
+        acowork_core::node::node_status_topic(NODE_ID),
+        QoS::AtLeastOnce,
+        true,
+        "online".as_bytes(),
+    )
+    .await
+    .expect("publish status=online");
+    node.publish(
+        node_ready_topic(NODE_ID),
+        QoS::AtLeastOnce,
+        true,
+        ready_envelope(NODE_ID),
+    )
+    .await
+    .expect("publish NodeReady");
+    let snapshot = surface.orchestrator.clone();
+    let ready = wait_until(Duration::from_secs(5), move || {
+        snapshot.snapshot().phase == BootstrapPhase::Ready
+    })
+    .await;
+    assert!(ready, "phase must reach READY before the wake simulation");
+
+    // Phase 2 — sleep: the node goes away. Its retained snapshot is
+    // cleared (offline LWT + empty NodeReady) → demotes to BOOTING.
+    node.publish(
+        acowork_core::node::node_status_topic(NODE_ID),
+        QoS::AtLeastOnce,
+        true,
+        "offline".as_bytes(),
+    )
+    .await
+    .expect("publish status=offline");
+    node.publish(node_ready_topic(NODE_ID), QoS::AtLeastOnce, true, Vec::new())
+        .await
+        .expect("clear retained NodeReady");
+    drop(node);
+    let snapshot = surface.orchestrator.clone();
+    let demoted = wait_until(Duration::from_secs(5), move || {
+        snapshot.snapshot().phase == BootstrapPhase::Booting
+    })
+    .await;
+    assert!(demoted, "phase must drop to BOOTING while the node is away");
+
+    // Phase 3 — wake: gateway + node reconnect concurrently (both fatal
+    // backoffs ended at the same instant). Drop the old gateway client
+    // (its connection died during sleep) and reconnect.
+    drop(surface.gw_client);
+    let (gw_result, node_wake) = tokio::join!(
+        GatewayMqttClient::new_publisher_with_callback(
+            "127.0.0.1",
+            port,
+            surface.callback.clone(),
+        ),
+        async {
+            let n = fast_node_publisher(port, "node:verify-node-wake-2").await;
+            n.publish(
+                acowork_core::node::node_status_topic(NODE_ID),
+                QoS::AtLeastOnce,
+                true,
+                "online".as_bytes(),
+            )
+            .await
+            .expect("publish status=online (wake)");
+            n.publish(
+                node_ready_topic(NODE_ID),
+                QoS::AtLeastOnce,
+                true,
+                ready_envelope(NODE_ID),
+            )
+            .await
+            .expect("publish NodeReady (wake)");
+            n
+        }
+    );
+    let gw_client = gw_result.expect("gateway client should reconnect after wake");
+    gw_client.set_replay_guard(surface.guard.clone());
+    // The new client's first ConnAck fires inside `connect()` before the
+    // guard is attached (mirrors Gateway startup). In production every
+    // later reconnect is a soft-restart of the SAME client whose ConnAck
+    // stamps the guard — replicate that stamp here.
+    surface.guard.mark_gateway_reconnect();
+    *surface.dispatch_slot.lock().await = Some(Arc::new(gw_client.clone()));
+
+    // The stale replay races the live re-announcement; whichever order
+    // the broker delivers them, the phase must settle on READY and stay
+    // there (the pre-fix bug stalled at BOOTING with no recovery).
+    let snapshot = surface.orchestrator.clone();
+    let re_ready = wait_until(Duration::from_secs(5), move || {
+        snapshot.snapshot().phase == BootstrapPhase::Ready
+    })
+    .await;
+    assert!(re_ready, "phase must return to READY after the wake reconnect");
+
+    // Hold well past the replay delivery: a late stale replay (the bug
+    // delivered it ~10 ms after the live NodeReady) must NOT demote.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let snapshot = surface.orchestrator.snapshot();
+    assert_eq!(
+        snapshot.phase,
+        BootstrapPhase::Ready,
+        "late stale replay must not demote the reconnected node (bootstrap stuck in BOOTING)"
+    );
+
+    drop(node_wake);
+    drop(gw_client);
+    drop(broker);
+}
+
+/// 6. Deterministic stale-replay sequence (ADR-059 §7.2): replays the
+/// exact message order observed in the wake bug (gateway log 13:03:59)
+/// without relying on broker timing:
+///
+///   1. Gateway (re)connects — ConnAck opens the replay window;
+///   2. stale `offline` replay demotes the not-yet-reconnected node
+///      (legitimate — the node really is away);
+///   3. live `NodeReady` re-announcement restores READY;
+///   4. stale empty-`NodeReady` replay arrives AFTER the live signal —
+///      the replay guard must suppress it. Without the guard the node
+///      is demoted back to BOOTING with no recovery (the desktop stuck
+///      on "syncing LLM config").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_replay_after_live_ready_does_not_demote() {
+    let registry = SubsystemReadinessRegistry::new_shared();
+    let orchestrator = BootstrapOrchestrator::new("test-instance".to_string(), registry.clone());
+    let _handle = registry.register(SUBSYSTEM, ReadinessKind::Required);
+    let guard = Arc::new(dispatch::NodeReplayGuard::default());
+
+    let gw_state: SharedHttpState = Arc::new(RwLock::new(GatewayState::new(
+        "/tmp/acowork-node-ready-test-vault",
+    )));
+    gw_state.write().await.bootstrap.orchestrator = Some(orchestrator.clone());
+    let ctx = dispatch::DispatchContext {
+        runtime_http_registry: acowork_gateway::http::proxy::new_shared_registry(),
+        agent_registry: acowork_gateway::mqtt::agent_registry::new_shared_registry(),
+        node_registry: acowork_gateway::mqtt::node_registry::new_shared_registry(),
+        state: gw_state,
+        bootstrap_registry: Some(registry.clone()),
+        node_replay_guard: guard.clone(),
+        ..Default::default()
+    };
+
+    // 1. Gateway (re)connection — ConnAck stamps the replay window.
+    guard.mark_gateway_reconnect();
+
+    // 2. Stale offline replay (node not yet re-announced) demotes.
+    dispatch::handle_plaintext_message(
+        &acowork_core::node::node_status_topic(NODE_ID),
+        b"offline",
+        &ctx,
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        orchestrator.snapshot().phase,
+        BootstrapPhase::Booting,
+        "offline replay must demote a node that has not re-announced"
+    );
+
+    // 3. Live NodeReady re-announcement restores READY.
+    dispatch::handle_plaintext_message(&node_ready_topic(NODE_ID), &ready_envelope(NODE_ID), &ctx);
+    let snapshot = orchestrator.clone();
+    let re_ready = wait_until(Duration::from_secs(5), move || {
+        snapshot.snapshot().phase == BootstrapPhase::Ready
+    })
+    .await;
+    assert!(re_ready, "live NodeReady must restore READY");
+
+    // 4. Stale empty-NodeReady replay delivered late — the guard must
+    //    suppress it (the bug demoted here and never recovered).
+    dispatch::handle_plaintext_message(&node_ready_topic(NODE_ID), &[], &ctx);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        orchestrator.snapshot().phase,
+        BootstrapPhase::Ready,
+        "stale empty NodeReady replay must not demote a reconnected node"
+    );
 }

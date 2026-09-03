@@ -179,7 +179,7 @@ pub struct McpProbeResponse {
 /// `GET /api/mcp-catalog` — list all MCP server definitions (env values masked)
 pub async fn list_catalog(
     State(state): State<AppState>,
-) -> Result<Json<McpCatalogResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<McpCatalogResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await?;
     let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
@@ -206,7 +206,7 @@ pub async fn list_catalog(
 pub async fn replace_catalog(
     State(state): State<AppState>,
     Json(new_catalog): Json<Vec<McpServerConfigDef>>,
-) -> Result<Json<McpCatalogResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<McpCatalogResponse>, ApiError> {
     // Validate: no duplicate names
     let mut seen = std::collections::HashSet::new();
     for entry in &new_catalog {
@@ -257,7 +257,7 @@ pub async fn replace_catalog(
 pub async fn add_catalog_entry(
     State(state): State<AppState>,
     Json(body): Json<AddCatalogEntryRequest>,
-) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
     // ADR-059 §7.3: reject stale writers before touching the catalog.
     crate::http::routes::check_expected_version(&state, body.expected_version).await?;
 
@@ -315,7 +315,7 @@ pub async fn update_catalog_entry(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(body): Json<UpdateCatalogEntryRequest>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await?;
     let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
@@ -386,7 +386,7 @@ pub async fn update_catalog_entry(
 pub async fn remove_catalog_entry(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await?;
     let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
@@ -539,7 +539,7 @@ async fn do_probe(config: McpServerConfigDef) -> McpProbeResponse {
 /// config is valid before saving it to the catalog.
 pub async fn probe_server_config(
     Json(config): Json<McpServerConfigDef>,
-) -> Result<Json<McpProbeResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<McpProbeResponse>, ApiError> {
     tracing::info!(server = %config.name, transport = ?config.transport, "Probing MCP server config");
     Ok(Json(do_probe(config).await))
 }
@@ -551,7 +551,7 @@ pub async fn probe_server_config(
 pub async fn probe_catalog_entry(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<McpProbeResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<McpProbeResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await?;
     let catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
 
@@ -569,7 +569,7 @@ pub async fn probe_catalog_entry(
 // ── Helpers ───────────────────────────────────────────────────────────
 
 /// Get the data_dir from Gateway state
-async fn get_data_dir(state: &AppState) -> Result<PathBuf, (StatusCode, Json<ApiError>)> {
+async fn get_data_dir(state: &AppState) -> Result<PathBuf, ApiError> {
     let gw = state.gateway_state.read().await;
     Ok(gw
         .config

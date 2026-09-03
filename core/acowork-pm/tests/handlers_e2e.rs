@@ -43,9 +43,11 @@ struct TestApp {
 impl TestApp {
     async fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = PmConfig::default();
-        cfg.data_dir = tmp.path().to_path_buf();
-        cfg.index_rebuild_on_start = false;
+        let cfg = PmConfig {
+            data_dir: tmp.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
         let store = Arc::new(TreePmStore::new(cfg.clone()).await.unwrap());
         let router = acowork_pm::pm_router(store, cfg);
         Self { router, _tmp: tmp }

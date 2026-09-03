@@ -11,15 +11,19 @@
 //! The write path is NOT a test stub: it exercises the real production
 //! compaction landing chain —
 //!   `EpisodeDistiller::write_summary_to_provider`
-//!     → `parse_compact_output` (5-field triples per ADR-057 D7/D8)
+//!     → `parse_compact_output` (quality gate + `<summary>` block,
+//!       ADR-057 triples-removed)
 //!     → `MemoryManager::record_distilled`
-//!     → `GrafeoStore::ingest_distilled_triples`
-//!     → instant pipeline (`process_memory_store`) + `SOURCED_FROM` edges
+//!     → `GrafeoStore::store_episode`
 //! — against a real in-memory GrafeoStore wired into a real
 //! `RuntimeHttpServer` listening on 127.0.0.1 (random port). The only
 //! simulated part is the LLM: its compact-model output is a fixture
 //! string (LLM prompt/parse contracts are unit-tested in
 //! `episode_distill.rs`).
+//!
+//! ADR-057 (triples-removed): compaction no longer lands Knowledge nodes
+//! or `SOURCED_FROM` edges — only an Episodic node. Knowledge persistence
+//! is exercised separately via `memory_store` / procedural paths.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,11 +47,45 @@ use acowork_runtime::usecases::GrafeoMemoryAdapter;
 ///
 /// Same text → same 384-dim vector (cosine 1.0), different text →
 /// unrelated vector. This keeps the dedup semantics of the landing
-/// pipeline realistic: identical triples deduplicate, distinct triples
-/// do not. (The "no provider" degradation path — nodes land without
-/// vectors and dedup is skipped — is covered in `acowork-grafeo`
-/// `consolidation::distill` unit tests.)
+/// pipeline realistic: identical Episodic summaries deduplicate,
+/// distinct ones do not.
 struct DeterministicEmbedding;
+
+/// Embedding provider that always fails at runtime — used to verify the
+/// D1 best-effort degradation in `record_distilled`: a failing embedding
+/// provider must NOT fail the episode write (the vector is dropped, the
+/// episode still lands).
+struct FailingEmbedding;
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for FailingEmbedding {
+    fn name(&self) -> &str {
+        "failing-test"
+    }
+
+    async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::EmbeddingError> {
+        Err(acowork_core::EmbeddingError::Unavailable(
+            "test-only failure".to_string(),
+        ))
+    }
+
+    async fn embed_batch(
+        &self,
+        _texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, acowork_core::EmbeddingError> {
+        Err(acowork_core::EmbeddingError::Unavailable(
+            "test-only failure".to_string(),
+        ))
+    }
+
+    fn dimension(&self) -> usize {
+        384
+    }
+
+    async fn is_available(&self) -> bool {
+        true
+    }
+}
 
 #[async_trait::async_trait]
 impl EmbeddingProvider for DeterministicEmbedding {
@@ -79,15 +117,11 @@ impl EmbeddingProvider for DeterministicEmbedding {
     }
 }
 
-/// Compact-model output fixture: one high-confidence Fact (Active path)
-/// and one low-confidence Preference (Pending path).
+/// Compact-model output fixture (ADR-057 triples-removed): a single
+/// `<summary>` block that lands as one Episodic memory node.
 const COMPACT_OUTPUT: &str = "<summary>\
 User worked on the ADR-057 memory distillation landing pipeline and verified it end to end.\
-</summary>\
-<triples>\
-User | requested | context compaction fix | 0.95 | Fact\n\
-User | might prefer | tea | 0.6 | Preference\n\
-</triples>";
+</summary>";
 
 struct MemoryE2e {
     port: u16,
@@ -123,6 +157,7 @@ async fn spawn_memory_e2e_server(tag: &str) -> MemoryE2e {
 
     let server = RuntimeHttpServer::start(
         temp_dir.clone(),
+        temp_dir.clone(), // package_dir (ADR-063): tests reuse work_dir as package dir
         "com.test.agent".to_string(),
         snapshots,
         latest,
@@ -147,6 +182,7 @@ async fn spawn_memory_e2e_server(tag: &str) -> MemoryE2e {
             acowork_runtime::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
         )),
         session_manager_slot,
+        std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
     )
     .await
     .expect("runtime http server should start");
@@ -198,8 +234,8 @@ async fn desktop_memory_panel_flow_after_distillation_landing() {
 
     // ── 2. Simulate a compaction distillation landing ────────────────────
     // This is the production write path for compacted summaries (ADR-011 /
-    // ADR-057): parse 5-field triples → record_distilled →
-    // GrafeoStore::ingest_distilled_triples → instant pipeline.
+    // ADR-057 triples-removed): parse <summary> → record_distilled →
+    // GrafeoStore::store_episode (summary-only, no triple landing).
     let provider: Arc<dyn MemoryProvider> = e2e.store.clone();
     EpisodeDistiller::write_summary_to_provider(
         COMPACT_OUTPUT,
@@ -207,13 +243,13 @@ async fn desktop_memory_panel_flow_after_distillation_landing() {
         &Some(provider),
         Some(&DeterministicEmbedding),
     )
-    .await;
+    .await
+    .expect("fixture must pass the summary quality gate and land");
 
-    // ── 3. Panel list: 1 Episodic + 2 Knowledge nodes ───────────────────
+    // ── 3. Panel list: 1 Episodic node, no Knowledge nodes ──────────────
     let list = get_json(&e2e, "/memory/nodes?page=1&size=50").await;
-    assert_eq!(list["total"].as_u64(), Some(3), "episode + 2 knowledge nodes");
+    assert_eq!(list["total"].as_u64(), Some(1), "one distilled episode");
     let nodes = list["nodes"].as_array().expect("nodes array");
-
     let episodes: Vec<&serde_json::Value> = nodes
         .iter()
         .filter(|n| n["node_type"] == "Episodic")
@@ -223,67 +259,40 @@ async fn desktop_memory_panel_flow_after_distillation_landing() {
         .filter(|n| n["node_type"] == "Knowledge")
         .collect();
     assert_eq!(episodes.len(), 1, "exactly one distilled episode");
-    assert_eq!(knowledge.len(), 2, "one knowledge node per triple");
+    assert_eq!(knowledge.len(), 0, "triples-removed: no Knowledge nodes from distillation");
     let episode_id = episodes[0]["node_id"].as_u64().expect("episode node id");
 
-    // ── 4. Type filter (panel's "Knowledge" tab) ─────────────────────────
-    let kn_only = get_json(&e2e, "/memory/nodes?type=Knowledge").await;
-    assert_eq!(kn_only["total"].as_u64(), Some(2));
+    // ── 4. Episodic type filter — only Episodic nodes ────────────────────
+    let ep_only = get_json(&e2e, "/memory/nodes?type=Episodic").await;
+    assert_eq!(ep_only["total"].as_u64(), Some(1));
     assert!(
-        kn_only["nodes"]
+        ep_only["nodes"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|n| n["node_type"] == "Knowledge"),
+            .all(|n| n["node_type"] == "Episodic"),
         "type filter must hold"
     );
 
-    // ── 5. Sub-type filter (Fact tab): only the Fact triple ──────────────
-    let facts = get_json(&e2e, "/memory/nodes?type=Knowledge&sub_type=Fact").await;
-    assert_eq!(facts["total"].as_u64(), Some(1));
-
-    // ── 6. Node detail: Active dispatch + source_episode_id traceability ─
-    let mut active_kn: Option<u64> = None;
-    let mut pending_kn: Option<u64> = None;
-    for n in kn_only["nodes"].as_array().unwrap() {
-        match n["status"].as_str() {
-            Some("Active") => active_kn = n["node_id"].as_u64(),
-            Some("Pending") => pending_kn = n["node_id"].as_u64(),
-            other => panic!("unexpected knowledge status: {other:?}"),
-        }
-    }
-    let active_kn = active_kn.expect("0.95-confidence Fact must dispatch Active");
-    let pending_kn = pending_kn.expect("0.6-confidence Preference must dispatch Pending");
-
-    let detail = get_json(&e2e, &format!("/memory/nodes/{active_kn}")).await;
+    // ── 5. Node detail: the episode content matches the fixture summary ─
+    let detail = get_json(&e2e, &format!("/memory/nodes/{episode_id}")).await;
     assert_eq!(detail["found"].as_bool(), Some(true));
-    assert_eq!(detail["status"].as_str(), Some("Active"));
-    assert_eq!(detail["sub_type"].as_str(), Some("Fact"));
-    // D4 reverse link: the knowledge node must trace back to its episode.
-    // Property values are serialized as tagged grafeo Values
-    // (e.g. {"Int64": 7}) — that is the existing admin contract the
-    // desktop panel consumes.
-    let source_prop = &detail["properties"]["source_episode_id"];
-    let source = source_prop
-        .as_u64()
-        .or_else(|| source_prop.as_i64().map(|v| v as u64))
-        .or_else(|| source_prop["Int64"].as_u64())
-        .or_else(|| source_prop["Int64"].as_i64().map(|v| v as u64))
-        .expect("source_episode_id present in node properties");
-    assert_eq!(source, episode_id, "knowledge must link back to its episode");
+    assert_eq!(detail["node_type"].as_str(), Some("Episodic"));
+    let content = detail["content"].as_str().expect("episode content");
+    assert!(
+        content.contains("ADR-057 memory distillation landing pipeline"),
+        "stored episode must preserve the compact-model summary text, got: {content}"
+    );
 
-    let pending_detail = get_json(&e2e, &format!("/memory/nodes/{pending_kn}")).await;
-    assert_eq!(pending_detail["status"].as_str(), Some("Pending"));
-
-    // ── 7. Stats card reflects the landing ──────────────────────────────
+    // ── 6. Stats card reflects the landing ──────────────────────────────
     let stats = get_json(&e2e, "/memory/stats").await;
-    assert_eq!(stats["total_nodes"].as_u64(), Some(3));
+    assert_eq!(stats["total_nodes"].as_u64(), Some(1));
 
-    // ── 8. Graph view: all three nodes visible ───────────────────────────
+    // ── 7. Graph view: the single episode is visible ─────────────────────
     let graph = get_json(&e2e, "/memory/graph").await;
-    assert_eq!(graph["node_count"].as_u64(), Some(3));
+    assert_eq!(graph["node_count"].as_u64(), Some(1));
 
-    // ── 9. "Consolidate now" button (panel action) ───────────────────────
+    // ── 8. "Consolidate now" button (panel action) ───────────────────────
     let report = post_json(
         &e2e,
         "/memory/consolidate",
@@ -291,60 +300,17 @@ async fn desktop_memory_panel_flow_after_distillation_landing() {
     )
     .await;
     assert_eq!(report["started"].as_bool(), Some(true));
-    // The fresh Pending node is too young to upgrade (min_pending_age_hours)
-    // — it must survive consolidation, not disappear.
-    let after = get_json(&e2e, "/memory/nodes?type=Knowledge").await;
-    assert_eq!(after["total"].as_u64(), Some(2));
-
-    std::fs::remove_dir_all(&e2e._temp_dir).ok();
-}
-
-/// Cross-layer traceability through the panel interfaces: the SOURCED_FROM
-/// edge written at landing time (D9) must be observable from the store side
-/// so the desktop graph view can follow episode → knowledge once edges are
-/// surfaced (graph endpoint currently returns nodes only).
-#[tokio::test]
-async fn desktop_memory_panel_sourced_from_edges_survive_landing() {
-    let e2e = spawn_memory_e2e_server("edges").await;
-
-    let provider: Arc<dyn MemoryProvider> = e2e.store.clone();
-    EpisodeDistiller::write_summary_to_provider(
-        COMPACT_OUTPUT,
-        "sess-e2e-edges",
-        &Some(provider),
-        Some(&DeterministicEmbedding),
-    )
-    .await;
-
-    // Resolve the episode node id through the same HTTP list the panel uses.
-    let episodes = get_json(&e2e, "/memory/nodes?type=Episodic").await;
-    let episode_id = episodes["nodes"][0]["node_id"]
-        .as_u64()
-        .expect("episode id");
-
-    // Store-side verification (what the graph view will consume once the
-    // edges field of /memory/graph is populated): the episode must have one
-    // outgoing SOURCED_FROM edge per landed knowledge node (D9).
-    let edges = e2e.store.get_edges(
-        grafeo_common::types::NodeId(episode_id),
-        grafeo_core::graph::Direction::Outgoing,
-    );
-    assert_eq!(
-        edges.len(),
-        2,
-        "each landed triple must produce one SOURCED_FROM edge"
-    );
-    assert!(
-        edges
-            .iter()
-            .all(|e| e.edge_type.as_str() == acowork_grafeo::types::edge_types::SOURCED_FROM)
-    );
+    // The fresh distilled episode must survive consolidation, not disappear.
+    let after = get_json(&e2e, "/memory/nodes?type=Episodic").await;
+    assert_eq!(after["total"].as_u64(), Some(1));
 
     std::fs::remove_dir_all(&e2e._temp_dir).ok();
 }
 
 /// Idempotency from the panel's perspective: re-landing the SAME compact
-/// output (e.g. duplicate compaction event) must not duplicate knowledge.
+/// output (e.g. duplicate compaction event) must store one episode per call —
+/// the natural-language summary has no uniqueness contract, so duplicates
+/// surface as multiple Episodic rows the panel can inspect.
 #[tokio::test]
 async fn desktop_memory_panel_duplicate_distillation_is_idempotent() {
     let e2e = spawn_memory_e2e_server("dup").await;
@@ -357,19 +323,111 @@ async fn desktop_memory_panel_duplicate_distillation_is_idempotent() {
             &Some(provider.clone()),
             Some(&DeterministicEmbedding),
         )
-        .await;
+        .await
+        .expect("fixture must pass the summary quality gate and land");
     }
 
-    // Two episodes (one per write) but still only 2 knowledge nodes —
-    // the triples are deduplicated by the instant pipeline.
+    // Two episodes (one per write) — triples-removed, so no Knowledge nodes.
     let episodes = get_json(&e2e, "/memory/nodes?type=Episodic").await;
     assert_eq!(episodes["total"].as_u64(), Some(2));
     let knowledge = get_json(&e2e, "/memory/nodes?type=Knowledge").await;
     assert_eq!(
         knowledge["total"].as_u64(),
-        Some(2),
-        "duplicate compaction output must not duplicate knowledge nodes"
+        Some(0),
+        "triples-removed: no Knowledge nodes are ever created from distillation"
     );
+
+    std::fs::remove_dir_all(&e2e._temp_dir).ok();
+}
+
+/// The quality gate must reject polluted LLM output BEFORE it reaches the
+/// store: verbatim role-label echoes (the model copied the raw dialog into
+/// the summary) must not land any node (P1: quality-over-nothing).
+#[tokio::test]
+async fn desktop_memory_panel_rejects_polluted_summary() {
+    let e2e = spawn_memory_e2e_server("reject").await;
+
+    let provider: Arc<dyn MemoryProvider> = e2e.store.clone();
+    let polluted = "<summary>用户：你好\n[User]: 你好\n[Assistant]: 我来看一下\n[Tool(bash)]: ls\n对话结束</summary>";
+    let err = EpisodeDistiller::write_summary_to_provider(
+        polluted,
+        "sess-e2e-reject",
+        &Some(provider),
+        Some(&DeterministicEmbedding),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            acowork_runtime::error::RuntimeError::Summary(
+                acowork_runtime::episode_distill::SummaryError::LowQuality(_)
+            )
+        ),
+        "verbatim role labels must fail the quality gate, got: {err:?}"
+    );
+
+    // Nothing landed — the panel shows an empty memory.
+    let stats = get_json(&e2e, "/memory/stats").await;
+    assert_eq!(stats["total_nodes"].as_u64(), Some(0));
+
+    std::fs::remove_dir_all(&e2e._temp_dir).ok();
+}
+
+/// D1 best-effort embedding: when the embedding provider is absent (None)
+/// or fails at runtime, `record_distilled` must still land the episode —
+/// only the vector is dropped (summary-only landing, ADR-057). This is
+/// the "no provider / provider error" degradation path promised in
+/// `MemoryManager::record_distilled`'s contract.
+#[tokio::test]
+async fn desktop_memory_distillation_embedding_degrades_gracefully() {
+    let e2e = spawn_memory_e2e_server("embed-degrade").await;
+
+    let provider: Arc<dyn MemoryProvider> = e2e.store.clone();
+
+    // ── 1. No embedding provider at all (None) ───────────────────────────
+    EpisodeDistiller::write_summary_to_provider(
+        COMPACT_OUTPUT,
+        "sess-e2e-embed-none",
+        &Some(provider.clone()),
+        None,
+    )
+    .await
+    .expect("episode must land without an embedding provider");
+
+    let eps_none = e2e
+        .store
+        .get_episodes(Some("sess-e2e-embed-none"), 10)
+        .expect("episodes readable");
+    assert_eq!(eps_none.len(), 1, "episode landed with no provider");
+    assert!(
+        eps_none[0].embedding.is_none(),
+        "D1: no provider → embedding must be None"
+    );
+
+    // ── 2. Embedding provider errors at runtime (Some + failing) ─────────
+    EpisodeDistiller::write_summary_to_provider(
+        COMPACT_OUTPUT,
+        "sess-e2e-embed-error",
+        &Some(provider.clone()),
+        Some(&FailingEmbedding),
+    )
+    .await
+    .expect("episode must land even when embedding fails (D1)");
+
+    let eps_err = e2e
+        .store
+        .get_episodes(Some("sess-e2e-embed-error"), 10)
+        .expect("episodes readable");
+    assert_eq!(eps_err.len(), 1, "episode landed despite embedding failure");
+    assert!(
+        eps_err[0].embedding.is_none(),
+        "D1: provider error → embedding degrades to None, episode still stored"
+    );
+
+    // Both episodes visible through the HTTP panel.
+    let episodes = get_json(&e2e, "/memory/nodes?type=Episodic").await;
+    assert_eq!(episodes["total"].as_u64(), Some(2));
 
     std::fs::remove_dir_all(&e2e._temp_dir).ok();
 }

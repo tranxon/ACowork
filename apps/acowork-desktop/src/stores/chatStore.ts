@@ -14,6 +14,7 @@ import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
 import { with503Retry } from "../lib/httpRetry";
+import { verifyAgentHealth } from "../lib/gateway-api";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
@@ -186,6 +187,25 @@ interface SessionChatState {
   messageOffset: number;
   messageLimit: number;
   messageTotal: number;
+  /**
+   * Cache-integrity flag: true when `messages[]` is known to be a
+   * PARTIAL, non-authoritative slice of the conversation.
+   *
+   * Set by `clearSessionMessages` (which wipes `messages[]` and resets
+   * the pagination cursor).  After a clear, the array can only be
+   * partially repopulated by background events (e.g. `record_complete`
+   * writes for a session the user switched away from mid-stream) — the
+   * older history (including the first user message) never comes back
+   * until a real HTTP window load.  Cleared back to false by any
+   * successful `loadSessionMessages` (the merge makes the cache
+   * authoritative for the fetched window again).
+   *
+   * Consumers must gate their "cache already has data → skip reload"
+   * shortcuts on `!messagesStale`; otherwise a partial cache is
+   * mistaken for a complete one and the conversation renders with
+   * missing messages until the next clear+reload cycle.
+   */
+  messagesStale: boolean;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
@@ -266,6 +286,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messageOffset: 0,
   messageLimit: 0,
   messageTotal: 0,
+  messagesStale: false,
   pendingApproval: {},
   pendingQuestions: [],
   isLoadingSession: false,
@@ -1217,6 +1238,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
+        messagesStale: true,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1237,6 +1259,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
+        messagesStale: true,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1483,6 +1506,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
+        // Local truncation makes the cache non-authoritative (tail lost) —
+        // force a reload on the next re-entry so the conversation renders whole.
+        messagesStale: true,
       });
     });
   },
@@ -1784,6 +1810,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messageOffset: finalOffset,
           messageLimit: finalLimit,
           messageTotal: returnedTotal,
+          // A real HTTP window landed — the cache is authoritative for the
+          // fetched window again (see the messagesStale doc).  hasOlder /
+          // hasNewer drive any further pagination.
+          messagesStale: false,
           isLoadingSession: false,
           loadError: null,
         });
@@ -1861,7 +1891,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   ensureLatestInCache: async (agentId: string, sessionId: string) => {
     const sessionState = getSessionState(get(), agentId, sessionId);
     if (sessionState.isLoadingMore) return;
-    const { messageOffset, messageLimit, messageTotal, messages } = sessionState;
+    const { messageOffset, messageLimit, messageTotal, messages, messagesStale } = sessionState;
     // Already at the tail:
     //   - The cache window's far edge touches the end of the conversation
     //     (messageOffset + messageLimit >= messageTotal), AND
@@ -1869,7 +1899,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
     //     empty, which would otherwise be mistaken for "already at tail"), AND
     //   - messages.length > 0 (the cache has at least some data at the tail).
+    //   - !messagesStale — a stale cache's cursor (offset/limit/total) is
+    //     NOT trustworthy: after clearSessionMessages, background
+    //     record_complete writes directly append tail records and bump
+    //     messageTotal/messageLimit (chatStore record_complete handler),
+    //     making a PARTIAL slice look like it fully covers the tail
+    //     (offset 0 + limit N == total N) while older history — typically
+    //     the first user message — is still missing.  Short-circuiting on
+    //     such a cache would swallow the reload that restores the missing
+    //     head; we must NOT skip the fetch until a real HTTP window lands.
     const tailCovered =
+      !messagesStale &&
       messageTotal > 0 &&
       messageOffset + messageLimit >= messageTotal &&
       messages.length > 0;
@@ -1880,8 +1920,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // `offset = max(0, total - limit)`.  When total === 0 (fresh session
       // that has never been loaded) we delegate to the initial-load path,
       // which uses `?tail=true` to grab the newest `limit` entries.
+      // A stale cache's messageTotal is likewise untrustworthy (partial
+      // tail write-backs), so treat it the same way and force a fresh
+      // tail fetch instead of deriving an offset from the polluted cursor.
       const limit = 50;
-      if (messageTotal === 0) {
+      if (messagesStale || messageTotal === 0) {
         await get().loadSessionMessages(agentId, sessionId, undefined, limit);
       } else {
         const tailOffset = Math.max(0, messageTotal - limit);
@@ -1900,6 +1943,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       messageOffset: 0,
       messageLimit: 0,
       messageTotal: 0,
+      // The cache is now a non-authoritative empty slice.  It can only be
+      // partially repopulated by background record_complete writes (e.g. a
+      // session the user switched away from mid-stream), so consumers must
+      // NOT treat "has data" as "has complete data" until a full HTTP load
+      // lands (loadSessionMessages clears this back to false).
+      messagesStale: true,
     }));
   },
 
@@ -2243,7 +2292,7 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
       compactionMeta: {
         compacted_from_id: meta.compacted_from_id as string | undefined,
         compacted_to_id: meta.compacted_to_id as string | undefined,
-        keep_last_rounds: (meta.keep_last_rounds as number) ?? 0,
+        level: (meta.level as number) ?? 0,
         model: meta.model as string | undefined,
         before_tokens: (meta.before_tokens as number) ?? 0,
         after_tokens: (meta.after_tokens as number) ?? 0,
@@ -3053,6 +3102,33 @@ export function handleMessageEvent(
         // it; `updateAgentOnlineStatus` defaults `sleeping` to false.
         const sleeping = (data as { sleeping?: boolean }).sleeping ?? false;
         useAgentStore.getState().updateAgentOnlineStatus(aid, online, sleeping);
+        // HTTP health double-check on MQTT disconnect (distributed liveness):
+        // the Runtime may run on a remote node, and its MQTT connection can
+        // drop (e.g. system sleep → KeepAlive timeout → Gateway marks the
+        // agent offline) while the Runtime process itself stays alive.
+        // Probe `/health` through the Gateway reverse-proxy; if the Runtime
+        // answers 2xx it is alive, so override back to online instead of
+        // rendering it offline/sleeping.
+        if (!online) {
+          // The trailing `.catch(() => {})` is defensive: in production
+          // `verifyAgentHealth` always resolves (it has its own try/catch
+          // around `fetch`), but if a future refactor accidentally lets a
+          // rejection escape, we must not surface it as an unhandled
+          // promise rejection — that would crash the desktop renderer.
+          void verifyAgentHealth(aid)
+            .then((alive) => {
+              if (alive) {
+                useAgentStore
+                  .getState()
+                  .updateAgentOnlineStatus(aid, true, false);
+              }
+            })
+            .catch(() => {
+              // Swallow — see comment above. The agent is correctly
+              // marked offline; the chatStore will get another chance on
+              // the next MQTT status tick or the next user action.
+            });
+        }
       }
       break;
     }

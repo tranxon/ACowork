@@ -13,6 +13,7 @@ rust-version.workspace = true
 acowork-core = { workspace = true }
 acowork-mqtt-session = { workspace = true }
 acowork-sign = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

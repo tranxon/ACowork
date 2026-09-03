@@ -83,10 +83,6 @@ pub struct AgentConfigResponse {
     /// ADR-029: Full builtin tools list with enabled flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_tools_all: Option<serde_json::Value>,
-    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
-    /// None = not set / use default (true).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_compression_enabled: Option<bool>,
 }
 
 /// PUT request body for updating agent config.
@@ -117,16 +113,6 @@ pub struct UpdateAgentConfigRequest {
     /// Some(vec![]) disables all builtin tools. None leaves unchanged.
     #[serde(default)]
     pub builtin_tools: Option<Vec<String>>,
-    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
-    /// JSON `null` / field absent -> "don't change" (partial-PUT semantics).
-    /// JSON `true` or `false` -> explicit value, persisted verbatim.
-    /// Hot-reloadable: the Runtime pushes the change to the SessionManager
-    /// via `apply_runtime_config_override`, which updates the shared
-    /// `AgentCore` template (future sessions inherit it), the
-    /// `runtime_overrides` cache, and every active SessionTask's
-    /// `ContextBuilder.tool_definitions` in one shot (ADR-052 §3.5).
-    #[serde(default)]
-    pub tool_compression_enabled: Option<bool>,
 }
 
 /// Default global values used as fallback when no override exists.

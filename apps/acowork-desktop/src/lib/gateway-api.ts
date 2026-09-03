@@ -15,8 +15,14 @@ import type {
   EmbeddingModelActionResponse,
   EmbeddingModelStatusResponse,
   EmbeddingTestResponse,
+  CloudEmbeddingTestResponse,
   MigrationProgressResponse,
   SelectModelMigrationResponse,
+  CloudEmbeddingProvidersResponse,
+  SelectCloudEmbeddingResponse,
+  AddCloudEmbeddingProviderRequest,
+  UpdateCloudEmbeddingProviderRequest,
+  CloudEmbeddingProviderResponse,
   AgentLspEndpointResponse,
   LspInstallScriptResponse,
   LspInstallRunResponse,
@@ -84,6 +90,44 @@ export async function fetchProviders(
   if (!resp.ok) throw new Error(`Failed to fetch providers: ${resp.status}`);
   const data = await resp.json();
   return data.providers as ProviderListEntry[];
+}
+
+/**
+ * HTTP health double-check for distributed liveness.
+ *
+ * The Runtime may run on a remote node, so process-based liveness is not
+ * observable from the desktop. The only trustworthy signals are network
+ * based: MQTT (status topic) and HTTP (the Runtime's `/health` endpoint,
+ * reverse-proxied through the Gateway at `/api/agents/{id}/health`).
+ *
+ * When MQTT reports an agent as offline/sleeping — e.g. the machine was
+ * asleep and the MQTT connection dropped (KeepAlive timeout) while the
+ * Runtime process itself stayed alive — this probes `/health`. A 2xx
+ * answer means the Runtime is actually alive, and the caller should NOT
+ * render it as offline/sleeping.
+ *
+ * Returns `true` iff the Runtime answers 2xx within `timeoutMs`; `false`
+ * on any non-2xx or network error (unreachable over HTTP too).
+ */
+export async function verifyAgentHealth(
+  agentId: string,
+  timeoutMs = 3000,
+  gatewayUrl = getGatewayUrl(),
+): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const resp = await fetch(`${gatewayUrl}/api/agents/${agentId}/health`, {
+        signal: ctrl.signal,
+      });
+      return resp.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
 }
 
 /** Fetch models for a specific provider from Gateway's models cache */
@@ -336,6 +380,147 @@ export async function selectEmbeddingModelWithMigration(
   const data = await resp.json();
   if (!resp.ok) throw new Error((data as EmbeddingModelActionResponse).message ?? `Select failed: ${resp.status}`);
   return data as SelectModelMigrationResponse | EmbeddingModelActionResponse;
+}
+
+// ── Cloud Embedding Providers (S1-7) ──────────────────────────────────
+
+/** List all cloud embedding providers + the active selection (if any). */
+export async function fetchCloudEmbeddingProviders(
+  gatewayUrl = getGatewayUrl(),
+): Promise<CloudEmbeddingProvidersResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers`);
+  if (!resp.ok) throw new Error(`Failed to fetch cloud embedding providers: ${resp.status}`);
+  return resp.json();
+}
+
+/** Select a cloud embedding model. Persists active selection and triggers
+ *  an MQTT retained-topic republish so Runtime picks up the change. */
+export async function selectCloudEmbeddingModel(
+  providerId: string,
+  modelId: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<SelectCloudEmbeddingResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers/${encodeURIComponent(providerId)}/select`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error((data as SelectCloudEmbeddingResponse)?.message ?? `Select failed: ${resp.status}`);
+  }
+  return data as SelectCloudEmbeddingResponse;
+}
+
+/** Store an API key for a cloud embedding provider in the Gateway Vault. */
+export async function setCloudEmbeddingApiKey(
+  providerId: string,
+  apiKey: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<{ provider_id: string; status: string; message: string }> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers/${encodeURIComponent(providerId)}/api-key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.message ?? `Failed to store API key: ${resp.status}`);
+  }
+  return data;
+}
+
+/** Remove a stored API key for a cloud embedding provider. */
+export async function deleteCloudEmbeddingApiKey(
+  providerId: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<{ provider_id: string; status: string; message: string }> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers/${encodeURIComponent(providerId)}/api-key`, {
+    method: "DELETE",
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.message ?? `Failed to remove API key: ${resp.status}`);
+  }
+  return data;
+}
+
+/** Test connectivity to a cloud embedding provider's /v1/embeddings endpoint
+ *  using the stored API key. */
+export async function testCloudEmbeddingProvider(
+  providerId: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<CloudEmbeddingTestResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers/${encodeURIComponent(providerId)}/test`, {
+    method: "POST",
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.message ?? `Test request failed: ${resp.status}`);
+  }
+  return data as CloudEmbeddingTestResponse;
+}
+
+/** Add a user-defined cloud embedding provider.
+ *  Persists to data_dir/user_embedding_providers.json + optionally stores
+ *  an API key in Vault. Triggers an MQTT retained-topic republish so
+ *  the broker sees the new provider on next config refresh. */
+export async function addCloudEmbeddingProvider(
+  payload: AddCloudEmbeddingProviderRequest,
+  gatewayUrl = getGatewayUrl(),
+): Promise<CloudEmbeddingProviderResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: payload.id,
+      name: payload.name,
+      api: payload.api,
+      models: payload.models,
+      api_key: payload.api_key ?? undefined,
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.message ?? `Add provider failed: ${resp.status}`);
+  }
+  return data as CloudEmbeddingProviderResponse;
+}
+
+/** Update a user-defined cloud embedding provider. All fields optional.
+ *  Refuses to update a bundled (offline) provider — backend returns 404. */
+export async function updateCloudEmbeddingProvider(
+  providerId: string,
+  patch: UpdateCloudEmbeddingProviderRequest,
+  gatewayUrl = getGatewayUrl(),
+): Promise<CloudEmbeddingProviderResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers/${encodeURIComponent(providerId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.message ?? `Update provider failed: ${resp.status}`);
+  }
+  return data as CloudEmbeddingProviderResponse;
+}
+
+/** Delete a user-defined cloud embedding provider. Also removes the
+ *  Vault-stored API key and clears the active selection if it pointed
+ *  at this provider. Refuses to delete a bundled (offline) provider. */
+export async function deleteCloudEmbeddingProvider(
+  providerId: string,
+  gatewayUrl = getGatewayUrl(),
+): Promise<CloudEmbeddingProviderResponse> {
+  const resp = await fetch(`${gatewayUrl}/api/embedding-providers/${encodeURIComponent(providerId)}`, {
+    method: "DELETE",
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    throw new Error(data?.message ?? `Delete provider failed: ${resp.status}`);
+  }
+  return data as CloudEmbeddingProviderResponse;
 }
 
 

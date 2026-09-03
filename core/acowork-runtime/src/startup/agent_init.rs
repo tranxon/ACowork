@@ -62,6 +62,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     > = None;
+    // ADR-033: receiver for `acowork/global/embedding_models` retained
+    // updates, wired through `gateway_loop` to SessionManager so sessions
+    // rebuild their embedding provider when the embed sidecar becomes
+    // ready or the active model switches.
+    let mut embedding_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
+    > = None;
     // ADR-055 §6.7 (Phase 4): receiver for node LSP relay state changes,
     // wired through `gateway_loop` to SessionManager.
     let mut lsps_update_rx: Option<
@@ -225,6 +232,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         match crate::http::RuntimeHttpServer::start_with_bind_port(
             bind_port,
             std::path::PathBuf::from(&config.work_dir),
+            // ADR-063: the agent's `.agent` package directory holds
+            // `prompts/<file>.md` — distinct from `work_dir` (runtime
+            // state). Wired into HttpState so the `/agents/{id}/prompts*`
+            // routes can resolve canonical filenames under
+            // `<package_dir>/prompts/`.
+            loaded.package_dir.clone(),
             loaded.manifest.agent_id.clone(),
             session_snapshots.clone(),
             latest_session.clone(),
@@ -245,6 +258,14 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             debug_service_slot.clone(),
             workspace_resolver.clone(),
             session_manager_slot.clone(),
+            // ADR-063 §3.7.5 L2 reload: the HTTP reload handler
+            // (`POST /agents/{id}/prompts/reload`) reads the live
+            // `AgentCore` Arc through this slot. Phase B
+            // (`session_init.rs`) populates it once `AgentCore::new`
+            // completes. The slot is currently None at Phase A; the
+            // reload handler returns 503 (same late-bind pattern as
+            // every other shared resource) until Phase B finishes.
+            agent_core_shared.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -281,6 +302,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::ProviderUpdate>();
         let (search_update_tx, search_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::SearchUpdate>();
+        // ADR-033: sink for `acowork/global/embedding_models` retained
+        // updates (embed sidecar ready / model switch). gateway_loop
+        // forwards to SessionManager::handle_embedding_config_update.
+        let (embedding_update_tx, embedding_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::EmbeddingUpdate>();
         // ADR-055 §6.7 (Phase 4): sink for the node's LSP relay state.
         // The MQTT event loop decodes `acowork/nodes/{id}/lsps` retained
         // pushes; gateway_loop forwards to SessionManager so the
@@ -308,6 +334,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_tx: Some(identity_update_tx),
                 provider_update_tx: Some(provider_update_tx),
                 search_update_tx: Some(search_update_tx),
+                embedding_update_tx: Some(embedding_update_tx),
                 node_id: config.node_id.as_deref(),
                 lsps_update_tx: Some(lsps_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
@@ -379,6 +406,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_rx = Some(identity_update_chan_rx);
                 provider_update_rx = Some(provider_update_chan_rx);
                 search_update_rx = Some(search_update_chan_rx);
+                embedding_update_rx = Some(embedding_update_chan_rx);
                 lsps_update_rx = Some(lsps_update_chan_rx);
 
                 // Bug B fix (active pull, v3): after the MQTT client
@@ -471,6 +499,34 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             "Loaded agent-specific compaction prompt from prompts/summary.md"
         );
     }
+
+    // ADR-063: 8 additional package-level prompt overrides. Each is loaded
+    // from `prompts/<file>.md` independently — missing files yield `None`
+    // and the LLM call site falls back to the built-in constant. We log at
+    // debug level (not info) because the absence of an override is the
+    // common case for the v1 .agent packages shipped today.
+    let load_or_trace = |filename: &'static str, ctx_desc: &'static str| {
+        let loaded =
+            crate::package::prompt_builder::load_optional_prompt(&loaded.package_dir, filename);
+        if let Some(ref p) = loaded {
+            tracing::debug!(
+                filename,
+                ctx_desc,
+                prompt_len = p.len(),
+                "ADR-063: loaded package-level prompt override"
+            );
+        }
+        loaded
+    };
+    let search_prompt = load_or_trace("search.md", "SEARCH_SYSTEM_PROMPT");
+    let compact_template = load_or_trace("compact-template.md", "COMPACT_PROMPT");
+    let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
+    let extraction_prompt = load_or_trace("extraction.md", "EXTRACTION_SYSTEM_PROMPT (grafeo)");
+    let conflict_classification_prompt =
+        load_or_trace("conflict-classification.md", "CONFLICT_CLASSIFICATION_PROMPT (grafeo)");
+    let generalization_prompt =
+        load_or_trace("generalization.md", "GENERALIZATION_PROMPT (grafeo)");
+    let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
     let skills_dir = loaded.package_dir.join("skills");
@@ -606,14 +662,54 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // emb_provider = None means memory::manager auto-falls back to
     // text_search_with_filter (manager.rs L270-280).
 
-    let embed_endpoint = std::env::var("ACOWORK_EMBED_ENDPOINT").ok();
-    let embed_model_id = std::env::var("ACOWORK_EMBED_MODEL")
+    let env_endpoint = std::env::var("ACOWORK_EMBED_ENDPOINT").ok();
+    let env_model = std::env::var("ACOWORK_EMBED_MODEL").ok();
+    let env_dim = std::env::var("ACOWORK_EMBED_DIMENSION")
         .ok()
-        .unwrap_or_else(|| "bge-small-zh-v1.5".to_string());
-    let embed_dimension = std::env::var("ACOWORK_EMBED_DIMENSION")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
+        .and_then(|s| s.parse().ok());
+
+    // Bug1: the Gateway never injects ACOWORK_EMBED_ENDPOINT into spawned
+    // node/runtime env after the MQTT refactor, so endpoint is normally
+    // missing here. Fall back to the cached global-resources snapshot
+    // (populated by the synchronous active pull right after MQTT connect,
+    // or by the retained `acowork/global/embedding_models` message).
+    let cached_embed = match available_cache.as_ref() {
+        Some(cache) => cache.read().await.embedding_config(),
+        None => None,
+    };
+    let cache_present = available_cache.is_some();
+    tracing::info!(
+        target: "embedding_diag",
+        env_endpoint_present = env_endpoint.is_some(),
+        env_model_present = env_model.is_some(),
+        env_dim_present = env_dim.is_some(),
+        cache_present,
+        cache_hit = cached_embed.is_some(),
+        "Step 3.5: embedding config source check"
+    );
+
+    // Prefer explicit env values when present; otherwise recover the
+    // endpoint/model/dimension from the MQTT-populated cache.
+    let (embed_endpoint, embed_model_id, embed_dimension) = match cached_embed {
+        Some((ep, mdl, d)) => (
+            env_endpoint.or(Some(ep)),
+            env_model.unwrap_or(mdl),
+            env_dim.unwrap_or(d),
+        ),
+        None => (
+            env_endpoint,
+            env_model.unwrap_or_else(|| "bge-small-zh-v1.5".to_string()),
+            env_dim.unwrap_or(512),
+        ),
+    };
+    tracing::info!(
+        target: "embedding_diag",
+        resolved_endpoint = embed_endpoint.as_deref(),
+        resolved_model_id = %embed_model_id,
+        resolved_dimension = embed_dimension,
+        resolved_endpoint_present = embed_endpoint.is_some(),
+        "Step 3.5: embedding config resolved"
+    );
 
     let emb_provider: Option<Arc<dyn EmbeddingProvider>> = match embed_endpoint.as_deref() {
         Some(endpoint) => {
@@ -705,22 +801,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     ));
     let mcp_notifier = Arc::new(crate::mcp_notify::McpConfigNotifier::default());
 
-    // ADR-052: Create shared abandon/retrieve queues. These are shared
-    // between the context_abandon/context_retrieve tools (write end) and
-    // the AgentLoop (drain end). The queues are stored in AgentCore so
-    // the AgentLoop can access them at drain time.
-    let abandon_queue = crate::agent::context_compression::new_abandon_queue();
+    // ADR-061 §10.2: only the retrieve queue survives — `context_retrieve`
+    // is always registered, `context_abandon` (and its queue) is deleted.
     let retrieve_queue = crate::agent::context_compression::new_retrieve_queue();
-
-    // ADR-052: Determine whether tool compression is enabled (default: true).
-    // Boot-only: read from agent_config.json. When enabled, register
-    // context_retrieve + context_abandon tools.
-    let agent_cfg_for_compression = crate::agent_config::load_agent_config(
-        std::path::Path::new(&config.work_dir)
-    ).ok().flatten().unwrap_or_default();
-    let tool_compression_enabled = agent_cfg_for_compression
-        .tool_compression_enabled
-        .unwrap_or(true);
 
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(
@@ -734,9 +817,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         config.work_dir.clone(),
         lsp_relay_endpoint,
         mqtt_client_slot.clone(),
-        abandon_queue.clone(),
         retrieve_queue.clone(),
-        tool_compression_enabled,
     ) {
         registry.register(tool);
     }
@@ -958,9 +1039,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // propagated to `AgentBootContext`. New sessions now derive their
     // initial `ContextBuilder.tool_definitions` live from
     // `core.builtin_tools` inside `SessionTask::new`, so a pre-baked
-    // snapshot here would diverge from the hot-reloaded dispatch list
-    // whenever `RuntimeConfigUpdate` toggles
-    // `tool_compression_enabled`.
+    // snapshot here would diverge from the hot-reloaded dispatch list.
 
     // ── Step 6: Build context builder ───────────────────────────────
     // ADR-042: User identity is delivered via the `acowork/global/user_profile`
@@ -1052,6 +1131,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         identity_update_rx,
         provider_update_rx,
         search_update_rx,
+        embedding_update_rx,
         lsps_update_rx,
         runtime_http_port,
         provider,
@@ -1065,6 +1145,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_tool_specs,
         system_prompt,
         compaction_prompt,
+        // ADR-063: 7 additional package-level overrides (Phase A loaded
+        // each from `prompts/<file>.md`; see load_or_trace above). Wired
+        // through `AgentBootContext` so Phase B's session_init.rs can
+        // inject them into `AgentCore` as `Arc<RwLock<Option<String>>>`.
+        search_prompt,
+        compact_template,
+        title_prompt,
+        extraction_prompt,
+        conflict_classification_prompt,
+        generalization_prompt,
+        abstention_prompt,
         memory_session,
         mcp_notifier,
         workspace_resolver,
@@ -1108,7 +1199,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         search_key_vault,
         search_provider_list,
         session_configs,
-        abandon_queue,
         retrieve_queue,
     })
 }

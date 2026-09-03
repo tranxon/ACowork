@@ -478,19 +478,14 @@ pub struct TaskFilter {
     pub sort: Option<TaskSort>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskSort {
+    #[default]
     CreatedAt,
     UpdatedAt,
     DueAt,
     Priority,
-}
-
-impl Default for TaskSort {
-    fn default() -> Self {
-        TaskSort::CreatedAt
-    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

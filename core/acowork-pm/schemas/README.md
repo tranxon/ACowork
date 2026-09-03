@@ -16,8 +16,8 @@
 
 ## 1. 基础约定
 
-- **Base URL**（生产）：经 Gateway 反向代理 `{gw}/api/pm/...` → 剥 `/api/pm` 前缀转发到 pm 服务内部路径（不带 `/api` 前缀，见 §2）。
-- **Base URL**（开发）：PM router 内部路径不带 `/api` 前缀，可直接独立 serve（`/projects`、`/tasks/:tid` 等）；如与生产对齐可自行 nest 到 `/api/pm`。
+- **Base URL**（生产）：经 Gateway 反向代理 `{gw}/api/pm/...` → 剥 `/api/pm` 前缀转发到 pm 服务内部路径（不带 `/api` 前缀，见 §2）。PM 为**独立进程**（ADR-064），内部监听 `127.0.0.1:{pm_port}`（默认 18082）。
+- **Base URL**（开发）：PM router 内部路径不带 `/api` 前缀，可直接独立 serve（`/projects`、`/tasks/:tid` 等）；`cargo run -p acowork-pm` 即起独立进程。
 - **内容类型**：`application/json; charset=utf-8`（附件上传 / 下载除外）。
 - **鉴权**：复用 Gateway Desktop 会话鉴权（Bearer Token，见 [`docs/protocols/zh/http.md`](../../../docs/protocols/zh/http.md) §1）。
 - **Actor 标识**：写操作与 `claim` / `submit` / `review` 依赖 HTTP header `X-Actor`
@@ -31,7 +31,7 @@
 ## 2. 路由表
 
 > 与 [`src/api/routes.rs`](../../../core/acowork-pm/src/api/routes.rs) `pm_router` 逐条对齐。
-> 路径以**公开形式**（带 `/api/pm` 前缀）展示；PM router 内部路径**不带** `/api`，由 Gateway `nest_service("/api/pm", ...)` 挂载。
+> 路径以**公开形式**（带 `/api/pm` 前缀）展示；PM router 内部路径**不带** `/api`，由 Gateway [`pm_proxy.rs`](../../../core/acowork-gateway/src/http/pm_proxy.rs) 反代时剥离前缀。
 
 | 方法 | 路径 | 说明 | 实现 |
 |------|------|------|------|
@@ -51,11 +51,11 @@
 | POST | `/api/pm/tasks/{tid}/review` | 人类审核（approved → done / rejected） | ✅ |
 | GET | `/api/pm/tasks/{tid}/children` | 直接子任务列表 | ✅ |
 | GET | `/api/pm/tasks/{tid}/attachments` | 附件元数据列表 | ✅ |
-| POST | `/api/pm/tasks/{tid}/attachments` | 上传附件（multipart，≤10MB） | 🔶 `src/api/attachments.rs`（P1 待完成） |
-| GET | `/api/pm/attachments/{aid}?download=&thumb=` | 下载附件 | 🔶（P1 待完成） |
+| POST | `/api/pm/tasks/{tid}/attachments` | 上传附件（multipart，≤10MB） | ✅ `src/api/attachments.rs` |
+| GET | `/api/pm/attachments/{aid}?download=&thumb=` | 下载附件 | ✅ |
 | DELETE | `/api/pm/attachments/{aid}` | 删除附件 | ✅ |
 
-> 🔶 = 路由已注册、handler 骨架已建，multipart 解析 / 下载实现留待 P1 收尾。
+> 附件上传 / 下载 / 缩略图已完整实现（P1 收尾完成）。
 
 ### 与设计文档 §5 的差异（意图态 → 实现态）
 

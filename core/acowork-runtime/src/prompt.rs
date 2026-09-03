@@ -15,6 +15,19 @@ pub const PROMPT_BUILDER_FALLBACK: &str = "You are a helpful AI assistant.";
 /// role labels into the summary instead of writing prose). The user prompt
 /// ([`COMPACT_PROMPT`]) provides the conversation body and a worked example
 /// as reinforcement.
+///
+/// ADR-061 §8.1 (triples-removed): the output MUST contain exactly two
+/// blocks in this order — `<summary>`, `<user_intent>` — with nothing
+/// outside them. `<user_intent>` is the mandatory intent-preservation
+/// block: every original user intent and explicit constraint must be
+/// listed even if already satisfied, because user messages are the only
+/// hard constraints the LLM cannot re-derive after compaction (ADR-061 §3.4).
+///
+/// The earlier `<triples>` and `<entities>` blocks (ADR-057 D6/D5) were
+/// dropped because compact-model output quality was too low — the natural-
+/// language `<summary>` is the only durable artifact of a compaction pass
+/// now. Knowledge-layer updates flow through `memory_store` / procedural
+/// creation paths instead.
 pub const COMPACTION_SYSTEM_PROMPT: &str = "\
 You are an AI assistant that summarizes conversations.
 
@@ -27,33 +40,18 @@ The user message will mark the source conversation with a <conversation>...</con
 <summary>
 Your natural-language summary text goes here...
 </summary>
-<triples>
-subject | predicate | object | confidence | sub_type
-subject | predicate | object | confidence | sub_type
-</triples>
+
+<user_intent>
+List every original user intent and explicit constraint, even if already satisfied or no longer relevant. One per line, verbatim where possible.
+</user_intent>
 
 ## What each block contains:
 
 ### <summary>
 Plain natural-language prose. Cover all key topics discussed, decisions made, problems solved, and code written. Include technical details needed to resume work later. Preserve the chronological flow of the conversation.
 
-### <triples>
-Factual knowledge expressed as `subject | predicate | object | confidence | sub_type`. One triple per line, FIVE pipe-separated fields per triple. Only extract EXPLICIT facts from the conversation — do not invent or speculate.
-
-Field semantics:
-- `subject`: entity the fact is about (e.g. \"User\", \"Project Foo\", \"Bug\")
-- `predicate`: relation in canonical short form (e.g. \"requested\", \"uses language\", \"caused by\")
-- `object`: value (e.g. \"context compaction fix\", \"Rust\")
-- `confidence`: a number in [0.0, 1.0] representing how strongly the conversation supports this fact (0.85+ means you are confident enough to act on it; 0.5-0.7 means it is implied or partial)
-- `sub_type`: one of `Fact`, `Preference`, `Relation`. Use `Fact` for objective facts, `Preference` for likes/stylistic choices, `Relation` for relationships between entities.
-
-Examples:
-User | requested | context compaction fix | 0.95 | Fact
-Project Foo | uses language | Rust | 0.9 | Fact
-User | prefers tone | concise | 0.8 | Preference
-User | collaborates with | acowork team | 0.85 | Relation
-
-If no factual triples can be extracted, emit an empty `<triples>` block (with the opening and closing tags and nothing between them).
+### <user_intent>
+Every original user intent and explicit constraint from the conversation, even if already satisfied or no longer relevant. These are the hard requirements the user communicated — they must survive compaction even when the surrounding prose is condensed.
 
 ## Hard rules:
 - Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata. Your <summary> must contain NO lines starting with [User]:, [Assistant]:, [Tool(...)]:, [CompactionSummary]:, [tool_call]:, [tool_result]:, or [thought]:. If you are tempted to echo a tool's command or output, convert it into a one-line prose statement of what the tool accomplished.
@@ -63,9 +61,9 @@ If no factual triples can be extracted, emit an empty `<triples>` block (with th
 - GOOD <summary> (plain prose — always do this):
   用户要求查找包含 running 与 retry 的 UI 元素，助手通过 grep 检索 chat 组件，最终定位到 RetryWaitBanner。
 - The placeholder text \"[Tool result compressed...]\" in tool results is opaque. Acknowledge it with a short phrase like \"(earlier tool results were compressed)\" instead of reproducing it.
-- Output MUST contain exactly two blocks (<summary>, <triples>) with no extra prose before <summary>, between blocks, or after </triples>. The legacy `<entities>` block is no longer emitted (ADR-057 D5 — entities are not modelled as graph nodes in P0).
+- Output MUST contain exactly two blocks (<summary>, <user_intent>) with no extra prose before <summary>, between blocks, or after </user_intent>. The legacy `<entities>` and `<triples>` blocks are no longer emitted (ADR-057 D5/D6 — triples-removed).
 - Language (MUST follow):
-  - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary> and <triples>.
+  - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary> and <user_intent>.
   - If the conversation is too short or too ambiguous to determine the language (e.g. only \"hi\", only \"hello\", a single emoji, or a single sentence that is identical in multiple languages), fall back to the Language field in the user identity context (provided as a separate \"About the user:\" block appended to this prompt). Use the code written there (e.g. \"zh-CN\" → Simplified Chinese, \"en-US\" → English).
   - If neither signal is available, default to English.";
 
@@ -79,15 +77,16 @@ pub const SEARCH_SYSTEM_PROMPT: &str =
 /// The summary serves both as in-memory context replacement and as a Grafeo
 /// episodic memory entry.
 ///
-/// Memory-hint extraction (triples) was moved from per-round LLM
-/// output to compaction-time extraction. The compact model produces
-/// knowledge triples alongside the summary — zero per-round token cost,
-/// higher quality extraction from full conversation context.
+/// Memory-hint extraction (triples) was removed entirely in ADR-057:
+/// compaction now emits only a `<summary>` block (which doubles as the
+/// Grafeo episodic memory entry). Knowledge persistence is handled by
+/// the separate `memory_store` tool and offline consolidation, not by
+/// this compaction path.
 ///
-/// Role, task, output format, triples semantic definitions, and all
-/// hard rules live in [`COMPACTION_SYSTEM_PROMPT`] (higher priority). This
-/// prompt's only job is to deliver the conversation body inside a clear
-/// `<conversation>` delimiter so the LLM cannot confuse it with instructions.
+/// Role, task, output format, and all hard rules live in
+/// [`COMPACTION_SYSTEM_PROMPT`] (higher priority). This prompt's only job
+/// is to deliver the conversation body inside a clear `<conversation>`
+/// delimiter so the LLM cannot confuse it with instructions.
 pub const COMPACT_PROMPT: &str = r#"<conversation>
 {messages_text}
 </conversation>"#;

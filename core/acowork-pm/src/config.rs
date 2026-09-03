@@ -6,8 +6,8 @@
 //! 2. TOML 配置文件（通过 `--config <path>` 传入，默认 `./acowork-pm.toml`）
 //! 3. [`PmConfig::default`]
 //!
-//! Gateway 把 `PmConfig` 嵌入到自身配置树（[`acowork-gateway::config::GatewayConfig::pm`]），
-//! 启动时构造本服务实例。
+//! ADR-064：PM 作为独立进程运行，数据目录独立解析为 `$HOME/.acowork/acowork-pm/`，
+//! 不再由 Gateway 内嵌/覆写。
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -18,17 +18,30 @@ use std::path::PathBuf;
 pub struct PmConfig {
     /// 数据根目录（项目/任务/附件存储位置）。
     ///
-    /// 解析顺序：环境变量 `ACOWORK_PM_DATA_DIR` → TOML `data_dir` → [`directories::ProjectDirs`]。
-    /// 嵌入 Gateway 时由 Gateway 覆写为 `{gateway.data_dir}/acowork-pm`（见
-    /// [`acowork-gateway::config::GatewayConfig::prepare_pm_data_dir`]）。
+    /// 解析顺序：环境变量 `ACOWORK_PM_DATA_DIR` → TOML `data_dir` → [`default_data_dir`]。
+    /// ADR-064：默认 `$HOME/.acowork/acowork-pm/`（与 `acowork-gateway/`、
+    /// `acowork-node/` 平级），不再嵌套在 Gateway 数据目录下。
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
-    /// HTTP 监听地址（仅供 Gateway 内嵌模式使用，独立进程模式由 `--bind` 覆盖）。
+    /// HTTP 监听地址（**legacy**，独立进程模式由 CLI `--host`/`--port` 覆盖）。
     ///
-    /// 默认 `127.0.0.1:0`（由 Gateway 分配端口）。
+    /// 默认 `127.0.0.1:0`。保留以兼容旧配置；独立进程入口（`main.rs`）不使用此字段。
     #[serde(default = "default_bind_addr")]
     pub bind_addr: String,
+
+    /// 独立进程 HTTP 监听端口（ADR-064）。
+    ///
+    /// 默认 `18082`。端口冲突时自动递增（最多 +20）。
+    #[serde(default = "default_port")]
+    pub port: u16,
+
+    /// 是否启用 PM 服务（ADR-064）。
+    ///
+    /// 默认 `true`。Gateway 据此决定是否 spawn PM 子进程；独立进程模式下
+    /// `false` 时进程直接退出。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 
     /// 任务最大嵌套深度（防滥用 + UI 折叠层数合理）。
     ///
@@ -93,13 +106,40 @@ fn default_mcp_http_path() -> String {
 }
 
 fn default_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("com", "acowork", "pm")
-        .map(|p| p.data_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("./data/acowork-pm"))
+    // ADR-064: PM 数据目录独立于 Gateway，与 acowork-gateway/、acowork-node/ 平级。
+    // 解析顺序：ACOWORK_PM_HOME env > $HOME/.acowork/acowork-pm > ./.acowork-pm
+    // （镜像 acowork-node::default_node_home 模式）。
+    if let Some(dir) = std::env::var_os("ACOWORK_PM_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    // Windows 没有 `HOME`（只有 `USERPROFILE`）；没有此分支会静默回退到
+    // `./.acowork-pm`（cwd），把 PM 数据散落到启动目录。
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE")
+        && !profile.is_empty()
+    {
+        return PathBuf::from(profile)
+            .join(".acowork")
+            .join("acowork-pm");
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".acowork")
+            .join("acowork-pm");
+    }
+    PathBuf::from(".").join(".acowork-pm")
 }
 
 fn default_bind_addr() -> String {
     "127.0.0.1:0".to_string()
+}
+
+fn default_port() -> u16 {
+    18082
 }
 
 fn default_max_task_depth() -> u8 {
@@ -131,6 +171,8 @@ impl Default for PmConfig {
         Self {
             data_dir: default_data_dir(),
             bind_addr: default_bind_addr(),
+            port: default_port(),
+            enabled: default_true(),
             max_task_depth: default_max_task_depth(),
             max_attachment_size: default_max_attachment_size(),
             max_attachments_per_task: default_max_attachments_per_task(),
@@ -182,6 +224,9 @@ impl PmConfig {
 mod tests {
     use super::*;
 
+    /// 串行化修改全局环境变量的测试（`ACOWORK_PM_HOME`），避免并行污染。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_validates() {
         PmConfig::default().validate().unwrap();
@@ -189,8 +234,50 @@ mod tests {
 
     #[test]
     fn rejects_zero_depth() {
-        let mut cfg = PmConfig::default();
-        cfg.max_task_depth = 0;
+        let cfg = PmConfig {
+            max_task_depth: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
+    }
+
+    /// ADR-064: 默认端口 18082、默认启用。
+    #[test]
+    fn default_port_and_enabled() {
+        let cfg = PmConfig::default();
+        assert_eq!(cfg.port, 18082);
+        assert!(cfg.enabled);
+    }
+
+    /// ADR-064: 默认数据目录解析到 `$HOME/.acowork/acowork-pm`（与
+    /// acowork-gateway/、acowork-node/ 平级），不再使用 `directories::ProjectDirs`
+    /// 的 `%APPDATA%\com\acowork\pm`。
+    #[test]
+    fn default_data_dir_is_under_acowork_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = default_data_dir();
+        let s = dir.to_string_lossy();
+        assert!(
+            s.contains(".acowork") && s.contains("acowork-pm"),
+            "default data dir should be under $HOME/.acowork/acowork-pm, got: {s}"
+        );
+        // 不再解析到 ProjectDirs 的 com/acowork/pm 布局
+        assert!(!s.contains("com") || !s.contains("acowork") || !s.contains("pm"),
+            "must not fall back to ProjectDirs layout: {s}");
+    }
+
+    /// ADR-064: `ACOWORK_PM_HOME` 环境变量覆盖默认数据目录。
+    #[test]
+    fn data_dir_respects_acowork_pm_home_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join("acowork-pm-test-home");
+        unsafe {
+            std::env::set_var("ACOWORK_PM_HOME", &tmp);
+        }
+        let dir = default_data_dir();
+        unsafe {
+            std::env::remove_var("ACOWORK_PM_HOME");
+        }
+        assert_eq!(dir, tmp);
     }
 }

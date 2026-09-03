@@ -8,6 +8,7 @@ pub mod capability;
 pub mod cli;
 pub mod config;
 pub mod cron;
+pub mod embedding_providers;
 pub mod error;
 pub mod gateway;
 pub mod http;

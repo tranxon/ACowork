@@ -10,7 +10,6 @@ import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
-import { Switch } from "../common/Switch";
 import { Dropdown } from "../common/Dropdown";
 import {
   clearAgentAvatarCache,
@@ -73,8 +72,8 @@ type WiredField =
   | "contextWindow"
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
-  | "toolCompressionEnabled"
-  | "idleTimeoutSecs";
+  | "idleTimeoutSecs"
+  | "compressionRatioThreshold";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -84,14 +83,13 @@ const WIRE_FIELD: Record<WiredField, string> = {
   contextWindow: "context_window",
   shellApprovalThreshold: "shell_approval_threshold",
   approvalTimeoutSecs: "approval_timeout_secs",
-  toolCompressionEnabled: "tool_compression_enabled",
   idleTimeoutSecs: "idle_timeout_secs",
+  compressionRatioThreshold: "compression_ratio_threshold",
 };
 
 const FIELD_DEBOUNCE_MS = 500;
 
 const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
-  toolCompressionEnabled: FIELD_DEBOUNCE_MS,
   shellApprovalThreshold: FIELD_DEBOUNCE_MS,
   temperature: FIELD_DEBOUNCE_MS,
   contextWindow: FIELD_DEBOUNCE_MS,
@@ -100,6 +98,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   maxTokens: FIELD_DEBOUNCE_MS,
   maxIterations: FIELD_DEBOUNCE_MS,
   maxSessions: FIELD_DEBOUNCE_MS,
+  compressionRatioThreshold: FIELD_DEBOUNCE_MS,
 };
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -181,8 +180,8 @@ export function AgentSetupTab() {
           context_window?: number | null;
           shell_approval_threshold?: string | null;
           approval_timeout_secs?: number | null;
-          tool_compression_enabled?: boolean | null;
           idle_timeout_secs?: number | null;
+          compression_ratio_threshold?: number | null;
         };
         // Race-safe merge (ADR-052 follow-up): only overwrite each
         // local profile field when the server returned a concrete
@@ -194,7 +193,7 @@ export function AgentSetupTab() {
         // input or clicked on the Switch before this GET returned,
         // dropping their intent before the next Apply could persist
         // it (this is the wider pattern behind the original
-        // tool_compression_enabled bug — see `saveField` below).
+        // switch-clobber bug — see `saveField` below).
         const patch: Partial<typeof profile> = {
           // `global_max_output_tokens` lives on the Gateway
           // AgentConfigResponse (not on Runtime AgentConfig), so the
@@ -225,11 +224,11 @@ export function AgentSetupTab() {
         if (typeof cfg.approval_timeout_secs === "number") {
           patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
         }
-        if (typeof cfg.tool_compression_enabled === "boolean") {
-          patch.toolCompressionEnabled = cfg.tool_compression_enabled;
-        }
         if (typeof cfg.idle_timeout_secs === "number") {
           patch.idleTimeoutSecs = cfg.idle_timeout_secs;
+        }
+        if (typeof cfg.compression_ratio_threshold === "number") {
+          patch.compressionRatioThreshold = cfg.compression_ratio_threshold;
         }
         setProfile(selectedAgentId, patch);
       })
@@ -262,7 +261,6 @@ export function AgentSetupTab() {
               context_window?: number | null;
               shell_approval_threshold?: string | null;
               approval_timeout_secs?: number | null;
-              tool_compression_enabled?: boolean | null;
               idle_timeout_secs?: number | null;
             };
             // Same race-safe merge as the mount effect above. The
@@ -299,9 +297,6 @@ export function AgentSetupTab() {
             }
             if (typeof cfg.approval_timeout_secs === "number") {
               patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
-            }
-            if (typeof cfg.tool_compression_enabled === "boolean") {
-              patch.toolCompressionEnabled = cfg.tool_compression_enabled;
             }
             if (typeof cfg.idle_timeout_secs === "number") {
               patch.idleTimeoutSecs = cfg.idle_timeout_secs;
@@ -557,6 +552,13 @@ export function AgentSetupTab() {
   }
 
   const agentName = profile.displayName ?? selectedAgent.name ?? selectedAgentId;
+
+  // Derived once so the slider thumb and the numeric badge can never
+  // disagree (bug: previously the slider used `?? 0.9` while the badge
+  // used strict `!== undefined`, so a freshly loaded agent whose runtime
+  // config omitted `compression_ratio_threshold` showed thumb-at-90%
+  // with a "—" badge until the user dragged — see ADR-061 §16).
+  const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
     <div className="flex-1 overflow-y-auto p-3">
@@ -826,21 +828,6 @@ export function AgentSetupTab() {
         </p>
       </div>
 
-      {/* Tool Compression (ADR-052) */}
-      <div className="mb-3 space-y-1">
-        <Switch
-          checked={profile.toolCompressionEnabled ?? true}
-          onChange={(checked) => saveField("toolCompressionEnabled", checked)}
-          size="sm"
-          label={t("agentSetup.toolCompressionEnabled")}
-          className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400"
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.toolCompressionEnabledDesc")}
-        </p>
-      </div>
-
-
       {/* Approval Timeout */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -973,6 +960,37 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Compression Ratio Threshold (ADR-061) */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.compressionRatioThreshold")}
+        </label>
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            min={50}
+            max={95}
+            step={5}
+            value={ratioPct}
+            onChange={(e) => {
+              saveField(
+                "compressionRatioThreshold",
+                parseFloat(e.target.value) / 100,
+              );
+            }}
+            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
+              bg-zinc-200 dark:bg-zinc-700
+              accent-zinc-600 dark:accent-zinc-400"
+          />
+          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+            {ratioPct}%
+          </span>
+        </div>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.compressionRatioThresholdDesc")}
+        </p>
+      </div>
+
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
       <div className="mt-4 border-t border-zinc-200 pt-3 dark:border-zinc-700 flex items-center gap-3">
         <span
@@ -1018,7 +1036,6 @@ export function AgentSetupTab() {
           //   context_window    → 200K
           //   shell_approval_threshold → manifest default
           //   approval_timeout_secs     → 300
-          //   tool_compression_enabled  → true (agent_init.rs)
           try {
             setSavingFields((prev) => {
               const next = new Set(prev);
@@ -1038,7 +1055,6 @@ export function AgentSetupTab() {
                   context_window: null,
                   shell_approval_threshold: null,
                   approval_timeout_secs: null,
-                  tool_compression_enabled: null,
                   idle_timeout_secs: null,
                 }),
               },

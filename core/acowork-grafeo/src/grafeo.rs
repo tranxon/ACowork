@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use grafeo_common::types::Value;
@@ -12,6 +13,7 @@ use crate::types::{
     AutobiographicalNode as GrafeoAutobiographicalNode, Episode as GrafeoEpisode, GrafeoConfig,
     KnowledgeNode as GrafeoKnowledgeNode, ProceduralNode as GrafeoProceduralNode,
 };
+use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::types::{ResultSource, SearchResult};
 use acowork_memory::{
     AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode, MemoryQuery,
@@ -60,6 +62,10 @@ pub struct GrafeoStore {
     /// [`migrate_embedding_dimension`](Self::migrate_embedding_dimension)
     /// can update it through `&self` (the store is behind `Arc`).
     pub(crate) embedding_dim: AtomicUsize,
+    /// Memory quality configuration (ADR-062 D2), applied via
+    /// `MemoryProvider::apply_quality_config`. Defaults mirror the
+    /// pre-ADR-062 hardcoded behaviour ("zero-config = current behaviour").
+    pub(crate) quality: Arc<RwLock<MemoryQualityConfig>>,
 }
 
 // Static assertion: GrafeoStore must be Sync for safe concurrent access.
@@ -102,6 +108,7 @@ impl GrafeoStore {
             db,
             hnsw_config: config,
             embedding_dim: AtomicUsize::new(0),
+            quality: Arc::new(RwLock::new(MemoryQualityConfig::default())),
         };
         store.init_schema()?;
         // Sync embedding_dim with the configured dimension after schema init.
@@ -123,6 +130,7 @@ impl GrafeoStore {
             db,
             hnsw_config: config,
             embedding_dim: AtomicUsize::new(0),
+            quality: Arc::new(RwLock::new(MemoryQualityConfig::default())),
         };
         store.init_schema()?;
         store.embedding_dim.store(store.hnsw_config.dim, Ordering::Relaxed);
@@ -134,6 +142,18 @@ impl GrafeoStore {
     /// For persistent databases this ensures everything is safely on disk.
     pub fn close(&self) -> Result<()> {
         self.db.close().map_err(Into::into)
+    }
+
+    /// Clone the currently-applied memory quality configuration (ADR-062 D2).
+    ///
+    /// Returns the default configuration when `apply_quality_config` has not
+    /// been called yet, which is identical to the pre-ADR-062 hardcoded
+    /// behaviour ("zero-config = current behaviour").
+    pub(crate) fn quality(&self) -> MemoryQualityConfig {
+        self.quality
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Initialize schema: create HNSW vector indexes and BM25 text indexes.
@@ -648,6 +668,8 @@ impl MemoryStore for GrafeoStore {
             created_at: node.created_at,
             updated_at: node.updated_at,
             metadata: node.metadata.clone(),
+            privacy: node.privacy.clone(),
+            importance: node.importance,
         };
         GrafeoStore::store_knowledge(self, &grafeo_node)
             .map(|_| ())
@@ -698,6 +720,7 @@ impl MemoryStore for GrafeoStore {
             status: node.status.clone(),
             created_at: node.created_at,
             updated_at: node.updated_at,
+            source: node.source.clone(),
             metadata: node.metadata.clone(),
         };
         GrafeoStore::store_autobiographical(self, &grafeo_node)
@@ -807,16 +830,10 @@ impl MemoryStore for GrafeoStore {
     }
 
     fn run_decay_scan(&self, config: &DecayConfig) -> acowork_core::error::Result<DecayScanResult> {
-        // Convert acowork_memory::DecayConfig to native DecayConfig
-        let native_config = crate::forgetting::decay::DecayConfig {
-            lambda: config.lambda as f64,
-            access_boost: config.access_per_hit as f64,
-            dormant_threshold: config.dormant_threshold,
-        };
-
-        // Call native decay scan method
+        // DecayConfig is now the single acowork_memory type (design §10.3);
+        // pass it through directly — no native conversion needed.
         let transitioned = self
-            .run_decay_scan(&native_config)
+            .run_decay_scan(config)
             .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?;
 
         Ok(DecayScanResult {

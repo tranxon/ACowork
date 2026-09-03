@@ -17,13 +17,19 @@ import {
   RefreshCw,
   RotateCcw,
   Bug,
-  LogOut,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ToolsTab } from "./ToolsTab";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
+import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
+// ADR-063 §3.7 — package prompt override editor. Always rendered at
+// the TOP of the Debug tab regardless of DevMode state (operators can
+// prepare overrides before clicking "Enter Debug"; the reload button
+// stays reachable once DevMode is on).
+import { PromptList } from "../debug/PromptList";
+import { Switch } from "../common/Switch";
 import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
 
 interface ResultsPanelProps {
@@ -278,19 +284,31 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
       </div>
 
       {/* ── Debug tab content ─────────────────────────────────────── */}
-      {/* ADR-048 follow-up: the debug tab renders in every state, not
-          just when DevMode is active — otherwise the "Enable Debug"
-          button (shown when debug_state === "disabled") would be
-          unreachable. Branching:
+      {/* Restructured: the debug tab always renders an action block
+          (with a two-state Enter/Exit Debug button on the left and the
+          session debug controls on the right, gated by DevMode). The
+          4 DevMode branches now live BELOW the action block:
             1. agent not running            → "no agent in debug mode"
-            2. running, DevMode off         → "Enable Debug" button
+               (replaces the action block — no point showing Enter Debug
+                for an agent that isn't running)
+            2. running, DevMode off         → action block only
+               (the Enter Debug button is the only interactive element;
+                the 4 session controls + lower cards are hidden)
             3. running, DevMode on, remote  → remote-unavailable
             4. running, DevMode on, local,
                not connected                → "debug connection lost"
             5. running, DevMode on, local,
-               connected                    → DebugPanel */}
+               connected                    → state + snapshots + prompts
+                                              + compression history */}
       {activeTab === "debug" && (
-        <>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          {/* ADR-063 §3.7 — package prompt override editor. Always
+              visible at the TOP of the Debug tab, BEFORE the
+              "no agent running" placeholder, the action block, and
+              the debug-only state/snapshots/compression cards.
+              Operators must be able to browse and prepare overrides
+              regardless of agent running state or DevMode. */}
+          <PromptList />
           {!selectedAgent?.running ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
               <Bug className="h-5 w-5" />
@@ -298,229 +316,222 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                 {t("resultsPanel.noAgentDebug")}
               </span>
             </div>
-          ) : selectedAgent?.debug_state !== "enabled" ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
-              <Bug className="h-5 w-5" />
-              <span className="text-center">
-                {t("resultsPanel.agentNotDebugMode")}
-              </span>
-              {/* ADR-048 follow-up: runtime DevMode activation. Renders only
-                  when the agent is running but not yet in DevMode. Clicking
-                  flips DevMode on at the Runtime via
-                  POST /api/agents/{id}/debug/enable without restarting the agent. */}
-              <button
-                type="button"
-                className={cn(
-                  "mt-1 inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-modal-surface px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800",
-                  enablingDebug && "opacity-50 cursor-wait",
-                )}
-                disabled={enablingDebug}
-                onClick={async () => {
-                  if (!selectedAgentId) return;
-                  setEnablingDebug(true);
-                  try {
-                    log.debug("[ResultsPanel] enable_agent_debug: invoking", { agentId: selectedAgentId });
-                    await invoke<{ enabled: boolean; already_enabled: boolean; debug_port: number }>(
-                      "enable_agent_debug",
-                      { agentId: selectedAgentId, debugPort: 0 },
-                    );
-                    log.debug("[ResultsPanel] enable_agent_debug: invoke ok, refreshing agents");
-                    await useAgentStore.getState().fetchAgents();
-                    // ADR-048 follow-up: don't wait for the auto-connect
-                    // useEffect to fire — its run is deferred to after
-                    // commit, which races with the tab switch below and
-                    // leaves `connected` momentarily false (case 4 "调试
-                    // 连接已断开" flashes for a frame). Attach the
-                    // debug session synchronously so the very first
-                    // render after fetchAgents already shows the panel.
-                    log.debug("[ResultsPanel] enable_agent_debug: calling connect() directly");
-                    useDebugStore.getState().connect(selectedAgentId);
-                    onTabChange("debug");
-                  } catch (err) {
-                    log.error("[ResultsPanel] enable_agent_debug failed:", err);
-                  } finally {
-                    setEnablingDebug(false);
-                  }
-                }}
-              >
-                <Bug className="h-3.5 w-3.5" />
-                {enablingDebug
-                  ? t("resultsPanel.enablingDebug")
-                  : t("resultsPanel.enableDebug")}
-              </button>
-            </div>
-          ) : !isGatewayLocal() ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
-              <WifiOff className="h-5 w-5" />
-              <span className="text-center text-xs">
-                {t("resultsPanel.debugUnavailableRemote")}
-              </span>
-              <span className="text-center text-xs text-zinc-400">
-                {t("resultsPanel.debugRemoteDesc")}
-              </span>
-            </div>
-          ) : !connected ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
-              <WifiOff className="h-5 w-5" />
-              <span className="text-center">
-                {t("resultsPanel.debugConnectionLost")}
-              </span>
-            </div>
           ) : (
-            <div className="flex-1 overflow-y-auto p-3 space-y-3">
-              {/* ── Controls card ──────────────────────────────────── */}
+            <div className="p-3 space-y-3">
+              {/* Section title — matches the visual weight of other
+                  section headings in this tab (e.g. Status tab's
+                  "Token statistics" h3). */}
+              <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                {t("resultsPanel.debugSection")}
+              </div>
+
+              {/* Action block — always shown when the agent is running.
+                  Left: two-state text button (Enter/Exit Debug, btn-solid,
+                  no icon). Right: 4 session debug buttons, only rendered
+                  once DevMode is on. */}
               <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
-                <div className="flex items-center gap-1">
-                  <ControlButton
-                    onClick={() => {
-                      if (debugState === "Paused") void resume(activeSessionId);
-                      else if (debugState === "Stopped") void restart(activeSessionId);
-                      else void pauseDebug(activeSessionId);
-                    }}
-                    title={
-                      debugState === "Paused"
-                        ? "Resume (F5)"
-                        : debugState === "Stopped"
-                          ? t("resultsPanel.buttonRestart")
-                          : "Pause (F6)"
-                    }
-                    active={debugState === "Paused"}
-                  >
-                    {debugState === "Paused"
-                      ? <Play className="h-3.5 w-3.5" />
-                      : <Pause className="h-3.5 w-3.5" />
-                    }
-                  </ControlButton>
-                  <ControlButton
-                    onClick={() => step(activeSessionId, "iteration")}
-                    title={t("resultsPanel.buttonStep")}
-                    disabled={debugState === "Stopped"}
-                  >
-                    <StepForward className="h-3.5 w-3.5" />
-                  </ControlButton>
-                  <ControlButton
-                    onClick={() => stop(activeSessionId)}
-                    title={t("resultsPanel.buttonStop")}
-                    disabled={debugState === "Stopped"}
-                  >
-                    <Square className="h-3.5 w-3.5" />
-                  </ControlButton>
-                  <ControlButton onClick={() => restart(activeSessionId)} title={t("resultsPanel.buttonRestart")} disabled={!debugAgentId}>
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </ControlButton>
-                  {/* ADR-048 follow-up: the "Exit Debug" button is
-                      the only control here that doesn't manipulate
-                      a *session's* DebugState — it tears down the
-                      agent-wide DevMode at the Runtime via
-                      `useDebugStore.disableDebugMode()`. After it
-                      fires the agent flips back to
-                      `debug_state = "disabled"`, the Debug Panel
-                      unmounts, and the user sees the "Enable Debug"
-                      placeholder again. No agent restart needed.
-                      Visually distinct (red hue, log-out icon) so
-                      the user reads it as a state exit, not a
-                      session-level toggle. */}
-                  <div className="ml-auto" />
-                  <ControlButton
-                    onClick={async () => {
-                      if (disablingDebug) return;
-                      setDisablingDebug(true);
-                      try {
-                        log.debug(
-                          "[ResultsPanel] exit_debug: invoking disableDebugMode",
-                        );
-                        await disableDebugMode();
-                        log.debug(
-                          "[ResultsPanel] exit_debug: disableDebugMode ok",
-                        );
-                      } catch (err) {
-                        log.error(
-                          "[ResultsPanel] exit_debug failed:",
-                          err,
-                        );
-                      } finally {
-                        setDisablingDebug(false);
+                <div className="flex min-h-[26px] items-center gap-1">
+                  <Switch
+                    checked={selectedAgent?.debug_state === "enabled"}
+                    onChange={async (checked) => {
+                      if (checked) {
+                        /* Enter Debug — ADR-048 follow-up runtime DevMode
+                           activation. Flips DevMode on at the Runtime via
+                           POST /api/agents/{id}/debug/enable without
+                           restarting the agent. Don't wait for the auto-
+                           connect useEffect — its run is deferred to after
+                           commit and would race the tab switch, leaving
+                           `connected` momentarily false. Attach the debug
+                           session synchronously. */
+                        if (!selectedAgentId) return;
+                        setEnablingDebug(true);
+                        try {
+                          log.debug("[ResultsPanel] enable_agent_debug: invoking", { agentId: selectedAgentId });
+                          await invoke<{ enabled: boolean; already_enabled: boolean; debug_port: number }>(
+                            "enable_agent_debug",
+                            { agentId: selectedAgentId, debugPort: 0 },
+                          );
+                          log.debug("[ResultsPanel] enable_agent_debug: invoke ok, refreshing agents");
+                          await useAgentStore.getState().fetchAgents();
+                          log.debug("[ResultsPanel] enable_agent_debug: calling connect() directly");
+                          useDebugStore.getState().connect(selectedAgentId);
+                          onTabChange("debug");
+                        } catch (err) {
+                          log.error("[ResultsPanel] enable_agent_debug failed:", err);
+                        } finally {
+                          setEnablingDebug(false);
+                        }
+                      } else {
+                        /* Exit Debug — tears down agent-wide DevMode via
+                           useDebugStore.disableDebugMode(). No agent restart. */
+                        if (disablingDebug) return;
+                        setDisablingDebug(true);
+                        try {
+                          log.debug("[ResultsPanel] exit_debug: invoking disableDebugMode");
+                          await disableDebugMode();
+                          log.debug("[ResultsPanel] exit_debug: disableDebugMode ok");
+                        } catch (err) {
+                          log.error("[ResultsPanel] exit_debug failed:", err);
+                        } finally {
+                          setDisablingDebug(false);
+                        }
                       }
                     }}
-                    title={
-                      disablingDebug
-                        ? t("resultsPanel.exitingDebug")
-                        : t("resultsPanel.buttonExitDebug")
+                    disabled={enablingDebug || disablingDebug}
+                    size="sm"
+                    label={
+                      enablingDebug
+                        ? t("resultsPanel.enteringDebug")
+                        : disablingDebug
+                          ? t("resultsPanel.exitingDebug")
+                          : selectedAgent?.debug_state === "enabled"
+                            ? t("resultsPanel.buttonExitDebug")
+                            : t("resultsPanel.enterDebug")
                     }
-                    disabled={disablingDebug || !debugAgentId}
-                  >
-                    <LogOut className="h-3.5 w-3.5 text-red-500 dark:text-red-400" />
-                  </ControlButton>
-                  {hasPendingPatches && (
+                    labelPosition="right"
+                  />
+                  <div className="ml-auto" />
+                  {selectedAgent?.debug_state === "enabled" && (
                     <>
-                      <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
                       <ControlButton
-                        onClick={() => reExecute(activeSessionId).catch(log.error)}
-                        title={t("resultsPanel.buttonReExecute")}
-                        active
+                        onClick={() => {
+                          if (debugState === "Paused") void resume(activeSessionId);
+                          else if (debugState === "Stopped") void restart(activeSessionId);
+                          else void pauseDebug(activeSessionId);
+                        }}
+                        title={
+                          debugState === "Paused"
+                            ? "Resume (F5)"
+                            : debugState === "Stopped"
+                              ? t("resultsPanel.buttonRestart")
+                              : "Pause (F6)"
+                        }
+                        active={debugState === "Paused"}
                       >
-                        <RotateCcw className="h-3.5 w-3.5" />
+                        {debugState === "Paused"
+                          ? <Play className="h-3.5 w-3.5" />
+                          : <Pause className="h-3.5 w-3.5" />
+                        }
                       </ControlButton>
+                      <ControlButton
+                        onClick={() => step(activeSessionId, "iteration")}
+                        title={t("resultsPanel.buttonStep")}
+                        disabled={debugState === "Stopped"}
+                      >
+                        <StepForward className="h-3.5 w-3.5" />
+                      </ControlButton>
+                      <ControlButton
+                        onClick={() => stop(activeSessionId)}
+                        title={t("resultsPanel.buttonStop")}
+                        disabled={debugState === "Stopped"}
+                      >
+                        <Square className="h-3.5 w-3.5" />
+                      </ControlButton>
+                      <ControlButton onClick={() => restart(activeSessionId)} title={t("resultsPanel.buttonRestart")} disabled={!debugAgentId}>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      </ControlButton>
+                      {hasPendingPatches && (
+                        <>
+                          <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
+                          <ControlButton
+                            onClick={() => reExecute(activeSessionId).catch(log.error)}
+                            title={t("resultsPanel.buttonReExecute")}
+                            active
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          </ControlButton>
+                        </>
+                      )}
                     </>
                   )}
                 </div>
               </div>
 
-              {/* ── State card ─────────────────────────────────────── */}
-              <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-                  <StateLabel label={t("resultsPanel.iteration")} value={`#${iteration}`} />
-                  <StateLabel label={t("resultsPanel.phase")} value={phase} highlight />
-                  <StateLabel label={t("resultsPanel.tokens")} value={`${promptTokens + completionTokens}`} />
-                  <StateLabel
-                    label={t("resultsPanel.sessionStatusLabel")}
-                    value={debugState}
-                    highlight={debugState !== "Running" && debugState !== "Stepping"}
-                  />
-                </div>
-              </div>
-
-              {/* ── Context snapshots card ─────────────────────────── */}
-              <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
-                <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                  {t("resultsPanel.contextSnapshots", { count: snapshots.length })}
-                </div>
-                {snapshots.length === 0 && (
-                  <div className="py-3 text-center text-xs text-zinc-400">
-                    {t("resultsPanel.noSnapshots")}
-                    <br />
-                    {t("resultsPanel.sendMessageToGenerate")}
+              {/* Below action block — only when in debug mode. The
+                  lower cards (state, snapshots, prompts, compression
+                  history) are intentionally hidden until the operator
+                  commits to a debug session. */}
+              {selectedAgent?.debug_state === "enabled" && (
+                !isGatewayLocal() ? (
+                  <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+                    <WifiOff className="h-5 w-5" />
+                    <span className="text-center text-xs">
+                      {t("resultsPanel.debugUnavailableRemote")}
+                    </span>
+                    <span className="text-center text-xs text-zinc-400">
+                      {t("resultsPanel.debugRemoteDesc")}
+                    </span>
                   </div>
-                )}
-                {snapshots.map((snap) => (
-                  <SnapshotNode
-                    key={snap.iteration}
-                    snapshot={snap}
-                    expandedSections={expandedSections}
-                    sectionCache={sectionCache}
-                    editingSection={editingSection}
-                    onToggleSection={(section) => toggleSection(snap.iteration, section)}
-                    onStartEdit={(section, original) =>
-                      setEditingSection({ iteration: snap.iteration, section, original, current: original })
-                    }
-                    onCancelEdit={() => setEditingSection(null)}
-                    onSaveEdit={(section, content) => {
-                      const patches: Record<string, unknown> = {};
-                      patches[section] = content;
-                      patchContext(activeSessionId, patches).catch(log.error);
-                      setEditingSection(null);
-                    }}
-                    onEditChange={(content) =>
-                      setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
-                    }
-                    onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
-                    getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
-                  />
-                ))}
-              </div>
+                ) : !connected ? (
+                  <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+                    <WifiOff className="h-5 w-5" />
+                    <span className="text-center">
+                      {t("resultsPanel.debugConnectionLost")}
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    {/* State card */}
+                    <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                        <StateLabel label={t("resultsPanel.iteration")} value={`#${iteration}`} />
+                        <StateLabel label={t("resultsPanel.phase")} value={phase} highlight />
+                        <StateLabel label={t("resultsPanel.tokens")} value={`${promptTokens + completionTokens}`} />
+                        <StateLabel
+                          label={t("resultsPanel.sessionStatusLabel")}
+                          value={debugState}
+                          highlight={debugState !== "Running" && debugState !== "Stepping"}
+                        />
+                      </div>
+                    </div>
+                    {/* Context snapshots card */}
+                    <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
+                      <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                        {t("resultsPanel.contextSnapshots", { count: snapshots.length })}
+                      </div>
+                      {snapshots.length === 0 && (
+                        <div className="py-3 text-center text-xs text-zinc-400">
+                          {t("resultsPanel.noSnapshots")}
+                          <br />
+                          {t("resultsPanel.sendMessageToGenerate")}
+                        </div>
+                      )}
+                      {snapshots.map((snap) => (
+                        <SnapshotNode
+                          key={snap.iteration}
+                          snapshot={snap}
+                          expandedSections={expandedSections}
+                          sectionCache={sectionCache}
+                          editingSection={editingSection}
+                          onToggleSection={(section) => toggleSection(snap.iteration, section)}
+                          onStartEdit={(section, original) =>
+                            setEditingSection({ iteration: snap.iteration, section, original, current: original })
+                          }
+                          onCancelEdit={() => setEditingSection(null)}
+                          onSaveEdit={(section, content) => {
+                            const patches: Record<string, unknown> = {};
+                            patches[section] = content;
+                            patchContext(activeSessionId, patches).catch(log.error);
+                            setEditingSection(null);
+                          }}
+                          onEditChange={(content) =>
+                            setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
+                          }
+                          onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
+                          getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
+                        />
+                      ))}
+                    </div>
+                    <CompressionHistoryCard
+                      agentId={selectedAgentId}
+                      sessionId={activeSessionId}
+                    />
+                  </>
+                )
+              )}
             </div>
           )}
-        </>
+        </div>
       )}
 
       {/* ── Status tab content ───────────────────────────────────── */}

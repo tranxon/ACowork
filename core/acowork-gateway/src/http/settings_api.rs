@@ -6,7 +6,7 @@
 //! auto-compaction thresholds) can be added alongside without polluting
 //! `provider_api.rs`.
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 
 use acowork_core::protocol::CompactModelRef;
@@ -42,7 +42,7 @@ pub struct PutDefaultCompactModelRequest {
 /// `GET /api/settings/default-compact-model` — read current value.
 pub async fn get_default_compact_model(
     State(state): State<AppState>,
-) -> Result<Json<DefaultCompactModelResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<DefaultCompactModelResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let current = gw
         .resource_cache
@@ -63,7 +63,7 @@ pub async fn get_default_compact_model(
 pub async fn put_default_compact_model(
     State(state): State<AppState>,
     Json(body): Json<PutDefaultCompactModelRequest>,
-) -> Result<Json<DefaultCompactModelResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<DefaultCompactModelResponse>, ApiError> {
     let data_dir = {
         let gw = state.gateway_state.read().await;
         gw.config

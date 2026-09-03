@@ -216,7 +216,7 @@ pub async fn list_skills(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Query(query): Query<SkillListQuery>,
-) -> Result<Json<SkillListResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SkillListResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
 
     // Verify agent exists and get install path
@@ -264,7 +264,7 @@ pub async fn list_skills(
 pub async fn get_skill_detail(
     State(state): State<AppState>,
     Path((agent_id, skill_name)): Path<(String, String)>,
-) -> Result<Json<SkillDetailResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SkillDetailResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
 
     // Verify agent exists and get install path
@@ -314,7 +314,7 @@ pub async fn import_skill(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<ImportSkillResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<ImportSkillResponse>), ApiError> {
     // Parse multipart fields
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut overwrite: Option<bool> = None;
@@ -412,7 +412,7 @@ pub async fn get_skill_history(
     State(state): State<AppState>,
     Path((agent_id, skill_name)): Path<(String, String)>,
     Query(query): Query<SkillListQuery>,
-) -> Result<Json<SkillExecutionHistoryResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SkillExecutionHistoryResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
 
     // Verify agent exists

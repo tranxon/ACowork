@@ -492,7 +492,7 @@ pub async fn handle_patch_context(
                     "environment" => {
                         if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
                             named.content = super::controller::SectionContent::new(
-                                crate::agent::context::detect_environment_text(),
+                                crate::agent::context::detect_environment_text().to_string(),
                                 model,
                             );
                         }
@@ -1219,13 +1219,17 @@ mod tests {
         // ADR-054: empty-string clearing semantics must be identical between
         // the snapshot preview and apply-time. The snapshot must drop the
         // cleared section (build() will omit it).
+        //
+        // ADR-060 v2: `todo_context` section no longer exists — switched to
+        // `ambiguous_confirmation_hint` (same ADR-054 step-3 empty-clearing
+        // semantic, still recognized by `resolve_patch`).
         let mut ctrl = fresh_controller();
         ctrl.iteration = 4;
         ctrl.current_model = Some("test-model".to_string());
         let mut sections = seven_sections(("sys", 1));
         sections.sections.push(super::super::controller::NamedSection {
-            key: "todo_context".to_string(),
-            content: SectionContent::with_token_count("old todos".to_string(), 2),
+            key: "ambiguous_confirmation_hint".to_string(),
+            content: SectionContent::with_token_count("old hint".to_string(), 2),
         });
         ctrl.context_snapshots.insert(
             4,
@@ -1243,7 +1247,7 @@ mod tests {
             PatchContextParams {
                 patches: PatchSet {
                     patches: HashMap::from([(
-                        "todo_context".to_string(),
+                        "ambiguous_confirmation_hint".to_string(),
                         PatchValue::Text {
                             value: String::new(), // clear
                         },
@@ -1256,7 +1260,7 @@ mod tests {
 
         let snap = ctrl.context_snapshots.get(&4).unwrap();
         assert!(
-            snap.sections.find("todo_context").is_none(),
+            snap.sections.find("ambiguous_confirmation_hint").is_none(),
             "cleared section must be dropped from the snapshot"
         );
         // The patch itself is stored for the next reExecute — apply_patches

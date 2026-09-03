@@ -70,7 +70,7 @@ pub struct MessageResponse {
 pub async fn list_crons(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-) -> Result<Json<CronListResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<CronListResponse>, ApiError> {
     // Verify agent exists
     {
         let gw = state.gateway_state.read().await;
@@ -105,7 +105,7 @@ pub async fn add_cron(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(body): Json<AddCronRequest>,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<MessageResponse>), ApiError> {
     // Verify agent exists
     {
         let gw = state.gateway_state.read().await;
@@ -178,7 +178,7 @@ pub async fn add_cron(
 pub async fn remove_cron(
     State(state): State<AppState>,
     Path((agent_id, cron_id)): Path<(String, String)>,
-) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<MessageResponse>, ApiError> {
     // Verify agent exists
     {
         let gw = state.gateway_state.read().await;

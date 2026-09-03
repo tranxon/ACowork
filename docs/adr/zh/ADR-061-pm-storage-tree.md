@@ -85,7 +85,7 @@
 |------|------|------------------|
 | 千任务级别规模 | 开发计划 v0.3 §11 估算 | 内存索引 + walkdir 重建（<1s）足够 |
 | 跨平台（Windows / macOS / Linux） | Gateway 客户端分布 | `tokio::fs` + `rename` 同 FS 原子 |
-| 单用户单进程 | 当前阶段部署形态 | **不需要**考虑并发写冲突；未来加锁不迟 |
+| 单用户单进程 | 当前阶段部署形态 | **不需要**考虑并发写冲突；未来加锁不迟。> ADR-064 后 PM 为**独立进程**，但仍是**单实例**（Gateway supervisor 只 spawn 一个 `acowork-pm`，数据目录 `$HOME/.acowork/acowork-pm/` 独占），单写者假设仍成立，无需加锁 |
 | Agent MCP 调用 | §6 MCP 工具表 | 接口层用 `PmStore` trait，存储层切换对 MCP 透明 |
 | Desktop UI 直接读 task.json | UX §3.4 | 字段扁平 + `serde_json` 直接渲染 |
 
@@ -313,7 +313,7 @@ sequenceDiagram
 |------|------|----------|
 | **跨 FS reparent** | `fs::rename` 跨 mount point 失败 | `atomic.rs::rename_or_fallback`：copy + remove |
 | **千任务规模** | walkdir 全量重建 ~1s | 启动期可接受；超阈值切 SQLite |
-| **并发写** | 单进程假设下无锁；多进程会冲突 | 当前阶段单进程；未来加 `flock` 或走 SQLite WAL |
+| **并发写** | 单进程假设下无锁；多进程会冲突 | 当前阶段单进程（ADR-064 独立进程仍单实例，单写者假设成立）；未来加 `flock` 或走 SQLite WAL |
 | **附件缩略图** | 上传时 CPU 成本（256x256 JPEG 生成）| 后台任务 + 缓存；feature flag 可关 |
 | **深度限制 5** | UI 折叠层数合理但硬限制 | 配置项 `max_task_depth` 可调（默认 5）|
 | **依赖图规模** | O(N²) 关系在千节点内可接受 | 超阈值切图数据库（grafeo） |
@@ -391,3 +391,4 @@ sequenceDiagram
 **变更记录**：
 - 2026-08-31：初版（v1.0）—— 整合 P0 设计对话全部决策
 - 2026-09-02：P4 收口 —— 设计文档升 v1.0（六态状态机 / 内嵌形态 / advertise endpoint 定稿），P1–P4 实施状态标记完成
+- 2026-09-02：ADR-064 定案 —— PM 迁出为**独立进程**（Gateway 仅 supervisor + 反代），数据目录独立为 `$HOME/.acowork/acowork-pm/`；本 ADR 的**单进程假设仍成立**（PM 单实例独占数据目录，单写者，无需加锁）

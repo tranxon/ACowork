@@ -15,10 +15,11 @@ docs/
 ├── AGENTS.md                # This file (index)
 ├── design/{zh,en}/          # 架构设计（zh: 19 篇；en: 待翻译占位）
 ├── module-design/{zh,en}/   # Rust crate 规格（zh: 8 篇；en: AGENTS.md 占位）
-├── adr/{zh,en}/             # 架构决策记录（zh: 49；en: 1）
+├── adr/{zh,en}/             # 架构决策记录（zh: 54；en: 1）
 ├── prd/{zh,en}/             # 平台 PRD + Desktop UI/UX（zh: 2；en: 占位）
 ├── protocols/{zh,en}/       # API 协议参考（zh: HTTP / MQTT / RAG 集成；en: 占位）
-└── mcp-server-research/{zh,en}/   # MCP Server 集成调研（en: 1；zh: 占位）
+├── mcp-server-research/{zh,en}/   # MCP Server 集成调研（en: 1；zh: 占位）
+└── prompt-audit/{zh,en}/    # 代码内硬编码 LLM prompt 清单（zh + en: 各 1）
 ```
 
 每个主题目录均带 `zh/` + `en/` 子目录，使目录结构对称、新主题可零成本复制。
@@ -40,6 +41,8 @@ docs/
 | RAG 集成协议 | [`protocols/zh/RAG-protocol-guide.md`](./protocols/zh/RAG-protocol-guide.md) |
 | MCP Server 集成 | [`mcp-server-research/en/mcp-server-research.md`](./mcp-server-research/en/mcp-server-research.md) |
 | 架构决策记录 | [`adr/zh/`](./adr/zh/) |
+| 包级 LLM prompt 覆盖约定（`prompts/<file>.md`） | [`adr/zh/ADR-063-package-level-prompt-override.md`](./adr/zh/ADR-063-package-level-prompt-override.md) |
+| Runtime 内硬编码 prompt 清单 | [`prompt-audit/zh/runtime-prompts-summary.md`](./prompt-audit/zh/runtime-prompts-summary.md) |
 
 ## CONVENTIONS (THIS DIR)
 

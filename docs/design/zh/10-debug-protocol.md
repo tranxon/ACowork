@@ -57,6 +57,46 @@ DevMode 现在支持**两种**激活方式：
 
 **已废弃**：`POST /api/agents/{id}/restart-debug`（完整进程重启进入调试模式）已被运行时启用替代。Gateway 端点仍保留可用以作操作逃生口，Desktop 端右键菜单「Restart in Debug」已移除（`AgentList.tsx`）。计划在下一个 minor 版本后完全下线——见 ADR-048 follow-up。
 
+### 1.2 已存在 session 的注入路径与并发约束（v3.1.1 修复）
+
+运行时激活不仅让 **Runtime** 进入 DevMode，还需要让**已存在**的 session（它们的 `AgentCore` 此刻可能正被 `agent_loop.run()` 阻塞）也切换到 DevMode observer。这条注入路径在 v3.1 引入运行时激活时存在一个并发缺陷，v3.1.1 已修复：
+
+#### 注入的两种时序
+
+| 时序 | 路径 | 结果 |
+|------|------|------|
+| **idle 状态**启用调试 | SessionTask 主循环空闲，`EnableDebugMode` 消息被立即消费（`session_task.rs` 的 `SessionMessage::EnableDebugMode` 分支 → `set_debug_mode`） | 快照正常更新 ✅ |
+| **LLM 推理中途**启用调试 | SessionTask 主循环阻塞在 `agent_loop.run()`，`EnableDebugMode` 消息在 inbound 队列排队；必须靠 **bypass 通道**把 `DebugHandles` 直接写入共享槽位，由 AgentLoop 在**下一次 iteration 开头**拾取 | v3.1.1 起正常 ✅ |
+
+#### Bug 根因（v3.1.1 修复）
+
+`EnableDebugMode` 消息只能在 SessionTask 主循环空闲时被处理——而主循环在 LLM 推理期间长时间阻塞（一次 tool-call 推理常达数十秒到数分钟）。为覆盖该场景，`SessionManager::push_debug_mode_to_existing_sessions` 额外把 `DebugHandles` 写入 `session_handle.pending_debug_handles`（bypass 通道），并期望 AgentLoop 在 `execute_single_iteration` 开头通过 `check_pending_injection()` 拾取。
+
+缺陷出在 **ADR-013 Observer Pipeline 迁移时**：`pending_debug_handles` 被从 `AgentCore` 移入 `DebugObserverSlot`，而 `DebugObserverSlot::set_pending_injection` 对 `Production` 变体是 **no-op**（observer.rs）。session 创建时 observer 几乎总是 `Production`，因此 `session_task.rs` 在 `SessionTask::new` 中绑定的 bypass 通道被**静默丢弃**——此后 AgentCore 从未持有该通道，mid-loop 写入的 `DebugHandles` 永远不可见，iteration 计数冻结，直到 `run()` 返回后消息才被消费。
+
+> 这解释了「idle 启动正常、推理中启动不更新」的规律：idle 时消息立即可达，推理中只能靠（已失效的）bypass 通道。
+
+#### 修复（v3.1.1）
+
+让 `AgentCore` 在**自身字段**持有 bypass 通道（`pending_debug_handles`），与 observer 是否 `Production` 解耦：
+
+```
+SessionManager                        SessionTask (AgentLoop)
+─────────────────                     ────────────────────────
+push_debug_mode_to_existing_sessions
+  └─ session_handle.pending_debug_handles  ← 同一 Arc ──  AgentCore.pending_debug_handles
+       写入 DebugHandles ──────────────────────────────▶  execute_single_iteration 开头
+                                                            take_pending_debug_handles()
+                                                            → DebugObserverImpl::new → set_debug_mode
+```
+
+- `AgentCore::set_debug_pending_injection`：把通道同时转发给 observer slot（Dev 场景保留）**并**存入 AgentCore 字段（真正的持有者，对 `Production` 也有效）。
+- `AgentCore::take_pending_debug_handles()`：`try_lock` + `take`，不阻塞 agent loop；锁被 writer 持有时返回 `None` 待下一 iteration 重试。
+- **disable 安全性**：`disable_debug_mode` 会把 `session_handle.pending_debug_handles` 清为 `None`（session_manager.rs）——由于 AgentCore 与该 handle 共享**同一个 Arc**，disable 后任何在途 handle 都无法被后续 iteration 应用，与 teardown 语义严格一致。
+- **clone 隔离**：`AgentCore::clone` 不携带 pending 通道（传 `None`）——它是 per-session 状态，由每个 `SessionTask::new` 重新绑定，模板/sibling session 不得继承。
+
+> **架构说明（对 ADR-013 的偏离）**：ADR-013 的目标是把 `AgentCore` 从 6 个 debug 字段收敛为 1 个 `DebugObserverSlot`，`pending_debug_handles` 正是在那次迁移中被移入 observer slot 的字段之一。v3.1.1 发现该迁移在「已存在 session 的 mid-loop 注入」场景下不成立：bypass 通道必须在 DevMode 激活**之前**就已存在，而 observer slot 的 `Production` 变体恰恰在那个阶段丢弃通道（no-op）。因此把该通道放回 `AgentCore` 是**有意为之的最小例外**——替代方案（给 `Production` 变体挂数据）会破坏「Production = 零成本 no-op」的核心不变量，改动更侵入。ADR-013 的其余目标（observer 收敛、主循环钩子化、ContextBuilder 解耦）保持不变。
+
 ## 2. 传输层
 
 | 平台 | RPC | 事件 | 说明 |

@@ -150,6 +150,8 @@ pub fn is_retryable(error: &AcoworkError) -> bool {
     match error {
         AcoworkError::Provider(provider_err) => provider_err.retryable,
         AcoworkError::RateLimited(_) => true,
+        // Network / transport I/O failures are retryable: a transient
+        // disconnect (e.g. machine sleep, Wi-Fi drop) may be fixed by waiting.
         AcoworkError::Io(_) => true,
         _ => false,
     }

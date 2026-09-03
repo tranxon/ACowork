@@ -145,6 +145,11 @@ pub struct AgentCore {
     /// Per-agent context window cap (from agent_config.json, set via Agent Setup panel).
     /// Layer 1 in the resolution chain. 0 means "no limit".
     pub(crate) context_window_override: Option<u64>,
+    /// ADR-061: minimum compression ratio for levels 1-7 (from
+    /// agent_config.json, set via Agent Setup panel). `None` = use
+    /// [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`] (0.90
+    /// default = "compress until at most 10% remains").
+    pub(crate) compression_ratio_threshold: Option<f64>,
     /// Context window cap from manifest.toml [llm].context_window (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
@@ -155,7 +160,7 @@ pub struct AgentCore {
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Agent-specific compaction prompt (from `prompts/summary.md` in the
-    /// .agent package). `None` = use the built-in
+    /// .agent package). `None` (the inner `Option`) = use the built-in
     /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`] fallback.
     ///
     /// This is the package-declared summarization directive for context
@@ -163,7 +168,59 @@ pub struct AgentCore {
     /// of `system_prompt_override` (which covers the MAIN dialog prompt
     /// only) — compaction is a summarization task with its own directive,
     /// and per-agent rules belong to the package, not the runtime config.
-    pub(crate) compaction_prompt: Option<String>,
+    ///
+    /// ADR-063 §3.7.5: wrapped in `Arc<RwLock<...>>` so the Debug panel
+    /// L2 reload (`DebugService::reload_prompts`) can write through any
+    /// `Arc<AgentCore>` clone held by a running session, not just the
+    /// canonical `AgentCore` in `SessionManager`. `Clone for AgentCore`
+    /// shares the inner `Arc` (reference +1) — writes from one clone are
+    /// visible to all others.
+    pub(crate) compaction_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    // ── ADR-063: 7 additional package-level LLM prompt overrides ──
+    //
+    // Each follows the same `Arc<RwLock<Option<String>>>` pattern as
+    // `compaction_prompt` (see doc-comment above for L2 reload semantics).
+    // Field naming maps 1-to-1 to entries in
+    // `crate::package::prompt_builder::OVERRIDABLE_PROMPTS`; see ADR-063
+    // §3.2 for the full list and resolution chain.
+
+    /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
+    /// (`prompts/search.md`). Inner `None` = use built-in Perplexity
+    /// search system prompt.
+    pub(crate) search_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for `crate::prompt::COMPACT_PROMPT`
+    /// (`prompts/compact-template.md`). Authors MUST preserve the
+    /// `{messages_text}` placeholder — the runtime substitution is the
+    /// same `format!` pattern used for the built-in constant.
+    pub(crate) compact_template: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for `crate::prompt::TITLE_PROMPT`
+    /// (`prompts/title.md`). Authors may use `{language}` and
+    /// `{user_message}` placeholders.
+    pub(crate) title_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for grafeo's `EXTRACTION_SYSTEM_PROMPT`
+    /// (`prompts/extraction.md`). Note: grafeo holds a process-level
+    /// singleton; L2 reload for this field is NOT in ADR-063 scope —
+    /// PUT writes to disk + updates this field, but the live grafeo
+    /// cache only refreshes after Runtime restart. See ADR-063 §6.1.
+    pub(crate) extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for grafeo's `CONFLICT_CLASSIFICATION_PROMPT`
+    /// (`prompts/conflict-classification.md`). Same reload caveat as
+    /// `extraction_prompt`.
+    pub(crate) conflict_classification_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for grafeo's `GENERALIZATION_PROMPT`
+    /// (`prompts/generalization.md`). Same reload caveat.
+    pub(crate) generalization_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
+    /// (`prompts/abstention.md`). Same reload caveat.
+    pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
     /// Grafeo memory store (shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
     /// `memory_admin` is the admin interface for HTTP endpoints and
@@ -177,6 +234,20 @@ pub struct AgentCore {
     pub(crate) rag_provider: Option<Arc<dyn RagProvider>>,
     /// Debug observer slot — Production (no-op) or Dev (real observer).
     pub(crate) debug_observer: DebugObserverSlot,
+    /// ADR-048: shared bypass-injection channel for debug handles.
+    ///
+    /// SessionManager writes `DebugHandles` here while the agent loop is
+    /// running (its message channel is blocked inside `run()`), and the
+    /// agent loop drains it at the start of each iteration via
+    /// [`Self::take_pending_debug_handles`].
+    ///
+    /// Held here — not on the observer slot — because the observer's
+    /// `set_pending_injection` is a no-op while the slot is `Production`,
+    /// which is exactly the state during a mid-loop `EnableDebugMode`.
+    /// `disable_debug_mode` clears the shared slot (session_manager.rs),
+    /// so a stale handles pointer cannot be applied after teardown.
+    pub(crate) pending_debug_handles:
+        Option<Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>>,
     /// ADR-046: blob store for `file_upload` / `image_upload` items
     /// (uploaded PDFs, images, …). Populated in Phase B of `session_init`
     /// via [`AgentCore::set_attachment_service`]; the agent loop reads
@@ -217,26 +288,84 @@ pub struct AgentCore {
     /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
     pub(crate) agent_total_output_tokens: AtomicU64,
 
-    /// ADR-052: Whether context_retrieve and context_abandon tools are registered.
-    /// `None` falls through to `true` (default enabled).
-    /// Hot-reload: when this changes, [`Self::sync_platform_tools_to_registry`]
-    /// mutates `builtin_tools` and triggers the dispatch-list + LLM
-    /// tool_definitions rebuild via `apply_runtime_config` and the
-    /// `SessionTask` handler.
-    pub(crate) tool_compression_enabled_override: Option<bool>,
-
-    /// ADR-052: Shared queue for context_abandon tool. Created in agent_init,
-    /// passed to the tool and stored here for the AgentLoop to drain.
-    pub(crate) abandon_queue:
-        crate::agent::context_compression::AbandonQueue,
-
-    /// ADR-052: Shared queue for context_retrieve tool. Created in agent_init,
-    /// passed to the tool and stored here for the AgentLoop to drain.
+    /// ADR-061 §10.2: Shared queue for the `context_retrieve` tool (the
+    /// manual recall channel after compaction). Created in agent_init
+    /// and passed to the tool at registration time.
     pub(crate) retrieve_queue:
         crate::agent::context_compression::RetrieveQueue,
 }
 
 impl AgentCore {
+    // ── ADR-063 §3.7.5: accessor methods for LLM call sites ──
+    //
+    // Each accessor:
+    //   1. Acquires a read lock briefly to clone the inner `Option<String>`.
+    //   2. Returns `Option<String>` so call sites compose naturally with
+    //      `.as_deref().unwrap_or(BUILTIN_CONSTANT)` exactly as they did
+    //      before the ADR-063 Arc<RwLock<>> refactor (ADR-053 used the
+    //      direct `Option<String>` field with the same idiom).
+    //   3. Holds the lock only for the `clone()` — a few microseconds.
+    //      LLM call sites do not hold the lock across network round-trips.
+    //
+    // For the runtime-level 4 fields (fallback / search / compact-template /
+    // title), the accessor is plumbed by the calling code at the LLM
+    // invocation site. For the grafeo/memory 4 fields, the accessor is
+    // **not yet consumed** — wiring those requires trait-level injection
+    // (ADR-063 §6.1, deferred) so the process-level singletons in those
+    // crates can pick the value up via `AgentCore::shared()`. The fields
+    // are loaded into the struct (Phase A/B) and are PUT-writable via the
+    // HTTP API, but live cache invalidation requires the trait refactor.
+
+    /// `prompts/summary.md` accessor (ADR-053 + ADR-063 §3.7.5).
+    pub fn compaction_prompt(&self) -> Option<String> {
+        self.compaction_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/search.md` (runtime-level, used by
+    /// perplexity backend). See ADR-063 §3.7.5.
+    pub fn search_prompt(&self) -> Option<String> {
+        self.search_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/compact-template.md` (runtime-level,
+    /// used by `episode_distill::compact_full_context`). See ADR-063 §3.7.5.
+    pub fn compact_template(&self) -> Option<String> {
+        self.compact_template.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/title.md` (runtime-level, used by
+    /// `episode_distill::compact_session_title_with_llm`). See ADR-063 §3.7.5.
+    pub fn title_prompt(&self) -> Option<String> {
+        self.title_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/extraction.md` (grafeo-level, **deferred
+    /// plumbing**, see ADR-063 §6.1). Loaded into the struct, PUT-writable
+    /// via HTTP, but the live grafeo singleton does not yet consult it.
+    pub fn extraction_prompt(&self) -> Option<String> {
+        self.extraction_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/conflict-classification.md` (grafeo,
+    /// deferred). See ADR-063 §6.1.
+    pub fn conflict_classification_prompt(&self) -> Option<String> {
+        self.conflict_classification_prompt
+            .read()
+            .unwrap()
+            .clone()
+    }
+
+    /// Override accessor — `prompts/generalization.md` (grafeo, deferred).
+    /// See ADR-063 §6.1.
+    pub fn generalization_prompt(&self) -> Option<String> {
+        self.generalization_prompt.read().unwrap().clone()
+    }
+
+    /// Override accessor — `prompts/abstention.md` (memory, deferred).
+    /// See ADR-063 §6.1.
+    pub fn abstention_prompt(&self) -> Option<String> {
+        self.abstention_prompt.read().unwrap().clone()
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_observer(
         config: RuntimeConfig,
@@ -284,17 +413,35 @@ impl AgentCore {
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
+            compression_ratio_threshold: None,
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
-            // Populated in Phase B of session_init from prompts/summary.md
-            // (see `load_compaction_prompt`); None until then.
-            compaction_prompt: None,
+            // ADR-053: populated in Phase B of session_init from
+            // prompts/summary.md (see `load_compaction_prompt`).
+            // ADR-063 §3.7.5: wrapped in `Arc<RwLock<...>>` so the L2
+            // reload (DebugService::reload_prompts) can write through any
+            // Arc<AgentCore> clone held by a running session, not just the
+            // canonical one in SessionManager.
+            compaction_prompt: Arc::new(std::sync::RwLock::new(None)),
+            // ADR-063: 7 additional overridable prompt fields. Each
+            // starts as `None` and is populated in Phase B from
+            // `AgentBootContext.<field>` (loaded in Phase A from
+            // `prompts/<file>.md`). The L2 reload (`reload_prompts`)
+            // overwrites these via the `RwLock::write` guard.
+            search_prompt: Arc::new(std::sync::RwLock::new(None)),
+            compact_template: Arc::new(std::sync::RwLock::new(None)),
+            title_prompt: Arc::new(std::sync::RwLock::new(None)),
+            extraction_prompt: Arc::new(std::sync::RwLock::new(None)),
+            conflict_classification_prompt: Arc::new(std::sync::RwLock::new(None)),
+            generalization_prompt: Arc::new(std::sync::RwLock::new(None)),
+            abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
             rag_provider: None,
             memory_session: None,
             debug_observer: observer,
+            pending_debug_handles: None,
             approval_gate: None,
             shell_approval_threshold,
             shell_risk_rules: crate::security::shell_risk::ShellRiskRules::load(
@@ -316,10 +463,6 @@ impl AgentCore {
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
             agent_total_output_tokens: AtomicU64::new(0),
-            tool_compression_enabled_override: None,
-            abandon_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
             retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -346,9 +489,8 @@ impl AgentCore {
     /// - Agent startup (after `builtin_tools` is initialized with flags)
     /// - MCP connect/disconnect
     /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
-    /// - `RuntimeConfigUpdate.tool_compression_enabled` toggle (after
-    ///   [`Self::sync_platform_tools_to_registry`] mutates
-    ///   `builtin_tools`)
+    ///   (ADR-061 §10.2: `context_retrieve` is always registered, so
+    ///   there is no platform-tool hot-reload path anymore)
     pub(crate) fn rebuild_all_tools(&mut self) {
         let mut merged: Vec<Arc<dyn Tool>> = self
             .builtin_tools
@@ -360,90 +502,6 @@ impl AgentCore {
             merged.extend(mcp.clone());
         }
         self.all_tools = merged;
-    }
-
-    /// Add or remove the platform-protected tools (`context_retrieve`,
-    /// `context_abandon`, ADR-052) from `builtin_tools` according to
-    /// the new `tool_compression_enabled` value, then refresh the
-    /// dispatch list via [`Self::rebuild_all_tools`].
-    ///
-    /// Idempotent: calling twice with the same `enabled` value is a
-    /// no-op (second call finds no names to add/remove).
-    ///
-    /// Important — does NOT touch `ContextBuilder.tool_definitions`
-    /// directly. The LLM-visible tool list lives on `ContextBuilder`,
-    /// not on `AgentCore`. The caller (e.g. the `UpdateRuntimeConfig`
-    /// handler in `session_task.rs`) must additionally invoke
-    /// `rebuild_context_tool_definitions` so the LLM sees the new set
-    /// on the next `build_chat_request`. Keeping the two rebuilds
-    /// separate at this layer preserves the existing
-    /// `apply_builtin_tools_update` invariant ("one refresh site, not
-    /// two concurrent callers").
-    ///
-    /// Triggered by [`Self::apply_runtime_config`] when Gateway pushes
-    /// `RuntimeConfigUpdate.tool_compression_enabled`.
-    pub(crate) fn sync_platform_tools_to_registry(
-        &mut self,
-        enabled: bool,
-    ) -> bool {
-        use crate::tools::builtin::build_platform_protected_tools;
-        use crate::tools::registry::PLATFORM_PROTECTED_TOOLS;
-
-        let before: Vec<String> = self
-            .builtin_tools
-            .iter()
-            .filter(|e| PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name().as_str()))
-            .map(|e| e.tool.name())
-            .collect();
-
-        if enabled {
-            // Add the platform tools if any are missing.
-            let existing: std::collections::HashSet<String> = before
-                .iter()
-                .cloned()
-                .collect();
-            let to_add: Vec<Arc<dyn Tool>> = build_platform_protected_tools(
-                &self.config.work_dir,
-                self.retrieve_queue.clone(),
-                self.abandon_queue.clone(),
-            )
-            .into_iter()
-            .filter(|t| !existing.contains(&t.name()))
-            .collect();
-            if to_add.is_empty() {
-                return false;
-            }
-            tracing::info!(
-                adding = ?to_add.iter().map(|t| t.name()).collect::<Vec<_>>(),
-                "sync_platform_tools_to_registry: adding platform tools"
-            );
-            for tool in to_add {
-                // Force-enable: same invariant as the startup path
-                // (PLATFORM_PROTECTED_TOOLS are platform-managed, not
-                // user-toggleable). See
-                // BuiltinToolEntry::with_resolved_enabled for rationale.
-                let entry = BuiltinToolEntry::with_resolved_enabled(false, tool);
-                self.builtin_tools.push(entry);
-            }
-        } else {
-            // Remove every platform tool currently in the registry.
-            let before_len = self.builtin_tools.len();
-            self.builtin_tools
-                .retain(|e| !PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name().as_str()));
-            let removed = before_len - self.builtin_tools.len();
-            if removed == 0 {
-                return false;
-            }
-            tracing::info!(
-                removed,
-                "sync_platform_tools_to_registry: removing platform tools"
-            );
-        }
-
-        // Refresh the dispatch list so newly-enabled tools become
-        // callable and newly-removed tools stop being dispatched.
-        self.rebuild_all_tools();
-        true
     }
 
     /// Rewrite `builtin_tools` enabled flags from a desired
@@ -458,7 +516,8 @@ impl AgentCore {
     /// never diverge):
     /// - Platform-protected names ([`PLATFORM_PROTECTED_TOOLS`]) are
     ///   filtered out of the resolution - their enabled flag is
-    ///   platform-managed by [`Self::sync_platform_tools_to_registry`],
+    ///   platform-managed (registered unconditionally by
+    ///   [`crate::tools::builtin::all_builtin_tools`], ADR-061 §10.2),
     ///   never user-toggleable. Their registered slots keep the current
     ///   flag.
     /// - Names not currently registered are dropped (defensive against
@@ -737,30 +796,18 @@ impl AgentCore {
             );
             self.approval_timeout_secs = Some(timeout);
         }
-
-        if let Some(enabled) = overrides.tool_compression_enabled {
-            let old = self.tool_compression_enabled_override;
+        if let Some(threshold) = overrides.compression_ratio_threshold {
             tracing::info!(
-                old = ?old,
-                new = enabled,
-                "runtime config: tool_compression_enabled updated"
+                old = ?self.compression_ratio_threshold,
+                new = threshold,
+                "runtime config: compression_ratio_threshold updated"
             );
-            self.tool_compression_enabled_override = Some(enabled);
-
-            // Hot-reload: when the toggle actually flips, sync the
-            // platform tools into / out of `builtin_tools` and refresh
-            // the dispatch list. The LLM-visible tool_definitions are
-            // rebuilt by the caller (SessionTask handler) so that the
-            // AgentLoop and ContextBuilder stay locked-step — see the
-            // `apply_builtin_tools_update` comment for the same
-            // invariant. ADR-052 §3.5 was updated from "boot-only" to
-            // "hot-reload via RuntimeConfigUpdate" alongside this change.
-            if old != Some(enabled) {
-                self.sync_platform_tools_to_registry(enabled);
-                // Note: ContextBuilder.tool_definitions rebuild lives in
-                // the SessionTask handler — it owns the &mut to context_builder.
-            }
+            self.compression_ratio_threshold = Some(threshold);
         }
+
+        // ADR-061 §10.2: the `tool_compression_enabled` toggle and its
+        // platform-tools hot-reload are deleted; `context_retrieve` is
+        // always registered and `context_abandon` is never registered.
     }
 
     pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
@@ -815,10 +862,18 @@ impl AgentCore {
                 let existing: usize = ["Episodic", "Knowledge", "Procedural", "Autobiographical"]
                     .iter().map(|l| graph.nodes_by_label(l).len()).sum();
                 tracing::info!(path = %db_path.display(), existing_nodes = existing, "Grafeo memory store opened");
+                let quality = self.memory_quality_config();
+                if let Err(e) = store.apply_quality_config(&quality) {
+                    tracing::warn!(error = %e, "Failed to apply memory quality config to GrafeoStore, using defaults");
+                }
                 let store_arc = Arc::new(store);
                 self.bootstrap_autobiographical_from_manifest(&*store_arc);
                 if let Some(ref session) = self.memory_session {
                     session.set_provider(store_arc.clone());
+                    // Config consistency: the memory_recall tool reads the
+                    // SAME MemoryManagerConfig as auto-inject (ADR-062 M5),
+                    // so per-agent quality settings apply to both paths.
+                    session.set_memory_config(self.memory_manager_config());
                 }
                 self.memory_admin = Some(store_arc.clone());
                 self.memory_provider = Some(store_arc);
@@ -874,7 +929,9 @@ impl AgentCore {
                 id: None, category: AutobioCategory::Identity, key: key.to_string(),
                 value: value.clone(), confidence: 1.0, source_episode_id: None,
                 embedding: None, status: NodeStatus::Active,
-                created_at: now, updated_at: now, metadata: HashMap::new(),
+                created_at: now, updated_at: now,
+                // Bootstrapped from the agent manifest — not a user statement.
+                source: "manifest".to_string(), metadata: HashMap::new(),
             };
             if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node");
@@ -885,7 +942,9 @@ impl AgentCore {
                 id: None, category: AutobioCategory::Capability, key: cap_key.clone(),
                 value: cap_def.description.clone(), confidence: 1.0, source_episode_id: None,
                 embedding: None, status: NodeStatus::Active,
-                created_at: now, updated_at: now, metadata: HashMap::new(),
+                created_at: now, updated_at: now,
+                // Bootstrapped from the agent manifest — not a user statement.
+                source: "manifest".to_string(), metadata: HashMap::new(),
             };
             if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node");
@@ -894,8 +953,48 @@ impl AgentCore {
         tracing::info!(identity_count = identity_entries.len(), capability_count = manifest.capabilities.len(), "Bootstrapped Autobiographical nodes from manifest");
     }
 
+    /// Resolve the agent's `MemoryManagerConfig` (manifest overrides +
+    /// defaults).
+    ///
+    /// Shared by `init_memory_manager` (auto-inject path) and the
+    /// `memory_recall` tool (via `MemorySessionHandle`) so both retrieval
+    /// paths use identical quality settings (ADR-062 M5).
+    pub(crate) fn memory_manager_config(&self) -> MemoryManagerConfig {
+        // auto-inject defaults OFF: the LLM recalls memories explicitly via
+        // the `memory_recall` tool (same user-message query), so first-turn
+        // injection would duplicate already-present context. Per-agent
+        // opt-in via `[memory.quality].auto_inject_enabled = true`.
+        // The override is read straight from the manifest — it is a
+        // `MemoryManagerConfig` field, not part of `MemoryQualityConfig`.
+        let manifest_auto_inject = self
+            .manifest
+            .memory
+            .quality
+            .as_ref()
+            .and_then(|q| q.auto_inject_enabled);
+        MemoryManagerConfig {
+            quality: self.memory_quality_config(),
+            auto_inject_enabled: manifest_auto_inject.unwrap_or(false),
+            ..MemoryManagerConfig::default()
+        }
+    }
+
     pub fn init_memory_manager(&self) -> MemoryManager {
-        MemoryManager::new(MemoryManagerConfig::default())
+        MemoryManager::new(self.memory_manager_config())
+    }
+
+    /// Resolve the agent's memory quality config (ADR-062 D2).
+    ///
+    /// Source: the `.agent` manifest `[memory.quality]` section (package
+    /// author default). An absent section yields `MemoryQualityConfig::default()`
+    /// ("zero configuration = current behaviour").
+    pub(crate) fn memory_quality_config(&self) -> acowork_memory::quality::MemoryQualityConfig {
+        self.manifest
+            .memory
+            .quality
+            .clone()
+            .map(Into::into)
+            .unwrap_or_default()
     }
 
     pub fn start_consolidation_pipeline(&mut self) {
@@ -1041,7 +1140,42 @@ impl AgentCore {
         &mut self,
         ch: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>,
     ) {
-        self.debug_observer.set_pending_injection(ch);
+        // ADR-048: hold the bypass-injection channel at the AgentCore level.
+        // The observer slot's `set_pending_injection` is a NO-OP while the
+        // observer is `Production` (which is almost always the case here —
+        // `session_task.rs` calls this in `SessionTask::new` before any
+        // DevMode is active). Relying on the observer slot alone silently
+        // dropped the channel, so a mid-loop `EnableDebugMode` written into
+        // `session_handle.pending_debug_handles` was never visible to the
+        // running agent loop. The agent loop drains this channel at the
+        // start of each iteration via [`Self::take_pending_debug_handles`].
+        //
+        // We still forward to the observer slot as well: for a session that
+        // is ALREADY Dev, `DebugObserverImpl::check_pending_injection` can
+        // observe a late bypass write (rewind/patch injection), and the
+        // observer's own pending slot remains the mirror for the Dev case.
+        self.debug_observer.set_pending_injection(ch.clone());
+        self.pending_debug_handles = Some(ch);
+    }
+
+    /// Take any bypass-injected debug handles, clearing the slot.
+    ///
+    /// Called at the start of every agent-loop iteration. Returns the
+    /// handles written by SessionManager's `push_debug_mode_to_existing_sessions`
+    /// (the mid-loop `EnableDebugMode` path) if any, so the caller can
+    /// build a DevMode observer and inject it via [`Self::set_debug_mode`].
+    ///
+    /// Returns `None` when the lock is contended (the writer holds it); in
+    /// that case the caller should retry next iteration rather than block
+    /// the agent loop.
+    pub(crate) fn take_pending_debug_handles(
+        &self,
+    ) -> Option<crate::debug::DebugHandles> {
+        let ch = self.pending_debug_handles.as_ref()?;
+        match ch.try_lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        }
     }
 
     pub fn debug_observer(&self) -> &DebugObserverSlot { &self.debug_observer }
@@ -1144,15 +1278,37 @@ impl Clone for AgentCore {
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
+            compression_ratio_threshold: self.compression_ratio_threshold,
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
-            compaction_prompt: self.compaction_prompt.clone(),
+            // ADR-063 §3.7.5: these 9 fields share the inner `Arc` across
+            // clones (reference +1), so a write through one clone is
+            // visible to all clones. This is the foundation that makes
+            // `DebugService::reload_prompts` work without forcing every
+            // session to re-derive its `Arc<AgentCore>` from the canonical
+            // `AgentCore` in `SessionManager`.
+            compaction_prompt: Arc::clone(&self.compaction_prompt),
+            search_prompt: Arc::clone(&self.search_prompt),
+            compact_template: Arc::clone(&self.compact_template),
+            title_prompt: Arc::clone(&self.title_prompt),
+            extraction_prompt: Arc::clone(&self.extraction_prompt),
+            conflict_classification_prompt: Arc::clone(
+                &self.conflict_classification_prompt,
+            ),
+            generalization_prompt: Arc::clone(&self.generalization_prompt),
+            abstention_prompt: Arc::clone(&self.abstention_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
             rag_provider: self.rag_provider.clone(),
             memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),
+            // ADR-048: the pending-debug channel is intentionally NOT
+            // carried across clones — it is per-session state bound by
+            // `SessionTask::new` via `set_debug_pending_injection`. A
+            // template (or another session's clone) must not inherit a
+            // sibling's bypass channel.
+            pending_debug_handles: None,
             approval_gate: self.approval_gate.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
             shell_risk_rules: self.shell_risk_rules.clone(),
@@ -1173,8 +1329,6 @@ impl Clone for AgentCore {
             agent_total_output_tokens: AtomicU64::new(
                 self.agent_total_output_tokens.load(Ordering::Acquire),
             ),
-            tool_compression_enabled_override: self.tool_compression_enabled_override,
-            abandon_queue: self.abandon_queue.clone(),
             retrieve_queue: self.retrieve_queue.clone(),
         }
     }
@@ -1534,183 +1688,6 @@ mod tests {
         assert_eq!(budget, 100_000);
     }
 
-
-    // ── apply_runtime_config (ADR-052 tool_compression_enabled) ──────
-
-    #[test]
-    fn apply_runtime_config_persists_tool_compression_enabled() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        assert_eq!(core.tool_compression_enabled_override, None);
-
-        let overrides = RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        };
-        core.apply_runtime_config(&overrides);
-
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-    }
-
-    #[test]
-    fn apply_runtime_config_preserves_tool_compression_enabled_across_none_push() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-
-        // Partial push: only changes an unrelated field.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            max_iterations: Some(50),
-            ..Default::default()
-        });
-
-        // tool_compression_enabled is untouched.
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-    }
-
-
-    // ── sync_platform_tools_to_registry hot-reload (ADR-052 §3.5) ────
-    //
-    // The tests below pin the new contract: when `apply_runtime_config`
-    // observes a *change* in `tool_compression_enabled`, it must
-    // actually mutate `builtin_tools` and rebuild `all_tools`. The
-    // 2026-08-17 user-reported regression was that the override field
-    // was written but the registry stayed stale — these tests fail
-    // loudly if anyone reintroduces the orphan-write.
-
-    fn has_platform_tool(core: &AgentCore, name: &str) -> bool {
-        core.all_tools.iter().any(|t| t.name() == name)
-    }
-
-    fn builtin_has_platform_tool(core: &AgentCore, name: &str) -> bool {
-        core.builtin_tools.iter().any(|e| e.tool.name() == name)
-    }
-
-    /// Pre-populate builtin_tools with the platform tools (mimics an
-    /// agent that booted with `tool_compression_enabled = true`) so the
-    /// toggle-off path has something to remove.
-    fn seed_with_platform_tools(core: &mut AgentCore) {
-        use crate::tools::builtin::build_platform_protected_tools;
-        for tool in build_platform_protected_tools(
-            &core.config.work_dir,
-            core.retrieve_queue.clone(),
-            core.abandon_queue.clone(),
-        ) {
-            core.builtin_tools
-                .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
-        }
-        core.rebuild_all_tools();
-    }
-
-    #[test]
-    fn sync_platform_tools_to_registry_adds_when_enabled_and_missing() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        // Boot with compression OFF → registry has no platform tools.
-        assert!(!builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(!builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(!has_platform_tool(&core, "context_retrieve"));
-
-        let changed = core.sync_platform_tools_to_registry(true);
-        assert!(changed, "first toggle on must report change");
-
-        assert!(builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(has_platform_tool(&core, "context_retrieve"),
-            "dispatch list (all_tools) must include newly-added tool");
-        assert!(has_platform_tool(&core, "context_abandon"));
-
-        // Idempotent: second call with the same enabled value must
-        // return false (no-op).
-        let changed_again = core.sync_platform_tools_to_registry(true);
-        assert!(!changed_again, "second toggle on is a no-op");
-        // ...and the count stays the same.
-        assert_eq!(
-            core.builtin_tools
-                .iter()
-                .filter(|e| crate::tools::registry::PLATFORM_PROTECTED_TOOLS
-                    .contains(&e.tool.name().as_str()))
-                .count(),
-            2,
-            "platform tools must appear exactly once after idempotent toggle"
-        );
-    }
-
-    #[test]
-    fn sync_platform_tools_to_registry_removes_when_disabled_and_present() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_platform_tools(&mut core);
-        assert!(has_platform_tool(&core, "context_retrieve"));
-        assert!(has_platform_tool(&core, "context_abandon"));
-
-        let changed = core.sync_platform_tools_to_registry(false);
-        assert!(changed, "first toggle off must report change");
-
-        assert!(!builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(!builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(!has_platform_tool(&core, "context_retrieve"),
-            "dispatch list must drop newly-removed tool");
-        assert!(!has_platform_tool(&core, "context_abandon"));
-
-        // Idempotent.
-        let changed_again = core.sync_platform_tools_to_registry(false);
-        assert!(!changed_again, "second toggle off is a no-op");
-    }
-
-    /// End-to-end: drive `apply_runtime_config` the same way Gateway
-    /// does (via MQTT `RuntimeConfigUpdate`). The override field used
-    /// to be the only thing that changed; the new contract is that
-    /// builtin_tools + all_tools follow the toggle.
-    #[test]
-    fn apply_runtime_config_hot_reloads_tool_compression_end_to_end() {
-        use crate::tools::registry::PLATFORM_PROTECTED_TOOLS;
-
-        let mut core = make_core(Some(8192), None, None, 0);
-
-        // Push false → registry must lose the platform tools (start
-        // state was "no platform tools", so toggle off is a no-op for
-        // the Vec but the override field must still flip).
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-        assert!(
-            !core.builtin_tools.iter().any(|e| {
-                PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name().as_str())
-            }),
-            "toggle false → builtin_tools must have no platform tools"
-        );
-
-        // Push true → registry must gain the platform tools. This is
-        // the user-reported regression path that was broken.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(true),
-            ..Default::default()
-        });
-        assert_eq!(core.tool_compression_enabled_override, Some(true));
-        assert!(builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(has_platform_tool(&core, "context_retrieve"),
-            "LLM dispatch list must include context_retrieve after toggle true");
-        assert!(has_platform_tool(&core, "context_abandon"));
-
-        // Push true again (no-op for Vec), then false → must remove.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(true),
-            ..Default::default()
-        });
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-        assert!(!has_platform_tool(&core, "context_retrieve"),
-            "LLM dispatch list must drop context_retrieve after toggle false");
-        assert!(!has_platform_tool(&core, "context_abandon"));
-    }
-
-
     // ── apply_builtin_enabled_entries (ADR-052 §3.5 shared policy) ────
     //
     // The tests below pin the policy helper that BOTH the per-session
@@ -1724,7 +1701,8 @@ mod tests {
 
     /// Pre-populate `builtin_tools` with a small mixed set so the
     /// enabled-rewrite path has both platform and non-platform entries
-    /// to work with. Mirrors a real boot with compression enabled.
+    /// to work with. Mirrors a real boot where `context_retrieve` is
+    /// always registered (ADR-061 §10.2).
     fn seed_with_mixed_builtins(core: &mut AgentCore) {
         use crate::tools::builtin::build_platform_protected_tools;
         // Add a non-platform tool for the rewrite to land on.
@@ -1761,7 +1739,6 @@ mod tests {
         for tool in build_platform_protected_tools(
             &core.config.work_dir,
             core.retrieve_queue.clone(),
-            core.abandon_queue.clone(),
         ) {
             core.builtin_tools
                 .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
@@ -1800,13 +1777,14 @@ mod tests {
         // Platform tools are filtered OUT of the resolution map, so
         // their registered slots keep whatever enabled flag they had
         // before the call (here, force-enabled by `with_resolved_enabled`
-        // -> true).
+        // -> true). Only names actually registered are checked:
+        // `context_abandon` is no longer registered at all (ADR-061
+        // §10.2), so it is simply absent rather than disabled.
         for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let entry = core
-                .builtin_tools
-                .iter()
-                .find(|e| e.name() == *name)
-                .unwrap_or_else(|| panic!("{name} must still be registered"));
+            let Some(entry) = core.builtin_tools.iter().find(|e| e.name() == *name)
+            else {
+                continue;
+            };
             assert!(
                 entry.enabled,
                 "{name} must keep its prior enabled flag (platform tools are filter-out, not force-disable)"
@@ -2048,6 +2026,262 @@ mod tests {
         assert_eq!(
             session_core.rag_provider.as_ref().unwrap().name(),
             "dummy_rag"
+        );
+    }
+
+    /// Build a minimal per-session `DebugHandles` bundle, mirroring
+    /// `SessionManager::create_session` / `push_debug_mode_to_existing_sessions`.
+    async fn make_debug_handles(session_id: &str) -> crate::debug::DebugHandles {
+        let ctrl = Arc::new(tokio::sync::Mutex::new(
+            crate::debug::controller::DebugController::new(),
+        ));
+        let bus = crate::debug::events::DebugEventBus::new();
+        let (rw, rs, rc) = {
+            let guard = ctrl.lock().await;
+            (
+                guard.rewind_notify_handle(),
+                guard.resume_notify_handle(),
+                guard.control_notify_handle(),
+            )
+        };
+        crate::debug::DebugHandles {
+            debug_ctrl: ctrl,
+            debug_event_tx: bus.sender_template().for_session(session_id.to_string()),
+            rewind_notify: rw,
+            resume_notify: rs,
+            control_notify: rc,
+        }
+    }
+
+    /// Regression for the mid-loop `EnableDebugMode` bypass bug (ADR-048):
+    ///
+    /// `AgentCore::set_debug_pending_injection` must hold the bypass
+    /// channel at the AgentCore level EVEN when the observer slot is
+    /// `Production` (the observer's own `set_pending_injection` is a no-op
+    /// in that state). Before this fix, `session_task.rs` bound the channel
+    /// in `SessionTask::new` — which runs while the observer is Production
+    /// — so a debug panel opened mid-loop could never be picked up, and
+    /// iteration counters stayed frozen until the SessionTask message loop
+    /// processed the queued `EnableDebugMode`.
+    #[tokio::test]
+    async fn test_pending_debug_handles_held_at_core_level_and_clone_isolated() {
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        // Sanity: a fresh core has no pending channel.
+        assert!(core.take_pending_debug_handles().is_none());
+
+        // Simulate SessionTask::new binding the shared bypass channel while
+        // the observer is still Production.
+        let channel: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        core.set_debug_pending_injection(channel.clone());
+
+        // The channel must be retained at the AgentCore level (the fix).
+        assert!(core.pending_debug_handles.is_some());
+
+        // Simulate SessionManager::push_debug_mode_to_existing_sessions
+        // writing per-session handles into the shared channel while the
+        // agent loop is running.
+        {
+            let mut pending = channel.lock().await;
+            *pending = Some(make_debug_handles("sess-1").await);
+        }
+
+        // The agent loop drains it at the next iteration boundary.
+        let taken = core
+            .take_pending_debug_handles()
+            .expect("bypass-injected handles must be drainable");
+        assert_eq!(taken.debug_event_tx.session_id(), "sess-1");
+
+        // A second drain yields nothing (slot cleared).
+        assert!(core.take_pending_debug_handles().is_none());
+
+        // Clones do NOT carry the pending channel: it is per-session state,
+        // rebound by each SessionTask::new. A template clone must not
+        // inherit a sibling session's bypass channel.
+        let clone = core.clone();
+        assert!(clone.pending_debug_handles.is_none());
+        assert!(clone.take_pending_debug_handles().is_none());
+    }
+
+    // ── auto_inject manifest opt-in (per-agent switch) ─────────────
+
+    /// Build an AgentCore whose manifest carries the given TOML fragment
+    /// appended after the `[llm]` section (e.g. a `[memory.quality]`
+    /// block). An empty fragment leaves `[memory]` absent entirely.
+    fn make_core_with_memory_toml(extra_toml: &str) -> AgentCore {
+        let config = RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(&format!(
+            r#"
+            agent_id = "com.test.cw"
+            version = "1.0.0"
+            name = "Test CW"
+            description = "auto-inject opt-in test agent"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+
+            {extra_toml}
+            "#
+        ))
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+        AgentCore::new(config, manifest, provider, vec![])
+    }
+
+    #[test]
+    fn test_auto_inject_defaults_off_when_manifest_absent() {
+        // Zero-config = current behaviour: auto-inject stays OFF, the LLM
+        // recalls memories via the explicit `memory_recall` tool.
+        let core = make_core_with_memory_toml("");
+        assert!(
+            !core.init_memory_manager().config().auto_inject_enabled,
+            "auto_inject_enabled must default to false"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_manifest_opt_in_true() {
+        // Per-agent opt-in: `[memory.quality].auto_inject_enabled = true`.
+        let core = make_core_with_memory_toml(
+            "[memory.quality]\nauto_inject_enabled = true\n",
+        );
+        assert!(
+            core.init_memory_manager().config().auto_inject_enabled,
+            "manifest opt-in must enable auto-inject"
+        );
+    }
+
+    #[test]
+    fn test_auto_inject_manifest_opt_in_false() {
+        // Explicit opt-out is still honored.
+        let core = make_core_with_memory_toml(
+            "[memory.quality]\nauto_inject_enabled = false\n",
+        );
+        assert!(
+            !core.init_memory_manager().config().auto_inject_enabled,
+            "manifest opt-out must disable auto-inject"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ADR-063 §3.4 L2 reload — AgentCore 9 prompt fields are
+    // `Arc<RwLock<Option<String>>>` so that `DebugService::reload_prompts`
+    // can mutate the canonical Arc in `SessionManager` and have every
+    // session that holds a `Clone` see the new value (no session restart).
+    //
+    // These three tests lock in the three preconditions the L2 reload
+    // path relies on:
+    //
+    //   1. Fresh AgentCore: all 9 accessors return `None` (R3 default —
+    //      nothing in memory until Phase B injects or `reload_prompts`
+    //      re-reads from disk).
+    //   2. Clone shares Arc (R3 §Clone for AgentCore): writing through
+    //      one handle is visible from any other clone. Sessions that
+    //      captured `AgentCore` before DevMode reload still see the new
+    //      prompt.
+    //   3. Accessor reflection: the `pub fn` accessor reads through the
+    //      RwLock on every call (no caching), so reload is observable
+    //      without a session re-derivation step.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_prompt_accessors_default_to_none() {
+        // ADR-063 §3.4 — fresh AgentCore has no override loaded. Phase B
+        // (session_init) or `reload_prompts` is the only path that
+        // populates these. A `None` here means "fall back to the
+        // built-in constant" at the LLM call site.
+        let core = make_core(Some(8192), None, None, 0);
+
+        assert!(core.compaction_prompt().is_none(), "compaction_prompt must default to None");
+        assert!(core.search_prompt().is_none(), "search_prompt must default to None");
+        assert!(core.title_prompt().is_none(), "title_prompt must default to None");
+        assert!(core.extraction_prompt().is_none(), "extraction_prompt must default to None");
+        assert!(
+            core.conflict_classification_prompt().is_none(),
+            "conflict_classification_prompt must default to None"
+        );
+        assert!(core.generalization_prompt().is_none(), "generalization_prompt must default to None");
+        assert!(core.abstention_prompt().is_none(), "abstention_prompt must default to None");
+        assert!(core.compact_template().is_none(), "compact_template must default to None");
+    }
+
+    #[test]
+    fn test_agent_core_clone_shares_arc_for_prompts() {
+        // ADR-063 §3.4 — `Clone for AgentCore` clones the inner
+        // `Arc<RwLock<Option<String>>>` (reference +1), so a write
+        // through any clone is visible from every other clone. This is
+        // the precondition that lets `DebugService::reload_prompts`
+        // (which holds the canonical AgentCore in SessionManager) push
+        // a new prompt into running sessions that already cloned the
+        // AgentCore at session start.
+        //
+        // We write through the `pub(crate)` field directly — same
+        // pattern `DebugService::reload_prompts` uses. The clone test
+        // is whether the OTHER handle observes the change.
+        let core = make_core(Some(8192), None, None, 0);
+        let session_clone = core.clone();
+
+        // Write through `core` — simulates `reload_prompts` doing
+        // `*core.compaction_prompt.write().unwrap() = Some(...)`.
+        *core.compaction_prompt.write().unwrap() = Some("override-from-canonical".to_string());
+
+        // Read through the cloned handle that a running session would
+        // hold. Must reflect the write.
+        assert_eq!(
+            session_clone.compaction_prompt().as_deref(),
+            Some("override-from-canonical"),
+            "Clone for AgentCore must share Arc<RwLock>; reload through \
+             canonical must be visible to session-held clones"
+        );
+
+        // Symmetry: write through the session clone, read from canonical.
+        *session_clone.search_prompt.write().unwrap() = Some("override-from-session".to_string());
+        assert_eq!(
+            core.search_prompt().as_deref(),
+            Some("override-from-session"),
+            "Write direction must be symmetric across all Arc clones"
+        );
+    }
+
+    #[test]
+    fn test_prompt_accessor_reflects_write_through_lock() {
+        // ADR-063 §3.4 — the public accessor (e.g. `search_prompt`)
+        // MUST read the RwLock on every call (no caching to a local
+        // String), otherwise L2 reload would be silently broken for any
+        // session that derived its `AgentCore` clone before the reload.
+        // Pin the behavior with an explicit sequence: read → write → read.
+        let core = make_core(Some(8192), None, None, 0);
+
+        // Initial read: None.
+        assert!(core.search_prompt().is_none());
+
+        // First reload: Some("first").
+        *core.search_prompt.write().unwrap() = Some("first".to_string());
+        assert_eq!(core.search_prompt().as_deref(), Some("first"));
+
+        // Second reload: Some("second"). The accessor must NOT have
+        // memoized "first" — it must re-read through the lock.
+        *core.search_prompt.write().unwrap() = Some("second".to_string());
+        assert_eq!(
+            core.search_prompt().as_deref(),
+            Some("second"),
+            "accessor must re-read RwLock every call; reload must be \
+             observable without re-deriving AgentCore"
+        );
+
+        // Reload to None: simulates the operator deleting the
+        // `prompts/<file>.md` file and clicking Reload. The accessor
+        // must now return None again so the call site falls back to
+        // the built-in constant.
+        *core.search_prompt.write().unwrap() = None;
+        assert!(
+            core.search_prompt().is_none(),
+            "clearing the RwLock must propagate to the accessor so the \
+             built-in fallback constant takes effect again"
         );
     }
 }

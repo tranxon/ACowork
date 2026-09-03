@@ -93,7 +93,7 @@ pub async fn upload(
         .map_err(|e| PmError::Multipart(format!("read field: {e}")))?
     {
         if field.name() == Some("file") {
-            filename = field.file_name().map(|s| sanitize_filename(s));
+            filename = field.file_name().map(sanitize_filename);
             content_type = field.content_type().map(|s| s.to_string());
             bytes = Some(
                 field
@@ -256,6 +256,9 @@ fn validate_mime(content_type: &str) -> Result<()> {
     Ok(())
 }
 
+/// 缩略图生成结果：`(jpeg 字节, 宽, 高)`；`image-thumb` 关闭时返回 `(None, None, None)`。
+type ThumbResult = (Option<Vec<u8>>, Option<u32>, Option<u32>);
+
 /// 缩略图生成（feature-gated）。
 ///
 /// `image-thumb` feature 关闭时返回 `(None, None, None)` —— 前端预览直接拉原图。
@@ -263,7 +266,7 @@ fn validate_mime(content_type: &str) -> Result<()> {
 fn generate_thumb(
     bytes: &[u8],
     max_edge: u32,
-) -> Result<(Option<Vec<u8>>, Option<u32>, Option<u32>)> {
+) -> Result<ThumbResult> {
     use image::GenericImageView;
 
     let img = image::load_from_memory(bytes).map_err(|e| PmError::Image(e.to_string()))?;
@@ -284,7 +287,7 @@ fn generate_thumb(
 fn generate_thumb(
     _bytes: &[u8],
     _max_edge: u32,
-) -> Result<(Option<Vec<u8>>, Option<u32>, Option<u32>)> {
+) -> Result<ThumbResult> {
     Ok((None, None, None))
 }
 

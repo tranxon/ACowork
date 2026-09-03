@@ -47,6 +47,14 @@ pub(crate) struct AgentBootContext {
     pub search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
+    /// Receiver for `acowork/global/embedding_models` updates (ADR-033).
+    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
+    /// `SessionManager::handle_embedding_config_update` so sessions rebuild
+    /// their embedding provider when the embed sidecar becomes ready or
+    /// the active model switches.
+    pub embedding_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
+    >,
     /// Receiver for node LSP relay state changes (ADR-055 §6.7,
     /// Phase 4). Consumed by `gateway_loop::mqtt_only_loop` and
     /// forwarded to `SessionManager::handle_lsp_relay_update`.
@@ -100,6 +108,59 @@ pub(crate) struct AgentBootContext {
     /// identically; each `AgentCore` constructor injects it into
     /// [`crate::agent::AgentCore::compaction_prompt`].
     pub compaction_prompt: Option<String>,
+
+    // ── ADR-063: 7 additional package-level LLM prompt overrides ──
+    //
+    // Each field corresponds 1-to-1 to an entry in
+    // `crate::package::prompt_builder::OVERRIDABLE_PROMPTS`. Phase A loads
+    // all 8 (this one + the 7 below); Phase B injects them into
+    // `AgentCore` as `Arc<RwLock<Option<String>>>` so the L1+L2 reload path
+    // (Debug panel §3.7.5) can write them in place without recreating the
+    // shared `Arc<AgentCore>` cloned into every session.
+    //
+    // The 7 entries below are loaded *only* if their file exists in
+    // `prompts/` — `None` is the normal "no override" state and the LLM
+    // call site resolves to the built-in constant via
+    // `core.<field>.read().unwrap().as_deref().unwrap_or(const)`.
+
+    /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
+    /// (package file: `prompts/search.md`).
+    pub search_prompt: Option<String>,
+
+    /// Override for `crate::prompt::COMPACT_PROMPT`
+    /// (package file: `prompts/compact-template.md`).
+    /// Package authors MUST preserve the `{messages_text}` placeholder
+    /// in their override — the runtime substitution at the call site
+    /// panics with a clear error if the placeholder is missing.
+    pub compact_template: Option<String>,
+
+    /// Override for `crate::prompt::TITLE_PROMPT`
+    /// (package file: `prompts/title.md`). Authors may customise
+    /// `{language}` and `{user_message}` placeholders per their style.
+    pub title_prompt: Option<String>,
+
+    /// Override for `acowork-grafeo::consolidation::triple_extraction::EXTRACTION_SYSTEM_PROMPT`
+    /// (package file: `prompts/extraction.md`). Note: grafeo holds a
+    /// process-level singleton; the L2 reload (§3.7.4) for grafeo is NOT
+    /// in this ADR's scope — this field is loaded but the reload report
+    /// only covers runtime prompt.rs entries until ADR-051 trait
+    /// refactor lands.
+    pub extraction_prompt: Option<String>,
+
+    /// Override for
+    /// `acowork-grafeo::consolidation::conflict_llm::CONFLICT_CLASSIFICATION_PROMPT`
+    /// (package file: `prompts/conflict-classification.md`).
+    pub conflict_classification_prompt: Option<String>,
+
+    /// Override for
+    /// `acowork-grafeo::consolidation::generalization::GENERALIZATION_PROMPT`
+    /// (package file: `prompts/generalization.md`).
+    pub generalization_prompt: Option<String>,
+
+    /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
+    /// (package file: `prompts/abstention.md`). Note: memory holds a
+    /// process-level singleton; L2 reload is out of scope here too.
+    pub abstention_prompt: Option<String>,
 
     // Shared handles
     pub memory_session: Arc<crate::memory::MemorySessionHandle>,
@@ -266,13 +327,9 @@ pub(crate) struct AgentBootContext {
     /// [`Self::search_key_vault`].
     pub search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList,
 
-    /// ADR-052: Shared abandon queue for context_abandon tool.
+    /// ADR-061 §10.2: Shared retrieve queue for `context_retrieve` tool.
     /// Created in Phase A, passed to the tool and injected into AgentCore
     /// in Phase B. The AgentLoop drains this queue each iteration.
-    pub abandon_queue: crate::agent::context_compression::AbandonQueue,
-
-    /// ADR-052: Shared retrieve queue for context_retrieve tool.
-    /// Same lifecycle as [`Self::abandon_queue`].
     pub retrieve_queue: crate::agent::context_compression::RetrieveQueue,
 }
 
@@ -320,5 +377,8 @@ pub(crate) fn build_session_manager_config(
         session_snapshots: Some(ctx.session_snapshots.clone()),
         latest_session: Some(ctx.latest_session.clone()),
         session_configs: Some(ctx.session_configs.clone()),
+        // ADR-063: forward the package directory so `enable_debug_mode`
+        // can hand it to `RuntimeDebugService::new_with_agent` (L2 reload).
+        package_dir: ctx.loaded.package_dir.clone(),
     }
 }

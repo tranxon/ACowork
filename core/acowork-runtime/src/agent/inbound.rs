@@ -75,9 +75,7 @@ pub enum UserOp {
     /// broadcast - the LLM sees the new tool_definitions on the next
     /// `build_chat_request`), and (4) mid-execution AgentLoops via the
     /// inbound fast channel (`AgentLoop::apply_runtime_config` ->
-    /// `core.apply_runtime_config` ->
-    /// `sync_platform_tools_to_registry` for the
-    /// `tool_compression_enabled` flip). ADR-052 §3.5.
+    /// `core.apply_runtime_config`). ADR-052 §3.5.
     UpdateRuntimeConfig(RuntimeConfigOverrides),
 }
 
@@ -213,6 +211,20 @@ pub enum InboundMessage {
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },
+    /// ADR-063 §3.7.6: agent-level main-dialog system prompt update.
+    ///
+    /// Produced by the L2 reload endpoint (`POST /agents/{id}/prompts/reload`
+    /// in `http::prompts`) after it rebuilds the main dialog system prompt
+    /// from `prompts/*.md` (including the required `system.md`). Routed
+    /// system-level (`session_id ""`) through
+    /// `SessionManager::apply_system_prompt`, which updates the shared
+    /// template (so sessions opened LATER inherit the new value) and
+    /// broadcasts `SessionMessage::UpdateSystemPrompt` to every active
+    /// session's `ContextBuilder` — so editing `system.md` takes effect
+    /// immediately, without an agent restart.
+    UpdateSystemPrompt {
+        system_prompt: String,
+    },
 }
 
 impl InboundMessage {
@@ -308,6 +320,17 @@ impl InboundMessage {
             InboundMessage::WorkspaceSwitchAction { .. } => {}
             InboundMessage::CompactContextAction => {}
             InboundMessage::UpdateBuiltinTools { .. } => {}
+            InboundMessage::UpdateSystemPrompt { system_prompt } => {
+                if system_prompt.len() > MAX_INBOUND_PAYLOAD_SIZE {
+                    tracing::warn!(
+                        original_len = system_prompt.len(),
+                        max = MAX_INBOUND_PAYLOAD_SIZE,
+                        "Truncating oversized inbound UpdateSystemPrompt"
+                    );
+                    *system_prompt = truncate_to_bytes(system_prompt, MAX_INBOUND_PAYLOAD_SIZE);
+                    truncated = true;
+                }
+            }
         }
         (self, truncated)
     }

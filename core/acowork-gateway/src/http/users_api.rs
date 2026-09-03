@@ -124,7 +124,7 @@ async fn get_data_dir(state: &AppState) -> std::path::PathBuf {
 /// `GET /api/users` — list all user profiles
 pub async fn list_users(
     State(state): State<AppState>,
-) -> Result<Json<UserListResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<UserListResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let list = gw.resource_cache.user_profile_list.clone();
     Ok(Json(UserListResponse {
@@ -140,7 +140,7 @@ pub async fn list_users(
 pub async fn create_user(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
-) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
     // ADR-059 §7.3: reject stale writers before touching the profile list.
     crate::http::routes::check_expected_version(&state, req.expected_version).await?;
 
@@ -230,7 +230,7 @@ pub async fn update_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     Json(req): Json<UpdateUserRequest>,
-) -> Result<Json<UserResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<UserResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await;
 
     let updated_profile = {
@@ -315,7 +315,7 @@ pub async fn update_user(
 pub async fn activate_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-) -> Result<Json<ActivateResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ActivateResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await;
 
     // Update state: deactivate all, activate target
@@ -441,7 +441,7 @@ fn next_avatar_name(data_dir: &std::path::Path, ext: &str) -> String {
 /// `GET /api/user/avatar-config` — get active user's avatar config.
 pub async fn get_user_avatar_config(
     State(state): State<AppState>,
-) -> Result<Json<UserAvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<UserAvatarConfigResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let active = gw
         .resource_cache
@@ -466,7 +466,7 @@ pub async fn get_user_avatar_config(
 pub async fn update_user_avatar_config(
     State(state): State<AppState>,
     Json(req): Json<UpdateUserAvatarConfigRequest>,
-) -> Result<Json<UserAvatarConfigResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<UserAvatarConfigResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await;
 
     let is_active = {
@@ -509,7 +509,7 @@ pub async fn update_user_avatar_config(
 /// `GET /api/user/avatar-assets` — list avatar files in `{data_dir}/assets/`.
 pub async fn list_user_avatar_assets(
     State(state): State<AppState>,
-) -> Result<Json<UserAvatarAssetsResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<UserAvatarAssetsResponse>, ApiError> {
     let data_dir = get_data_dir(&state).await;
     let assets_dir = data_dir.join("assets");
     let mut entries = Vec::new();
@@ -534,7 +534,7 @@ pub async fn list_user_avatar_assets(
 pub async fn get_user_avatar_file(
     State(state): State<AppState>,
     Query(query): Query<UserAvatarFileQuery>,
-) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+) -> Result<Response<Body>, ApiError> {
     let data_dir = get_data_dir(&state).await;
 
     // Path traversal guard: only allow "assets/..." paths
@@ -586,7 +586,7 @@ pub async fn get_user_avatar_file(
 pub async fn upload_user_avatar_file(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Json<UserAvatarAssetEntry>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<UserAvatarAssetEntry>, ApiError> {
     let data_dir = get_data_dir(&state).await;
     let assets_dir = data_dir.join("assets");
     std::fs::create_dir_all(&assets_dir).map_err(|e| {
@@ -646,7 +646,7 @@ pub async fn upload_user_avatar_file(
 pub async fn delete_user_avatar_file(
     State(state): State<AppState>,
     Query(query): Query<UserAvatarFileQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let data_dir = get_data_dir(&state).await;
 
     // Path traversal guard

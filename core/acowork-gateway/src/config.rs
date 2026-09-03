@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use crate::cli::Cli;
 use crate::error::GatewayError;
 use acowork_core::{Timeouts, defaults};
-use acowork_pm::PmConfig;
 use serde::{Deserialize, Serialize};
 
 /// Compute the single application root directory for the gateway.
@@ -136,12 +135,66 @@ pub struct GatewayConfig {
     /// (default 19878). See `node_proxy_port`.
     #[serde(default)]
     pub node_lsp_relay_port: Option<u16>,
-    /// PM 项目管理服务配置（ADR-061）。
+    /// PM 项目管理服务配置（ADR-064）。
     ///
-    /// PM 服务由 Gateway 监督并内嵌，数据默认放在 `{data_dir}/acowork-pm`
-    /// （见 [`Self::prepare_pm_data_dir`]）。留空则使用 [`PmConfig::default`]。
+    /// PM 作为**独立进程**运行（`acowork-pm` 二进制），由 Gateway supervisor
+    /// 管理生命周期，Gateway 反向代理 `/api/pm/*` → `127.0.0.1:{pm.port}/*`。
+    /// 本段只保留 Gateway 需要的字段（是否启用 / 端口 / MCP 注入）；PM 自身的
+    /// 调优参数（max_task_depth 等）由 PM 进程独立解析（env / TOML / default）。
     #[serde(default)]
     pub pm: PmConfig,
+}
+
+/// PM 服务配置（Gateway 侧，ADR-064）。
+///
+/// 仅包含 Gateway 管理 PM 独立进程所需的字段。PM 进程自身的完整配置
+/// （数据目录、任务深度、附件限额等）由 `acowork-pm` 独立解析，不再嵌入
+/// Gateway 配置树。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PmConfig {
+    /// 是否启用 PM 服务（spawn 独立进程）。
+    ///
+    /// 默认 `true`。`false` 时 Gateway 不 spawn PM，`/api/pm/*` 返回 503。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// PM 独立进程监听端口。
+    ///
+    /// 默认 `18082`。端口冲突时 PM 自动递增（最多 +20），实际端口经
+    /// `--port-file` 上报，Gateway supervisor 读取后写入 `pm_process`。
+    #[serde(default = "default_pm_port")]
+    pub port: u16,
+
+    /// 是否自动把 pm MCP HTTP 端点注入每个 Agent 的 MCP catalog（设计 §6.1 / T3-4）。
+    ///
+    /// 默认 `true`：Gateway 在 `acowork/global/mcps` 资源下发中附带一个
+    /// `name = "pm"`、transport = http 的 MCP server，Agent 启动后自动获得
+    /// `pm_*` 工具。关闭后 Agent 需在 Tools 面板手动添加（通常无需关闭）。
+    #[serde(default = "default_true")]
+    pub auto_inject_mcp: bool,
+
+    /// pm MCP HTTP 端点的公开路径（经 Gateway 反代）。默认 `/api/pm/mcp`（设计 §21）。
+    #[serde(default = "default_pm_mcp_http_path")]
+    pub mcp_http_path: String,
+}
+
+fn default_pm_port() -> u16 {
+    18082
+}
+
+fn default_pm_mcp_http_path() -> String {
+    "/api/pm/mcp".to_string()
+}
+
+impl Default for PmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            port: default_pm_port(),
+            auto_inject_mcp: default_true(),
+            mcp_http_path: default_pm_mcp_http_path(),
+        }
+    }
 }
 
 /// MQTT broker configuration (ADR-033).
@@ -419,7 +472,7 @@ impl GatewayConfig {
         };
 
         // Merge: CLI > env > file > defaults
-        let mut config = Self {
+        let config = Self {
             config_source_path: config_path,
             vault_dir: cli
                 .vault_dir
@@ -524,21 +577,8 @@ impl GatewayConfig {
                 .unwrap_or_default(),
         };
 
-        config.prepare_pm_data_dir();
         config.validate()?;
         Ok(config)
-    }
-
-    /// ADR-061: PM 数据目录默认落在 Gateway 数据目录下（`{data_dir}/acowork-pm`），
-    /// 与设计文档 §2.2 Q8 一致（`data_dir = "<root>/data/acowork-pm"`）。
-    ///
-    /// 仅当用户未在 `[pm].data_dir` 显式配置时覆写；显式配置则保留用户值。
-    /// 幂等：重复调用不会覆盖已解析的路径。
-    fn prepare_pm_data_dir(&mut self) {
-        let default_pm = PmConfig::default();
-        if self.pm.data_dir == default_pm.data_dir {
-            self.pm.data_dir = std::path::PathBuf::from(&self.data_dir).join("acowork-pm");
-        }
     }
 
     /// Load config from a TOML file
@@ -837,11 +877,12 @@ mod tests {
         }
     }
 
-    // ── ADR-061: GatewayConfig.pm wiring ─────────────────────────────
+    // ── ADR-064: GatewayConfig.pm wiring ─────────────────────────────
     //
-    // 覆盖 from_cli 解析 TOML `[pm]` 段 + prepare_pm_data_dir 行为。
-    // 这是 Gateway 启动时把 PM 数据目录从用户配置(或默认值)路由到
-    // `{gateway.data_dir}/acowork-pm` 的关键转换路径。
+    // 覆盖 from_cli 解析 TOML `[pm]` 段。PM 作为独立进程，Gateway 侧
+    // `[pm]` 只保留 enabled / port / auto_inject_mcp / mcp_http_path；
+    // PM 自身调优参数（max_task_depth 等）由 acowork-pm 独立解析，不再
+    // 嵌入 Gateway 配置树（`prepare_pm_data_dir` 已删除）。
 
     /// 临时写一份 TOML 配置文件,返回路径(测试结束由 caller 删除)。
     fn write_toml_config(label: &str, body: &str) -> PathBuf {
@@ -855,8 +896,7 @@ mod tests {
         path
     }
 
-    /// `[pm]` 段被显式配置时,TOML 反序列化应正确读取所有字段
-    /// (ADR-061:`pm: PmConfig` 嵌在 GatewayConfig 顶层)。
+    /// `[pm]` 段被显式配置时,TOML 反序列化应正确读取所有字段 (ADR-064)。
     #[test]
     fn test_from_cli_reads_explicit_pm_section() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -872,39 +912,27 @@ packages_dir = "/tmp/gw-explicit-test-packages"
 data_dir = "/tmp/gw-explicit-test-data"
 
 [pm]
-data_dir = "/tmp/custom-pm-store"
-max_task_depth = 7
-max_attachment_size = 20971520
-trash_retention_days = 14
-index_rebuild_on_start = false
-generate_thumbnails = false
-thumbnail_max_edge = 512
+enabled = false
+port = 19082
+auto_inject_mcp = false
+mcp_http_path = "/custom/pm/mcp"
 "#;
         let path = write_toml_config("explicit", toml);
         let cli = Cli::parse_from(["acowork-gateway", "--config-path", path.to_str().unwrap()]);
         let config = GatewayConfig::from_cli(&cli).expect("from_cli");
 
-        assert_eq!(
-            config.pm.data_dir,
-            PathBuf::from("/tmp/custom-pm-store"),
-            "explicit [pm].data_dir must be respected (not overwritten by prepare_pm_data_dir)"
-        );
-        assert_eq!(config.pm.max_task_depth, 7);
-        assert_eq!(config.pm.max_attachment_size, 20_971_520);
-        assert_eq!(config.pm.trash_retention_days, 14);
-        assert!(!config.pm.index_rebuild_on_start);
-        assert!(!config.pm.generate_thumbnails);
-        assert_eq!(config.pm.thumbnail_max_edge, 512);
+        assert!(!config.pm.enabled);
+        assert_eq!(config.pm.port, 19082);
+        assert!(!config.pm.auto_inject_mcp);
+        assert_eq!(config.pm.mcp_http_path, "/custom/pm/mcp");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&tmp_home);
     }
 
-    /// `[pm]` 段被省略时,PmConfig 各字段走 `#[serde(default)]`,
-    /// 然后 `prepare_pm_data_dir` 把 data_dir 覆写为
-    /// `{gateway.data_dir}/acowork-pm`(用户没显式配所以会被覆写)。
+    /// `[pm]` 段被省略时,各字段走 `#[serde(default)]` (ADR-064)。
     #[test]
-    fn test_from_cli_omitted_pm_section_uses_defaults_and_subdir() {
+    fn test_from_cli_omitted_pm_section_uses_defaults() {
         let _lock = ENV_LOCK.lock().unwrap();
         let tmp_home = std::env::temp_dir().join("acowork-test-pm-config-omitted-home");
         let _ = std::fs::remove_dir_all(&tmp_home);
@@ -920,18 +948,10 @@ data_dir = "/tmp/gw-omitted-test-data"
         let cli = Cli::parse_from(["acowork-gateway", "--config-path", path.to_str().unwrap()]);
         let config = GatewayConfig::from_cli(&cli).expect("from_cli");
 
-        // PmConfig::default() 的非 data_dir 字段应保留
-        assert_eq!(config.pm.max_task_depth, 5);
-        assert_eq!(config.pm.max_attachment_size, 10 * 1024 * 1024);
-        assert_eq!(config.pm.max_attachments_per_task, 20);
-        assert_eq!(config.pm.trash_retention_days, 30);
-
-        // data_dir 应被 prepare_pm_data_dir 覆写为子目录
-        assert_eq!(
-            config.pm.data_dir,
-            PathBuf::from("/tmp/gw-omitted-test-data/acowork-pm"),
-            "omitted [pm].data_dir should be rewritten to {{gateway.data_dir}}/acowork-pm"
-        );
+        assert!(config.pm.enabled);
+        assert_eq!(config.pm.port, 18082);
+        assert!(config.pm.auto_inject_mcp);
+        assert_eq!(config.pm.mcp_http_path, "/api/pm/mcp");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&tmp_home);
@@ -952,89 +972,19 @@ packages_dir = "/tmp/gw-partial-test-packages"
 data_dir = "/tmp/gw-partial-test-data"
 
 [pm]
-max_task_depth = 3
+port = 20082
 "#;
         let path = write_toml_config("partial", toml);
         let cli = Cli::parse_from(["acowork-gateway", "--config-path", path.to_str().unwrap()]);
         let config = GatewayConfig::from_cli(&cli).expect("from_cli");
 
-        // 显式覆写
-        assert_eq!(config.pm.max_task_depth, 3);
-        // 其他字段走 PmConfig::default
-        assert_eq!(config.pm.max_attachment_size, 10 * 1024 * 1024);
-        assert_eq!(config.pm.trash_retention_days, 30);
-        // data_dir 走 default → 被 prepare_pm_data_dir 覆写
-        // (具体子目录取决于 default_config_path 的位置,这里只验证非空且与 default 不同)
-        assert!(!config.pm.data_dir.as_os_str().is_empty());
+        assert_eq!(config.pm.port, 20082);
+        // 其他字段走默认
+        assert!(config.pm.enabled);
+        assert!(config.pm.auto_inject_mcp);
+        assert_eq!(config.pm.mcp_http_path, "/api/pm/mcp");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&tmp_home);
-    }
-
-    /// `prepare_pm_data_dir` 在 pm.data_dir 等于 PmConfig::default().data_dir 时,
-    /// 把它改为 `{gateway.data_dir}/acowork-pm`(直连 unit test,不走 from_cli)。
-    #[test]
-    fn test_prepare_pm_data_dir_overrides_default() {
-        let mut cfg = GatewayConfig::default();
-        // 强制把 gateway.data_dir 设到临时目录,排除跨平台默认路径影响
-        let gw_data = format!("/tmp/acowork-test-prepare-pm-default-{}", std::process::id());
-        cfg.data_dir = gw_data.clone();
-        // pm.data_dir 显式等于 PmConfig::default().data_dir → 应被覆写
-        cfg.pm = acowork_pm::PmConfig::default();
-
-        cfg.prepare_pm_data_dir();
-
-        assert_eq!(
-            cfg.pm.data_dir,
-            PathBuf::from(format!("{gw_data}/acowork-pm")),
-            "default pm.data_dir must be rewritten to {{gateway.data_dir}}/acowork-pm"
-        );
-    }
-
-    /// `prepare_pm_data_dir` 在 pm.data_dir 已是用户值时,必须**保留**原值
-    /// (这是 from_cli 后用户配置不被覆盖的契约)。
-    #[test]
-    fn test_prepare_pm_data_dir_preserves_explicit() {
-        let mut cfg = GatewayConfig::default();
-        let gw_data = format!("/tmp/acowork-test-prepare-pm-explicit-{}", std::process::id());
-        cfg.data_dir = gw_data.clone();
-
-        let user_pm_dir = format!("/tmp/user-custom-pm-store-{}", std::process::id());
-        let mut pm = acowork_pm::PmConfig::default();
-        pm.data_dir = PathBuf::from(&user_pm_dir);
-        cfg.pm = pm;
-
-        cfg.prepare_pm_data_dir();
-
-        assert_eq!(
-            cfg.pm.data_dir,
-            PathBuf::from(&user_pm_dir),
-            "explicit pm.data_dir must NOT be overwritten"
-        );
-    }
-
-    /// `prepare_pm_data_dir` 幂等:连续调用两次结果一致,不会被叠加成
-    /// `/data/acowork-pm/acowork-pm` 这种双层嵌套。
-    #[test]
-    fn test_prepare_pm_data_dir_is_idempotent() {
-        let mut cfg = GatewayConfig::default();
-        let gw_data = format!("/tmp/acowork-test-prepare-pm-idem-{}", std::process::id());
-        cfg.data_dir = gw_data.clone();
-        cfg.pm = acowork_pm::PmConfig::default();
-
-        cfg.prepare_pm_data_dir();
-        let once = cfg.pm.data_dir.clone();
-        cfg.prepare_pm_data_dir();
-        let twice = cfg.pm.data_dir.clone();
-
-        assert_eq!(
-            once, twice,
-            "prepare_pm_data_dir must be idempotent (no double nesting)"
-        );
-        assert_eq!(
-            once,
-            PathBuf::from(format!("{gw_data}/acowork-pm")),
-            "stable point should be {{gateway.data_dir}}/acowork-pm"
-        );
     }
 }

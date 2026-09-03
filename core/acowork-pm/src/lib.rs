@@ -35,9 +35,12 @@
 //!
 //! | 调用方 | 协议 | 入口 |
 //! |--------|------|------|
-//! | Gateway HTTP API | REST over axum | `acowork-gateway::http::pm_api` |
+//! | Gateway HTTP API | REST over axum（反代） | `acowork-gateway::http::pm_proxy` |
 //! | Agent (本地/远程) | MCP HTTP | `acowork-pm::mcp::tools` |
 //! | Desktop UI | REST + multipart upload | 同 Gateway 路径 |
+//!
+//! ADR-064：PM 作为**独立进程**运行（`acowork-pm` 二进制），由 Gateway
+//! supervisor 管理生命周期，Gateway 反向代理 `/api/pm/*` → `127.0.0.1:{pm_port}/*`。
 //!
 //! ## 设计引用
 //!
@@ -49,6 +52,7 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod health;
 pub mod mcp;
 pub mod server;
 pub mod store;
@@ -77,13 +81,14 @@ pub use store::tree::{PmStore, TreePmStore};
 // API
 pub use api::routes::pm_router;
 
-// Service handle (ADR-061): constructed by Gateway during `Gateway::run`,
-// shared via `Arc<PmService>` for HTTP route mounting + future graceful
-// shutdown. The Gateway owns the instance; the PM service itself stays
-// a stateless library crate.
+// Service handle (ADR-061 / ADR-064): constructed by the standalone
+// `acowork-pm` process entry (`main.rs`) and used to serve the full
+// router (REST + MCP + `/health`). The PM service stays a stateless
+// library crate; the Gateway no longer compiles it (ADR-064).
 pub use server::PmService;
 
 // MCP
+pub use mcp::agent_dir::HttpAgentDirectory;
 pub use mcp::manifest::PM_TOOL_MANIFEST;
 pub use mcp::mcp_router;
 pub use mcp::{AgentDirectory, McpState, NoopAgentDirectory};

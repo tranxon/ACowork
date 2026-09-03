@@ -419,7 +419,7 @@ export function LspTab() {
             <div className="mt-4 flex justify-end">
               <button
                 onClick={() => setScriptDialog(null)}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
               >
                 {t("harnessLsp.close")}
               </button>
@@ -541,7 +541,7 @@ function LspServerCard({
           <button
             onClick={onCheck}
             disabled={isChecking}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
           >
             {isChecking ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -555,7 +555,7 @@ function LspServerCard({
           {entry.install_script && (
             <button
               onClick={onViewScript}
-              className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
             >
               <Eye className="h-3 w-3" />
               {t("harnessLsp.viewScript")}

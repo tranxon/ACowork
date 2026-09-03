@@ -8,10 +8,13 @@
 //! - Session metadata updates (title, workspace_id)
 //! - Think block utilities (extract, strip, build metadata)
 
-use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole};
+use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole, Provider};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::agent::context::build_context_usage_from_persisted;
+use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
+use crate::agent::loop_context::DistillTier;
 use crate::agent::session_state::SessionStatus;
 use crate::error::Result;
 
@@ -60,7 +63,10 @@ impl super::loop_::AgentLoop {
                 Some(&persisted),
             );
             let json = serde_json::to_string(&ctx).ok();
-            tracing::info!(
+            // LOG-001: fires on every emit_session_state (multiple per turn)
+            // and only confirms the JSON was built — the value itself is
+            // carried in the MQTT state snapshot. Demoted to DEBUG.
+            tracing::debug!(
                 session_id = %self.session_core.session_id.as_deref().unwrap_or("?"),
                 model = %model_name,
                 last_input = persisted.last_input,
@@ -261,78 +267,136 @@ impl super::loop_::AgentLoop {
                 // feed the agent-scoped token counters for this distillation
                 // LLM call.
                 let core_clone = self.core.clone();
-                // Build combined text for model-aware token counting via the unified API.
-                let combined_text: String =
-                    tail_messages.iter().fold(String::new(), |mut acc, m| {
-                        acc.push_str(&m.content);
-                        acc.push('\n');
-                        acc
-                    });
-                let resolved_distill = self.resolve_distill_model(&combined_text);
                 let distill_max_tokens = self.core.config.distill_max_tokens;
                 // Snapshot user identity (small text block) so the spawned
                 // task is independent of `self` and so the summary is written
                 // in the user's preferred language.
                 let identity_context = self.session.identity_context().map(String::from);
+                // Clone the chunk sender so the spawned task can surface an
+                // all-tiers-failed error to the frontend even though the
+                // session is closing (best-effort; the channel may already be
+                // gone by then, in which case the error stays in the logs).
+                let chunk_tx = self.session_core.chunk_tx.clone();
 
-                // ADR-056: pick the right Provider instance for tail
-                // distillation — shared helper, same semantics as
-                // `compact_history_if_needed`. Reuses the session provider
-                // unless the resolved target lives on a different one.
-                let (compact_provider, model_name, tier) =
-                    self.distill_provider(&resolved_distill);
+                // ADR-056 call-phase fallback: resolve the FULL ordered list of
+                // distillation targets (GlobalDefault → ProviderCompact →
+                // CurrentChat) and pre-resolve each (provider, model) pair so
+                // the spawned task only owns Arc handles. Mirrors
+                // `compact_history_if_needed` — the previous single-target
+                // attempt silently dropped the tail memory when the provider
+                // was down.
+                let resolved_targets: Vec<(Arc<dyn Provider>, String, DistillTier)> = self
+                    .resolve_distill_targets()
+                    .into_iter()
+                    .map(|t| self.distill_provider(&t))
+                    .collect();
 
                 tracing::info!(
                     session_id = %session_id,
                     tail_start,
                     tail_message_count = tail_messages.len(),
                     is_compacted = self.session.is_compacted,
-                    model = %model_name,
-                    tier = ?tier,
-                    "Spawning tail distillation for session close"
+                    fallback_targets = resolved_targets.len().saturating_sub(1),
+                    "Spawning tail distillation for session close (with call-phase fallback chain)"
                 );
 
                 // Spawn tail distillation (best-effort, non-blocking)
                 tokio::spawn(async move {
-                    match crate::episode_distill::EpisodeDistiller::compact_messages(
-                        &tail_messages,
-                        compact_provider.as_ref(),
-                        &model_name,
-                        distill_max_tokens,
-                        identity_context.as_deref(),
-                        core_clone.compaction_prompt.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok((summary, usage)) => {
-                            // ADR-027: record raw Provider usage from tail
-                            // distillation into session token accumulator.
-                            if let Some(ref conv) = conversation_clone {
-                                conv.accumulate_llm_usage(&usage);
+                    let mut last_err: Option<crate::error::RuntimeError> = None;
+                    for (compact_provider, model_name, tier) in &resolved_targets {
+                        match crate::episode_distill::EpisodeDistiller::compact_messages(
+                            &tail_messages,
+                            compact_provider.as_ref(),
+                            model_name,
+                            distill_max_tokens,
+                            identity_context.as_deref(),
+                            // ADR-063 §3.7.5: read through the Arc<RwLock>
+                            // accessor so a Debug panel L2 reload on the
+                            // canonical AgentCore is visible to every clone
+                            // held by a running session (this `core_clone`
+                            // shares the inner Arc with the canonical one in
+                            // SessionManager — see `AgentCore::compaction_prompt`
+                            // doc and the `Clone for AgentCore` impl).
+                            core_clone.compaction_prompt().as_deref(),
+                        )
+                        .await
+                        {
+                            Ok((summary, usage)) => {
+                                // ADR-027: record raw Provider usage from tail
+                                // distillation into session token accumulator.
+                                if let Some(ref conv) = conversation_clone {
+                                    conv.accumulate_llm_usage(&usage);
+                                }
+                                // ADR-028: also feed the agent-scoped counters
+                                // so the agent-total line in Results Panel
+                                // accounts for this distillation call.
+                                core_clone.accumulate_llm_usage(&usage);
+                                if let Err(e) = crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
+                                    &summary,
+                                    &session_id,
+                                    &memory_provider,
+                                    emb_provider.as_deref(),
+                                )
+                                .await
+                                {
+                                    // Write failure is infrastructure-level:
+                                    // log it — the summary itself passed the
+                                    // quality gate, so no user-facing error.
+                                    tracing::error!(
+                                        session_id = %session_id,
+                                        error = %e,
+                                        "Tail distillation: failed to write summary to provider"
+                                    );
+                                }
+                                tracing::info!(
+                                    session_id = %session_id,
+                                    summary_len = summary.len(),
+                                    tier = ?tier,
+                                    "Tail distillation completed for session close"
+                                );
+                                last_err = None;
+                                break;
                             }
-                            // ADR-028: also feed the agent-scoped counters
-                            // so the agent-total line in Results Panel
-                            // accounts for this distillation call.
-                            core_clone.accumulate_llm_usage(&usage);
-                            crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
-                                &summary,
-                                &session_id,
-                                &memory_provider,
-                                emb_provider.as_deref(),
-                            )
-                            .await;
-                            tracing::info!(
-                                session_id = %session_id,
-                                summary_len = summary.len(),
-                                "Tail distillation completed for session close"
-                            );
+                            Err(e) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    tier = ?tier,
+                                    error = %e,
+                                    "Tail distillation LLM call failed, trying next tier"
+                                );
+                                // LowQuality is a model-capability problem —
+                                // stepping down the chain only gets
+                                // cheaper/weaker, so discard instead of retry.
+                                let non_retryable = matches!(
+                                    &e,
+                                    crate::error::RuntimeError::Summary(se) if !se.is_retryable()
+                                );
+                                last_err = Some(e);
+                                if non_retryable {
+                                    break;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %e,
-                                "Tail distillation failed (non-fatal)"
-                            );
+                    }
+
+                    // P3: all fallback tiers failed → notify the user.
+                    if let Some(err) = last_err {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %err,
+                            "Tail distillation failed for session close (all tiers)"
+                        );
+                        if let Some(tx) = chunk_tx.as_ref() {
+                            let _ = tx.try_send(SessionChunkEvent {
+                                session_id: session_id.clone(),
+                                event: ChunkEvent::Error {
+                                    user_message: "Session memory distillation failed. The conversation is saved, but its summary memory was not written."
+                                        .to_string(),
+                                    detail: err.to_string(),
+                                    error_type: "DistillationFailed".to_string(),
+                                    message_id: format!("tail-distill-{session_id}"),
+                                },
+                            });
                         }
                     }
                 });

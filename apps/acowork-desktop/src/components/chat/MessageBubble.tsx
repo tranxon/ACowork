@@ -1,4 +1,4 @@
-import React, { useState, useCallback, Children, isValidElement, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useRef, Children, isValidElement, useMemo } from "react";
 import { Copy, ChevronDown, ChevronRight, Wrench, AlertTriangle, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -22,7 +22,8 @@ import {
   useContextMenu,
   type ContextMenuItem,
 } from "../common/ContextMenu";
-import { copySelectionOrFallback } from "../../lib/clipboard";
+import { copySelectionOrFallback, snapshotSelection } from "../../lib/clipboard";
+import { formatBubbleTime } from "../../lib/formatTime";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -268,7 +269,18 @@ const MessageBubble = React.memo(function MessageBubble({
         icon: <Copy size={14} />,
         label: t("chatPanel.copy"),
         onClick: ({ selectionAtOpen }) => {
-          void handleCopy(selectionAtOpen);
+          // WebKit guard (see `useEffect` above): we snapshotted the
+          // selection at the CAPTURE phase of right-button mousedown,
+          // BEFORE WebKit's auto word-select ran. If the snapshot equals
+          // the contextmenu-time selection, the user had nothing
+          // pre-selected and the non-empty value is purely WebKit noise
+          // — pass an empty string so `handleCopy` falls back to the
+          // whole message body.
+          const hadUserSelection =
+            selectionAtMousedownRef.current.length > 0 &&
+            selectionAtMousedownRef.current !== selectionAtOpen;
+          const userSelection = hadUserSelection ? selectionAtOpen : "";
+          void handleCopy(userSelection);
         },
       });
     }
@@ -296,6 +308,45 @@ const MessageBubble = React.memo(function MessageBubble({
     [menu],
   );
 
+  // ── WebKit auto-selection guard ───────────────────────────────────────
+  // Bug: WebKit / WKWebView (macOS Tauri) auto-selects the word under
+  // the cursor on right-click as a native context-menu prep step. By the
+  // time `contextmenu` fires, `window.getSelection()` is non-empty even
+  // when the user did NOT pre-select anything — and `copySelectionOrFallback`
+  // never falls back to the whole message body. Symptom: right-clicking a
+  // user bubble copies just one or two characters.
+  //
+  // Detection strategy: WebKit's word-select happens as the default
+  // action of the right-click `mousedown`. To capture the user's TRUE
+  // selection (the one that existed BEFORE WebKit auto-selects), we have
+  // to listen on the DOCUMENT at the CAPTURE phase — React's synthetic
+  // event on the bubble div fires during bubbling, which is AFTER the
+  // default action has already mutated the selection. Capture-phase
+  // listeners fire before any default action.
+  //
+  // We compare the capture-phase selection against the contextmenu-phase
+  // selection:
+  //   - equal  → user had nothing pre-selected; the non-empty value is
+  //              purely WebKit noise → fall back to `message.content`.
+  //   - differ → user did pre-select; the contextmenu value is what they
+  //              want (WebKit may have extended the range, which is fine).
+  //
+  // The capture listener is bound for the lifetime of the bubble; the
+  // cost is one selection-read per mousedown, which is negligible.
+  const selectionAtMousedownRef = useRef<string>("");
+  useEffect(() => {
+    const onDocMouseDownCapture = (e: MouseEvent) => {
+      // Right button only — left clicks should not interfere with
+      // in-progress text drag-selections the user is still making.
+      if (e.button !== 2) return;
+      selectionAtMousedownRef.current = snapshotSelection();
+    };
+    document.addEventListener("mousedown", onDocMouseDownCapture, true);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDownCapture, true);
+    };
+  }, []);
+
   if (message.type === "user") {
     return (
       <>
@@ -305,8 +356,28 @@ const MessageBubble = React.memo(function MessageBubble({
               <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
             {message.content && (
-              <div className="mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
-                {message.content}
+              // Timestamp rendered as a sibling BELOW the bubble
+              // (not absolutely positioned above) so it can never
+              // collide with the username row. Hover behaviour is
+              // preserved: the timestamp reveals with an opacity
+              // fade when the wrapper is hovered. The bubble and
+              // timestamp share a column with `max-w-[85%]` and
+              // `items-start`, so the timestamp's left edge aligns
+              // with the bubble's left edge.
+              <div className="group mt-[6px] max-w-[85%] flex flex-col items-start">
+                <div
+                  className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
+                  style={fontSizeStyle}
+                >
+                  <div className="px-4 py-2.5 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+                    {message.content}
+                  </div>
+                </div>
+                {message.timestamp && (
+                  <span className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+                    {formatBubbleTime(message.timestamp)}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -336,7 +407,19 @@ const MessageBubble = React.memo(function MessageBubble({
     return (
       <>
         <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
-          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+          {/* Hover-revealed timestamp. `relative` is on the bubble
+             div itself so `absolute right-0` anchors to the bubble's
+             own right edge (right edge faces screen center for a
+             left-aligned bubble). */}
+          <div
+            className="relative group max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words"
+            style={fontSizeStyle}
+          >
+            {message.timestamp && (
+              <span className="pointer-events-none absolute right-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+                {formatBubbleTime(message.timestamp)}
+              </span>
+            )}
             <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
               <StreamMarkdown content={displayContent} />
             </div>

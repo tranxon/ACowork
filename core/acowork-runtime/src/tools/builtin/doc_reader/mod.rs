@@ -32,6 +32,20 @@ pub struct ExtractOptions {
     pub end_page: Option<usize>,
     /// Whether to render tables as Markdown (DOCX / XLSX).
     pub include_tables: bool,
+    /// Optional 1-based start line for plain-text fallback (`.md`, source
+    /// code, logs, etc.).  Ignored by PDF/DOCX/PPTX/XLSX — those use
+    /// `start_page`/`end_page` for paging.
+    ///
+    /// Mirrors [`crate::tools::builtin::file_read::FileReadTool`]
+    /// semantics: 1-based, inclusive on both ends.  When set together
+    /// with [`end_line`](Self::end_line), returns only that line range.
+    /// When unset, the entire file is read and truncated to
+    /// [`crate::tools::output::MAX_OUTPUT_BYTES`] (32 KB) by the plain-text
+    /// fallback path.
+    pub start_line: Option<usize>,
+    /// Optional inclusive end line for plain-text fallback.
+    /// See [`start_line`](Self::start_line).
+    pub end_line: Option<usize>,
 }
 
 /// Detect the document format from a file extension.
@@ -82,7 +96,10 @@ impl DocReaderTool {
                  Use this tool to ingest file content for analysis. \
                  Accepts both relative paths (within workspace) and absolute paths. \
                  Returns plain text with structural markers (page/slide/sheet headers, \
-                 optional Markdown tables)."
+                 optional Markdown tables). \
+                 For plain-text files, use start_line / end_line to read a specific \
+                 line range (1-based, inclusive) — files larger than 32 KB must be \
+                 paged this way. For PDF/DOCX/PPTX/XLSX, use start_page / end_page."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -93,11 +110,19 @@ impl DocReaderTool {
                     },
                     "start_page": {
                         "type": "integer",
-                        "description": "Optional 1-based start page/slide/sheet (default: 1)"
+                        "description": "Optional 1-based start page/slide/sheet (default: 1). Used by PDF/DOCX/PPTX/XLSX only; ignored by plain-text fallback."
                     },
                     "end_page": {
                         "type": "integer",
-                        "description": "Optional inclusive end page/slide/sheet"
+                        "description": "Optional inclusive end page/slide/sheet. Used by PDF/DOCX/PPTX/XLSX only; ignored by plain-text fallback."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based start line for plain-text files (Markdown, source, logs, ...). Ignored by PDF/DOCX/PPTX/XLSX. When set with end_line, reads only that line range (max 400 lines per call)."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional inclusive end line for plain-text files. Ignored by PDF/DOCX/PPTX/XLSX. Must be >= start_line."
                     },
                     "include_tables": {
                         "type": "boolean",
@@ -161,6 +186,19 @@ impl Tool for DocReaderTool {
             }
         }
 
+        // Build extract options from params. Done *before* format detection
+        // because the plain-text fallback (None branch below) needs them
+        // for its `start_line`/`end_line` paging contract — the doc
+        // extractor branches don't read these fields but the struct is
+        // identical across paths.
+        let opts = ExtractOptions {
+            start_page: params["start_page"].as_u64().map(|v| v as usize),
+            end_page: params["end_page"].as_u64().map(|v| v as usize),
+            include_tables: params["include_tables"].as_bool().unwrap_or(false),
+            start_line: params["start_line"].as_u64().map(|v| v as usize),
+            end_line: params["end_line"].as_u64().map(|v| v as usize),
+        };
+
         // Detect format. PDF/DOCX/PPTX/XLSX get their dedicated
         // extractor; anything else falls back to UTF-8 plain-text
         // extraction — this is what makes Markdown / source code / log
@@ -170,9 +208,10 @@ impl Tool for DocReaderTool {
             Some(f) => f,
             None => {
                 let full_path_clone = full_path.clone();
+                let opts_clone = opts.clone();
                 let raw = tokio::task::spawn_blocking(move || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        text::extract_text(&full_path_clone)
+                        text::extract_text(&full_path_clone, &opts_clone)
                     }))
                     .map_err(|panic_payload| {
                         let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
@@ -224,13 +263,6 @@ impl Tool for DocReaderTool {
                     }),
                 };
             }
-        };
-
-        // Build extract options from params
-        let opts = ExtractOptions {
-            start_page: params["start_page"].as_u64().map(|v| v as usize),
-            end_page: params["end_page"].as_u64().map(|v| v as usize),
-            include_tables: params["include_tables"].as_bool().unwrap_or(false),
         };
 
         // Dispatch to format-specific extraction on a blocking thread.
@@ -351,5 +383,282 @@ mod tests {
         assert!(!result.ok);
         let err = result.error.unwrap_or_default();
         assert!(err.contains("Unsupported document format"), "got: {err}");
+    }
+
+    // ── E2E: paging contract ─────────────────────────────────────────
+    //
+    // doc_reader plain-text fallback previously had no way to page.
+    // These tests verify:
+    //  - The LLM-visible schema exposes start_line / end_line.
+    //  - The Tool::execute() path actually honours them end-to-end.
+    //  - Whole-file reads of >32 KB files fail cleanly with a paging hint
+    //    (the regression that motivated this work — without paging, large
+    //    Markdown / log files were unreadable).
+    //  - Paging a file larger than the 32 KB cap succeeds (the headline
+    //    new feature working through the real entry point).
+
+    #[test]
+    fn spec_exposes_start_line_and_end_line_to_llm() {
+        // The schema is what the LLM reads. If start_line / end_line
+        // are missing or mis-typed, models will never learn to page.
+        let spec = DocReaderTool::spec_value();
+        let props = spec.input_schema["properties"]
+            .as_object()
+            .expect("properties object present");
+
+        assert!(
+            props.contains_key("start_line"),
+            "missing start_line: {props:?}"
+        );
+        assert!(
+            props.contains_key("end_line"),
+            "missing end_line: {props:?}"
+        );
+        assert_eq!(
+            props["start_line"]["type"],
+            serde_json::Value::String("integer".to_string())
+        );
+        assert_eq!(
+            props["end_line"]["type"],
+            serde_json::Value::String("integer".to_string())
+        );
+        // Both are OPTIONAL (whole-file read is the default; paging is opt-in)
+        let start_required = props["start_line"].get("type").is_some()
+            && !spec.input_schema["required"]
+                .as_array()
+                .map(|a| a.iter().any(|v| v == "start_line"))
+                .unwrap_or(false);
+        assert!(
+            start_required,
+            "start_line must NOT be required (breaking change risk)"
+        );
+    }
+
+    #[test]
+    fn spec_still_exposes_start_page_and_end_page_for_documents() {
+        // Regression guard: adding line params must not remove page params.
+        let spec = DocReaderTool::spec_value();
+        let props = spec.input_schema["properties"]
+            .as_object()
+            .expect("properties object present");
+        assert!(props.contains_key("start_page"), "start_page must remain");
+        assert!(props.contains_key("end_page"), "end_page must remain");
+    }
+
+    #[test]
+    fn spec_description_teaches_line_paging_for_plain_text() {
+        // If the description doesn't say "use start_line/end_line for
+        // plain-text", models default to whole-file read and hit the
+        // 32 KB cap on real-world files.
+        let desc = DocReaderTool::spec_value().description;
+        assert!(
+            desc.contains("start_line") || desc.contains("line range"),
+            "spec description must advertise line paging: {desc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_whole_file_over_32kb_errors_with_paging_hint() {
+        // This is the regression that motivated the change: large
+        // plain-text uploads were unreadable because the 128 KB cap
+        // became 32 KB. The error message must teach the LLM how to
+        // recover (pass start_line/end_line).
+        let big = "x".repeat(crate::tools::output::MAX_OUTPUT_BYTES + 100);
+        let (_dir, p) = with_temp_file(big.as_bytes(), "big.md");
+        let result = DocReaderTool::new()
+            .execute(serde_json::json!({ "path": p.to_string_lossy() }), None)
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("too large"), "got: {err}");
+        assert!(
+            err.contains("start_line") && err.contains("end_line"),
+            "error must teach LLM the paging parameters; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_paged_read_returns_only_requested_lines() {
+        // Paging via the real LLM-style JSON params.
+        let mut buf = Vec::new();
+        for i in 1..=20 {
+            buf.extend_from_slice(format!("line {i}\n").as_bytes());
+        }
+        let (_dir, p) = with_temp_file(&buf, "twenty.md");
+        let result = DocReaderTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 5,
+                    "end_line": 10
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok, "paged read should succeed: {:?}", result.error);
+        // Use newline-terminated needles so substring collisions can't
+        // fool us — "line 1\n" is NOT a prefix of "line 10\n" or "line 11\n".
+        for i in 5..=10 {
+            let needle = format!("line {i}\n");
+            assert!(
+                result.content.contains(&needle),
+                "missing line {i}: {:?}",
+                result.content
+            );
+        }
+        for i in [1, 4, 11, 20] {
+            let needle = format!("line {i}\n");
+            assert!(
+                !result.content.contains(&needle),
+                "out-of-range line {i} leaked: {:?}",
+                result.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_paged_read_works_on_file_larger_than_32kb() {
+        // The headline new feature: a 100 KB Markdown file is readable
+        // via paging even though whole-file read is rejected. This is
+        // what the user actually wanted.
+        let big = "x".repeat(100_000); // 100 KB ≫ 32 KB cap
+        let (_dir, p) = with_temp_file(big.as_bytes(), "huge.md");
+        let result = DocReaderTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 3
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.ok,
+            "paged read of 100 KB file must succeed: {:?}",
+            result.error
+        );
+        assert!(result.content.starts_with("xxx"));
+    }
+
+    #[tokio::test]
+    async fn execute_paged_read_rejects_partial_params() {
+        // Both or neither — same contract as the unit-level test, but
+        // verified through Tool::execute() (where parameter names come
+        // from JSON, not Rust types).
+        let (_dir, p) = with_temp_file(b"line 1\nline 2\nline 3\n", "tiny.md");
+        let tool = DocReaderTool::new();
+
+        // Only start_line
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.as_deref().unwrap().contains("start_line"));
+        assert!(result.error.as_deref().unwrap().contains("end_line"));
+
+        // Only end_line
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "end_line": 2
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+    }
+
+    #[tokio::test]
+    async fn execute_paged_read_rejects_range_over_max() {
+        // MAX_LINES_PER_CALL is 400; doc_reader's paging contract must
+        // mirror file_read's cap (the constants are shared for a reason).
+        let mut buf = Vec::new();
+        for i in 1..=500 {
+            buf.extend_from_slice(format!("L{i}\n").as_bytes());
+        }
+        let (_dir, p) = with_temp_file(&buf, "long.md");
+        let result = DocReaderTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 500
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.as_deref().unwrap();
+        assert!(err.contains("Range too large"), "got: {err}");
+        assert!(
+            err.contains("400"),
+            "must mention MAX_LINES_PER_CALL: {err}"
+        );
+        assert!(
+            err.contains("Paginate"),
+            "must offer paginate template: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_paged_read_rejects_start_beyond_file() {
+        let (_dir, p) = with_temp_file(b"a\nb\nc\n", "short.md");
+        let result = DocReaderTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 100,
+                    "end_line": 105
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.as_deref().unwrap();
+        assert!(err.contains("exceeds file length"), "got: {err}");
+        assert!(err.contains("3 lines"), "must report actual length: {err}");
+    }
+
+    #[tokio::test]
+    async fn execute_paged_read_preserves_utf8_cjk_content() {
+        // CJK is the test bed for UTF-8 safety in the paging path.
+        let lines = ["中文第一行", "中文第二行", "中文第三行", "中文第四行"];
+        let mut buf = Vec::new();
+        for l in &lines {
+            buf.extend_from_slice(l.as_bytes());
+            buf.push(b'\n');
+        }
+        let (_dir, p) = with_temp_file(&buf, "cjk.md");
+        let result = DocReaderTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 2,
+                    "end_line": 3
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("中文第二行"));
+        assert!(result.content.contains("中文第三行"));
+        assert!(!result.content.contains("中文第一行"));
+        assert!(!result.content.contains("中文第四行"));
     }
 }
