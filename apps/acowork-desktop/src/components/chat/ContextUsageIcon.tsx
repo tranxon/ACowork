@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import { cn } from "../../lib/utils";
+import { cn, formatPercent } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
-import { computeCacheHitRate, formatCacheHitRate } from "../../lib/cacheHitRate";
+import { computeCacheHitStats, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
 
 /** Circular progress ring showing context usage percentage.
  *  Starts from bottom (6 o'clock), goes clockwise.
@@ -73,9 +73,8 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // ADR-066 §6: cache hit rate, provider-aware.  `null` means "no
   // signal" — either the provider doesn't report cache tokens, no LLM
   // call has happened yet, or the denominator would be zero.
-  const cacheHitRateLabel = formatCacheHitRate(
-    computeCacheHitRate(sessionProvider, contextUsage),
-  );
+  const cacheStats = computeCacheHitStats(sessionProvider, contextUsage);
+  const cacheHitRateLabel = formatCacheHitRate(cacheStats.ratio);
 
 // Open popover on hover (not click), with a small delay before closing
   const handleMouseEnter = useCallback(() => {
@@ -118,9 +117,15 @@ const handleCompressSummary = () => {
     setOpen(false);
   };
 
+  // Same precision contract as `formatTokenCount` in `ResultsPanel.tsx`:
+  // 2 decimals for M (= 10K granularity), 1 decimal for K.  Kept in
+  // sync because the two values rendered side by side (e.g.
+  // `2.71M / 2.78M` for cache vs. input) must speak the same
+  // precision — otherwise a "2.7M vs 2.8M" pair would read as a
+  // tie when the actual gap is 70K.
   const formatTokens = (n: number | undefined): string => {
     if (n == null) return "\u2014";
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
     return String(n);
   };
@@ -160,14 +165,14 @@ const handleCompressSummary = () => {
           )}
         >
           {/* Line 1: usage percentage + token stats */}
-          <div className="px-3 pt-2.5 pb-1.5 text-xs text-zinc-600 dark:text-zinc-300 whitespace-nowrap select-none">
+          <div className="px-3 pt-2.5 pb-3 text-xs text-zinc-600 dark:text-zinc-300 whitespace-nowrap select-none">
             <span
               className="font-semibold"
               style={{ color: "var(--color-accent)" }}
             >
-              {usagePercent}%
+              {formatPercent(usagePercent)}%
             </span>
-            <span className="mx-1.5 text-zinc-400 dark:text-zinc-500">|</span>
+            <span className="mx-2 text-zinc-400 dark:text-zinc-500">|</span>
             <span className="font-mono">
               {formatTokens(contextUsage?.total_tokens ?? 0)}
             </span>
@@ -175,50 +180,52 @@ const handleCompressSummary = () => {
             <span className="font-mono">
               {formatTokens(contextUsage?.context_window ?? 0)}
             </span>
-            <span className="text-zinc-400 dark:text-zinc-500">
-              {" "}
+            <span className="ml-3 text-zinc-400 dark:text-zinc-500">
               {t("contextUsage.contextUsedSuffix")}
             </span>
           </div>
 
-          {/* Line 2 (ADR-066): cache hit / cache write summary.  Only rendered
-              when the Runtime has emitted at least one of the cache fields —
-              the `?? 0` lets us suppress the row on legacy Runtimes without
-              showing a meaningless "0 hit / 0 write" line. */}
-          {(contextUsage?.cache_read_tokens !== undefined &&
-            contextUsage.cache_read_tokens > 0) ||
-          (contextUsage?.cache_write_tokens !== undefined &&
-            contextUsage.cache_write_tokens > 0) ? (
-            <div className="px-3 pb-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap select-none">
-              <span>{t("contextUsage.cacheReadLabel")}</span>
-              <span className="mx-1 font-mono">
-                {formatTokens(contextUsage?.cache_read_tokens ?? 0)}
-              </span>
-              <span className="mx-1 text-zinc-400 dark:text-zinc-500">·</span>
-              <span>{t("contextUsage.cacheWriteLabel")}</span>
-              <span className="mx-1 font-mono">
-                {formatTokens(contextUsage?.cache_write_tokens ?? 0)}
-              </span>
-            </div>
-          ) : null}
+          {/* Divider — separates 上下文用量 from 缓存命中率.  Style
+              mirrors the right-side Status panel dividers so the popover
+              reads as a miniature version of that surface.  Combined with
+              the py-3 padding on the surrounding rows, the visual gap
+              between the two text lines is ~25px (was ~15px before
+              bumping). */}
+          <div className="border-t border-zinc-100 dark:border-zinc-700/50" />
 
-          {/* Line 3 (ADR-066): prompt-cache hit ratio.  Provider-aware
-              (Anthropic Messages vs OpenAI Chat Completions).  Hidden
-              for providers that don't report cache tokens (ollama,
-              deepseek, zhipuai, …) so we never show a misleading 0%. */}
-          {cacheHitRateLabel !== null ? (
-            <div className="px-3 pb-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap select-none">
-              <span>{t("contextUsage.cacheHitLabel")}</span>
-              <span
-                className="mx-1 font-mono font-medium"
-                style={{ color: "var(--color-accent)" }}
-              >
-                {cacheHitRateLabel}
-              </span>
-              <span className="text-zinc-400 dark:text-zinc-500">
-                {t("contextUsage.cached")}
-              </span>
-            </div>
+          {/* Line 2 (ADR-066): prompt-cache hit ratio + its numerator /
+              denominator.  Rendered in the exact same style as the
+              context-usage line above (`90% | 90K / 100K 缓存命中率`) so
+              the two rows read as a pair — the two numbers are the actual
+              ratio components (cache-hit tokens / input tokens), not two
+              independent cache counters.  Shown whenever the Runtime
+              reports any cache accounting (read or write); the ratio
+              itself is hidden behind a dash when it isn't computable yet
+              (e.g. a fresh Anthropic session that has only seeded the
+              cache). */}
+          {hasCacheData(contextUsage) ? (
+            <>
+              <div className="px-3 py-3 text-xs text-zinc-600 dark:text-zinc-300 whitespace-nowrap select-none">
+                <span
+                  className="font-semibold"
+                  style={{ color: "var(--color-accent)" }}
+                >
+                  {cacheHitRateLabel ?? "\u2014"}
+                </span>
+                <span className="mx-2 text-zinc-400 dark:text-zinc-500">|</span>
+                <span className="font-mono">{formatTokens(cacheStats.numerator)}</span>
+                <span className="text-zinc-400 dark:text-zinc-500"> / </span>
+                <span className="font-mono">{formatTokens(cacheStats.denominator)}</span>
+                <span className="ml-3 text-zinc-400 dark:text-zinc-500">
+                  {t("contextUsage.cacheHitLabel")}
+                </span>
+              </div>
+              {/* Divider — separates 缓存命中率 from the Compress
+                  Summary button below.  The button's mt-3 below matches
+                  the py-3 padding on this row, keeping the gap symmetric
+                  with the gap above (~25px between content edges). */}
+              <div className="border-t border-zinc-100 dark:border-zinc-700/50" />
+            </>
           ) : null}
 
           {/* Compress Summary button */}
@@ -226,7 +233,7 @@ const handleCompressSummary = () => {
             onClick={handleCompressSummary}
             disabled={!canAct}
             className={cn(
-              "mx-1.5 mt-1 mb-2 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md",
+              "mx-1.5 mt-3 mb-2 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md",
               "bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors",
               "hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600",
               "disabled:opacity-40 disabled:cursor-not-allowed",
