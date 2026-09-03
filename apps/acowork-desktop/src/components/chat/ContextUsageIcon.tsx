@@ -92,8 +92,17 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
 
   // ADR-066 §6: cache hit rate, provider-aware.  `null` means "no
   // signal" — either the provider doesn't report cache tokens, no LLM
-  // call has happened yet, or the denominator would be zero.
-  const cacheStats = computeCacheHitStats(sessionProvider, contextUsage);
+  // call has happened yet, or the denominator would be zero.  We use
+  // the session-lifetime (`cumulative`) window here to match the
+  // right-hand agent-status panel's session-status block and the
+  // bottom status bar — keeping one consistent number for the same
+  // session rather than mixing per-turn (volatile) and cumulative
+  // (stable) views across surfaces.
+  const cacheStats = computeCacheHitStats(
+    sessionProvider,
+    contextUsage,
+    "cumulative",
+  );
   const cacheHitRateLabel = formatCacheHitRate(cacheStats.ratio);
 
 // Open popover on hover (not click), with a small delay before closing
@@ -269,7 +278,7 @@ const handleCompressSummary = () => {
             })}
           </div>
 
-          {hasCacheData(contextUsage) ? (
+          {hasCacheData(contextUsage, "cumulative") ? (
             <>
               <div className="border-t border-zinc-200 dark:border-zinc-700" />
               <div className="px-3 pt-2 pb-3">

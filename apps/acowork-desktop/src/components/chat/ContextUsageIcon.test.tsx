@@ -124,11 +124,16 @@ describe("ContextUsageIcon", () => {
   });
 
   it("shows the cache-hit row when provider cache accounting is present", () => {
+    // The input-box usage popup shows the session-lifetime (cumulative)
+    // window — the same window the right-hand agent-status panel and
+    // the bottom status bar use. We feed cumulative totals and assert
+    // the ratio is computed from those, not from the per-turn fields.
     mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage = {
       ...mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage,
-      cache_read_tokens: 90_000,
-      input_tokens: 144_900,
-      total_input_tokens: 200_000,
+      cache_read_tokens: 5_000, // per-turn — must be ignored
+      input_tokens: 12_345, // per-turn — must be ignored
+      total_cache_read_tokens: 90_000,
+      total_input_tokens: 144_900,
     };
 
     const { container } = render(
@@ -136,8 +141,7 @@ describe("ContextUsageIcon", () => {
     );
     fireEvent.mouseEnter(container.firstElementChild!);
 
-    // OpenAI protocol: hit rate = 90K / 144.9K ≈ 0.6211 → label is
-    // `formatPercent(62.11)` floored to "62%".
+    // OpenAI protocol, cumulative: 90K / 144.9K ≈ 0.6211 → "62%".
     expect(screen.getByText("62%")).toBeTruthy();
     expect(screen.getByText("缓存命中率")).toBeTruthy();
     expect(screen.getByText("90.0K")).toBeTruthy();
