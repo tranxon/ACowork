@@ -7,11 +7,12 @@
  *   1. `getCacheProtocol` classifies known provider ids into the
  *      right family; unknown ids return `null` rather than guessing.
  *
- *   2. `computeCacheHitRate` picks the **cumulative** numbers when
- *      both per-turn and cumulative are present (the status panel
- *      shows the lifetime hit rate), and falls back to per-turn
- *      when cumulative isn't available yet (the very first LLM
- *      call's push).
+ *   2. `computeCacheHitRate` / `computeCacheHitStats` support two
+ *      windows: **per-turn** (the last LLM call — used by the
+ *      input-box usage popover) and **cumulative** (the
+ *      session-lifetime totals — used by the session-status block and
+ *      the bottom status bar).  The `window` argument selects which
+ *      fields feed the formula.
  *
  *   3. OpenAI / Anthropic use **different** denominators — if we
  *      accidentally apply the Anthropic formula to OpenAI the hit
@@ -27,8 +28,10 @@
 import { describe, it, expect } from "vitest";
 import {
   computeCacheHitRate,
+  computeCacheHitStats,
   formatCacheHitRate,
   getCacheProtocol,
+  hasCacheData,
   type CacheUsageLike,
 } from "./cacheHitRate";
 
@@ -91,18 +94,19 @@ describe("computeCacheHitRate — OpenAI formula", () => {
     );
   });
 
-  it("prefers cumulative numbers over per-turn when both are present", () => {
+  it("uses per-turn numbers even when cumulative is present (real-time view)", () => {
     const usage: CacheUsageLike = {
-      // per-turn shows a recent big hit (400 / 600 = 66.7%),
-      // cumulative shows the lifetime view (600 / 1800 = 33.3%).
-      // The status panel wants the lifetime view.
+      // The ratio is the *current* LLM call's real-time view, so it
+      // uses per-turn counts (400 / 600 = 66.7%) — NOT the session
+      // lifetime (600 / 1800 = 33.3%).  Cumulative is deferred to a
+      // future cost-analysis surface.
       cache_read_tokens: 400,
       input_tokens: 600,
       total_cache_read_tokens: 600,
       total_input_tokens: 1800,
     };
     expect(computeCacheHitRate(openaiProvider, usage)).toBeCloseTo(
-      600 / 1800,
+      400 / 600,
       10,
     );
   });
@@ -161,7 +165,7 @@ describe("computeCacheHitRate — Anthropic formula", () => {
     );
   });
 
-  it("prefers cumulative numbers over per-turn", () => {
+  it("uses per-turn numbers even when cumulative is present (real-time view)", () => {
     const usage: CacheUsageLike = {
       cache_read_tokens: 100,
       cache_write_tokens: 50,
@@ -171,7 +175,7 @@ describe("computeCacheHitRate — Anthropic formula", () => {
       total_input_tokens: 1300,
     };
     expect(computeCacheHitRate(anthropicProvider, usage)).toBeCloseTo(
-      600 / (600 + 100 + 1300),
+      100 / (100 + 50 + 200),
       10,
     );
   });
@@ -223,20 +227,56 @@ describe("computeCacheHitRate — no-signal cases", () => {
     ).toBeNull(); // per-turn fallback also missing
   });
 
-  it("returns null for providers without cache accounting", () => {
-    // `ollama` has no cache_read / cache_write semantics at all.
+  it("returns null when the data shows no cache accounting", () => {
+    // `ollama` never reports cache tokens — cache_read stays 0, so the
+    // ratio is undefined regardless of provider id.
     expect(
       computeCacheHitRate("ollama", {
-        cache_read_tokens: 100,
+        cache_read_tokens: 0,
         input_tokens: 200,
       }),
     ).toBeNull();
     expect(
-      computeCacheHitRate("deepseek", {
-        cache_read_tokens: 100,
-        input_tokens: 200,
-      }),
+      computeCacheHitRate("ollama", { input_tokens: 200 }),
     ).toBeNull();
+  });
+
+  it("computes the ratio for OpenAI-compatible providers that report cached_tokens", () => {
+    // MiniMax / Volcengine / custom providers route through the
+    // Runtime's OpenAIProvider and surface
+    // `prompt_tokens_details.cached_tokens`.  The ratio is well-defined
+    // even though the provider id isn't in the explicit allowlist —
+    // the formula is chosen from the data, not the id.
+    expect(
+      computeCacheHitRate("minimax-cn-coding-plan", {
+        cache_read_tokens: 400,
+        input_tokens: 1000,
+      }),
+    ).toBeCloseTo(0.4, 10);
+    expect(
+      computeCacheHitRate("volcengine-agent-plan", {
+        cache_read_tokens: 400,
+        input_tokens: 1000,
+      }),
+    ).toBeCloseTo(0.4, 10);
+    expect(
+      computeCacheHitRate("custom-agnes", {
+        cache_read_tokens: 400,
+        input_tokens: 1000,
+      }),
+    ).toBeCloseTo(0.4, 10);
+  });
+
+  it("uses the Anthropic formula for unknown providers that report cache writes", () => {
+    // A custom provider reporting both read and write is Anthropic-style
+    // (the Runtime's OpenAI-compatible providers never report writes).
+    expect(
+      computeCacheHitRate("custom-anthropic-gateway", {
+        cache_read_tokens: 400,
+        cache_write_tokens: 200,
+        input_tokens: 1000,
+      }),
+    ).toBeCloseTo(400 / (400 + 200 + 1000), 10);
   });
 
   it("returns null when usage is null or undefined", () => {
@@ -260,19 +300,316 @@ describe("computeCacheHitRate — no-signal cases", () => {
   });
 });
 
+describe("computeCacheHitRate — cumulative (session) window", () => {
+  it("uses session-lifetime totals for OpenAI-style providers", () => {
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 400, // per-turn — ignored in the cumulative window
+      input_tokens: 600,
+      total_cache_read_tokens: 600,
+      total_input_tokens: 1800,
+    };
+    expect(computeCacheHitRate("openai", usage, "cumulative")).toBeCloseTo(
+      600 / 1800,
+      10,
+    );
+  });
+
+  it("uses session-lifetime totals for Anthropic-style providers", () => {
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 100,
+      cache_write_tokens: 50,
+      input_tokens: 200,
+      total_cache_read_tokens: 600,
+      total_cache_write_tokens: 100,
+      total_input_tokens: 1300,
+    };
+    expect(computeCacheHitRate("anthropic", usage, "cumulative")).toBeCloseTo(
+      600 / (600 + 100 + 1300),
+      10,
+    );
+  });
+
+  it("returns null when cumulative read is zero", () => {
+    expect(
+      computeCacheHitRate(
+        "openai",
+        { total_cache_read_tokens: 0, total_input_tokens: 1000 },
+        "cumulative",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when cumulative input is missing", () => {
+    expect(
+      computeCacheHitRate("openai", { total_cache_read_tokens: 100 }, "cumulative"),
+    ).toBeNull();
+  });
+});
+
+describe("hasCacheData", () => {
+  it("returns true when any per-turn cache field is present and positive", () => {
+    expect(hasCacheData({ cache_read_tokens: 400 })).toBe(true);
+    expect(hasCacheData({ cache_write_tokens: 200 })).toBe(true);
+  });
+
+  it("per-turn window also reports true when only cumulative is present (0-hit round)", () => {
+    // A 0-hit round in a cache-active session still renders the row
+    // (as `— | 0 / N`) rather than hiding it.
+    expect(hasCacheData({ total_cache_read_tokens: 600 })).toBe(true);
+    expect(hasCacheData({ total_cache_write_tokens: 100 })).toBe(true);
+  });
+
+  it("cumulative window checks only the session-lifetime totals", () => {
+    expect(hasCacheData({ total_cache_read_tokens: 600 }, "cumulative")).toBe(true);
+    expect(hasCacheData({ total_cache_write_tokens: 100 }, "cumulative")).toBe(true);
+    // Per-turn-only data does not gate the cumulative surface.
+    expect(hasCacheData({ cache_read_tokens: 400 }, "cumulative")).toBe(false);
+    expect(hasCacheData({ cache_write_tokens: 200 }, "cumulative")).toBe(false);
+  });
+
+  it("returns false when no cache accounting is present", () => {
+    expect(hasCacheData(null)).toBe(false);
+    expect(hasCacheData(undefined)).toBe(false);
+    expect(hasCacheData({})).toBe(false);
+    expect(hasCacheData({ input_tokens: 1000 })).toBe(false);
+    expect(hasCacheData({ cache_read_tokens: 0, cache_write_tokens: 0 })).toBe(false);
+    expect(hasCacheData({ total_cache_read_tokens: 0 }, "cumulative")).toBe(false);
+  });
+});
+
+describe("computeCacheHitStats", () => {
+  it("returns numerator = cache-hit tokens and denominator = input tokens (OpenAI)", () => {
+    const stats = computeCacheHitStats("minimax-cn-coding-plan", {
+      cache_read_tokens: 400,
+      input_tokens: 1000,
+    });
+    expect(stats.numerator).toBe(400);
+    expect(stats.denominator).toBe(1000);
+    expect(stats.ratio).toBeCloseTo(0.4, 10);
+  });
+
+  it("uses per-turn numbers even when cumulative is present (real-time view)", () => {
+    const stats = computeCacheHitStats("openai", {
+      cache_read_tokens: 400,
+      input_tokens: 600,
+      total_cache_read_tokens: 600,
+      total_input_tokens: 1800,
+    });
+    expect(stats.numerator).toBe(400);
+    expect(stats.denominator).toBe(600);
+    expect(stats.ratio).toBeCloseTo(400 / 600, 10);
+  });
+
+  it("includes cache-write tokens in the Anthropic denominator", () => {
+    const stats = computeCacheHitStats("anthropic", {
+      cache_read_tokens: 400,
+      cache_write_tokens: 200,
+      input_tokens: 1000,
+    });
+    expect(stats.numerator).toBe(400);
+    expect(stats.denominator).toBe(400 + 200 + 1000);
+    expect(stats.ratio).toBeCloseTo(400 / (400 + 200 + 1000), 10);
+  });
+
+  it("returns zeroed stats when there is no usage", () => {
+    expect(computeCacheHitStats("openai", null)).toEqual({
+      ratio: null,
+      numerator: 0,
+      denominator: 0,
+    });
+  });
+
+  it("keeps numerator/denominator consistent with the ratio for unknown providers", () => {
+    // A custom Anthropic-style gateway reporting writes.
+    const stats = computeCacheHitStats("custom-anthropic-gateway", {
+      cache_read_tokens: 300,
+      cache_write_tokens: 100,
+      input_tokens: 600,
+    });
+    expect(stats.numerator).toBe(300);
+    expect(stats.denominator).toBe(300 + 100 + 600);
+    expect(stats.ratio).toBeCloseTo(300 / (300 + 100 + 600), 10);
+  });
+
+  it("returns cumulative numerator/denominator for OpenAI-style providers", () => {
+    const stats = computeCacheHitStats(
+      "minimax-cn-coding-plan",
+      {
+        cache_read_tokens: 400,
+        input_tokens: 600,
+        total_cache_read_tokens: 600,
+        total_input_tokens: 1800,
+      },
+      "cumulative",
+    );
+    expect(stats.numerator).toBe(600);
+    expect(stats.denominator).toBe(1800);
+    expect(stats.ratio).toBeCloseTo(600 / 1800, 10);
+  });
+
+  it("includes cumulative cache-write tokens in the Anthropic denominator", () => {
+    const stats = computeCacheHitStats(
+      "anthropic",
+      {
+        total_cache_read_tokens: 600,
+        total_cache_write_tokens: 100,
+        total_input_tokens: 1300,
+      },
+      "cumulative",
+    );
+    expect(stats.numerator).toBe(600);
+    expect(stats.denominator).toBe(600 + 100 + 1300);
+    expect(stats.ratio).toBeCloseTo(600 / (600 + 100 + 1300), 10);
+  });
+});
+
+describe("edge scenarios — context compaction & session resume", () => {
+  // After compaction the Runtime zeroes the per-turn cache fields
+  // (`set_history_anchor`) while the cumulative totals keep the
+  // compaction LLM call's cache usage (`accumulate_compaction_usage`).
+  // The popup (per-turn) must show a dash — there is no fresh per-turn
+  // snapshot — and the session-status (cumulative) must reflect the
+  // accumulated totals.
+
+  it("after compaction: per-turn shows dash, cumulative keeps totals (OpenAI)", () => {
+    const usage: CacheUsageLike = {
+      // Per-turn zeroed by set_history_anchor; input = post-compaction
+      // history size.
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      input_tokens: 3_500,
+      // Cumulative includes the compaction LLM call (full-history input).
+      total_cache_read_tokens: 104_000,
+      total_cache_write_tokens: 0,
+      total_input_tokens: 154_000,
+    };
+    // Popup (per-turn): no fresh cache snapshot → dash.
+    const perTurn = computeCacheHitStats("minimax-cn-coding-plan", usage);
+    expect(perTurn.ratio).toBeNull();
+    expect(perTurn.numerator).toBe(0);
+    expect(perTurn.denominator).toBe(3_500);
+    // Session-status (cumulative): OpenAI formula.
+    const cumulative = computeCacheHitStats(
+      "minimax-cn-coding-plan",
+      usage,
+      "cumulative",
+    );
+    expect(cumulative.numerator).toBe(104_000);
+    expect(cumulative.denominator).toBe(154_000);
+    expect(cumulative.ratio).toBeCloseTo(104_000 / 154_000, 10);
+  });
+
+  it("after compaction: per-turn shows dash, cumulative keeps totals (Anthropic)", () => {
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      input_tokens: 3_500,
+      total_cache_read_tokens: 104_000,
+      total_cache_write_tokens: 800,
+      total_input_tokens: 154_000,
+    };
+    const perTurn = computeCacheHitStats("anthropic", usage);
+    expect(perTurn.ratio).toBeNull();
+    expect(perTurn.denominator).toBe(3_500);
+    const cumulative = computeCacheHitStats("anthropic", usage, "cumulative");
+    expect(cumulative.numerator).toBe(104_000);
+    expect(cumulative.denominator).toBe(104_000 + 800 + 154_000);
+    expect(cumulative.ratio).toBeCloseTo(
+      104_000 / (104_000 + 800 + 154_000),
+      10,
+    );
+  });
+
+  it("after compaction: hasCacheData gates per-turn on cumulative (0-hit round still shows)", () => {
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      input_tokens: 3_500,
+      total_cache_read_tokens: 104_000,
+      total_cache_write_tokens: 800,
+    };
+    // Popup gate: the session has seen cache → row still renders as "— | 0 / N".
+    expect(hasCacheData(usage)).toBe(true);
+    // Session-status gate: cumulative totals non-zero.
+    expect(hasCacheData(usage, "cumulative")).toBe(true);
+  });
+
+  it("after compaction with no prior cache: both windows hide the row", () => {
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      input_tokens: 3_500,
+      total_cache_read_tokens: 0,
+      total_cache_write_tokens: 0,
+    };
+    expect(hasCacheData(usage)).toBe(false);
+    expect(hasCacheData(usage, "cumulative")).toBe(false);
+  });
+
+  // Historical session resume: the Runtime rebuilds ContextUsageInfo from
+  // persisted SessionTokens (`build_context_usage_from_persisted`), so both
+  // per-turn (last call) and cumulative (session lifetime) cache fields are
+  // populated before the first new conversation.
+
+  it("resumed session: popup shows the historical last call's per-turn rate", () => {
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 4_000,
+      cache_write_tokens: 800,
+      input_tokens: 10_000,
+      total_cache_read_tokens: 104_000,
+      total_cache_write_tokens: 800,
+      total_input_tokens: 154_000,
+    };
+    const perTurn = computeCacheHitStats("anthropic", usage);
+    expect(perTurn.numerator).toBe(4_000);
+    expect(perTurn.denominator).toBe(4_000 + 800 + 10_000);
+    expect(perTurn.ratio).toBeCloseTo(4_000 / (4_000 + 800 + 10_000), 10);
+    const cumulative = computeCacheHitStats("anthropic", usage, "cumulative");
+    expect(cumulative.numerator).toBe(104_000);
+    expect(cumulative.denominator).toBe(104_000 + 800 + 154_000);
+  });
+
+  it("first conversation after resume: per-turn reflects the new call, cumulative adds to restored totals", () => {
+    // New call re-seeds the cache (Anthropic): read=0, write=5000, prompt=15000.
+    const usage: CacheUsageLike = {
+      cache_read_tokens: 0,
+      cache_write_tokens: 5_000,
+      input_tokens: 15_000,
+      total_cache_read_tokens: 104_000,
+      total_cache_write_tokens: 5_800,
+      total_input_tokens: 169_000,
+    };
+    const perTurn = computeCacheHitStats("anthropic", usage);
+    expect(perTurn.ratio).toBeNull(); // read=0 → no hit this round
+    expect(perTurn.denominator).toBe(15_000 + 5_000);
+    const cumulative = computeCacheHitStats("anthropic", usage, "cumulative");
+    expect(cumulative.numerator).toBe(104_000);
+    expect(cumulative.denominator).toBe(104_000 + 5_800 + 169_000);
+    expect(cumulative.ratio).toBeCloseTo(
+      104_000 / (104_000 + 5_800 + 169_000),
+      10,
+    );
+  });
+});
+
 describe("formatCacheHitRate", () => {
-  it("renders with one decimal place", () => {
-    expect(formatCacheHitRate(0)).toBe("0.0%");
-    expect(formatCacheHitRate(0.5)).toBe("50.0%");
-    expect(formatCacheHitRate(0.123)).toBe("12.3%");
-    expect(formatCacheHitRate(1)).toBe("100.0%");
+  it("renders as an integer percentage (0 decimals, matching context usage)", () => {
+    // Truncation (floor) — same rationale as `formatPercent`: a
+    // sub-100% ratio must NOT round up to "100%", otherwise the
+    // bar reads as "full cache" while the live token counts above
+    // are visibly less than full.
+    expect(formatCacheHitRate(0)).toBe("0%");
+    expect(formatCacheHitRate(0.5)).toBe("50%");
+    expect(formatCacheHitRate(0.123)).toBe("12%");
+    expect(formatCacheHitRate(0.896)).toBe("89%");
+    expect(formatCacheHitRate(1)).toBe("100%");
   });
 
   it("clamps visually-out-of-range ratios to [0%, 100%]", () => {
     // Floating-point ratios from `computeCacheHitRate` are already
     // clamped, but defensive formatting protects direct callers.
-    expect(formatCacheHitRate(-0.5)).toBe("0.0%");
-    expect(formatCacheHitRate(1.5)).toBe("100.0%");
+    expect(formatCacheHitRate(-0.5)).toBe("0%");
+    expect(formatCacheHitRate(1.5)).toBe("100%");
   });
 
   it("returns null for null input (no-signal pass-through)", () => {

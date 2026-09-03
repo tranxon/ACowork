@@ -216,9 +216,6 @@
     "agentRunning": "Agent実行中",
     "compressContext": "コンテキストを圧縮",
     "compressSummary": "コンテキスト全体を圧縮",
-    "cacheReadLabel": "キャッシュヒット",
-    "cacheWriteLabel": "キャッシュ書き込み",
-    "cacheSummary": "ヒット {{hit}} / 書き込み {{write}}",
     "contextUsedSuffix": "コンテキスト使用",
     "cacheHitLabel": "キャッシュヒット率",
     "cached": "キャッシュ済み"
@@ -622,11 +619,9 @@
     "totalOutputTokens": "累積出力トークン",
     "agentTotalInputTokens": "累計入力トークン",
     "agentTotalOutputTokens": "累計出力トークン",
-    "cacheReadTokens": "キャッシュヒットトークン",
-    "cacheWriteTokens": "キャッシュ書き込みトークン",
     "agentTotalCacheReadTokens": "累計キャッシュヒット",
     "agentTotalCacheWriteTokens": "累計キャッシュ書き込み",
-    "cacheHitRatio": "キャッシュヒット率",
+    "cacheHitRatio": "キャッシュヒット率（累計）",
     "cached": "キャッシュ済み",
     "iterations": "反復回数",
     "agentStatus": "Agentステータス",
@@ -902,6 +897,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "キャッシュ済み",
     "mqttDisconnected": "リアルタイム接続が切断されました{{reason}}。再接続中…"
   },
   "debugPanel": {

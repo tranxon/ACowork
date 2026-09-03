@@ -16,7 +16,8 @@ import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
 import { useEditorStatusStore } from "../../stores/editorStatusStore";
 import { FileStatusCluster, type FileStatusClusterActiveFile } from "../editor/FileStatusCluster";
-import { cn } from "../../lib/utils";
+import { cn, formatPercent } from "../../lib/utils";
+import { computeCacheHitRate, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
 import {
   DEFAULT_ACCENT_PRESET,
   getAccentPresetByHex,
@@ -245,6 +246,23 @@ export function AppLayout() {
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
   });
+  // ADR-066: provider for the active session — needed to pick the
+  // cache-hit-ratio formula (Anthropic vs OpenAI) for the status bar.
+  const sessionProvider = useChatStore((s) => {
+    if (!selectedAgentId) return null;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return null;
+    return agent.sessionStates[agent.activeSessionId]?.provider ?? null;
+  });
+  // ADR-066 §6: cache hit rate for the status bar.  The status bar is a
+  // session-level surface, so it shows the session-lifetime (cumulative)
+  // rate — the input-box popover shows the per-turn rate instead.
+  // `null` means "no signal" — provider doesn't report cache tokens, no
+  // LLM call yet, or a zero denominator — in which case we hide the pill
+  // entirely.
+  const cacheHitRateLabel = formatCacheHitRate(
+    computeCacheHitRate(sessionProvider, contextUsage, "cumulative"),
+  );
   // ADR-036: MQTT connection liveness is pushed from Rust via the
   // `mqtt-status` Tauri event.  The Rust eventloop owns reconnection —
   // we just reflect state into the UI.
@@ -974,12 +992,25 @@ export function AppLayout() {
                         : undefined,
                   }}
                 >
-                  {contextUsage.usage_percent}%
+                  {formatPercent(contextUsage.usage_percent)}%
                 </span>
                 <span className="text-zinc-400 dark:text-zinc-500"> | </span>
                 <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">
                   {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
                 </span>
+              </span>
+            )}
+            {/* ADR-066: cache hit rate — deliberately terse (`90% cached`)
+                because the status bar has limited horizontal space.  Shows
+                the session-lifetime (cumulative) rate.  Shown whenever the
+                Runtime reports any cumulative cache accounting; the ratio
+                falls back to a dash when it isn't computable yet. */}
+            {hasCacheData(contextUsage, "cumulative") && (
+              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
+                <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">
+                  {cacheHitRateLabel ?? "\u2014"}
+                </span>
+                <span className="text-zinc-400 dark:text-zinc-500">{t("statusBar.cached")}</span>
               </span>
             )}
           </span>

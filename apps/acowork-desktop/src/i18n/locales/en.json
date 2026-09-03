@@ -119,9 +119,6 @@
     "agentRunning": "Agent running",
     "compressContext": "compact context",
     "compressSummary": "Compress Summary",
-    "cacheReadLabel": "Cache hit",
-    "cacheWriteLabel": "Cache write",
-    "cacheSummary": "{{hit}} hit / {{write}} write",
     "contextUsedSuffix": "context used",
     "cacheHitLabel": "Cache hit rate",
     "cached": "cached"
@@ -758,11 +755,9 @@
     "totalOutputTokens": "Total output tokens",
     "agentTotalInputTokens": "total input tokens",
     "agentTotalOutputTokens": "total output tokens",
-    "cacheReadTokens": "cache hit tokens",
-    "cacheWriteTokens": "cache write tokens",
     "agentTotalCacheReadTokens": "agent total cache hit",
     "agentTotalCacheWriteTokens": "agent total cache write",
-    "cacheHitRatio": "cache hit ratio",
+    "cacheHitRatio": "cache hit ratio (session)",
     "cached": "cached",
     "iterations": "Iterations",
     "agentStatus": "Agent Status",
@@ -988,6 +983,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "cached",
     "mqttDisconnected": "Realtime connection lost{{reason}}, retrying…"
   },
   "exploreBlock": {

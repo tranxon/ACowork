@@ -215,9 +215,6 @@
     "agentRunning": "Agent 실행 중",
     "compressContext": "컨텍스트 압축",
     "compressSummary": "전체 컨텍스트 압축",
-    "cacheReadLabel": "캐시 히트",
-    "cacheWriteLabel": "캐시 쓰기",
-    "cacheSummary": "히트 {{hit}} / 쓰기 {{write}}",
     "contextUsedSuffix": "컨텍스트 사용",
     "cacheHitLabel": "캐시 히트율",
     "cached": "캐시됨"
@@ -623,11 +620,9 @@
     "totalOutputTokens": "누적 출력 토큰",
     "agentTotalInputTokens": "누적 입력 토큰",
     "agentTotalOutputTokens": "누적 출력 토큰",
-    "cacheReadTokens": "캐시 히트 토큰",
-    "cacheWriteTokens": "캐시 쓰기 토큰",
     "agentTotalCacheReadTokens": "누적 캐시 히트",
     "agentTotalCacheWriteTokens": "누적 캐시 쓰기",
-    "cacheHitRatio": "캐시 히트율",
+    "cacheHitRatio": "캐시 히트율 (누적)",
     "cached": "캐시됨",
     "iterations": "반복 횟수",
     "agentStatus": "Agent 상태",
@@ -903,6 +898,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "캐시됨",
     "mqttDisconnected": "실시간 연결이 끊겼습니다{{reason}}. 자동 재연결 중…"
   },
   "debugPanel": {

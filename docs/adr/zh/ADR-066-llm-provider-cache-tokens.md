@@ -458,7 +458,7 @@ UI 上仍然显示 "Cache Write: 0"（OpenAI 视角下语义无害、明确表�
 3. **`accumulate_llm_usage` 累加 cache**：两次调用 verify `total_cache_read/write` saturating_add
 4. **`accumulate_llm_usage` zero-input 行为**：`prompt_tokens=0` 时 cache 不累加（与 input 一致）
 5. **`accumulate_compaction_usage` 不污染 last_cache_*，累加 total_cache_***
-6. **`set_history_anchor` 不污染 cache 字段**（last_cache_* 保留，total_cache_* 保留）
+6. **`set_history_anchor` 保留 total_cache_*、清零 last_cache_***：压缩后 `last_input` 锚定为压缩后 history 大小、`last_output=0`，`last_cache_*` 同步清零（压缩后没有新的 per-turn 缓存快照，直到下一次 `accumulate_llm_usage`）；`total_cache_*` 保留（Provider 上报的真实累计，与本地 history 估算无关）
 7. **`scan_sessions_async` 聚合 cache**：多个 session 的 `total_cache_*` 求和正确
 
 ### `agent_core.rs` 单元测试（补充 ADR-028 已有测试）

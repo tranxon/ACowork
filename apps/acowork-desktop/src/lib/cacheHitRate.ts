@@ -14,16 +14,43 @@
  *     single 5-min write — but the hit-ratio is a UX metric, not a
  *     dollar conversion, so we just compare to total prompt cost.)
  *
- *   - **OpenAI Chat Completions** (and Azure OpenAI) reports only
- *     `prompt_tokens_details.cached_tokens`; there is no write
- *     concept (OpenAI auto-caches without a per-call write event).
- *     The natural denominator is therefore just `cache_read /
- *     prompt_tokens`.
+ *   - **OpenAI Chat Completions** (and every OpenAI-compatible
+ *     provider routed through the Runtime's `OpenAIProvider` —
+ *     Azure, MiniMax, Volcengine/Doubao, custom gateways, …)
+ *     reports only `prompt_tokens_details.cached_tokens`; there is
+ *     no write concept (the provider auto-caches without a per-call
+ *     write event).  The natural denominator is therefore just
+ *     `cache_read / prompt_tokens`.
  *
- * Other providers (`ollama`, `lmstudio`, `deepseek`, `zhipuai`,
- * `minimax*`, `volcengine-agent-plan`, …) do not surface cache
- * accounting through `UsageInfo`, so the ratio is undefined for them
- * and `computeCacheHitRate` returns `null`.
+ * The Runtime's `OpenAIProvider` is used for *all* OpenAI-compatible
+ * providers and always reports `cache_write_tokens: 0`, while the
+ * Anthropic provider reports both read and write.  So the formula is
+ * chosen **data-driven**: the presence of cache-write tokens selects
+ * the Anthropic denominator, otherwise the OpenAI denominator.  The
+ * explicit provider-id classification (`getCacheProtocol`) is kept
+ * only as a tiebreaker for Anthropic-family providers that report a
+ * read without a write on some call.
+ *
+ * Two windows are supported, selected by the `window` argument:
+ *
+ *   - **per-turn** (default) — the last LLM call's real-time counts
+ *     (`cache_read_tokens` / `input_tokens`), matching the per-turn
+ *     context-usage line rendered next to it.  Used by the input-box
+ *     usage popover.
+ *
+ *   - **cumulative** — the session-lifetime totals
+ *     (`total_cache_read_tokens` / `total_input_tokens`), i.e. the
+ *     session's overall cache-hit rate.  Used by the session-status
+ *     block and the bottom status bar.
+ *
+ * The two windows are deliberately kept separate: per-turn is a
+ * real-time health signal, cumulative is a lagging indicator
+ * dominated by early turns.  See ADR-066 §6.
+ *
+ * Providers that never surface cache accounting (`ollama`,
+ * `lmstudio`, …) simply keep `cache_read_tokens` at 0, so the
+ * `read <= 0` guard returns `null` and the UI hides the row — no
+ * provider allowlist needed.
  *
  * The choice of denominator is deliberately a **front-end UX
  * decision**: the Runtime just forwards raw provider counts and lets
@@ -43,7 +70,19 @@
  * Returns `null` for providers that don't surface prompt-cache
  * accounting (local models, providers without a write event, etc.).
  */
+import { formatPercent } from "./utils";
+
 export type CacheProtocol = "openai" | "anthropic";
+
+/**
+ * Which time window a cache-hit computation should use.
+ *
+ * - `"per-turn"`   — the last LLM call's real-time counts
+ *                    (`cache_read_tokens` / `input_tokens`).
+ * - `"cumulative"` — the session-lifetime totals
+ *                    (`total_cache_read_tokens` / `total_input_tokens`).
+ */
+export type CacheHitWindow = "per-turn" | "cumulative";
 
 /**
  * Resolve which cache protocol family a provider id belongs to.
@@ -102,78 +141,154 @@ export interface CacheUsageLike {
 }
 
 /**
+ * The cache-hit ratio together with the exact numerator and
+ * denominator used to compute it.  UI surfaces render the ratio and
+ * the two numbers side by side (e.g. `90% | 90K / 100K 缓存命中率`),
+ * so the numbers must always be the actual ratio components — never
+ * two independent cache counters that happen to look similar.
+ */
+export interface CacheHitStats {
+  /** Hit ratio in [0, 1], or `null` when undefined. */
+  ratio: number | null;
+  /** Numerator — cache-hit tokens for the selected window
+   *  (`cache_read_tokens` per-turn, `total_cache_read_tokens`
+   *  cumulative). */
+  numerator: number;
+  /** Denominator — input tokens for the selected window
+   *  (`input_tokens` per-turn, `total_input_tokens` cumulative;
+   *  OpenAI-style, or input + read + write Anthropic-style). */
+  denominator: number;
+}
+
+/**
+ * Compute the cache-hit ratio together with its numerator and
+ * denominator for the selected window.  See `computeCacheHitRate` for
+ * the ratio semantics; this is the single source of truth for both so
+ * the displayed numbers always match the displayed percentage.
+ *
+ * `window` defaults to `"per-turn"` (the last LLM call's real-time
+ * view); pass `"cumulative"` for the session-lifetime view.
+ */
+export function computeCacheHitStats(
+  providerId: string | null | undefined,
+  usage: CacheUsageLike | null | undefined,
+  window: CacheHitWindow = "per-turn",
+): CacheHitStats {
+  if (!usage) return { ratio: null, numerator: 0, denominator: 0 };
+
+  // Select the window's counts:
+  //   - per-turn: the last LLM call's real-time numbers (popup).
+  //   - cumulative: the session-lifetime totals (session-status block
+  //     and status bar).
+  const cumulative = window === "cumulative";
+  const read =
+    numOrNull(cumulative ? usage.total_cache_read_tokens : usage.cache_read_tokens) ??
+    0;
+  const write =
+    numOrNull(cumulative ? usage.total_cache_write_tokens : usage.cache_write_tokens) ??
+    0;
+  const input =
+    numOrNull(cumulative ? usage.total_input_tokens : usage.input_tokens) ?? 0;
+
+  // Formula selection:
+  //   - Explicitly-known providers use their own family (OpenAI ignores
+  //     writes, Anthropic includes them) — trust the id over the data.
+  //   - Unknown providers (any OpenAI-compatible id routed through the
+  //     Runtime's OpenAIProvider — MiniMax, Volcengine, custom, …) are
+  //     inferred from the data: the presence of cache-write tokens
+  //     selects the Anthropic denominator, otherwise the OpenAI one.
+  const protocol = getCacheProtocol(providerId);
+  const anthropicStyle =
+    protocol === "anthropic" || (protocol === null && write > 0);
+
+  let ratio: number | null = null;
+  let denominator = 0;
+
+  if (anthropicStyle) {
+    // Anthropic denominator: input + read + write.
+    denominator = input + read + write;
+    if (read > 0 && denominator > 0) {
+      ratio = clamp01(read / denominator);
+    }
+  } else {
+    // OpenAI-style: denominator is just the prompt.
+    denominator = input;
+    if (read > 0 && input > 0) {
+      ratio = clamp01(read / input);
+    }
+  }
+
+  return { ratio, numerator: read, denominator };
+}
+
+/**
  * Compute the prompt-cache hit ratio in [0, 1], or `null` if it is
  * undefined for the current provider / call state.
  *
- * Caller-supplied preference order:
+ * `window` selects the time window (default `"per-turn"`):
  *
- *   - For "read" we accept either per-turn (`cache_read_tokens`) or
- *     cumulative (`total_cache_read_tokens`).  UI surfaces generally
- *     want cumulative so the user sees the *lifetime* hit rate of
- *     the session, not a single turn's lucky hit.  Per-turn is used
- *     when cumulative is unavailable (e.g. immediately after a
- *     `compute_context_usage` call before `accumulate_llm_usage`).
+ *   - **per-turn** — the last LLM call's real-time counts:
+ *     numerator = `cache_read_tokens`, denominator = `input_tokens`
+ *     (OpenAI-style) or `input + read + write` (Anthropic-style).
+ *     Matches the per-turn context-usage line rendered next to it.
  *
- *   - For the denominator we use the matching cumulative or per-turn
- *     input/cache-write numbers — never mixing per-turn read with
- *     cumulative input.  Mixing would over-report the ratio (a big
- *     per-turn read on top of a small cumulative input).
+ *   - **cumulative** — the session-lifetime totals:
+ *     numerator = `total_cache_read_tokens`, denominator =
+ *     `total_input_tokens` (OpenAI-style) or
+ *     `total_input + total_read + total_write` (Anthropic-style).
+ *     Used by the session-status block and the bottom status bar.
+ *
+ * Formula selection is **data-driven** (see the module doc): the
+ * presence of cache-write tokens selects the Anthropic denominator
+ * (`input + read + write`); otherwise the OpenAI denominator
+ * (`prompt`).  `getCacheProtocol` is consulted only as a tiebreaker
+ * for Anthropic-family providers that report a read without a write
+ * on some call.
  *
  * Returns `null` when:
  *
- *   - the provider has no cache accounting (`getCacheProtocol`
- *     returns `null`),
- *   - cache-read is unknown or zero (no signal yet),
+ *   - cache-read is unknown or zero (no signal yet — includes
+ *     providers like `ollama` that never report cache tokens),
  *   - the denominator is zero or negative (would be division by
  *     zero / a nonsensical ratio).
  */
 export function computeCacheHitRate(
   providerId: string | null | undefined,
   usage: CacheUsageLike | null | undefined,
+  window: CacheHitWindow = "per-turn",
 ): number | null {
-  if (!usage) return null;
-  const protocol = getCacheProtocol(providerId);
-  if (protocol === null) return null;
+  return computeCacheHitStats(providerId, usage, window).ratio;
+}
 
-  // Prefer cumulative read for the lifetime view; fall back to
-  // per-turn when cumulative is not yet known (e.g. fresh session
-  // before any LLM call completed).
-  const cumulativeRead = numOrNull(usage.total_cache_read_tokens);
-  const perTurnRead = numOrNull(usage.cache_read_tokens);
-  const read = cumulativeRead ?? perTurnRead;
-  if (read == null || read <= 0) return null;
-
-  if (protocol === "openai") {
-    // OpenAI: no write event — denominator is just the prompt.
-    // Per-turn `input_tokens` is what the provider bills as the
-    // total prompt; cumulative `total_input_tokens` is the same
-    // concept across the session.  Match the source we used for
-    // `read` so we never mix per-turn read with cumulative input.
-    const prompt =
-      (cumulativeRead != null ? numOrNull(usage.total_input_tokens) : null) ??
-      numOrNull(usage.input_tokens);
-    if (prompt == null || prompt <= 0) return null;
-    return clamp01(read / prompt);
+/**
+ * Whether the given usage carries any cache accounting for the
+ * selected window — the UI gate for rendering the cache row.
+ *
+ * `window` defaults to `"per-turn"`:
+ *
+ *   - **per-turn** — true when the current round has cache activity,
+ *     OR the session has seen cache activity (so a 0-hit round is
+ *     rendered as `— | 0 / N` rather than hidden).
+ *   - **cumulative** — true when the session-lifetime totals are
+ *     non-zero.
+ */
+export function hasCacheData(
+  usage: CacheUsageLike | null | undefined,
+  window: CacheHitWindow = "per-turn",
+): boolean {
+  if (!usage) return false;
+  if (window === "cumulative") {
+    return (
+      (usage.total_cache_read_tokens ?? 0) > 0 ||
+      (usage.total_cache_write_tokens ?? 0) > 0
+    );
   }
-
-  // protocol === "anthropic"
-  // Anthropic denominator: input + read + write, using the same
-  // cumulative-vs-per-turn source as `read`.
-  const cumulativeWrite = numOrNull(usage.total_cache_write_tokens);
-  const perTurnWrite = numOrNull(usage.cache_write_tokens);
-  const write =
-    cumulativeRead != null
-      ? (cumulativeWrite ?? 0)
-      : (perTurnWrite ?? 0);
-
-  const input =
-    cumulativeRead != null
-      ? (numOrNull(usage.total_input_tokens) ?? 0)
-      : (numOrNull(usage.input_tokens) ?? 0);
-
-  const denom = input + read + write;
-  if (denom <= 0) return null;
-  return clamp01(read / denom);
+  return (
+    (usage.cache_read_tokens ?? 0) > 0 ||
+    (usage.cache_write_tokens ?? 0) > 0 ||
+    (usage.total_cache_read_tokens ?? 0) > 0 ||
+    (usage.total_cache_write_tokens ?? 0) > 0
+  );
 }
 
 /**
@@ -182,15 +297,17 @@ export function computeCacheHitRate(
  *
  *   - `null`  → `null` (let the caller decide whether to render
  *                nothing or a dash).
- *   - numeric → `"12.3%"` (one decimal place is enough for the
- *                resolution a user actually cares about; two would
- *                feel noisy in a 16px badge).  Out-of-range values
- *                are clamped to [0%, 100%] as a visual safety net for
- *                direct callers that bypass `computeCacheHitRate`.
+ *   - numeric → `"12%"` (integer, no decimals — deliberately matched
+ *                to the context-usage percentage via the shared
+ *                `formatPercent` helper so the two stay visually
+ *                aligned when shown side by side).  Out-of-range
+ *                values are clamped to [0%, 100%] as a visual safety
+ *                net for direct callers that bypass
+ *                `computeCacheHitRate`.
  */
 export function formatCacheHitRate(ratio: number | null): string | null {
   if (ratio == null) return null;
-  return `${(clamp01(ratio) * 100).toFixed(1)}%`;
+  return `${formatPercent(clamp01(ratio) * 100)}%`;
 }
 
 function numOrNull(v: number | null | undefined): number | null {
