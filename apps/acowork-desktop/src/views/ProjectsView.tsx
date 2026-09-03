@@ -118,27 +118,35 @@ export function ProjectsView() {
   }
 
   // 空状态：还没有项目 → 鼓励创建
+  // 同时渲染 <ProjectSidebar />，让左侧 "+" 按钮可见、可点（健康时）。
+  // 中央"创建项目"按钮直接调 usePmProjectStore.openCreate() 触发同一份对话框状态，
+  // 不再依赖脆弱的 `document.getElementById(...)?.click()` DOM 反查。
   if (projects.length === 0 && !loadingProjects) {
     return (
       <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-chat-area">
         <ServiceOfflineBanner />
-        <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8">
-          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-3xl dark:bg-zinc-800">
-            📋
-          </div>
-          <h2 className="text-base font-semibold text-zinc-700 dark:text-zinc-200">
-            {t("pm.emptyTitle")}
-          </h2>
-          <p className="max-w-sm text-center text-xs text-zinc-500 dark:text-zinc-400">
-            {t("pm.emptyDesc")}
-          </p>
-          <button
-            type="button"
-            className="rounded-md bg-zinc-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
-            onClick={() => document.getElementById("pm-new-project-trigger")?.click()}
-          >
-            {t("pm.newProject")}
-          </button>
+        <div className="flex min-h-0 flex-1">
+          <ProjectSidebar />
+          <main className="flex min-w-0 flex-1 items-center justify-center">
+            <div className="flex flex-col items-center justify-center gap-4 p-8">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-3xl dark:bg-zinc-800">
+                📋
+              </div>
+              <h2 className="text-base font-semibold text-zinc-700 dark:text-zinc-200">
+                {t("pm.emptyTitle")}
+              </h2>
+              <p className="max-w-sm text-center text-xs text-zinc-500 dark:text-zinc-400">
+                {t("pm.emptyDesc")}
+              </p>
+              <button
+                type="button"
+                className="rounded-md bg-zinc-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                onClick={() => usePmProjectStore.getState().openCreate()}
+              >
+                {t("pm.newProject")}
+              </button>
+            </div>
+          </main>
         </div>
       </div>
     );
@@ -200,9 +208,6 @@ export function ProjectsView() {
     </div>
   );
 }
-
-// 供全局触发的空状态新建项目按钮（ProjectsView 内联使用）
-export const pmNewProjectTriggerId = "pm-new-project-trigger";
 
 // 辅助：避免 useMemo 未使用告警（boardLoading 在骨架/空态外用于 ProjectBoard）
 export const _projectsViewHooks = { useMemo };

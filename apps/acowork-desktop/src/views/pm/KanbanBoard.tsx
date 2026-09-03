@@ -71,11 +71,16 @@ const boardKeyboardCoordinates: KeyboardCoordinateGetter = (event, { currentCoor
 export function KanbanBoard({ projectId, onOpenTask }: KanbanBoardProps) {
   const { t } = useTranslation();
   const columnRoots = usePmBoardStore((s) => s.columnRoots);
-  const tasksById = usePmBoardStore((s) => {
+  // ⚠️ 不能在 selector 里建新对象 — React 18 + zustand v5 的
+  // useSyncExternalStore 用 Object.is 比较 snapshot，每次返回新 Map
+  // 会触发 "getSnapshot should be cached" + 无限重渲染
+  // （修 T2 死循环 bug：原写法让 KanbanBoard 抛 Maximum update depth）。
+  const tasks = usePmBoardStore((s) => s.tasks);
+  const tasksById = useMemo(() => {
     const byId = new Map<string, PmTaskResponse>();
-    for (const task of s.tasks) byId.set(task.id, task);
+    for (const task of tasks) byId.set(task.id, task);
     return byId;
-  });
+  }, [tasks]);
   const healthy = usePmHealthStore((s) => s.healthy);
   const offline = healthy === false;
 

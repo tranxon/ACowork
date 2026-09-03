@@ -25,15 +25,17 @@ export function ProjectSidebar() {
   const selectProject = usePmProjectStore((s) => s.selectProject);
   const createProject = usePmProjectStore((s) => s.createProject);
   const deleteProject = usePmProjectStore((s) => s.deleteProject);
+  const creating = usePmProjectStore((s) => s.creating);
+  const openCreate = usePmProjectStore((s) => s.openCreate);
+  const closeCreate = usePmProjectStore((s) => s.closeCreate);
   const healthy = usePmHealthStore((s) => s.healthy);
 
-  const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<PmProject | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 新建对话框打开时聚焦输入框
+  // 新建对话框打开时聚焦输入框（creating 现在是全局 store 状态）
   useEffect(() => {
     if (creating) inputRef.current?.focus();
   }, [creating]);
@@ -49,10 +51,10 @@ export function ProjectSidebar() {
     setSaving(false);
     if (project) {
       setTitle("");
-      setCreating(false);
+      closeCreate();
       showToast({ type: "success", message: t("pm.projectCreated") });
     }
-  }, [title, createProject, t]);
+  }, [title, createProject, closeCreate, t]);
 
   const handleDelete = useCallback(async () => {
     if (!deleting) return;
@@ -71,9 +73,8 @@ export function ProjectSidebar() {
           {t("pm.projects")}
         </h2>
         <button
-          id="pm-new-project-trigger"
           type="button"
-          onClick={() => setCreating(true)}
+          onClick={() => openCreate()}
           disabled={healthy === false}
           className="rounded-md px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
           aria-label={t("pm.newProject")}
@@ -135,7 +136,7 @@ export function ProjectSidebar() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
             className="absolute inset-0 bg-modal-overlay"
-            onClick={() => setCreating(false)}
+            onClick={() => closeCreate()}
           />
           <div
             className="relative z-10 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
@@ -153,7 +154,7 @@ export function ProjectSidebar() {
                 onChange={(e) => setTitle(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") handleCreate();
-                  if (e.key === "Escape") setCreating(false);
+                  if (e.key === "Escape") closeCreate();
                 }}
                 placeholder={t("pm.newProjectPlaceholder")}
                 disabled={saving}
@@ -162,7 +163,7 @@ export function ProjectSidebar() {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setCreating(false)}
+                onClick={() => closeCreate()}
                 className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
                 disabled={saving}
               >

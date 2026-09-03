@@ -1,6 +1,14 @@
 /**
  * usePmHealthStore — PM 服务健康检查（离线降级）。
  *
+ * ⚠️ Selector 契约（强制）：
+ * 任何 `usePmHealthStore((s) => ...)` 的 selector **必须返回稳定引用**
+ * （store 字段或函数引用）。禁止在 selector 里 `new Map / new Set / filter / map`
+ * 等创建新对象 —— zustand v5 + React 18 的 `useSyncExternalStore` 用
+ * `Object.is` 比较 snapshot，新引用会触发 "getSnapshot should be cached"
+ * 警告 + 无限重渲染 + "Maximum update depth exceeded"。
+ * 如需派生数据，请改成 `usePmHealthStore((s) => s.field)` + `useMemo`。
+ *
  * 对齐 UX 设计 §7：启动时 + 每 30s 轮询 `/api/pm/projects`（轻量探测）。
  * 连续 3 次失败 → healthy=false（触发离线降级 UI）。
  *

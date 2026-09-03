@@ -1,6 +1,14 @@
 /**
  * usePmProjectStore — 项目列表 + 选中项。
  *
+ * ⚠️ Selector 契约（强制）：
+ * 任何 `usePmProjectStore((s) => ...)` 的 selector **必须返回稳定引用**
+ * （store 字段或函数引用）。禁止在 selector 里 `new Map / new Set / filter / map`
+ * 等创建新对象 —— zustand v5 + React 18 的 `useSyncExternalStore` 用
+ * `Object.is` 比较 snapshot，新引用会触发 "getSnapshot should be cached"
+ * 警告 + 无限重渲染 + "Maximum update depth exceeded"。
+ * 如需派生数据，请改成 `usePmProjectStore((s) => s.field)` + `useMemo`。
+ *
  * 对齐 UX 设计 §6.1：进入 /projects 路由触发加载；创建/删除/改名后主动 reload。
  * 数据常驻 store（离开路由不清空），后台 reload() 静默刷新。
  */
@@ -20,6 +28,17 @@ interface PmProjectState {
   /** 项目任务计数（侧边栏徽章）：pid → { total, submitted } */
   counts: Record<string, { total: number; submitted: number }>;
 
+  // ── 新建项目对话框状态 ──────────────────────────────────────
+  // 提升到全局 store，让多个入口（sidebar "+"、空状态中央按钮、未来
+  // 命令面板 / 快捷键 / Agent MCP 工具）共享同一份 UI 状态，
+  // 取代脆弱的 `document.getElementById(...)?.click()` DOM 反查。
+  /** 新建项目对话框是否打开 */
+  creating: boolean;
+  /** 打开新建项目对话框（任意入口调用） */
+  openCreate: () => void;
+  /** 关闭新建项目对话框（取消 / 创建成功后调用） */
+  closeCreate: () => void;
+
   loadProjects: (opts?: { silent?: boolean }) => Promise<void>;
   selectProject: (pid: string | null) => void;
   createProject: (title: string, description?: string) => Promise<PmProject | null>;
@@ -38,6 +57,10 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
   error: null,
   updatedAt: null,
   counts: {},
+  creating: false,
+
+  openCreate: () => set({ creating: true }),
+  closeCreate: () => set({ creating: false }),
 
   loadProjects: async ({ silent = false } = {}) => {
     // 缓存命中（非强制刷新且距上次 < 30s）→ 静默跳过

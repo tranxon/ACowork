@@ -1,6 +1,14 @@
 /**
  * usePmBoardStore — 看板任务数据 + 乐观更新。
  *
+ * ⚠️ Selector 契约（强制）：
+ * 任何 `usePmBoardStore((s) => ...)` 的 selector **必须返回稳定引用**
+ * （store 字段或函数引用）。禁止在 selector 里 `new Map / new Set / filter / map`
+ * 等创建新对象 —— zustand v5 + React 18 的 `useSyncExternalStore` 用
+ * `Object.is` 比较 snapshot，新引用会触发 "getSnapshot should be cached"
+ * 警告 + 无限重渲染 + "Maximum update depth exceeded"（KanbanBoard 曾踩过）。
+ * 如需派生数据，请改成 `usePmBoardStore((s) => s.field)` + `useMemo`。
+ *
  * 对齐 UX 设计 §6：
  * - 选中项目后加载 `TaskResponse[]`（含 parent_id/depth/is_blocked）
  * - 按列分组派生 + 看板树重建（parent_id → children）
