@@ -1587,14 +1587,28 @@ async fn set_workspace_prompt_file(
     Path(ws_id): Path<String>,
     Json(body): Json<crate::usecases::workspace_mutation::PromptFileBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.set_prompt_file(&ws_id, body)
-        .await
-        .map(|_| Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
-        .map_err(workspace_error_to_response)
+    let result = {
+        let svc = state.workspace_mutation.lock().await;
+        let svc = svc
+            .as_ref()
+            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        svc.set_prompt_file(&ws_id, body).await
+    };
+    match result {
+        Ok(_) => {
+            // The prompt_file field must be visible to the shared resolver
+            // immediately — `read_prompt_file` (used by
+            // `update_session_workspace_context` at session creation) reads
+            // from the in-memory resolver, not disk. Without this reload a
+            // freshly-set AGENTS.md/CLAUDE.md stays invisible until the
+            // runtime restarts (regression from adae896a, which moved
+            // set_prompt_file from Gateway's push_and_cache to Runtime
+            // without preserving the resolver refresh).
+            reload_workspace_resolver(&state);
+            Ok(Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
+        }
+        Err(e) => Err(workspace_error_to_response(e)),
+    }
 }
 
 /// Request body for `PUT /workspaces/{ws_id}/fs-watch`.
@@ -4785,6 +4799,121 @@ mod tests {
         assert!(
             guard.find_by_id("ws-created-via-http").is_some(),
             "resolver must see the newly-created workspace after reload (route_workspace_switch would otherwise reject it and fall back to __agent_home__)"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Regression test for adae896a: `PUT /workspaces/{ws_id}/prompt-file`
+    /// must reload the shared WorkspaceResolver after persisting, so a
+    /// freshly-set AGENTS.md/CLAUDE.md is visible to `read_prompt_file`
+    /// (session creation) without a runtime restart. Before the fix the
+    /// handler only wrote disk — the in-memory resolver kept
+    /// `prompt_file: None` and every new session injected nothing.
+    #[tokio::test]
+    async fn test_set_prompt_file_reloads_resolver() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-http-prompt-file-reload");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+        // The create handler validates `path` against the real fs.
+        let ws_path = temp_dir.join("my-workspace");
+        std::fs::create_dir_all(&ws_path).unwrap();
+        // The prompt file the desktop would inject.
+        std::fs::write(ws_path.join("AGENTS.md"), "# Test AGENTS.md\n").unwrap();
+
+        let workspace_resolver = new_test_workspace_resolver();
+
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+        let workspace_mutation_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+            temp_dir.clone(),
+        ))));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            workspace_mutation_slot,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            workspace_resolver.clone(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // Seed the workspace via POST (writes disk + reloads resolver).
+        let resp = client
+            .post(format!("{}/workspaces", base))
+            .json(&serde_json::json!({
+                "id": "ws-prompt-file",
+                "path": ws_path.to_string_lossy(),
+                "access": "read-write",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "POST /workspaces must succeed, got {}",
+            resp.status()
+        );
+
+        // Precondition: resolver knows the workspace but has no prompt_file.
+        {
+            let guard = workspace_resolver.read().unwrap();
+            let ws = guard
+                .find_by_id("ws-prompt-file")
+                .expect("workspace must exist after POST");
+            assert_eq!(
+                ws.prompt_file, None,
+                "fresh workspace must start without prompt_file"
+            );
+        }
+
+        // The desktop's setPromptFile call.
+        let resp = client
+            .put(format!("{}/workspaces/ws-prompt-file/prompt-file", base))
+            .json(&serde_json::json!({ "prompt_file": "AGENTS.md" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "PUT prompt-file must succeed, got {}",
+            resp.status()
+        );
+
+        // Postcondition: the shared resolver now sees the prompt_file —
+        // `read_prompt_file` at session creation would otherwise return None.
+        let guard = workspace_resolver.read().unwrap();
+        let ws = guard
+            .find_by_id("ws-prompt-file")
+            .expect("workspace must exist");
+        assert_eq!(
+            ws.prompt_file.as_deref(),
+            Some("AGENTS.md"),
+            "resolver must see the freshly-set prompt_file after reload (session creation reads the in-memory resolver, not disk)"
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();
