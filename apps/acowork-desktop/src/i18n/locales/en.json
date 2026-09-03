@@ -535,6 +535,8 @@
     "reset": "Reset",
     "temperature": "Temperature",
     "temperatureDesc": "Controls LLM output randomness. Lower = more deterministic, higher = more creative. Range 0.0–2.0. Leave empty to use package default.",
+    "compressionRatioThreshold": "Compression Ratio",
+    "compressionRatioThresholdDesc": "Saved share after context compaction. 90% = compress until 10% remains. Range 50%–95%, default 90%.",
     "resetTemperature": "Clear temperature override, revert to package default",
     "contextWindow": "Context Window",
     "contextWindowDesc": "Max context tokens per request. 0 or empty = no limit (use model's full window). Set a value to cap token usage for this agent.",
@@ -543,9 +545,7 @@
     "tokens": "tokens",
     "builtinTools": "Builtin Tools",
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
-    "noBuiltinTools": "No builtin tools available.",
-    "toolCompressionEnabled": "Tool Compression",
-    "toolCompressionEnabledDesc": "When enabled, the LLM can autonomously compress and retrieve tool results"
+    "noBuiltinTools": "No builtin tools available."
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",
@@ -733,9 +733,9 @@
     "debugRemoteDesc": "Debug requires a direct local connection to the Agent Runtime. The Desktop App and Gateway must run on the same machine.",
     "connectingDebug": "Connecting to debug server...",
     "debugConnectionLost": "Debug connection lost",
-    "agentNotDebugMode": "Agent is not in debug mode. Click Enable Debug to start debugging.",
-    "enableDebug": "Enable Debug",
-    "enablingDebug": "Enabling Debug...",
+    "debugSection": "Debug",
+    "enterDebug": "Enter Debug",
+    "enteringDebug": "Entering Debug...",
     "noAgentDebug": "No agent in debug mode",
     "iteration": "Iteration",
     "phase": "Phase",
@@ -779,7 +779,18 @@
     "statePaused": "Paused",
     "stateStepping": "Stepping",
     "stateIdle": "Idle",
-    "stateStopped": "Stopped"
+    "stateStopped": "Stopped",
+    "compressionHistory": "Compression History ({{count}})",
+    "loadingCompressionHistory": "Loading compression history...",
+    "compressionHistoryError": "Failed to load compression history",
+    "noCompressionEvents": "No compression events yet. Context compactions will appear here.",
+    "buttonRefresh": "Refresh",
+    "compTime": "Time",
+    "compLevel": "Level",
+    "compTokens": "Tokens",
+    "compRatio": "Ratio",
+    "compModel": "Model",
+    "compRange": "Range"
   },
   "fileEditor": {
     "emptyState": "Double-click a file in the workspace tree to open it",
@@ -890,7 +901,43 @@
     "deleteConfirmTitle": "Delete Model Files",
     "deleteConfirmMessage": "Delete downloaded files for '{{name}}'? You can re-download it later.",
     "deleteConfirm": "Delete",
-    "deleteActiveError": "Cannot delete the active model. Switch to another model first."
+    "deleteActiveError": "Cannot delete the active model. Switch to another model first.",
+    "localModels": "Local Models",
+    "cloudProviders": "Cloud Providers",
+    "addCustom": "Add",
+    "addCustomProvider": "Add Custom Provider",
+    "customProviderName": "Provider Name",
+    "customProviderNamePlaceholder": "e.g. My GPT Proxy",
+    "customProviderId": "Provider ID",
+    "customProviderIdPlaceholder": "e.g. custom-my-proxy",
+    "customProviderNameRequired": "Provider name must not be empty",
+    "customProviderIdRequired": "Provider ID must not be empty",
+    "customBaseUrl": "Base URL",
+    "customBaseUrlRequired": "Base URL must be an http(s) URL",
+    "optional": "Optional",
+    "apiKey": "API Key",
+    "customModels": "Models",
+    "customModelsRequired": "Add at least one model",
+    "customAddModel": "Add Model",
+    "customRemoveModel": "Remove Model",
+    "customModelIdPlaceholder": "Model ID (e.g. doubao-embedding)",
+    "customModelNamePlaceholder": "Model name (optional)",
+    "customModelDimensionsPlaceholder": "Dimensions (e.g. 1024)",
+    "customModelContextLengthPlaceholder": "Context length (optional)",
+    "customModelIdRequired": "Model ID must not be empty",
+    "duplicateProviderId": "Provider ID '{{id}}' already exists",
+    "duplicateModelId": "Duplicate model ID '{{id}}'",
+    "dimensionMustBePositive": "Model '{{id}}' must have dimensions > 0",
+    "saving": "Saving...",
+    "cloudActive": "Cloud Active",
+    "cloudNoProviders": "No cloud providers available",
+    "apiKeyMissing": "API key not set",
+    "apiKeyRequired": "Set an API key first",
+    "setApiKey": "Set API Key",
+    "changeKey": "Change Key",
+    "deleteKey": "Delete Key",
+    "save": "Save",
+    "cancel": "Cancel"
   },
   "memoryPanel": {
     "consolidate": "Consolidate",
@@ -1063,8 +1110,11 @@
     "title": "Context summary",
     "empty": "(empty summary)",
     "model": "model: {{model}}",
-    "keepLastRounds": "keep last rounds: {{count}}",
+    "level": "compression level: {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "Context overflow: model capability info is missing, so context usage cannot be computed accurately. Check that the model name matches exactly (case-sensitive)."
   },
   "harnessLsp": {
     "tabLsp": "LSP",
@@ -1214,5 +1264,19 @@
       "confirm": "Reject"
     },
     "offlineHint": "PM service offline — board is read-only"
+  },  "prompts": {
+    "badgeBuiltin": "built-in",
+    "badgeMissing": "missing",
+    "badgeOverridden": "overridden",
+    "badgeRequired": "required",
+    "error": "Failed: {{message}}",
+    "help": "Click an entry to edit; click Reload to apply.",
+    "loading": "Loading prompts...",
+    "openAria": "Open prompt {{name}} in editor",
+    "reload": "Refresh",
+    "reloadAria": "Reload all prompts from disk",
+    "reloadOk": "Reload complete — 8 overrides refreshed and the main-dialog system prompt synced.",
+    "reloadSystemPromptFailed": "8 overrides refreshed, but the main-dialog system prompt rebuild failed — system.md changes need an agent restart.",
+    "title": "PROMPT"
   }
 }

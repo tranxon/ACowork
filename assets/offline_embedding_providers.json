@@ -1,0 +1,43 @@
+{
+  "volcengine": {
+    "id": "volcengine",
+    "name": "字节火山方舟",
+    "api": "https://ark.cn-beijing.volces.com/api/v3",
+    "protocol": "openai-compatible",
+    "env": ["ARK_API_KEY"],
+    "doc": "https://www.volcengine.com/docs/82379/1390868",
+    "models": {
+      "doubao-embedding-vision": {
+        "id": "doubao-embedding-vision",
+        "name": "Doubao Embedding Vision",
+        "dimensions": 2048,
+        "context_length": 8192,
+        "embedding_modalities": ["text", "image"]
+      }
+    }
+  },
+  "dashscope": {
+    "id": "dashscope",
+    "name": "阿里百炼 (DashScope)",
+    "api": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "protocol": "openai-compatible",
+    "env": ["DASHSCOPE_API_KEY"],
+    "doc": "https://help.aliyun.com/zh/model-studio/developer-reference/text-embedding-api-v3",
+    "models": {
+      "text-embedding-v3": {
+        "id": "text-embedding-v3",
+        "name": "Text Embedding v3",
+        "dimensions": 1024,
+        "context_length": 8192,
+        "embedding_modalities": ["text"]
+      },
+      "text-embedding-v4": {
+        "id": "text-embedding-v4",
+        "name": "Text Embedding v4",
+        "dimensions": 1024,
+        "context_length": 8192,
+        "embedding_modalities": ["text"]
+      }
+    }
+  }
+}

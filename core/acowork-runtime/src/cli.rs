@@ -164,8 +164,7 @@ impl Cli {
     /// Returns a reload handle that allows dynamic log level changes
     /// at runtime (e.g. when Gateway pushes LogLevelUpdate).
     fn init_tracing(&self) -> Option<LogReloadHandle> {
-        let env_filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&self.log_level));
+        let env_filter = acowork_core::logging::build_env_filter(&self.log_level);
 
         // Ensure the log directory exists under work_dir
         let log_dir = std::path::Path::new(&self.work_dir).join("logs");
@@ -282,6 +281,23 @@ async fn async_main(
         let handles =
             phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await?;
 
+        // ADR-065 §2.5/§5.4: in never-sleep mode the Runtime is a resident
+        // process with no parent to restart it after an OS sleep/wake, so
+        // it must recover its stale MQTT connection by itself. Spawn the
+        // shared power-probe loop (2 s interval, same as Desktop / Node)
+        // which force-restarts the MQTT client on genuine sleep detection.
+        // Standalone mode has no MQTT client, so no probe is needed there.
+        if let Some(mqtt_client) = agent_ctx.mqtt_client.clone() {
+            tokio::spawn(async move {
+                acowork_mqtt_session::power::run_power_probe_loop(
+                    move || mqtt_client.force_reconnect(),
+                    acowork_mqtt_session::power::POWER_PROBE_INTERVAL,
+                    "runtime",
+                )
+                .await;
+            });
+        }
+
         // Phase D: announce ready + run Gateway message loop.
         phase_d_run(&mut agent_ctx, session_ctx, handles, &config, log_reload_handle).await
     } else {
@@ -306,7 +322,29 @@ async fn async_main(
         // The value was already loaded once in Phase A (see
         // `AgentBootContext::compaction_prompt`), so both modes resolve the
         // same package declaration.
-        agent_loop.core.compaction_prompt = agent_ctx.compaction_prompt.clone();
+        //
+        // ADR-063 §3.7.5: wrap in `Arc<RwLock<Option<String>>>` for the
+        // same L2 reload reasons documented in `session_init.rs`.
+        *agent_loop.core.compaction_prompt.write().unwrap() =
+            agent_ctx.compaction_prompt.clone();
+
+        // ADR-063: 7 additional overrides. Mirror the session_init.rs
+        // Phase B injection. Both Gateway and Standalone modes resolve
+        // to the same package declaration because Phase A loaded once.
+        *agent_loop.core.search_prompt.write().unwrap() = agent_ctx.search_prompt.clone();
+        *agent_loop.core.compact_template.write().unwrap() =
+            agent_ctx.compact_template.clone();
+        *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
+        *agent_loop.core.extraction_prompt.write().unwrap() =
+            agent_ctx.extraction_prompt.clone();
+        *agent_loop.core
+            .conflict_classification_prompt
+            .write()
+            .unwrap() = agent_ctx.conflict_classification_prompt.clone();
+        *agent_loop.core.generalization_prompt.write().unwrap() =
+            agent_ctx.generalization_prompt.clone();
+        *agent_loop.core.abstention_prompt.write().unwrap() =
+            agent_ctx.abstention_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 

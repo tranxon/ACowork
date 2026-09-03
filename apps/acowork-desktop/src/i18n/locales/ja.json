@@ -425,8 +425,8 @@
     "resetToDefaults": "デフォルトに戻す",
     "resetAgentSetup": "Agent設定をリセット",
     "reset": "リセット",
-    "toolCompressionEnabled": "ツール圧縮",
-    "toolCompressionEnabledDesc": "有効にすると、LLMが自律的にツール結果を圧縮・取得できます"
+    "compressionRatioThreshold": "圧縮率しきい値",
+    "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。"
   },
   "harness": {
     "tabProviders": "プロバイダー",
@@ -597,9 +597,9 @@
     "debugRemoteDesc": "デバッグにはAgentランタイムへの直接ローカル接続が必要です。デスクトップアプリとゲートウェイは同じマシン上で実行する必要があります。",
     "connectingDebug": "デバッグサーバーに接続中...",
     "debugConnectionLost": "デバッグ接続が切断されました",
-    "agentNotDebugMode": "Agentはデバッグモードではありません。「デバッグを有効化」をクリックすると、Agentを再起動せずにデバッグを開始できます。",
-    "enableDebug": "デバッグを有効化",
-    "enablingDebug": "デバッグを有効化中...",
+    "debugSection": "デバッグ",
+    "enterDebug": "デバッグに入る",
+    "enteringDebug": "デバッグに入る...",
     "noAgentDebug": "デバッグモードのAgentはありません",
     "iteration": "反復",
     "phase": "フェーズ",
@@ -641,7 +641,18 @@
     "statePaused": "一時停止中",
     "stateStepping": "ステップ中",
     "stateIdle": "アイドル",
-    "stateStopped": "停止済み"
+    "stateStopped": "停止済み",
+    "compressionHistory": "圧縮履歴（{{count}}）",
+    "loadingCompressionHistory": "圧縮履歴を読み込み中...",
+    "compressionHistoryError": "圧縮履歴の読み込みに失敗しました",
+    "noCompressionEvents": "圧縮イベントはまだありません。コンテキスト圧縮が発生するとここに表示されます。",
+    "buttonRefresh": "更新",
+    "compTime": "時刻",
+    "compLevel": "レベル",
+    "compTokens": "トークン数",
+    "compRatio": "圧縮率",
+    "compModel": "モデル",
+    "compRange": "対象範囲"
   },
   "workspace": {
     "delete": "削除",
@@ -793,7 +804,43 @@
     "deleteConfirmTitle": "モデルファイルを削除",
     "deleteConfirmMessage": "「{{name}}」のダウンロード済みファイルを削除しますか？後で再ダウンロードできます。",
     "deleteConfirm": "削除",
-    "deleteActiveError": "現在使用中のモデルは削除できません。先に別のモデルに切り替えてください。"
+    "deleteActiveError": "現在使用中のモデルは削除できません。先に別のモデルに切り替えてください。",
+    "localModels": "ローカルモデル",
+    "cloudProviders": "クラウドプロバイダー",
+    "addCustom": "追加",
+    "addCustomProvider": "カスタムプロバイダーを追加",
+    "customProviderName": "プロバイダー名",
+    "customProviderNamePlaceholder": "例：My GPT Proxy",
+    "customProviderId": "プロバイダーID",
+    "customProviderIdPlaceholder": "例：custom-my-proxy",
+    "customProviderNameRequired": "プロバイダー名は必須です",
+    "customProviderIdRequired": "プロバイダーIDは必須です",
+    "customBaseUrl": "Base URL",
+    "customBaseUrlRequired": "Base URL は http(s):// で始まる必要があります",
+    "optional": "任意",
+    "apiKey": "APIキー",
+    "customModels": "モデル",
+    "customModelsRequired": "少なくとも1つのモデルを追加してください",
+    "customAddModel": "モデルを追加",
+    "customRemoveModel": "モデルを削除",
+    "customModelIdPlaceholder": "モデルID（例：doubao-embedding）",
+    "customModelNamePlaceholder": "モデル名（任意）",
+    "customModelDimensionsPlaceholder": "次元数（例：1024）",
+    "customModelContextLengthPlaceholder": "コンテキスト長（任意）",
+    "customModelIdRequired": "モデルIDは必須です",
+    "duplicateProviderId": "プロバイダーID「{{id}}」は既に存在します",
+    "duplicateModelId": "モデルID「{{id}}」が重複しています",
+    "dimensionMustBePositive": "モデル「{{id}}」の次元数は1以上である必要があります",
+    "saving": "保存中...",
+    "cloudActive": "クラウド使用中",
+    "cloudNoProviders": "クラウドプロバイダーはありません",
+    "apiKeyMissing": "APIキー未設定",
+    "apiKeyRequired": "先にAPIキーを設定してください",
+    "setApiKey": "APIキーを設定",
+    "changeKey": "キーを変更",
+    "deleteKey": "キーを削除",
+    "save": "保存",
+    "cancel": "キャンセル"
   },
   "memoryPanel": {
     "consolidate": "ノードを統合",
@@ -987,8 +1034,11 @@
     "title": "コンテキスト要約",
     "empty": "（空の要約）",
     "model": "モデル: {{model}}",
-    "keepLastRounds": "直近 {{count}} ラウンドを保持",
+    "level": "圧縮レベル {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "コンテキストオーバーフロー：モデル能力情報が見つからないため、コンテキスト使用量を正確に計算できません。モデル名が正確であるか（大文字小文字を区別）を確認してください。"
   },
   "codeBlock": {
     "ariaLabelCopy": "コードをコピー"
@@ -1210,5 +1260,19 @@
       "confirm": "却下"
     },
     "offlineHint": "PM service offline — board is read-only"
+  },  "prompts": {
+    "badgeBuiltin": "組み込み",
+    "badgeMissing": "欠落",
+    "badgeOverridden": "オーバーライド済み",
+    "badgeRequired": "必須",
+    "error": "読み込み失敗：{{message}}",
+    "help": "クリックして編集；保存後に「更新」で反映。",
+    "loading": "プロンプトを読み込み中...",
+    "openAria": "エディタでプロンプト {{name}} を開く",
+    "reload": "更新",
+    "reloadAria": "ディスクからすべてのプロンプトを再読み込み",
+    "reloadOk": "再読み込み完了 — 8 件のオーバーライドを更新し、メイン対話 system prompt を同期しました。",
+    "reloadSystemPromptFailed": "8 件のオーバーライドは更新しましたが、メイン対話 system prompt の再構築に失敗 — system.md の変更は Agent 再起動後に反映されます。",
+    "title": "PROMPT"
   }
 }

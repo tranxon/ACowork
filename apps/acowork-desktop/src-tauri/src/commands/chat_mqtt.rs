@@ -525,10 +525,6 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "reconnecting": true,
                     "reason": reason,
                 }),
-                MqttStatus::Disconnected { reason } => serde_json::json!({
-                    "connected": false,
-                    "reason": reason,
-                }),
             };
             if let Err(e) = app.emit("mqtt-status", payload) {
                 tracing::warn!(error = %e, "failed to emit mqtt-status");
@@ -536,13 +532,13 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         },
     ).await?;
 
-    // Subscribe to ALL agent topics (lifecycle + session messages).
-    // `subscribe_agent_lifecycle` now subscribes to ALL_TOPIC_FILTERS
-    // which includes `messages/#` – this ensures the initial
-    // subscription set matches exactly what `resubscribe_all` restores
-    // on reconnect, eliminating the gap that previously caused silent
-    // event loss after a reconnect.
-    client.subscribe_agent_lifecycle().await?;
+    // ADR-065 Step 4: subscriptions are now driven by
+    // `DesktopHandler::on_connack` (re-applied on every (re)connect),
+    // so no explicit subscribe call is needed here. The handler covers
+    // every entry in ALL_TOPIC_FILTERS (lifecycle + session messages),
+    // which guarantees the initial subscription set matches the
+    // post-reconnect set — eliminating the gap that previously caused
+    // silent event loss after a reconnect.
 
     let shared = Arc::new(tokio::sync::Mutex::new(client));
     *guard = Some(shared);
@@ -620,48 +616,6 @@ pub async fn get_mqtt_status(
     let state = client.session_state();
     Ok(mqtt_status_to_payload(&state))
 }
-
-/// Subscribe to session events for a specific agent session.
-///
-/// Called when the user enters the chat view for a specific session.
-/// Use this to avoid bandwidth waste from other sessions.
-#[allow(dead_code)]
-#[tauri::command]
-pub async fn mqtt_subscribe_agent_session(
-    agent_id: String,
-    session_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let guard = state.mqtt_client.lock().await;
-    let client = guard
-        .as_ref()
-        .ok_or_else(|| "MQTT client not connected".to_string())?;
-
-    let client = client.lock().await;
-    client.subscribe_agent_session(&agent_id, &session_id).await
-}
-
-/// Unsubscribe from a specific agent session's events.
-///
-/// Called when switching away from a session to stop receiving stale events.
-#[allow(dead_code)]
-#[tauri::command]
-pub async fn mqtt_unsubscribe_agent_session(
-    agent_id: String,
-    session_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let guard = state.mqtt_client.lock().await;
-    let client = guard
-        .as_ref()
-        .ok_or_else(|| "MQTT client not connected".to_string())?;
-
-    let client = client.lock().await;
-    client.unsubscribe_agent_session(&agent_id, &session_id).await
-}
-
-/// Publish a control command via MQTT (protobuf-encoded DataEnvelope).
-///
 /// ADR-034 Phase 5: All 17 control commands supported via MQTT.
 /// No HTTP fallback for any control command.
 ///

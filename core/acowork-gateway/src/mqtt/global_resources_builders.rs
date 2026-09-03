@@ -217,7 +217,7 @@ pub(crate) fn build_available_searches(gw: &GatewayState) -> AvailableSearches {
 }
 
 /// Build `AvailableEmbeddingModels` from the GatewayState resource cache
-/// + embed process state.
+/// + embed process state + active cloud embedding selection (Vault).
 pub(crate) fn build_available_embedding_models(gw: &GatewayState) -> AvailableEmbeddingModels {
     let cache = &gw.resource_cache.embedding_models;
     let models: Vec<EmbeddingModelRef> = cache
@@ -250,12 +250,27 @@ pub(crate) fn build_available_embedding_models(gw: &GatewayState) -> AvailableEm
         _ => (String::new(), 0, String::new()),
     };
 
+    // Cloud embedding selection (S1-5b): read active selection from disk +
+    // decrypt the API key from the Vault. When the snapshot is empty, the
+    // proto defaults to empty strings and Runtime continues with local
+    // ONNX.
+    let data_dir: Option<&std::path::Path> = gw
+        .config
+        .as_ref()
+        .map(|c| std::path::Path::new(&c.data_dir));
+    let cloud = data_dir
+        .map(|dir| crate::embedding_providers::resolve_active_cloud_embedding(dir, &gw.vault))
+        .unwrap_or_default();
+
     AvailableEmbeddingModels {
         version: cache.version,
         models,
         active_model_id,
         active_dimension,
         endpoint,
+        active_provider_id: cloud.active_provider_id,
+        active_api_key: cloud.active_api_key,
+        active_base_url: cloud.active_base_url,
     }
 }
 

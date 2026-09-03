@@ -14,48 +14,14 @@
 //!   broker drops subscriptions on disconnect).
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use rumqttc::{AsyncClient, ConnectionError, ConnectReturnCode, Event, Incoming, LastWill, MqttOptions, QoS};
+use rumqttc::{AsyncClient, LastWill, QoS};
 use tokio::sync::Mutex;
 
 use acowork_core::mqtt_proto::DataEnvelope;
 use acowork_mqtt_session::{
-    classify as classify_err, ErrorDescriptor, ErrorKind, ErrClass, RefusedReason, ReconnectPolicy,
-    SessionState, SessionStateTx,
+    ErrClass, MqttClient, MqttClientConfig, MqttClientError, MqttClientHandler,
 };
-
-/// Watchdog timeout for `eventloop.poll()`. 5 s matches the desktop
-/// client (28b1aec8): the broker keepalive is 5 s, so a healthy poll
-/// returns at least one event per interval; anything silent for 5 s is
-/// a half-dead socket (e.g. after OS sleep/wake) and must be cut
-/// short immediately. The previous 4 × keepalive (20 s) is why the
-/// node took 20 s to recover after every wake.
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Sleep for `dur` unless a force-restart is requested, in which case
-/// return `true` so the caller can break to the soft-restart path.
-///
-/// The force-restart signal must be able to interrupt a backoff
-/// sleep, not only `poll()`: after a system wake the poll task often
-/// returns a fatal IO error (10053) instead of hanging, and an
-/// uninterruptible 60 s fatal backoff leaves the node offline for the
-/// whole minute (desktop-app wake incident, 2026-08 — recovery took
-/// exactly 60 s because `sleep(60s).await` sat outside any `select!`,
-/// so the wake-triggered force-restart could not break it).
-async fn interruptible_backoff(
-    dur: Duration,
-    force_restart: &tokio::sync::Notify,
-    kind: &str,
-) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(dur) => false,
-        _ = force_restart.notified() => {
-            tracing::info!(kind, "Force-restart requested during backoff");
-            true
-        }
-    }
-}
 
 /// Error type for the node MQTT client.
 #[derive(Debug, thiserror::Error)]
@@ -68,46 +34,13 @@ pub enum NodeMqttClientError {
     Subscribe(String),
 }
 
-/// Adapter from rumqttc 0.25 errors to the shared
-/// `acowork-mqtt-session` descriptor (same mapping as the Gateway
-/// client).
-fn error_descriptor_from_rumqttc(err: &ConnectionError) -> ErrorDescriptor {
-    match err {
-        ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout => ErrorDescriptor {
-            kind: ErrorKind::Timeout,
-            io_kind: None,
-        },
-        ConnectionError::Io(io_err) => ErrorDescriptor {
-            kind: ErrorKind::Io,
-            io_kind: Some(io_err.kind()),
-        },
-        ConnectionError::ConnectionRefused(code) => ErrorDescriptor {
-            kind: ErrorKind::ConnectionRefused(match code {
-                ConnectReturnCode::BadUserNamePassword => RefusedReason::BadUserNamePassword,
-                ConnectReturnCode::NotAuthorized => RefusedReason::NotAuthorized,
-                ConnectReturnCode::RefusedProtocolVersion => RefusedReason::RefusedProtocolVersion,
-                ConnectReturnCode::BadClientId => RefusedReason::BadClientId,
-                ConnectReturnCode::ServiceUnavailable => RefusedReason::ServiceUnavailable,
-                _ => RefusedReason::Unknown,
-            }),
-            io_kind: None,
-        },
-        ConnectionError::MqttState(_) => ErrorDescriptor {
-            kind: ErrorKind::MqttState,
-            io_kind: None,
-        },
-        ConnectionError::NotConnAck(_) => ErrorDescriptor {
-            kind: ErrorKind::NotConnAck,
-            io_kind: None,
-        },
-        ConnectionError::RequestsDone => ErrorDescriptor {
-            kind: ErrorKind::RequestsDone,
-            io_kind: None,
-        },
-        _ => ErrorDescriptor {
-            kind: ErrorKind::Other,
-            io_kind: None,
-        },
+impl From<MqttClientError> for NodeMqttClientError {
+    fn from(e: MqttClientError) -> Self {
+        match e {
+            MqttClientError::Connection(s) => NodeMqttClientError::Connection(s),
+            MqttClientError::Publish(s) => NodeMqttClientError::Publish(s),
+            MqttClientError::Subscribe(s) => NodeMqttClientError::Subscribe(s),
+        }
     }
 }
 
@@ -119,25 +52,87 @@ pub type NodeMqttMessageCallback = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
 /// publish retained status/info + re-subscribe control filters.
 pub type NodeMqttBootstrapCallback = Arc<dyn Fn(AsyncClient) + Send + Sync>;
 
-/// The Node Agent's MQTT client. The event loop is polled in a
-/// background task that survives reconnects and soft-restarts.
+/// The Node Agent's MQTT client.
+///
+/// Wraps the shared [`MqttClient`] (ADR-065): the entire poll loop —
+/// error classification, backoff, soft-restart, watchdog and wake
+/// recovery — lives in `acowork-mqtt-session`. This struct only adds
+/// the Node's entity differences via [`NodeHandler`].
 #[derive(Clone)]
 pub struct NodeMqttClient {
-    shared_client: Arc<Mutex<AsyncClient>>,
-    /// Signal to force a soft-restart of the MQTT event loop.
-    ///
-    /// When [`NodeMqttClient::force_reconnect`] is called, the poll
-    /// task receives this notification, breaks out of its inner
-    /// polling loop, and recreates the `AsyncClient` + `EventLoop`
-    /// from scratch — exactly the same path as the automatic
-    /// watchdog-triggered soft-restart (e.g. after a system
-    /// sleep/wake the stale TCP connection can stall `poll()`).
-    force_restart: Arc<tokio::sync::Notify>,
-    _eventloop_guard: Arc<EventLoopGuard>,
+    inner: MqttClient<NodeHandler>,
 }
 
-struct EventLoopGuard {
-    _task: tokio::task::JoinHandle<()>,
+/// Node entity handler for the shared [`MqttClient`] (ADR-065 Step 4).
+///
+/// Implements the Node's per-process differences: message routing,
+/// bootstrap on every ConnAck, retained NodeReady cleanup on
+/// disconnect/error, and dynamic CONNECT credentials re-read on every
+/// soft-restart (enrollment token → node_token swap, ADR-055 Phase 5a).
+struct NodeHandler {
+    /// CONNECT username (protocol §8.5: `node:{node_id}`).
+    client_id: String,
+    /// Live CONNECT password slot, re-read on every soft-restart.
+    credentials: SharedNodeMqttCredentials,
+    /// ADR-059 §7.2: retained NodeReady topic to clear on
+    /// disconnect/error (empty payload = deleted). `None` for the
+    /// one-shot enrollment/rename/leave paths that never announced it.
+    ready_topic: Option<String>,
+    /// Bootstrap callback re-run on every ConnAck.
+    bootstrap: NodeMqttBootstrapCallback,
+    /// Message callback for incoming publishes.
+    message_callback: Option<NodeMqttMessageCallback>,
+}
+
+#[async_trait::async_trait]
+impl MqttClientHandler for NodeHandler {
+    async fn on_publish(&self, topic: &str, payload: &[u8]) {
+        if let Some(ref cb) = self.message_callback {
+            cb(topic.to_string(), payload.to_vec());
+        }
+    }
+
+    async fn on_connack(&self, client: &AsyncClient) -> Result<(), String> {
+        tracing::info!(
+            node_client_id = %self.client_id,
+            "Node MQTT (re)connected — running bootstrap"
+        );
+        (self.bootstrap)(client.clone());
+        Ok(())
+    }
+
+    async fn on_disconnect(&self, client: &AsyncClient) {
+        // ADR-059 §7.2: on any observed disconnect the poll task clears
+        // the retained NodeReady snapshot (empty payload = deleted) so
+        // the Gateway demotes this node back to not-ready even when the
+        // LWT misses (e.g. broker restart without the LWT firing).
+        if let Some(ref topic) = self.ready_topic {
+            let _ = client
+                .publish(topic, QoS::AtLeastOnce, true, Vec::new())
+                .await;
+        }
+    }
+
+    async fn on_error(&self, client: &AsyncClient, _class: ErrClass, _error: &str) {
+        // ADR-059 §7.2: connection-level failure also clears the
+        // retained NodeReady.
+        if let Some(ref topic) = self.ready_topic {
+            let _ = client
+                .publish(topic, QoS::AtLeastOnce, true, Vec::new())
+                .await;
+        }
+    }
+
+    async fn on_soft_restart(&self) -> Option<(String, String)> {
+        // Re-read the live credential slot so a reconnect after the
+        // enrollment reply presents the node_token, never the (now
+        // consumed) enrollment token.
+        self.credentials
+            .lock()
+            .await
+            .as_deref()
+            .map(|p| (self.client_id.clone(), p.to_string()))
+    }
 }
 
 /// Live CONNECT credential slot (ADR-055 Phase 5a).
@@ -176,201 +171,55 @@ impl NodeMqttClient {
         let client_id = acowork_core::node::node_client_id(node_id);
         let status_topic = acowork_core::node::node_status_topic(node_id);
 
-        let mut options = MqttOptions::new(client_id.clone(), host, port);
-        options.set_keep_alive(Duration::from_secs(5));
-        options.set_clean_session(true);
-        if let Some(password) = credentials.lock().await.as_deref() {
-            options.set_credentials(client_id.clone(), password);
-        }
-        let pkt_size = acowork_core::defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
-        options.set_max_packet_size(pkt_size, pkt_size);
-
         // LWT: broker publishes retained "offline" if the node dies
         // ungracefully (§6.2).
         let will = LastWill::new(&status_topic, "offline", QoS::AtLeastOnce, true);
-        options.set_last_will(will);
 
-        let (client, mut eventloop) = AsyncClient::new(options.clone(), 50);
-        let shared_client: Arc<Mutex<AsyncClient>> = Arc::new(Mutex::new(client));
+        // Initial CONNECT credentials (username `node:{node_id}` +
+        // current password from the live slot). The slot is re-read on
+        // every soft-restart via `NodeHandler::on_soft_restart`.
+        let initial_credentials = credentials
+            .lock()
+            .await
+            .as_deref()
+            .map(|p| (client_id.clone(), p.to_string()));
 
-        let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
-        let poll_state_tx = state_tx.clone();
-        let reconnect_policy = ReconnectPolicy::default();
+        let config = MqttClientConfig {
+            client_id: client_id.clone(),
+            host: host.to_string(),
+            port,
+            credentials: initial_credentials,
+            last_will: Some(will),
+            max_packet_size: acowork_core::defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,
+            queue_capacity: 50,
+        };
 
-        let task_shared_client = Arc::clone(&shared_client);
-        let task_options = options;
-        let task_credentials = Arc::clone(&credentials);
-        let task_bootstrap = bootstrap;
-        let task_callback = message_callback;
-        // ADR-059 §7.2: on any observed disconnect the poll task clears
-        // the retained NodeReady snapshot (empty payload = deleted) so
-        // the Gateway demotes this node back to not-ready even when the
-        // LWT misses (e.g. broker restart without the LWT firing).
-        // Best-effort: a hard network drop may queue the clear until
-        // the reconnect, where the bootstrap's fresh NodeReady publish
-        // follows in order — the Gateway converges on the newest state.
-        let task_ready_topic = ready_topic;
-        let task_force_restart = Arc::new(tokio::sync::Notify::new());
-        let force_restart = Arc::clone(&task_force_restart);
+        let handler = NodeHandler {
+            client_id,
+            credentials,
+            ready_topic,
+            bootstrap,
+            message_callback,
+        };
 
-        let poll_task = tokio::spawn(async move {
-            loop {
-                let mut consecutive_failures: u32 = 0;
-                let mut fatal_streak: u32 = 0;
+        let inner = MqttClient::connect(config, handler, None).await?;
 
-                loop {
-                    tokio::select! {
-                        biased;
-                        // Mirror desktop (apps/acowork-desktop/src-tauri/src/
-                        // mqtt_client.rs:399): favour the force-restart
-                        // signal so a stored notify permit always wins on
-                        // the very next poll() return, instead of waiting
-                        // for an event-storm iteration order to land.
-                        _ = task_force_restart.notified() => {
-                            // External recovery trigger (system sleep/wake):
-                            // the broker already timed the stale connection
-                            // out while the machine slept, so reconnect now
-                            // instead of waiting for the poll watchdog.
-                            tracing::info!(
-                                "Node MQTT force-restart requested (e.g. system wake)"
-                            );
-                            poll_state_tx.set(SessionState::Reconnecting);
-                            break;
-                        }
-                        event_result = eventloop.poll() => {
-                            match event_result {
-                                Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                                    if let Some(ref cb) = task_callback {
-                                        cb(publish.topic, publish.payload.to_vec());
-                                    }
-                                }
-                                Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                                    tracing::info!(
-                                        node_client_id = %task_options.client_id(),
-                                        "Node MQTT (re)connected — running bootstrap"
-                                    );
-                                    poll_state_tx.set(SessionState::Connected);
-                                    consecutive_failures = 0;
-                                    fatal_streak = 0;
-
-                                    let poll_client = task_shared_client.lock().await.clone();
-                                    task_bootstrap(poll_client);
-                                }
-                                Ok(Event::Incoming(Incoming::Disconnect)) => {
-                                    poll_state_tx.set(SessionState::Reconnecting);
-                                    if let Some(ref topic) = task_ready_topic {
-                                        let _ = task_shared_client
-                                            .lock()
-                                            .await
-                                            .publish(topic, QoS::AtLeastOnce, true, Vec::new())
-                                            .await;
-                                    }
-                                }
-                                Ok(_) => continue,
-                                Err(e) => {
-                                    let desc = error_descriptor_from_rumqttc(&e);
-                                    let class: ErrClass = classify_err(&desc);
-
-                                    tracing::warn!(
-                                        error = %e,
-                                        err_class = class.label(),
-                                        consecutive_failures,
-                                        "Node MQTT event loop error"
-                                    );
-
-                                    // ADR-059 §7.2: connection-level failure
-                                    // also clears the retained NodeReady.
-                                    if let Some(ref topic) = task_ready_topic {
-                                        let _ = task_shared_client
-                                            .lock()
-                                            .await
-                                            .publish(topic, QoS::AtLeastOnce, true, Vec::new())
-                                            .await;
-                                    }
-
-                                    if class.is_fatal() {
-                                        fatal_streak += 1;
-                                        poll_state_tx.set(SessionState::Reconnecting);
-                                        if fatal_streak >= 3 {
-                                            tracing::warn!(
-                                                fatal_streak,
-                                                "3 consecutive fatal errors — soft-restarting node MQTT client"
-                                            );
-                                            break;
-                                        }
-                                        if interruptible_backoff(
-                                            Duration::from_secs(60),
-                                            &task_force_restart,
-                                            "fatal",
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
-                                    } else {
-                                        poll_state_tx.set(SessionState::Reconnecting);
-                                        consecutive_failures += 1;
-                                        if let Some(backoff) =
-                                            reconnect_policy.backoff(class, consecutive_failures - 1)
-                                            && interruptible_backoff(
-                                                backoff.duration,
-                                                &task_force_restart,
-                                                "retryable",
-                                            )
-                                            .await
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        _ = tokio::time::sleep(POLL_WATCHDOG_TIMEOUT) => {
-                            tracing::warn!(
-                                timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
-                                "Node MQTT poll() watchdog timeout — forcing soft-restart"
-                            );
-                            poll_state_tx.set(SessionState::Reconnecting);
-                            break;
-                        }
-                    }
-                }
-
-                // Soft-restart: recreate client + EventLoop. The
-                // credentials are re-read from the live slot so a
-                // reconnect after the enrollment reply presents the
-                // node_token, never the (now consumed) enrollment token.
-                poll_state_tx.set(SessionState::Connecting);
-                let mut fresh_options = task_options.clone();
-                if let Some(password) = task_credentials.lock().await.as_deref() {
-                    fresh_options
-                        .set_credentials(task_options.client_id().to_string(), password);
-                }
-                let (new_client, new_eventloop) = AsyncClient::new(fresh_options, 50);
-                *task_shared_client.lock().await = new_client;
-                eventloop = new_eventloop;
-                tracing::info!("Node MQTT client soft-restarted with fresh EventLoop");
-            }
-        });
-
-        Ok(Self {
-            shared_client,
-            force_restart,
-            _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
-        })
+        Ok(Self { inner })
     }
 
+    /// Force a soft-restart of the MQTT event loop.
+    ///
     /// Force a soft-restart of the MQTT event loop.
     ///
     /// Signals the background poll task to drop the current `EventLoop`
     /// and create a fresh `AsyncClient` + `EventLoop` pair — the same
     /// recovery path as the automatic watchdog soft-restart, but
     /// triggered externally (system sleep/wake detection, diagnostics).
-    /// A pending notification is stored if nobody is waiting yet, so a
-    /// call right after a connect is not lost.
+    /// Uses the shared `ForceRestart` (AtomicBool + Notify): a pending
+    /// request is stored if nobody is waiting yet, so a call right after
+    /// a connect is not lost.
     pub fn force_reconnect(&self) {
-        self.force_restart.notify_one();
+        self.inner.force_reconnect();
     }
 
     /// Publish a protobuf `DataEnvelope` payload.
@@ -393,12 +242,7 @@ impl NodeMqttClient {
         qos: QoS,
         retain: bool,
     ) -> Result<(), NodeMqttClientError> {
-        self.shared_client
-            .lock()
-            .await
-            .publish(topic, qos, retain, payload)
-            .await
-            .map_err(|e| NodeMqttClientError::Publish(format!("'{topic}': {e}")))?;
+        self.inner.publish_raw(topic, payload, qos, retain).await?;
         Ok(())
     }
 
@@ -418,45 +262,60 @@ impl NodeMqttClient {
     /// soft-restart). Used by the event dispatcher so replies always
     /// go through the CURRENT connection.
     pub fn shared_handle(&self) -> Arc<Mutex<AsyncClient>> {
-        Arc::clone(&self.shared_client)
+        self.inner.shared_handle()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::interruptible_backoff;
+    use super::*;
+    use acowork_mqtt_session::ForceRestart;
     use std::sync::Arc;
     use std::time::Duration;
 
     #[tokio::test]
     async fn interruptible_backoff_returns_false_after_duration() {
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let interrupted =
-            interruptible_backoff(Duration::from_millis(20), &notify, "test").await;
+        let fr = Arc::new(ForceRestart::new());
+        let interrupted = fr.interruptible_backoff(Duration::from_millis(20), "test").await;
         assert!(!interrupted, "must not report interrupted when no signal arrived");
     }
 
     #[tokio::test]
-    async fn interruptible_backoff_returns_true_on_notify() {
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let notify2 = Arc::clone(&notify);
+    async fn interruptible_backoff_returns_true_on_request() {
+        let fr = Arc::new(ForceRestart::new());
+        let fr2 = Arc::clone(&fr);
         // Wake the helper while it is still inside the sleep future,
         // i.e. NOT during a poll() iteration. Regression for the
         // 2026-08 wake incident where bare `sleep(60s).await` sat
         // outside any `select!` and the notify could not break it.
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            notify2.notify_one();
+            fr2.request();
         });
-        let interrupted = interruptible_backoff(
-            Duration::from_secs(60),
-            &notify,
-            "test",
-        )
-        .await;
+        let interrupted = fr.interruptible_backoff(Duration::from_secs(60), "test").await;
         assert!(
             interrupted,
-            "must return true when notified before duration elapsed"
+            "must return true when requested before duration elapsed"
         );
+    }
+
+    /// ADR-065 §7 acceptance #3 (Node path): the shared
+    /// `From<&ConnectionError>` adapter must classify the wake-time
+    /// `MqttState(StateError::Io(ECONNRESET))` shape as Transient, NOT
+    /// fatal E4 ConfigError. This is the exact bug that made the Node
+    /// wait out the 60 s fatal backoff after every OS wake (2026-09-03
+    /// incident). The Node previously carried a private adapter that
+    /// missed the `MqttState::Io` unwrap; Step 3 makes the shared
+    /// adapter unconditionally available to the Node.
+    #[test]
+    fn shared_adapter_classifies_wake_reset_as_transient() {
+        use acowork_mqtt_session::{classify, ErrorDescriptor, ErrClass};
+        use std::io;
+
+        let err = rumqttc::ConnectionError::MqttState(rumqttc::StateError::Io(
+            io::Error::new(io::ErrorKind::ConnectionReset, "reset"),
+        ));
+        let desc = ErrorDescriptor::from(&err);
+        assert_eq!(classify(&desc), ErrClass::Transient);
     }
 }

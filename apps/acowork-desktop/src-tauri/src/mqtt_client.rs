@@ -1,4 +1,4 @@
-//! Desktop MQTT client (ADR-033 Phase 3).
+//! Desktop MQTT client (ADR-033 Phase 3 / ADR-065 Step 4).
 //!
 //! The Tauri Rust backend connects to the Gateway's embedded MQTT broker
 //! as a `rumqttc` client. It subscribes to agent lifecycle topics
@@ -6,46 +6,29 @@
 //! React frontend via Tauri events. Control commands from the frontend
 //! (send message, stop, create session) are published via MQTT.
 //!
+//! ADR-065 Step 4: this file now wraps the shared
+//! [`acowork_mqtt_session::MqttClient<B>`] with a [`DesktopHandler`]
+//! implementing [`acowork_mqtt_session::MqttClientHandler`]. The
+//! poll loop, error classification, exponential backoff, soft-restart,
+//! watchdog and wake recovery all live in the shared crate. The Desktop
+//! wrapper only carries the entity differences: client_id format,
+//! `MqttStatus` → Tauri event bridge, persistent topic filter list, and
+//! `ControlCommand` protobuf encoding for the control topic.
+//!
 //! See `docs/zh/protocols/mqtt.md` §5.1.6, §5.2, §9.1.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
+use async_trait::async_trait;
+use rumqttc::{AsyncClient, QoS};
 use tokio::sync::Mutex;
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{self, ControlCommand, DataEnvelope, data_envelope};
 use acowork_mqtt_session::{
-    classify as classify_err, ErrorDescriptor, ErrorKind, RefusedReason, ReconnectPolicy,
-    SessionState, SessionStateTx,
+    ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState,
 };
-
-/// Watchdog timeout for `eventloop.poll()`.
-///
-/// If poll() doesn't produce any event within this duration, the TCP
-/// socket is presumed half-dead (most commonly after OS sleep/wake where
-/// the kernel hasn't yet detected the broken connection). The poll task
-/// breaks to the soft-restart path, which drops the old EventLoop and
-/// creates a fresh TCP connection.
-///
-/// 5 s = 1 × keepalive interval. Normal connections produce at least
-/// one PINGRESP within every keepalive interval (now 5 s — see
-/// `set_keep_alive` below; rumqttc paces PINGREQ at keepalive/2 so a
-/// healthy connection actually emits a PINGRESP every ~2.5 s), so 5 s
-/// without any event strongly indicates a stuck socket.
-///
-/// History:
-/// - Originally 90 s — left users staring at "Reconnecting..." for up
-///   to 90 s after OS wake-from-sleep.
-/// - Lowered to 20 s (4 × keepalive) for better wake-recovery UX.
-/// - Lowered to 5 s (1 × keepalive) to further cut wake-recovery
-///   latency. The cost is a higher chance of spurious soft-restarts on
-///   genuinely busy event loops — acceptable because soft-restart on a
-///   healthy connection only causes a ~100 ms input-disabled flash
-///   (replacing one EventLoop with another on localhost is sub-10 ms;
-///   the 14 SUBSCRIBE frames add another ~50 ms).
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
@@ -63,42 +46,7 @@ impl From<MqttQoS> for QoS {
     }
 }
 
-/// The Desktop's MQTT client.
-///
-/// Wraps `rumqttc::AsyncClient`. Incoming messages are routed to
-/// Tauri event emitters via a callback channel.
-///
-/// The inner `AsyncClient` is shared via `Arc<tokio::sync::Mutex<...>>`
-/// so the event-loop task can swap it during a **soft-restart**
-/// (drop old EventLoop + create fresh client/connection) without
-/// invalidating the handle held by Tauri command callers.
-pub struct DesktopMqttClient {
-    shared_client: Arc<tokio::sync::Mutex<AsyncClient>>,
-    /// Keep the event loop polling task alive.
-    _eventloop_guard: Arc<EventLoopGuard>,
-    /// Signal to force a soft-restart of the MQTT event loop.
-    ///
-    /// When `force_reconnect()` is called, the poll task receives this
-    /// notification, breaks out of its inner polling loop, and recreates
-    /// the `AsyncClient` + `EventLoop` from scratch – exactly the same
-    /// path as the automatic 3-fatal-error recovery.
-    force_restart: Arc<tokio::sync::Notify>,
-    /// ADR-039 Phase 2: session state broadcast.
-    ///
-    /// Held in the struct purely to keep the original `watch::Sender` alive
-    /// for the lifetime of the client. All status transitions are driven
-    /// through the `poll_state_tx` clone captured by the eventloop task;
-    /// `self.state_tx` is read by the public `session_state()` accessor so
-    /// external consumers can poll the current state.
-    #[allow(dead_code)]
-    state_tx: SessionStateTx,
-}
-
-struct EventLoopGuard {
-    _task: tokio::task::JoinHandle<()>,
-}
-
-/// An MQTT message received from the broker.
+/// Topic filter an MQTT message arrived on, plus the raw payload bytes.
 #[derive(Debug, Clone)]
 pub struct MqttMessage {
     pub topic: String,
@@ -110,102 +58,22 @@ pub struct MqttMessage {
 /// Per ADR-036 the Rust side is the source-of-truth for connection state:
 /// the Desktop `chatStore` only consumes these transitions via the
 /// `mqtt-status` Tauri event and never attempts to mutate the underlying
-/// `rumqttc::AsyncClient` itself.  Reconnection is owned by `rumqttc`'s
-/// built-in retry; this enum only reports the externally-observable state
-/// changes (broker confirmed connection / broker sent disconnect / network
-/// error).
+/// `rumqttc::AsyncClient` itself. Reconnection is owned by the shared
+/// [`MqttClient`]'s built-in retry; this enum only reports the
+/// externally-observable state changes.
 #[derive(Debug, Clone)]
 pub enum MqttStatus {
     /// The client is attempting to establish a connection (initial
-    /// connect or after a soft-restart / force-reconnect).  The
-    /// frontend uses this to avoid flashing the disconnected banner
-    /// while the client is actively trying to connect.
+    /// connect or after a soft-restart / force-reconnect). The frontend
+    /// uses this to avoid flashing the disconnected banner while the
+    /// client is actively trying to connect.
     Connecting,
-    /// Broker confirmed the connection (CONNACK received).  Also fired
+    /// Broker confirmed the connection (CONNACK received). Also fired
     /// after a successful automatic reconnect following a disconnect.
     Connected,
     /// Connection was lost and the client is retrying with backoff.
     /// `reason` explains why the connection was lost.
     Reconnecting { reason: String },
-    /// Connection is no longer usable.  `reason` is a human-readable
-    /// explanation suitable for surfacing in the UI status bar.
-    /// Currently unused by the poll task (which emits `Reconnecting`
-    /// instead), but retained for explicit disconnect scenarios.
-    #[allow(dead_code)]
-    Disconnected { reason: String },
-}
-
-/// Sleep for `dur` unless a force-restart is requested, in which case
-/// return `true` so the caller can break to the soft-restart path.
-///
-/// The force-restart signal must be able to interrupt a backoff
-/// sleep, not only `poll()`: after a system wake the poll task often
-/// returns a fatal IO error (10053) instead of hanging, and an
-/// uninterruptible 60 s fatal backoff left the MQTT connection down
-/// for the whole minute (2026-08 wake incident: recovery took exactly
-/// 60 s because `sleep(60s).await` sat outside any `select!`, so the
-/// wake-triggered force-restart could not break it).
-async fn interruptible_backoff(
-    dur: Duration,
-    force_restart: &tokio::sync::Notify,
-    kind: &str,
-) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(dur) => false,
-        _ = force_restart.notified() => {
-            tracing::info!(kind, "Force-restart requested during backoff");
-            true
-        }
-    }
-}
-
-/// Build an [`ErrorDescriptor`] from rumqttc 0.25's `ConnectionError`.
-///
-/// This is the Desktop-side adapter that bridges the rumqttc 0.25
-/// error type to the version-agnostic `ErrorDescriptor` used by
-/// the shared `acowork-mqtt-session` crate.
-///
-/// ADR-039 Phase 2.
-fn error_descriptor_from_rumqttc_025(err: &rumqttc::ConnectionError) -> ErrorDescriptor {
-    use rumqttc::{ConnectionError, ConnectReturnCode};
-
-    match err {
-        ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout => ErrorDescriptor {
-            kind: ErrorKind::Timeout,
-            io_kind: None,
-        },
-        ConnectionError::Io(io_err) => ErrorDescriptor {
-            kind: ErrorKind::Io,
-            io_kind: Some(io_err.kind()),
-        },
-        ConnectionError::ConnectionRefused(code) => ErrorDescriptor {
-            kind: ErrorKind::ConnectionRefused(match code {
-                ConnectReturnCode::BadUserNamePassword => RefusedReason::BadUserNamePassword,
-                ConnectReturnCode::NotAuthorized => RefusedReason::NotAuthorized,
-                ConnectReturnCode::RefusedProtocolVersion => RefusedReason::RefusedProtocolVersion,
-                ConnectReturnCode::BadClientId => RefusedReason::BadClientId,
-                ConnectReturnCode::ServiceUnavailable => RefusedReason::ServiceUnavailable,
-                _ => RefusedReason::Unknown,
-            }),
-            io_kind: None,
-        },
-        ConnectionError::MqttState(_) => ErrorDescriptor {
-            kind: ErrorKind::MqttState,
-            io_kind: None,
-        },
-        ConnectionError::NotConnAck(_) => ErrorDescriptor {
-            kind: ErrorKind::NotConnAck,
-            io_kind: None,
-        },
-        ConnectionError::RequestsDone => ErrorDescriptor {
-            kind: ErrorKind::RequestsDone,
-            io_kind: None,
-        },
-        _ => ErrorDescriptor {
-            kind: ErrorKind::Other,
-            io_kind: None,
-        },
-    }
 }
 
 /// All topic filters that must be re-subscribed on every ConnAck
@@ -218,9 +86,9 @@ fn error_descriptor_from_rumqttc_025(err: &rumqttc::ConnectionError) -> ErrorDes
 /// CRITICAL: `messages/#` MUST be in this list. Without it, any
 /// reconnect causes the Desktop to silently lose all session message
 /// events (stream_delta, record_complete, session_state_changed,
-/// done, stopped, context_usage, todo_updated) – the agent keeps
+/// done, stopped, context_usage, todo_updated) — the agent keeps
 /// running but the frontend appears frozen / "connecting".
-const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
+pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // ── Lifecycle topics ──
     ("acowork/agents/+/status", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/meta", MqttQoS::AtLeastOnce),
@@ -250,7 +118,7 @@ const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     ("acowork/agents/+/sessions/+/messages/#", MqttQoS::AtLeastOnce),
     // ── Debug protocol events (ADR-048 D6) ──
     // Runtime publishes DevMode debug events (onStep / onContextBuilt /
-    // onStateChange) on `acowork/agents/glm-5.3_common/debug/events/{type}`.
+    // onStateChange) on `acowork/agents/{id}/debug/events/{type}`.
     // Zero traffic outside DevMode, so subscribing unconditionally is
     // free. QoS 0 matches the publisher: events are fire-and-forget and
     // the DevMode panel re-syncs via `GET /api/debug/state` after a
@@ -264,44 +132,125 @@ const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     ("acowork/agents/+/workspaces/+/fs-changed", MqttQoS::AtLeastOnce),
 ];
 
-/// Re-subscribe to ALL topics after a (re)connect.
+/// Desktop entity handler for the shared [`MqttClient`] (ADR-065 Step 4).
 ///
-/// Called from the event loop's `ConnAck` handler. With
-/// `clean_session = true` the broker drops all subscriptions on
-/// disconnect, so this is essential to avoid silently losing events
-/// after a reconnect.
+/// Implements the Desktop subscriber's per-process differences: incoming
+/// message routing, persistent-topic re-subscription on every ConnAck,
+/// and `MqttStatus` surfacing for the `mqtt-status` Tauri event.
 ///
-/// ADR-039 P2.
-async fn resubscribe_all(client: &AsyncClient) {
-    for (filter, qos) in ALL_TOPIC_FILTERS {
-        if let Err(e) = client.subscribe(*filter, (*qos).into()).await {
-            tracing::warn!(filter, error = %e, "Desktop MQTT resubscribe failed");
-        }
-    }
-    tracing::info!("Desktop MQTT topics re-subscribed ({} filters)", ALL_TOPIC_FILTERS.len());
+/// ADR-065 §5.6: this is the **only** error-classification surface for
+/// the Desktop. The shared `From<&ConnectionError>` (lives in
+/// `acowork-mqtt-session::err_class`) handles the MqttState/Io unwrap;
+/// this handler consumes the classified [`ErrClass`] only to forward a
+/// human-readable reason to the frontend. No private error adapter is
+/// allowed (ADR-065 §7 #1 CI red line).
+struct DesktopHandler {
+    on_message: Arc<dyn Fn(MqttMessage) + Send + Sync>,
+    on_status: Arc<dyn Fn(MqttStatus) + Send + Sync>,
 }
+
+#[async_trait]
+impl MqttClientHandler for DesktopHandler {
+    async fn on_publish(&self, topic: &str, payload: &[u8]) {
+        (self.on_message)(MqttMessage {
+            topic: topic.to_string(),
+            payload: payload.to_vec(),
+        });
+    }
+
+    async fn on_connack(&self, client: &AsyncClient) -> Result<(), String> {
+        // Bridge to the `mqtt-status` Tauri event BEFORE re-subscribing
+        // so the frontend learns of the new connection as soon as the
+        // broker confirms it.
+        (self.on_status)(MqttStatus::Connected);
+
+        // ADR-039 P2: re-subscribe ALL topics on every (re)connect.
+        // With clean_session = true the broker drops all subscriptions on
+        // disconnect, so without this the Desktop would silently lose
+        // agent status/meta/config AND session message events
+        // (stream_delta, record_complete, etc.) after a reconnect.
+        // CRITICAL: `messages/#` must be in ALL_TOPIC_FILTERS — see the
+        // doc comment on the const.
+        for (filter, qos) in ALL_TOPIC_FILTERS {
+            if let Err(e) = client.subscribe(*filter, (*qos).into()).await {
+                tracing::warn!(filter, error = %e, "Desktop MQTT resubscribe failed");
+            }
+        }
+        tracing::info!(
+            "Desktop MQTT topics re-subscribed ({} filters)",
+            ALL_TOPIC_FILTERS.len()
+        );
+        Ok(())
+    }
+
+    async fn on_disconnect(&self, _client: &AsyncClient) {
+        (self.on_status)(MqttStatus::Reconnecting {
+            reason: "broker sent DISCONNECT".into(),
+        });
+    }
+
+    async fn on_error(&self, _client: &AsyncClient, _class: ErrClass, error: &str) {
+        (self.on_status)(MqttStatus::Reconnecting {
+            reason: format!("eventloop error: {error}"),
+        });
+    }
+
+    async fn on_soft_restart(&self) -> Option<(String, String)> {
+        // Surfacing `Connecting` here mirrors the Desktop's pre-Step-4
+        // behaviour, where the inline poll task fired
+        // `on_status(MqttStatus::Connecting)` immediately before
+        // recreating the EventLoop + AsyncClient.
+        (self.on_status)(MqttStatus::Connecting);
+        None
+    }
+}
+
+/// The Desktop's MQTT client.
+///
+/// ADR-065 Step 4: this is a thin wrapper around
+/// [`acowork_mqtt_session::MqttClient<DesktopHandler>`]. The poll loop,
+/// error classification, exponential backoff, soft-restart, watchdog
+/// and wake recovery all live in the shared crate. The wrapper only
+/// carries the entity differences: client_id format, `MqttStatus` →
+/// Tauri event bridge, persistent topic filter list (in `on_connack`),
+/// and `ControlCommand` protobuf encoding for the control topic.
+///
+/// Thread-safe: cheap `Clone` (all fields are `Arc`-shared with the
+/// poll task). Held inside a `tokio::sync::Mutex` by the Tauri state
+/// so command callers serialise their access to the inner handle.
+#[derive(Clone)]
+pub struct DesktopMqttClient {
+    inner: MqttClient<DesktopHandler>,
+}
+
+/// Thread-safe shared DesktopMqttClient.
+pub type SharedDesktopMqttClient = Arc<Mutex<DesktopMqttClient>>;
 
 impl DesktopMqttClient {
     /// Connect to the MQTT broker and start the event loop.
     ///
-    /// Returns IMMEDIATELY after spawning the polling task — does NOT wait
-    /// for the initial CONNACK.  Connection status (Connected / Disconnected)
-    /// is delivered through the `on_status` callback asynchronously as the
-    /// broker eventloop observes CONNACK / DISCONNECT / network errors.
+    /// Returns IMMEDIATELY after spawning the polling task — does NOT
+    /// wait for the initial CONNACK. Connection status (Connected /
+    /// Connecting / Reconnecting) is delivered through the `on_status`
+    /// callback asynchronously as the shared `MqttClient` observes
+    /// CONNACK / DISCONNECT / network errors.
     ///
     /// This is the correct shape for an event-driven MQTT client: the
-    /// caller doesn't block, doesn't need to manage a "still connecting"
-    /// intermediate state, and the consumer (Tauri layer) is expected to
-    /// expose a synchronous `get_mqtt_status` query alongside the
-    /// `mqtt-status` event so the frontend can fetch the current state on
-    /// startup without racing the listener registration.
+    /// caller doesn't block, doesn't need to manage a "still
+    /// connecting" intermediate state, and the consumer (Tauri layer)
+    /// is expected to expose a synchronous `get_mqtt_status` query
+    /// alongside the `mqtt-status` event so the frontend can fetch the
+    /// current state on startup without racing the listener
+    /// registration.
     ///
     /// `on_message` — called for every received MQTT Publish.
     /// `on_status`  — ADR-036: called on every state transition
-    ///                 (CONNACK → Connected; DISCONNECT / eventloop error →
-    ///                 Disconnected).  May fire multiple times over the
-    ///                 lifetime of the client (initial connect, reconnects,
-    ///                 outages); the consumer treats it as idempotent.
+    ///                 (CONNACK → Connected; broker DISCONNECT /
+    ///                 eventloop error → Reconnecting; force-restart /
+    ///                 soft-restart → Connecting). May fire multiple
+    ///                 times over the lifetime of the client (initial
+    ///                 connect, reconnects, outages); the consumer
+    ///                 treats it as idempotent.
     pub async fn connect<F, G>(
         host: &str,
         port: u16,
@@ -317,340 +266,75 @@ impl DesktopMqttClient {
         let pid = std::process::id();
         let client_id = format!("user:{}:desktop:{}", user_id, pid);
 
-        let mut options = MqttOptions::new(client_id.clone(), host, port);
-        // ADR-055 Phase 5a: authenticate against an auth-enabled broker
-        // (`user:{id}:desktop:{pid}` CONNECT username + http_token).
-        if let Some((username, password)) = credentials {
-            options.set_credentials(username.to_string(), password.to_string());
-        }
-        // ADR-039: match the broker's `connection_timeout_ms` (5 s, see
-        // `core/acowork-gateway/src/mqtt/broker.rs`). Setting the client
-        // keepalive to 5 s means PINGREQs are emitted well inside the
-        // broker's idle window. The previous 30 s value caused the broker
-        // to disconnect the client after every OS sleep/wake (broker
-        // timed out at 5 s while client still thought itself connected
-        // until the next PINGREQ 30 s later).
-        options.set_keep_alive(Duration::from_secs(5));
-        options.set_clean_session(true);
-
         // ADR-039: align outgoing packet size with the broker's
         // `max_payload_size` (`GATEWAY_MQTT_MAX_PACKET_SIZE`). Without
         // this, large Desktop publish packets (e.g. protobuf-wrapped
-        // ControlCommand payloads with embedded `config_json`) would hit
-        // rumqttc's default 10 KB outgoing limit and trigger
+        // ControlCommand payloads with embedded `config_json`) would
+        // hit rumqttc's default 10 KB outgoing limit and trigger
         // `OutgoingPacketTooLarge`, which the broker translates into
         // `connection closed by peer`.
         let pkt_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
-        options.set_max_packet_size(pkt_size, pkt_size);
 
-        let (client, eventloop) = AsyncClient::new(options.clone(), 100);
-        let shared_client = Arc::new(tokio::sync::Mutex::new(client));
+        let config = MqttClientConfig {
+            client_id,
+            host: host.to_string(),
+            port,
+            credentials: credentials.map(|(u, p)| (u.to_string(), p.to_string())),
+            last_will: None,
+            max_packet_size: pkt_size,
+            queue_capacity: 100,
+        };
+
+        let handler = DesktopHandler {
+            on_message: Arc::new(on_message),
+            on_status: Arc::new(on_status),
+        };
 
         tracing::info!(
             host,
             port,
-            client_id = %client_id,
-            "Desktop MQTT client created (poll task spawning)"
+            client_id = %config.client_id,
+            "Desktop MQTT client creating via shared MqttClient (ADR-065 Step 4)"
         );
 
-        let on_msg = Arc::new(on_message);
-        let on_status = Arc::new(on_status);
+        // ADR-065 Step 4: the shared MqttClient owns the entire poll
+        // loop. We pass `None` for `on_state_change` because the
+        // Desktop handler surfaces status via the explicit
+        // `MqttClientHandler` callbacks (on_connack, on_disconnect,
+        // on_error, on_soft_restart) — those are the *only* sources of
+        // `MqttStatus` transitions, matching the pre-Step-4 inline
+        // poll-task behaviour exactly.
+        let inner = MqttClient::connect(config, handler, None)
+            .await
+            .map_err(|e| e.to_string())?;
 
-        // ADR-039 Phase 2: session state broadcast + reconnect policy.
-        let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
-        let poll_state_tx = state_tx.clone();
-        let reconnect_policy = ReconnectPolicy::default();
-
-        // Clone shared state for the poll task.
-        let task_shared_client = shared_client.clone();
-        let task_options = options;
-        let force_restart = Arc::new(tokio::sync::Notify::new());
-        let task_force_restart = force_restart.clone();
-
-        // Spawn the eventloop poller.
-        //
-        // Structure: outer loop (soft-restart) + inner loop (normal polling).
-        //
-        // - Inner loop polls the current `EventLoop`. On retryable errors
-        //   (E1/E5) it applies exponential backoff and continues. On
-        //   "fatal" errors (E2/E3/E4/E6) it uses a fixed 60s backoff.
-        // - After 3 consecutive fatal errors the inner loop breaks to the
-        //   outer loop, which drops the old `EventLoop` + `AsyncClient`
-        //   and creates a fresh pair – a **soft-restart** that recovers
-        //   from any internal state corruption without restarting the
-        //   process.
-        // - The new `AsyncClient` is swapped into `shared_client` so
-        //   callers (Tauri commands) automatically use the new handle.
-        let poll_task = tokio::spawn(async move {
-            let mut eventloop = eventloop; // moved into task
-
-            // Outer loop: each iteration is a fresh client + eventloop.
-            let mut soft_restart_count: u32 = 0;
-            loop {
-                let mut consecutive_failures: u32 = 0;
-                let mut fatal_streak: u32 = 0;
-
-                // Inner loop: poll the current eventloop.
-                //
-                // We use `select!` to allow external force-restart
-                // signals to interrupt polling at any time.
-                loop {
-                    tokio::select! {
-                        biased; // favour the force-restart signal
-                        _ = task_force_restart.notified() => {
-                            tracing::info!(
-                                "MQTT force-restart requested by user – \
-                                 breaking to soft-restart path"
-                            );
-                            on_status(MqttStatus::Connecting);
-                            poll_state_tx.set(SessionState::Connecting);
-                            break; // break inner loop -> outer loop recreates
-                        }
-                        event_result = eventloop.poll() => {
-                            match event_result {
-                        Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
-                            on_msg(MqttMessage {
-                                topic: publish.topic.clone(),
-                                payload: publish.payload.to_vec(),
-                            });
-                        }
-                        // Broker confirmed (re)connection.
-                        Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
-                            on_status(MqttStatus::Connected);
-                            poll_state_tx.set(SessionState::Connected);
-                            consecutive_failures = 0;
-                            fatal_streak = 0;
-                            // ADR-039 P2: re-subscribe ALL topics on every
-                            // (re)connect. With clean_session = true the broker
-                            // drops all subscriptions on disconnect, so without
-                            // this the Desktop would silently lose agent
-                            // status/meta/config AND session message events
-                            // (stream_delta, record_complete, etc.) after a
-                            // reconnect.
-                            let poll_client = task_shared_client.lock().await.clone();
-                            resubscribe_all(&poll_client).await;
-                        }
-                        // Broker initiated a disconnect (e.g. admin shutdown,
-                        // client_id collision).  `rumqttc` will retry; we just
-                        // surface the transition.
-                        Ok(Event::Incoming(rumqttc::Incoming::Disconnect)) => {
-                            on_status(MqttStatus::Reconnecting {
-                                reason: "broker sent DISCONNECT".into(),
-                            });
-                            poll_state_tx.set(SessionState::Reconnecting);
-                        }
-                        Ok(_) => continue,
-                        Err(e) => {
-                            let desc = error_descriptor_from_rumqttc_025(&e);
-                            let class = classify_err(&desc);
-
-                            on_status(MqttStatus::Reconnecting {
-                                reason: format!("eventloop error: {e}"),
-                            });
-
-                            if class.is_fatal() {
-                                // E2/E3/E4/E6: in our local-no-auth-no-TLS
-                                // architecture these are extremely unlikely,
-                                // but if they do occur the EventLoop's
-                                // internal state may be corrupt. Use a long
-                                // 60s backoff; after 3 consecutive fatal
-                                // errors, soft-restart (recreate client +
-                                // EventLoop from scratch).
-                                fatal_streak += 1;
-                                tracing::error!(
-                                    error = %e,
-                                    err_class = class.label(),
-                                    fatal_streak,
-                                    "Desktop MQTT fatal error"
-                                );
-                                poll_state_tx.set(SessionState::Reconnecting);
-
-                                if fatal_streak >= 3 {
-                                    soft_restart_count += 1;
-                                    tracing::warn!(
-                                        soft_restart_count,
-                                        "3 consecutive fatal errors – soft-restarting MQTT client"
-                                    );
-                                    break; // break inner loop -> outer loop recreates
-                                }
-
-                                if interruptible_backoff(
-                                    Duration::from_secs(60),
-                                    &task_force_restart,
-                                    "fatal",
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            } else {
-                                // E1/E5: retryable. Apply exponential backoff.
-                                poll_state_tx.set(SessionState::Reconnecting);
-                                consecutive_failures += 1;
-                                if let Some(backoff) =
-                                    reconnect_policy.backoff(class, consecutive_failures - 1)
-                                    && interruptible_backoff(
-                                        backoff.duration,
-                                        &task_force_restart,
-                                        "retryable",
-                                    )
-                                    .await
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                        } // close match
-                        } // close event_result arm
-
-                        // Watchdog: if poll() hasn't produced any event in
-                        // POLL_WATCHDOG_TIMEOUT, the TCP socket is likely
-                        // half-dead (e.g. after OS sleep/wake where the
-                        // kernel hasn't detected the broken connection).
-                        // Break to soft-restart path to create a fresh
-                        // connection.  The sleep future is dropped (reset)
-                        // every time poll() returns, so this only fires
-                        // when the connection is truly silent.
-                        _ = tokio::time::sleep(POLL_WATCHDOG_TIMEOUT) => {
-                            tracing::warn!(
-                                timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
-                                "MQTT poll() watchdog timeout - \
-                                 forcing soft-restart (possible half-dead socket)"
-                            );
-                            on_status(MqttStatus::Reconnecting {
-                                reason: "poll watchdog timeout (possible half-dead socket)".into(),
-                            });
-                            poll_state_tx.set(SessionState::Reconnecting);
-                            break;
-                        }
-                    } // close select!
-                } // close inner loop
-
-                // ── Soft-restart: recreate client + EventLoop ──
-                //
-                // The old EventLoop is dropped (its TCP connection closes).
-                // A fresh AsyncClient + EventLoop pair is created with the
-                // same MqttOptions. The new AsyncClient is swapped into the
-                // shared slot so Tauri command callers automatically use it.
-                on_status(MqttStatus::Connecting);
-                poll_state_tx.set(SessionState::Connecting);
-                let (new_client, new_eventloop) =
-                    AsyncClient::new(task_options.clone(), 100);
-                *task_shared_client.lock().await = new_client;
-                eventloop = new_eventloop;
-                tracing::info!(
-                    soft_restart_count,
-                    "MQTT client soft-restarted with fresh EventLoop"
-                );
-                // Loop back to the inner loop with the fresh eventloop.
-            }
-        });
-
-        Ok(Self {
-            shared_client,
-            _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
-            force_restart,
-            state_tx,
-        })
+        Ok(Self { inner })
     }
 
-    /// ADR-039 Phase 2: returns the current MQTT session state.
-    ///
-    /// Reserved public accessor intended for Tauri commands / DevMode that
-    /// need to read the current session state on demand. Currently no
-    /// caller exists; suppress the dead-code warning until the integration
-    /// lands (the underlying `state_tx` field is still required to keep the
-    /// broadcast channel alive for the lifetime of the client).
-    #[allow(dead_code)]
+    /// Returns the current [`SessionState`] from the shared watch
+    /// channel. The frontend's `get_mqtt_status` Tauri command reads
+    /// this synchronously.
     pub fn session_state(&self) -> SessionState {
-        self.state_tx.current()
+        self.inner.current_state()
     }
 
-    /// Subscribe to a topic filter.
+    /// Subscribe to an additional topic filter (not in `ALL_TOPIC_FILTERS`).
+    ///
+    /// ADR-065: persistent subscriptions belong in `ALL_TOPIC_FILTERS`
+    /// and are re-applied on every ConnAck by `DesktopHandler::on_connack`.
+    /// This escape hatch exists for per-session dynamic subscriptions;
+    /// with the current Desktop design (subscribe to everything on
+    /// connect) it is unused by production code paths but kept for
+    /// parity with the pre-Step-4 `subscribe` helper.
+    #[allow(dead_code)]
     pub async fn subscribe(&self, filter: &str, qos: MqttQoS) -> Result<(), String> {
-        let client = self.shared_client.lock().await.clone();
-        client
+        self.inner
+            .shared_handle()
+            .lock()
+            .await
             .subscribe(filter, qos.into())
             .await
-            .map_err(|e| format!("subscribe '{}': {}", filter, e))
-    }
-
-    /// Subscribe to all agent lifecycle + session message topics.
-    ///
-    /// Called once during `connect_mqtt` to establish the initial
-    /// subscriptions. On subsequent reconnects, the event loop's
-    /// ConnAck handler calls `resubscribe_all` instead (same filter
-    /// list, different call path).
-    pub async fn subscribe_agent_lifecycle(&self) -> Result<(), String> {
-        for (filter, qos) in ALL_TOPIC_FILTERS {
-            self.subscribe(filter, *qos).await?;
-        }
-        tracing::info!("Subscribed to all agent topics ({} filters)", ALL_TOPIC_FILTERS.len());
-        Ok(())
-    }
-
-    /// Subscribe to events for a single session of a specific agent.
-    ///
-    /// Use this when the Desktop only displays one active session at a time
-    /// to avoid receiving events from other sessions and wasting
-    /// bandwidth/CPU.
-    ///
-    /// **QoS 1 is mandatory for the messages/# tree** (stream_delta and
-    /// record_complete topics). A subscriber QoS 0 forces the broker to
-    /// downgrade delivery of the publishers' QoS 1 frames to QoS 0, opening
-    /// the door to reorder and loss — exactly the symptom that motivated
-    /// the per-session `seq` counter and end-to-end QoS 1 stream.
-    #[allow(dead_code)]
-    pub async fn subscribe_agent_session(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-    ) -> Result<(), String> {
-        let filter = format!("acowork/agents/{}/sessions/{}/messages/#", agent_id, session_id);
-        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
-
-        let filter = format!("acowork/agents/{}/sessions/{}/meta", agent_id, session_id);
-        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
-
-        let filter = format!("acowork/agents/{}/sessions/{}/config", agent_id, session_id);
-        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
-
-        tracing::info!(agent_id, session_id, "Subscribed to agent session topics (per-session)");
-        Ok(())
-    }
-
-    /// Unsubscribe from a single session's events.
-    ///
-    /// Call this when switching away from a session to avoid receiving
-    /// stale events from the old session.
-    #[allow(dead_code)]
-    pub async fn unsubscribe_agent_session(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-    ) -> Result<(), String> {
-        let client = self.shared_client.lock().await.clone();
-
-        let filter = format!("acowork/agents/{}/sessions/{}/messages/#", agent_id, session_id);
-        client
-            .unsubscribe(&filter)
-            .await
-            .map_err(|e| format!("unsubscribe '{}': {}", filter, e))?;
-
-        let filter = format!("acowork/agents/{}/sessions/{}/meta", agent_id, session_id);
-        client
-            .unsubscribe(&filter)
-            .await
-            .map_err(|e| format!("unsubscribe '{}': {}", filter, e))?;
-
-        let filter = format!("acowork/agents/{}/sessions/{}/config", agent_id, session_id);
-        client
-            .unsubscribe(&filter)
-            .await
-            .map_err(|e| format!("unsubscribe '{}': {}", filter, e))?;
-
-        tracing::info!(agent_id, session_id, "Unsubscribed from agent session topics");
-        Ok(())
+            .map_err(|e| format!("subscribe '{filter}': {e}"))
     }
 
     /// Publish a control command to the broker.
@@ -670,11 +354,10 @@ impl DesktopMqttClient {
             "acowork/agents/{}/sessions/control/{}",
             agent_id, command
         );
-        let client = self.shared_client.lock().await.clone();
-        client
-            .publish(topic, QoS::AtLeastOnce, false, payload)
+        self.inner
+            .publish_raw(&topic, payload.to_vec(), QoS::AtLeastOnce, false)
             .await
-            .map_err(|e| format!("publish control '{}': {}", command, e))
+            .map_err(|e| format!("publish control '{command}': {e}"))
     }
 
     /// Publish a control command as a `DataEnvelope` protobuf payload.
@@ -700,9 +383,6 @@ impl DesktopMqttClient {
                     Some(mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",
                     Some(mqtt_proto::control_command::Command::DeleteSession(_)) => "delete_session",
                     Some(mqtt_proto::control_command::Command::CloseSession(_)) => "close_session",
-                    // ADR-038: explicit session activation. Runtime ack
-                    // (or error) comes via `SessionOpened` /
-                    // `SessionNotOpened` events.
                     Some(mqtt_proto::control_command::Command::OpenSession(_)) => "open_session",
                     Some(mqtt_proto::control_command::Command::UpdateSessionTitle(_)) => "update_session_title",
                     Some(mqtt_proto::control_command::Command::ChatMessage(_)) => "chat_message",
@@ -729,71 +409,43 @@ impl DesktopMqttClient {
         self.publish_control(agent_id, command, &payload).await
     }
 
-    /// Publish a raw message to any topic.
-    #[allow(dead_code)]
-    pub async fn publish_raw(
-        &self,
-        topic: &str,
-        payload: &[u8],
-        qos: MqttQoS,
-        retain: bool,
-    ) -> Result<(), String> {
-        let client = self.shared_client.lock().await.clone();
-        client
-            .publish(topic, qos.into(), retain, payload)
-            .await
-            .map_err(|e| format!("publish '{}': {}", topic, e))
-    }
-
-    /// Get a clone of the inner AsyncClient.
-    #[allow(dead_code)]
-    pub async fn inner(&self) -> AsyncClient {
-        self.shared_client.lock().await.clone()
-    }
-
-    /// Force a soft-restart of the MQTT event loop.
+    /// Force a soft-restart of the MQTT event loop (deterministic
+    /// recovery after a system wake).
     ///
+    /// Synchronously resets the session state to `Connecting` — so
+    /// `wait_for_connected` can never read the stale pre-sleep
+    /// `Connected` value — and requests a fresh `AsyncClient` +
+    /// `EventLoop` pair. The OS tears down TCP sockets during sleep,
+    /// so the old EventLoop is unusable by definition: rebuild
+    /// immediately instead of waiting for rumqttc to classify the
+    /// failure.
+    pub fn recover_after_wake(&self) {
+        self.inner.reset_to_connecting();
+    }
+
     /// Signals the background poll task to drop the current `EventLoop`
-    /// and create a fresh `AsyncClient` + `EventLoop` pair. This is the
-    /// same recovery path as the automatic 3-fatal-error soft-restart,
-    /// but triggered externally by the user via the `force_reconnect_mqtt`
-    /// Tauri command.
+    /// and create a fresh `AsyncClient` + `EventLoop` pair. This is
+    /// the same recovery path as the automatic 3-fatal-error
+    /// soft-restart, but triggered externally by the user via the
+    /// `force_reconnect_mqtt` Tauri command.
     ///
-    /// Use this when the MQTT connection appears stuck (e.g. status shows
-    /// "Reconnecting" for an extended period, or messages stop arriving
-    /// despite the broker being healthy).
+    /// Use this when the MQTT connection appears stuck (e.g. status
+    /// shows "Reconnecting" for an extended period, or messages stop
+    /// arriving despite the broker being healthy).
     pub fn force_reconnect(&self) {
-        self.force_restart.notify_one();
+        self.recover_after_wake();
     }
 
     /// Wait for the MQTT client to reach `Connected` state.
     ///
-    /// Returns `true` if connected within the timeout, `false` otherwise.
-    /// Call this after `force_reconnect()` to ensure the frontend loads
-    /// with a live connection rather than racing against the reconnection.
-    ///
-    /// Uses a simple polling loop instead of `subscribe()` + `changed()`
-    /// to avoid the race where `Connected` is set between the subscribe
-    /// and the `changed()` wait, causing the latter to hang indefinitely.
+    /// Returns `true` if connected within the timeout, `false`
+    /// otherwise. Call this after `force_reconnect()` to ensure the
+    /// frontend loads with a live connection rather than racing
+    /// against the reconnection.
     pub async fn wait_for_connected(&self, timeout: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        // Fast path: already connected.
-        if self.state_tx.current().is_connected() {
-            return true;
-        }
-        // Poll every 100 ms until connected or timeout.
-        while tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if self.state_tx.current().is_connected() {
-                return true;
-            }
-        }
-        false
+        self.inner.wait_for_connected(timeout).await
     }
 }
-
-/// Thread-safe shared DesktopMqttClient.
-pub type SharedDesktopMqttClient = Arc<Mutex<DesktopMqttClient>>;
 
 #[cfg(test)]
 mod tests {
@@ -820,10 +472,10 @@ mod tests {
 
         match client {
             Ok(client) => {
-                client
-                    .subscribe_agent_lifecycle()
-                    .await
-                    .expect("subscribe should succeed");
+                // Subscriptions are now automatic via on_connack. Wait
+                // briefly for the first ConnAck so the test exercises
+                // the same path as a real connect.
+                let _ = client.wait_for_connected(Duration::from_secs(2)).await;
                 drop(client);
             }
             Err(e) => {

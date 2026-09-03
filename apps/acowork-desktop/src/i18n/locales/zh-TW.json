@@ -424,8 +424,8 @@
     "resetToDefaults": "恢復預設",
     "resetAgentSetup": "重設 Agent 設定",
     "reset": "重設",
-    "toolCompressionEnabled": "工具壓縮",
-    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果"
+    "compressionRatioThreshold": "壓縮比閾值",
+    "compressionRatioThresholdDesc": "上下文壓縮後保留的比例。90% 表示壓縮到剩餘 10%。範圍 50%–95%，預設 90%。"
   },
   "harness": {
     "tabProviders": "模型服務提供者",
@@ -596,9 +596,9 @@
     "debugRemoteDesc": "除錯需要與 Agent Runtime 建立直接本機連線。桌面應用程式和閘道必須在同一台機器上執行。",
     "connectingDebug": "正在連線除錯伺服器...",
     "debugConnectionLost": "除錯連線已中斷",
-    "agentNotDebugMode": "Agent 未處於除錯模式。點擊「啟用除錯」即可開始除錯。",
-    "enableDebug": "啟用除錯",
-    "enablingDebug": "正在啟用除錯...",
+    "debugSection": "偵錯",
+    "enterDebug": "進入偵錯",
+    "enteringDebug": "正在進入偵錯...",
     "noAgentDebug": "沒有 Agent 處於除錯模式",
     "iteration": "迭代",
     "phase": "階段",
@@ -640,7 +640,18 @@
     "statePaused": "已暫停",
     "stateStepping": "單步中",
     "stateIdle": "閒置",
-    "stateStopped": "已停止"
+    "stateStopped": "已停止",
+    "compressionHistory": "壓縮歷史（{{count}}）",
+    "loadingCompressionHistory": "載入壓縮歷史中...",
+    "compressionHistoryError": "載入壓縮歷史失敗",
+    "noCompressionEvents": "暫無壓縮事件。上下文壓縮發生後會顯示在這裡。",
+    "buttonRefresh": "重新整理",
+    "compTime": "時間",
+    "compLevel": "級別",
+    "compTokens": "Token 數",
+    "compRatio": "壓縮比",
+    "compModel": "模型",
+    "compRange": "覆蓋範圍"
   },
   "workspace": {
     "delete": "刪除",
@@ -792,7 +803,43 @@
     "deleteConfirmTitle": "刪除模型檔案",
     "deleteConfirmMessage": "確定要刪除「{{name}}」的已下載檔案嗎？您可以稍後重新下載。",
     "deleteConfirm": "刪除",
-    "deleteActiveError": "無法刪除目前使用的模型，請先切換到其他模型。"
+    "deleteActiveError": "無法刪除目前使用的模型，請先切換到其他模型。",
+    "localModels": "本地模型",
+    "cloudProviders": "雲端 Provider",
+    "addCustom": "新增",
+    "addCustomProvider": "新增自訂 Provider",
+    "customProviderName": "Provider 名稱",
+    "customProviderNamePlaceholder": "例如：我的 GPT 代理",
+    "customProviderId": "Provider ID",
+    "customProviderIdPlaceholder": "例如：custom-my-proxy",
+    "customProviderNameRequired": "Provider 名稱不能為空",
+    "customProviderIdRequired": "Provider ID 不能為空",
+    "customBaseUrl": "Base URL",
+    "customBaseUrlRequired": "Base URL 必須為 http(s) URL",
+    "optional": "可選",
+    "apiKey": "API Key",
+    "customModels": "模型",
+    "customModelsRequired": "至少新增一個模型",
+    "customAddModel": "新增模型",
+    "customRemoveModel": "刪除模型",
+    "customModelIdPlaceholder": "模型 ID（如 doubao-embedding）",
+    "customModelNamePlaceholder": "模型名稱（可留空）",
+    "customModelDimensionsPlaceholder": "維度（如 1024）",
+    "customModelContextLengthPlaceholder": "上下文長度（可選）",
+    "customModelIdRequired": "模型 ID 不能為空",
+    "duplicateProviderId": "Provider ID「{{id}}」已存在",
+    "duplicateModelId": "模型 ID「{{id}}」重複",
+    "dimensionMustBePositive": "模型「{{id}}」的維度必須大於 0",
+    "saving": "儲存中...",
+    "cloudActive": "雲端使用中",
+    "cloudNoProviders": "暫無可用雲端 Provider",
+    "apiKeyMissing": "未設定 API Key",
+    "apiKeyRequired": "請先設定 API Key",
+    "setApiKey": "設定 API Key",
+    "changeKey": "修改 Key",
+    "deleteKey": "刪除 Key",
+    "save": "儲存",
+    "cancel": "取消"
   },
   "memoryPanel": {
     "consolidate": "合併節點",
@@ -986,8 +1033,11 @@
     "title": "上下文摘要",
     "empty": "（空摘要）",
     "model": "模型: {{model}}",
-    "keepLastRounds": "保留最近 {{count}} 輪",
+    "level": "壓縮級別 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "上下文溢出：模型能力資訊缺失，無法準確計算上下文用量。請檢查模型名稱是否正確（區分大小寫）。"
   },
   "codeBlock": {
     "ariaLabelCopy": "複製程式碼"
@@ -1209,5 +1259,19 @@
       "confirm": "拒絕"
     },
     "offlineHint": "PM service offline — board is read-only"
+  },  "prompts": {
+    "badgeBuiltin": "內建",
+    "badgeMissing": "缺失",
+    "badgeOverridden": "已覆寫",
+    "badgeRequired": "必填",
+    "error": "載入失敗：{{message}}",
+    "help": "點擊條目編輯；儲存後點重新整理使其生效。",
+    "loading": "載入提示詞中...",
+    "openAria": "在編輯器中開啟提示詞 {{name}}",
+    "reload": "重新整理",
+    "reloadAria": "從磁碟重新載入所有提示詞",
+    "reloadOk": "重新載入完成 — 8 個覆寫已從磁碟刷新，主對話 system prompt 已同步。",
+    "reloadSystemPromptFailed": "8 個覆寫已刷新，但主對話 system prompt 重建失敗 — system.md 變更需重啟 Agent 後生效。",
+    "title": "PROMPT"
   }
 }

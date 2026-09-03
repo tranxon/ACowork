@@ -169,11 +169,10 @@ pub fn classify(desc: &ErrorDescriptor) -> ErrClass {
 }
 
 // ── Convenience builders from rumqttc ─────────────────────────
-// These are behind a feature flag so the crate can be used without
-// rumqttc if needed. Both Runtime (0.24) and Desktop (0.25) have
-// the same ConnectionError structure.
+// rumqttc is a hard dependency (ADR-065 Step 3: MqttClient<B> needs its
+// types), so From<&ConnectionError> is the single adapter — no private
+// per-client adapters allowed (ADR-065 §5.6).
 
-#[cfg(feature = "rumqttc-0-25")]
 mod from_rumqttc_0_25 {
     use super::*;
     use rumqttc::ConnectionError;
@@ -212,21 +211,39 @@ mod from_rumqttc_0_25 {
                 },
                 ConnectionError::MqttState(state_err) => {
                     // rumqttc wraps transient I/O errors (e.g.
-                    // ConnectionAborted, ConnectionReset) inside
-                    // MqttState(StateError::Io(...)). Unwrap the
-                    // inner I/O error instead of blindly classifying
-                    // as ConfigError (which is fatal and breaks the
-                    // event loop).
-                    if let rumqttc::StateError::Io(io_err) = state_err {
-                        ErrorDescriptor {
+                    // ConnectionAborted, ConnectionReset — both produced
+                    // when the OS tears down the TCP socket during
+                    // sleep/wake) inside MqttState. Two shapes exist:
+                    //   StateError::Io(io::Error)                    — direct wrap
+                    //   StateError::Deserialization(mqttbytes::Error::Io)
+                    //     — the poll task read a partially-written
+                    //     packet at wake time and mqttbytes wrapped the
+                    //     same io::Error at decode time
+                    // Unwrap the inner I/O error in BOTH cases instead
+                    // of blindly classifying as ConfigError (fatal —
+                    // breaks the event loop with a 60s backoff).
+                    match state_err {
+                        rumqttc::StateError::Io(io_err) => ErrorDescriptor {
                             kind: ErrorKind::Io,
                             io_kind: Some(io_err.kind()),
+                        },
+                        rumqttc::StateError::Deserialization(mqttbytes_err) => {
+                            if let rumqttc::mqttbytes::Error::Io(io_err) = mqttbytes_err {
+                                ErrorDescriptor {
+                                    kind: ErrorKind::Io,
+                                    io_kind: Some(io_err.kind()),
+                                }
+                            } else {
+                                ErrorDescriptor {
+                                    kind: ErrorKind::MqttState,
+                                    io_kind: None,
+                                }
+                            }
                         }
-                    } else {
-                        ErrorDescriptor {
+                        _ => ErrorDescriptor {
                             kind: ErrorKind::MqttState,
                             io_kind: None,
-                        }
+                        },
                     }
                 },
                 ConnectionError::NotConnAck(_) => ErrorDescriptor {
@@ -249,6 +266,98 @@ mod from_rumqttc_0_25 {
                     io_kind: None,
                 },
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io;
+
+        #[test]
+        fn mqtt_state_direct_io_error_is_transient() {
+            let err = rumqttc::ConnectionError::MqttState(rumqttc::StateError::Io(
+                io::Error::new(io::ErrorKind::ConnectionReset, "reset"),
+            ));
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::Io);
+            assert_eq!(classify(&desc), ErrClass::Transient);
+        }
+
+        #[test]
+        fn mqtt_state_deserialization_io_error_is_transient() {
+            // The sleep/wake shape: the poll task read a partially
+            // written packet and mqttbytes wrapped the same io::Error
+            // inside `StateError::Deserialization(mqttbytes::Error::Io)`.
+            // It must NOT classify as fatal E4 ConfigError (which would
+            // trigger the 60s fatal backoff on every wake).
+            let err = rumqttc::ConnectionError::MqttState(
+                rumqttc::StateError::Deserialization(rumqttc::mqttbytes::Error::Io(
+                    io::Error::new(io::ErrorKind::ConnectionAborted, "aborted"),
+                )),
+            );
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::Io);
+            assert_eq!(desc.io_kind, Some(io::ErrorKind::ConnectionAborted));
+            assert_eq!(classify(&desc), ErrClass::Transient);
+        }
+
+        #[test]
+        fn mqtt_state_other_variants_stay_config_error() {
+            let err = rumqttc::ConnectionError::MqttState(rumqttc::StateError::InvalidState);
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::MqttState);
+            assert_eq!(classify(&desc), ErrClass::ConfigError);
+        }
+
+        #[test]
+        fn mqtt_state_io_econnreset_classified_transient_node_gateway_path() {
+            // ADR-065 §7 #3 regression test. Node and Gateway previously
+            // owned private `error_descriptor_from_rumqttc` adapters that
+            // pattern-matched `MqttState(_)` without unwrapping the inner
+            // `StateError::Io(ECONNRESET)`. The local match arm mapped
+            // `ErrorKind::MqttState` straight to `ErrClass::ConfigError`
+            // (E4 fatal), so every kernel TCP reset at OS wake — the
+            // exact same ECONNRESET this test simulates — re-triggered
+            // the 60-second fatal backoff and silently dropped start /
+            // stop commands for a full minute.
+            //
+            // The shared `From<&ConnectionError>` adapter (this file)
+            // unwraps `StateError::Io` and re-classifies the inner
+            // `io::ErrorKind` as `ErrorKind::Io`, which `classify()`
+            // maps to `ErrClass::Transient`. Every consumer (Desktop /
+            // Node / Runtime / Gateway publisher) MUST go through this
+            // adapter — enforced at CI level by the `ErrorKind::MqttState`
+            // literal red line in `dev/ci.sh`.
+            //
+            // We construct an ECONNRESET via `io::ErrorKind::ConnectionReset`
+            // (its cross-platform spelling — the raw OS code differs
+            // between Linux / macOS / Windows but `ErrorKind` is portable).
+            let io_err = io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "simulated kernel TCP reset at OS wake",
+            );
+            let err = rumqttc::ConnectionError::MqttState(rumqttc::StateError::Io(io_err));
+
+            let desc = ErrorDescriptor::from(&err);
+            // Must be unwrapped to ErrorKind::Io, NOT left as
+            // ErrorKind::MqttState — that's the regression we guard.
+            assert_eq!(
+                desc.kind,
+                ErrorKind::Io,
+                "StateError::Io(ECONNRESET) must be unwrapped to ErrorKind::Io"
+            );
+            assert_eq!(
+                desc.io_kind,
+                Some(io::ErrorKind::ConnectionReset),
+                "inner io::ErrorKind must be preserved so consumers can branch"
+            );
+            assert_eq!(
+                classify(&desc),
+                ErrClass::Transient,
+                "ECONNRESET inside MqttState must be Transient (E1), not fatal E4 ConfigError — \
+                 otherwise Node/Gateway hit the 60s fatal backoff on every wake"
+            );
         }
     }
 }
