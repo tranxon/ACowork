@@ -3,6 +3,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
+import { computeCacheHitRate, formatCacheHitRate } from "../../lib/cacheHitRate";
 
 /** Circular progress ring showing context usage percentage.
  *  Starts from bottom (6 o'clock), goes clockwise.
@@ -61,7 +62,20 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   const contextUsage = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.contextUsage ?? null);
   const isCompacting = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.isCompacting ?? false);
   const sessionStatus = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus ?? null);
+  // ADR-066: prompt-cache hit ratio is provider-specific (denominator
+  // differs between Anthropic Messages and OpenAI Chat Completions).
+  // We read `provider` from the per-session chatStore so the helper
+  // can pick the right formula; falls back to null (= hide) for
+  // providers that don't surface cache accounting (ollama, etc.).
+  const sessionProvider = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.provider ?? null);
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
+
+  // ADR-066 §6: cache hit rate, provider-aware.  `null` means "no
+  // signal" — either the provider doesn't report cache tokens, no LLM
+  // call has happened yet, or the denominator would be zero.
+  const cacheHitRateLabel = formatCacheHitRate(
+    computeCacheHitRate(sessionProvider, contextUsage),
+  );
 
 // Open popover on hover (not click), with a small delay before closing
   const handleMouseEnter = useCallback(() => {
@@ -163,9 +177,49 @@ const handleCompressSummary = () => {
             </span>
             <span className="text-zinc-400 dark:text-zinc-500">
               {" "}
-              context used
+              {t("contextUsage.contextUsedSuffix")}
             </span>
           </div>
+
+          {/* Line 2 (ADR-066): cache hit / cache write summary.  Only rendered
+              when the Runtime has emitted at least one of the cache fields —
+              the `?? 0` lets us suppress the row on legacy Runtimes without
+              showing a meaningless "0 hit / 0 write" line. */}
+          {(contextUsage?.cache_read_tokens !== undefined &&
+            contextUsage.cache_read_tokens > 0) ||
+          (contextUsage?.cache_write_tokens !== undefined &&
+            contextUsage.cache_write_tokens > 0) ? (
+            <div className="px-3 pb-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap select-none">
+              <span>{t("contextUsage.cacheReadLabel")}</span>
+              <span className="mx-1 font-mono">
+                {formatTokens(contextUsage?.cache_read_tokens ?? 0)}
+              </span>
+              <span className="mx-1 text-zinc-400 dark:text-zinc-500">·</span>
+              <span>{t("contextUsage.cacheWriteLabel")}</span>
+              <span className="mx-1 font-mono">
+                {formatTokens(contextUsage?.cache_write_tokens ?? 0)}
+              </span>
+            </div>
+          ) : null}
+
+          {/* Line 3 (ADR-066): prompt-cache hit ratio.  Provider-aware
+              (Anthropic Messages vs OpenAI Chat Completions).  Hidden
+              for providers that don't report cache tokens (ollama,
+              deepseek, zhipuai, …) so we never show a misleading 0%. */}
+          {cacheHitRateLabel !== null ? (
+            <div className="px-3 pb-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap select-none">
+              <span>{t("contextUsage.cacheHitLabel")}</span>
+              <span
+                className="mx-1 font-mono font-medium"
+                style={{ color: "var(--color-accent)" }}
+              >
+                {cacheHitRateLabel}
+              </span>
+              <span className="text-zinc-400 dark:text-zinc-500">
+                {t("contextUsage.cached")}
+              </span>
+            </div>
+          ) : null}
 
           {/* Compress Summary button */}
           <button

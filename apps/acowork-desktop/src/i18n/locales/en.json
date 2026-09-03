@@ -118,7 +118,13 @@
     "compressing": "Compacting...",
     "agentRunning": "Agent running",
     "compressContext": "compact context",
-    "compressSummary": "Compress Summary"
+    "compressSummary": "Compress Summary",
+    "cacheReadLabel": "Cache hit",
+    "cacheWriteLabel": "Cache write",
+    "cacheSummary": "{{hit}} hit / {{write}} write",
+    "contextUsedSuffix": "context used",
+    "cacheHitLabel": "Cache hit rate",
+    "cached": "cached"
   },
   "onboarding": {
     "step": "Step {{current}} of {{total}}",
@@ -752,6 +758,12 @@
     "totalOutputTokens": "Total output tokens",
     "agentTotalInputTokens": "total input tokens",
     "agentTotalOutputTokens": "total output tokens",
+    "cacheReadTokens": "cache hit tokens",
+    "cacheWriteTokens": "cache write tokens",
+    "agentTotalCacheReadTokens": "agent total cache hit",
+    "agentTotalCacheWriteTokens": "agent total cache write",
+    "cacheHitRatio": "cache hit ratio",
+    "cached": "cached",
     "iterations": "Iterations",
     "agentStatus": "Agent Status",
     "running": "Running",

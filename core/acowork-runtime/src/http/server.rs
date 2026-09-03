@@ -3583,6 +3583,10 @@ mod tests {
                 last_output: 200,
                 total_input: 100,
                 total_output: 200,
+                // ADR-066: cache fields default to 0 (this test
+                // focuses on the agent-total-in/out list aggregation
+                // path).
+                ..Default::default()
             }),
             last_compaction_offset: None,
             corrupted: false,
@@ -3609,6 +3613,10 @@ mod tests {
                 last_output: 400,
                 total_input: 300,
                 total_output: 400,
+                // ADR-066: cache fields default to 0 (this test
+                // focuses on the agent-total-in/out list aggregation
+                // path).
+                ..Default::default()
             }),
             last_compaction_offset: None,
             corrupted: false,

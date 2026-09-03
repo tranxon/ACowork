@@ -671,6 +671,26 @@ export interface ContextUsageInfo {
   /** ADR-028: cumulative output tokens across every LLM call made by this
    *  Runtime process for this agent. See `agent_total_input_tokens`. */
   agent_total_output_tokens?: number;
+  /** ADR-066: cache-hit tokens reported by the Provider on the last turn
+   *  (Anthropic `cache_read_input_tokens`, OpenAI `prompt_tokens_details.cached_tokens`).
+   *  Undefined on providers that do not return cache accounting. */
+  cache_read_tokens?: number;
+  /** ADR-066: cache-write tokens reported by the Provider on the last turn
+   *  (Anthropic `cache_creation_input_tokens`). Provider-billed as upfront
+   *  cost when seeding the cache. */
+  cache_write_tokens?: number;
+  /** ADR-066: cumulative cache-hit tokens across all turns in this session.
+   *  Populated from `SessionTokens.total_cache_read`. */
+  total_cache_read_tokens?: number;
+  /** ADR-066: cumulative cache-write tokens across all turns in this session.
+   *  Populated from `SessionTokens.total_cache_write`. */
+  total_cache_write_tokens?: number;
+  /** ADR-066: cumulative cache-hit tokens across every LLM call made by
+   *  this Runtime process for this agent. */
+  agent_total_cache_read_tokens?: number;
+  /** ADR-066: cumulative cache-write tokens across every LLM call made by
+   *  this Runtime process for this agent. */
+  agent_total_cache_write_tokens?: number;
 }
 
 /** Navigation view type */

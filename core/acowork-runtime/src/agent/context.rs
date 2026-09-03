@@ -1282,6 +1282,9 @@ mod tests {
             last_output: 1_200,
             total_input: 250_000,
             total_output: 7_500,
+            // ADR-066: cache fields default to 0 (this test focuses
+            // on the in/out cumulative code path).
+            ..Default::default()
         };
 
         let info = build_context_usage_from_persisted(
@@ -1458,6 +1461,16 @@ pub fn compute_context_usage(
         // ADR-028: agent-scoped cumulative tokens (patched by caller).
         agent_total_input_tokens: None,
         agent_total_output_tokens: None,
+        // ADR-066: per-turn cache breakdown — set here so callers
+        // computing from a fresh `UsageInfo` see the right numbers.
+        // Cumulative session / agent cache totals remain `None`
+        // (patched by the caller, mirroring the in/out policy above).
+        cache_read_tokens: Some(usage.cache_read_tokens),
+        cache_write_tokens: Some(usage.cache_write_tokens),
+        total_cache_read_tokens: None,
+        total_cache_write_tokens: None,
+        agent_total_cache_read_tokens: None,
+        agent_total_cache_write_tokens: None,
     }
 }
 
@@ -1465,7 +1478,10 @@ pub fn compute_context_usage(
 ///
 /// This produces the same structure as [`compute_context_usage`] but from
 /// the raw `last_input_tokens` / `last_output_tokens` values stored in
-/// JSONL metadata, filling zero for cache/reasoning breakdown fields.
+/// JSONL metadata.  Per-turn cache/reasoning breakdown fields are sourced
+/// from the `last_*` halves of `SessionTokens` (the last LLM call's
+/// provider-reported figures), and cumulative fields from the `total_*`
+/// halves — see [`patch_session_totals`] for the centralised patcher.
 ///
 /// Callers must supply the *current* [`ModelCapabilitiesInfo`] because
 /// window-derived fields (`context_window`, `usable_context`, `usage_percent`)
@@ -1475,7 +1491,8 @@ pub fn compute_context_usage(
 /// `context_window_cap` mirrors the same parameter on [`compute_context_usage`].
 ///
 /// `cumulative_tokens` optionally carries the full [`crate::conversation::SessionTokens`]
-/// so the cumulative `total_input_tokens` / `total_output_tokens` fields can be
+/// so the cumulative `total_input_tokens` / `total_output_tokens` /
+/// `total_cache_read_tokens` / `total_cache_write_tokens` fields can be
 /// populated on the resulting [`ContextUsageInfo`]. Pass `None` when only the
 /// last-turn snapshot is available (e.g. unit tests exercising the legacy
 /// scalar path).
@@ -1497,8 +1514,43 @@ pub fn build_context_usage_from_persisted(
         compute_context_usage(caps, &usage, max_output_tokens_limit, context_window_cap)
     };
     if let Some(t) = cumulative_tokens {
-        info.total_input_tokens = Some(t.total_input);
-        info.total_output_tokens = Some(t.total_output);
+        // ADR-066: patch from the persisted SessionTokens snapshot —
+        // both per-turn (last) and cumulative (total) views.  Per-turn
+        // cache is included even though the resume path doesn't have
+        // a fresh UsageInfo, because the last LLM call's cache figures
+        // were already recorded into `last_cache_read` /
+        // `last_cache_write` and are a meaningful per-turn indicator
+        // after a restart.
+        info.cache_read_tokens = Some(t.last_cache_read);
+        info.cache_write_tokens = Some(t.last_cache_write);
+        patch_session_totals(&mut info, t);
     }
     info
+}
+
+/// Patch session-level cumulative fields on a [`ContextUsageInfo`].
+///
+/// ADR-066 §2 commits to a strict split between per-turn (filled by
+/// [`compute_context_usage`] from a fresh `UsageInfo`) and cumulative
+/// (filled here from a [`SessionTokens`] snapshot).  All three call
+/// sites that build a `ContextUsageInfo` for push delivery now go
+/// through this helper, which guarantees:
+///
+///   - `total_input_tokens` / `total_output_tokens` come from
+///     `tokens.total_input` / `tokens.total_output` (saturating sums).
+///   - `total_cache_read_tokens` / `total_cache_write_tokens` come
+///     from the matching cumulative cache fields.
+///
+/// Centralising the patch prevents the original ADR-066 P0 bug
+/// (`total_cache_read_tokens` left at `None` because the caller
+/// forgot to copy it from `SessionTokens` after `accumulate_llm_usage`)
+/// from recurring in any of the three push sites in `loop_context.rs`.
+pub fn patch_session_totals(
+    info: &mut acowork_core::protocol::ContextUsageInfo,
+    tokens: &crate::conversation::SessionTokens,
+) {
+    info.total_input_tokens = Some(tokens.total_input);
+    info.total_output_tokens = Some(tokens.total_output);
+    info.total_cache_read_tokens = Some(tokens.total_cache_read);
+    info.total_cache_write_tokens = Some(tokens.total_cache_write);
 }

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use acowork_core::providers::traits::Provider;
 
 use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
-use crate::agent::context::count_chat_request_chars;
+use crate::agent::context::{count_chat_request_chars, patch_session_totals};
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
@@ -115,16 +115,16 @@ impl AgentLoop {
                 } else {
                     0
                 };
-                // Pull cumulative session totals so the frontend status
-                // panel can render session-level Total Input / Total Output
-                // alongside per-turn input_tokens / output_tokens.
-                let (total_input, total_output) = self
+                // Pull cumulative session totals (in/out + cache) so the frontend
+                // status panel can render session-level Total Input /
+                // Total Output / Cache Read / Cache Write alongside the
+                // per-turn figures.  ADR-066 §2 routes all four cumulative
+                // session fields through `patch_session_totals`.
+                let session_tokens = self
                     .session
                     .conversation
                     .as_ref()
-                    .and_then(|c| c.tokens())
-                    .map(|t| (Some(t.total_input), Some(t.total_output)))
-                    .unwrap_or((None, None));
+                    .and_then(|c| c.tokens());
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
                     context_window: effective_window,
                     input_tokens: total_tokens,
@@ -133,11 +133,20 @@ impl AgentLoop {
                     max_input_tokens: caps.max_input_tokens,
                     usable_context: effective_usable,
                     usage_percent: percent,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    // ADR-028: agent-scoped cumulative tokens (snapshot of AtomicU64 counters).
+                    // Cumulative session fields default to None —
+                    // patched below via the shared helper.
+                    total_input_tokens: None,
+                    total_output_tokens: None,
+                    // ADR-028 / ADR-066: agent-scoped cumulative tokens + cache
+                    // totals are snapshotted from AtomicU64 counters below.
                     agent_total_input_tokens: None,
                     agent_total_output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_cache_read_tokens: None,
+                    total_cache_write_tokens: None,
+                    agent_total_cache_read_tokens: None,
+                    agent_total_cache_write_tokens: None,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -145,11 +154,19 @@ impl AgentLoop {
                     usage_percent = percent,
                     "Pushing immediate context_usage after context_window config change"
                 );
-                // ADR-028: snapshot the agent-scoped counters before pushing.
+                // ADR-028 + ADR-066: snapshot the agent-scoped counters and
+                // patch the session totals in one place so the three push
+                // paths can never drift.
                 let mut ctx_info = ctx_info;
-                let (agent_in, agent_out) = self.core.agent_token_totals();
+                if let Some(t) = session_tokens {
+                    patch_session_totals(&mut ctx_info, &t);
+                }
+                let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
+                    self.core.agent_token_totals();
                 ctx_info.agent_total_input_tokens = Some(agent_in);
                 ctx_info.agent_total_output_tokens = Some(agent_out);
+                ctx_info.agent_total_cache_read_tokens = Some(agent_cache_read);
+                ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         }
@@ -1081,13 +1098,11 @@ impl AgentLoop {
                 // Pull cumulative session totals for the post-compaction
                 // snapshot so the frontend status panel can update both
                 // per-turn and cumulative fields in one push.
-                let (total_input, total_output) = self
+                let session_tokens = self
                     .session
                     .conversation
                     .as_ref()
-                    .and_then(|c| c.tokens())
-                    .map(|t| (Some(t.total_input), Some(t.total_output)))
-                    .unwrap_or((None, None));
+                    .and_then(|c| c.tokens());
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
                     context_window: effective_window,
                     input_tokens: total_tokens,
@@ -1096,17 +1111,32 @@ impl AgentLoop {
                     max_input_tokens: caps.max_input_tokens,
                     usable_context: effective_usable,
                     usage_percent,
-                    total_input_tokens: total_input,
-                    total_output_tokens: total_output,
-                    // ADR-028: agent-scoped cumulative tokens (snapshot of AtomicU64 counters).
+                    // Cumulative session fields default to None —
+                    // patched below via the shared helper.
+                    total_input_tokens: None,
+                    total_output_tokens: None,
+                    // ADR-028 / ADR-066: agent-scoped cumulative tokens + cache
+                    // totals are snapshotted from AtomicU64 counters below.
                     agent_total_input_tokens: None,
                     agent_total_output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_cache_read_tokens: None,
+                    total_cache_write_tokens: None,
+                    agent_total_cache_read_tokens: None,
+                    agent_total_cache_write_tokens: None,
                 };
-                // ADR-028: snapshot the agent-scoped counters before pushing.
+                // ADR-028 + ADR-066: patch session + agent totals in one place.
                 let mut ctx_info = ctx_info;
-                let (agent_in, agent_out) = self.core.agent_token_totals();
+                if let Some(t) = session_tokens {
+                    patch_session_totals(&mut ctx_info, &t);
+                }
+                let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
+                    self.core.agent_token_totals();
                 ctx_info.agent_total_input_tokens = Some(agent_in);
                 ctx_info.agent_total_output_tokens = Some(agent_out);
+                ctx_info.agent_total_cache_read_tokens = Some(agent_cache_read);
+                ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
@@ -1432,9 +1462,17 @@ impl AgentLoop {
                         usage_percent: percent,
                         total_input_tokens: None,
                         total_output_tokens: None,
-                        // ADR-028: agent-scoped cumulative tokens (snapshot of AtomicU64 counters).
+                        // ADR-028 / ADR-066: agent-scoped cumulative tokens + cache totals
+                        // are snapshotted from AtomicU64 counters immediately after
+                        // construction; the snapshot step below populates them.
                         agent_total_input_tokens: None,
                         agent_total_output_tokens: None,
+                        cache_read_tokens: None,
+                        cache_write_tokens: None,
+                        total_cache_read_tokens: None,
+                        total_cache_write_tokens: None,
+                        agent_total_cache_read_tokens: None,
+                        agent_total_cache_write_tokens: None,
                     }
                 };
                 tracing::debug!(
@@ -1465,8 +1503,14 @@ impl AgentLoop {
                 if let Some(ref conv) = self.session.conversation {
                     conv.accumulate_llm_usage(usage);
                     if let Some(t) = conv.tokens() {
-                        ctx_usage.total_input_tokens = Some(t.total_input);
-                        ctx_usage.total_output_tokens = Some(t.total_output);
+                        // ADR-066 §2 / ADR-066 §7: "compute 只看 per-turn、
+                        // session total 由 caller patch".  All four
+                        // cumulative session fields (in/out + cache read/write)
+                        // are patched through `patch_session_totals` so the
+                        // three push sites can't drift apart.  See
+                        // `context::patch_session_totals` for the rationale
+                        // behind the helper.
+                        patch_session_totals(&mut ctx_usage, &t);
                     }
                 }
                 // ADR-028: feed the agent-scoped counters and snapshot them
@@ -1474,10 +1518,16 @@ impl AgentLoop {
                 // show a "Agent total" line. Live in this path is the
                 // primary data source; the session-list response carries a
                 // fallback copy (see `handle_list_sessions`).
+                //
+                // ADR-066: agent-scoped cache totals snapshotted alongside
+                // input/output via the 4-tuple return of `agent_token_totals`.
                 self.core.accumulate_llm_usage(usage);
-                let (agent_in, agent_out) = self.core.agent_token_totals();
+                let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
+                    self.core.agent_token_totals();
                 ctx_usage.agent_total_input_tokens = Some(agent_in);
                 ctx_usage.agent_total_output_tokens = Some(agent_out);
+                ctx_usage.agent_total_cache_read_tokens = Some(agent_cache_read);
+                ctx_usage.agent_total_cache_write_tokens = Some(agent_cache_write);
 
                 if !self
                     .session_core

@@ -215,7 +215,13 @@
     "compressing": "压缩中...",
     "agentRunning": "Agent 运行中",
     "compressContext": "压缩上下文",
-    "compressSummary": "压缩整个上下文"
+    "compressSummary": "压缩整个上下文",
+    "cacheReadLabel": "缓存命中",
+    "cacheWriteLabel": "缓存写入",
+    "cacheSummary": "命中 {{hit}} / 写入 {{write}}",
+    "contextUsedSuffix": "上下文已用",
+    "cacheHitLabel": "缓存命中率",
+    "cached": "已缓存"
   },
   "agentList": {
     "doubleClickToStart": "双击启动",
@@ -629,6 +635,12 @@
     "totalOutputTokens": "总输出 Token",
     "agentTotalInputTokens": "累计输入 Token",
     "agentTotalOutputTokens": "累计输出 Token",
+    "cacheReadTokens": "缓存命中 Token",
+    "cacheWriteTokens": "缓存写入 Token",
+    "agentTotalCacheReadTokens": "累计缓存命中",
+    "agentTotalCacheWriteTokens": "累计缓存写入",
+    "cacheHitRatio": "缓存命中率",
+    "cached": "已缓存",
     "iterations": "迭代次数",
     "agentStatus": "Agent 状态",
     "running": "运行中",

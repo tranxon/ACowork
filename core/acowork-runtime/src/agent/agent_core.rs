@@ -287,6 +287,15 @@ pub struct AgentCore {
     /// ADR-028: cumulative output tokens across every LLM call made by this
     /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
     pub(crate) agent_total_output_tokens: AtomicU64,
+    /// ADR-066: cumulative prompt-cache read tokens across every LLM call
+    /// made by this agent process (OpenAI `cached_tokens` / Anthropic
+    /// `cache_read_input_tokens`).  Same persistence / restart semantics
+    /// as [`Self::agent_total_input_tokens`].
+    pub(crate) agent_total_cache_read_tokens: AtomicU64,
+    /// ADR-066: cumulative prompt-cache write tokens across every LLM
+    /// call made by this agent process (Anthropic
+    /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
+    pub(crate) agent_total_cache_write_tokens: AtomicU64,
 
     /// ADR-061 §10.2: Shared queue for the `context_retrieve` tool (the
     /// manual recall channel after compaction). Created in agent_init
@@ -463,6 +472,9 @@ impl AgentCore {
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
             agent_total_output_tokens: AtomicU64::new(0),
+            // ADR-066: cache counters follow the same lifecycle.
+            agent_total_cache_read_tokens: AtomicU64::new(0),
+            agent_total_cache_write_tokens: AtomicU64::new(0),
             retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -563,6 +575,11 @@ impl AgentCore {
     // - `agent_token_totals` snapshots both counters for the
     //   `ContextUsageInfo` push.
     //
+    // ADR-066: the four-tuple is `(input, output, cache_read,
+    // cache_write)` — the cache dimensions mirror the Provider-reported
+    // `UsageInfo` cache fields and the persisted `SessionTokens`
+    // totals.
+    //
     // Not persisted: a process restart zeroes the counters, and the
     // next `list_sessions` fetch rebuilds the baseline via scan + merge.
     // See ADR-028 §"Why no startup seed" for the rationale.
@@ -573,11 +590,23 @@ impl AgentCore {
     /// a zero-input call is still recorded (the LLM did happen), but its
     /// `prompt_tokens` contribution is skipped to avoid masking a reliable
     /// baseline with a Provider-fallback zero ("宁可 miss 也不估计").
+    ///
+    /// ADR-066: `cache_read_tokens` follows the same zero-skip gate as
+    /// `prompt_tokens` (a reliable `cache_read` requires a reliable
+    /// input).  `cache_write_tokens` is always accumulated — Anthropic
+    /// cache writes are real, billable events independent of the
+    /// regular input count.
     pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
         if usage.prompt_tokens > 0 {
             self.agent_total_input_tokens
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.saturating_add(usage.prompt_tokens))
+                })
+                .ok();
+            // ADR-066: cache_read shares the zero-skip gate.
+            self.agent_total_cache_read_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.saturating_add(usage.cache_read_tokens))
                 })
                 .ok();
         }
@@ -586,20 +615,31 @@ impl AgentCore {
                 Some(cur.saturating_add(usage.completion_tokens))
             })
             .ok();
+        // ADR-066: cache_write always accumulates (no zero-skip gate).
+        self.agent_total_cache_write_tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some(cur.saturating_add(usage.cache_write_tokens))
+            })
+            .ok();
     }
 
     /// Atomically merge a freshly-scanned total into the in-process counter
     /// using `max(counter, scanned)`.
     ///
-    /// Idempotent: calling with the same `(in, out)` value repeatedly is a
-    /// no-op once the counter has been raised. Race-safe with concurrent
-    /// `accumulate_llm_usage` calls — whichever side sees the larger value
-    /// wins, so a slow scan followed by a fresh LLM call won't accidentally
-    /// downgrade the counter to the (stale) scan result.
+    /// Idempotent: calling with the same `(in, out, cache_read,
+    /// cache_write)` tuple repeatedly is a no-op once the counters have
+    /// been raised. Race-safe with concurrent `accumulate_llm_usage`
+    /// calls — whichever side sees the larger value wins, so a slow
+    /// scan followed by a fresh LLM call won't accidentally downgrade
+    /// the counter to the (stale) scan result.
     ///
-    /// Pass `None` for either side if the scan yielded no data
-    /// (e.g. agents with no persisted sessions yet).
-    pub fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>)) {
+    /// Pass `None` for any dimension whose scan yielded no data
+    /// (e.g. agents with no persisted sessions yet, or legacy meta
+    /// files without cache fields).
+    pub fn merge_token_totals(
+        &self,
+        scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
+    ) {
         if let Some(inp) = scanned.0 {
             self.agent_total_input_tokens
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
@@ -614,18 +654,38 @@ impl AgentCore {
                 })
                 .ok();
         }
+        // ADR-066: cache_read + cache_write follow the same atomic-max
+        // merge pattern.
+        if let Some(cache_read) = scanned.2 {
+            self.agent_total_cache_read_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.max(cache_read))
+                })
+                .ok();
+        }
+        if let Some(cache_write) = scanned.3 {
+            self.agent_total_cache_write_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.max(cache_write))
+                })
+                .ok();
+        }
     }
 
     /// Snapshot the current agent-scoped cumulative token totals.
     ///
-    /// Returns `(input_tokens, output_tokens)`. Always present (zero is a
-    /// valid baseline before the first LLM call). Callers embed these in
-    /// `ContextUsageInfo` so the frontend can show a "agent-total" line in
-    /// the Results Panel before any per-session cumulative figure exists.
-    pub fn agent_token_totals(&self) -> (u64, u64) {
+    /// ADR-066: returns `(input_tokens, output_tokens, cache_read_tokens,
+    /// cache_write_tokens)`. Always present (zero is a valid baseline
+    /// before the first LLM call). Callers embed these in
+    /// `ContextUsageInfo` so the frontend can show a "agent-total"
+    /// line in the Results Panel before any per-session cumulative
+    /// figure exists.
+    pub fn agent_token_totals(&self) -> (u64, u64, u64, u64) {
         (
             self.agent_total_input_tokens.load(Ordering::Acquire),
             self.agent_total_output_tokens.load(Ordering::Acquire),
+            self.agent_total_cache_read_tokens.load(Ordering::Acquire),
+            self.agent_total_cache_write_tokens.load(Ordering::Acquire),
         )
     }
 
@@ -1328,6 +1388,15 @@ impl Clone for AgentCore {
             ),
             agent_total_output_tokens: AtomicU64::new(
                 self.agent_total_output_tokens.load(Ordering::Acquire),
+            ),
+            // ADR-066: cache counters inherit the same "snapshot value,
+            // share updates across clones" semantics as the in/out
+            // counters above.
+            agent_total_cache_read_tokens: AtomicU64::new(
+                self.agent_total_cache_read_tokens.load(Ordering::Acquire),
+            ),
+            agent_total_cache_write_tokens: AtomicU64::new(
+                self.agent_total_cache_write_tokens.load(Ordering::Acquire),
             ),
             retrieve_queue: self.retrieve_queue.clone(),
         }
@@ -2282,6 +2351,201 @@ mod tests {
             core.search_prompt().is_none(),
             "clearing the RwLock must propagate to the accessor so the \
              built-in fallback constant takes effect again"
+        );
+    }
+
+    // ── ADR-066: agent-level cache counter tests ─────────────────────
+
+    /// Helper: build an AgentCore with default test config and no
+    /// manifest, suitable for token-counter tests.
+    fn make_minimal_core() -> AgentCore {
+        let config = RuntimeConfig {
+            history_max_tokens: 8000,
+            ..RuntimeConfig::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.cache"
+            version = "1.0.0"
+            name = "Cache counter test"
+            description = "ADR-066 cache counter tests"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+        AgentCore::new(config, manifest, provider, vec![])
+    }
+
+    /// Basic cache accumulation: four counters all advance correctly
+    /// across two LLM calls (the Anthropic-style cache breakdown).
+    #[test]
+    fn test_accumulate_llm_usage_advances_cache_counters() {
+        let core = make_minimal_core();
+        assert_eq!(core.agent_token_totals(), (0, 0, 0, 0));
+
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+            cache_read_tokens: 400,
+            cache_write_tokens: 100,
+            ..Default::default()
+        });
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 3500,
+            completion_tokens: 450,
+            cache_read_tokens: 1200,
+            cache_write_tokens: 0,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            core.agent_token_totals(),
+            (4500, 650, 1600, 100),
+            "input/output/cache_read/cache_write all accumulate"
+        );
+    }
+
+    /// `cache_read` follows the same zero-skip gate as `prompt_tokens`
+    /// (Provider fallback).  `cache_write` always accumulates.
+    #[test]
+    fn test_accumulate_llm_usage_cache_zero_input_skip() {
+        let core = make_minimal_core();
+
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            cache_read_tokens: 300,
+            cache_write_tokens: 50,
+            ..Default::default()
+        });
+        // Provider fallback: prompt=0, bogus cache_read must NOT count.
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 0,
+            completion_tokens: 50,
+            cache_read_tokens: 999,
+            cache_write_tokens: 30,
+            ..Default::default()
+        });
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 2000,
+            completion_tokens: 80,
+            cache_read_tokens: 800,
+            cache_write_tokens: 0,
+            ..Default::default()
+        });
+
+        let (_, _, cr, cw) = core.agent_token_totals();
+        assert_eq!(cr, 1100, "cache_read: 300 + 800 (999 skipped)");
+        assert_eq!(cw, 80, "cache_write: 50 + 30 + 0 (always accumulated)");
+    }
+
+    /// Saturating overflow on cache counters — `u64::MAX` followed by a
+    /// non-zero add must cap at `u64::MAX` without panicking.
+    #[test]
+    fn test_accumulate_llm_usage_cache_saturating_overflow() {
+        let core = make_minimal_core();
+
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            cache_read_tokens: u64::MAX,
+            cache_write_tokens: u64::MAX,
+            ..Default::default()
+        });
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            cache_read_tokens: 5,
+            cache_write_tokens: 7,
+            ..Default::default()
+        });
+
+        let (_, _, cr, cw) = core.agent_token_totals();
+        assert_eq!(cr, u64::MAX, "saturating_add caps cache_read at u64::MAX");
+        assert_eq!(cw, u64::MAX, "saturating_add caps cache_write at u64::MAX");
+    }
+
+    /// `merge_token_totals` applies atomic-max across all four
+    /// dimensions, mirroring the ADR-028 in/out semantics.  Each
+    /// dimension is max'd independently — a larger scanned value
+    /// always wins; a larger live value is preserved; `None` per
+    /// dimension skips that dimension.
+    #[test]
+    fn test_merge_token_totals_cache_atomic_max() {
+        let core = make_minimal_core();
+
+        // Step 1: live counter has values.
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            cache_read_tokens: 50,
+            cache_write_tokens: 20,
+            ..Default::default()
+        });
+
+        // Step 2: scan reports smaller values across the board — every
+        // dimension's atomic-max preserves the live value.
+        core.merge_token_totals((
+            Some(50),  // < live 100
+            Some(5),   // < live 10
+            Some(10),  // < live 50
+            Some(5),   // < live 20
+        ));
+        assert_eq!(
+            core.agent_token_totals(),
+            (100, 10, 50, 20),
+            "per-dimension atomic max preserves live when scan is smaller"
+        );
+
+        // Step 3: scan reports larger values across the board — every
+        // dimension's atomic-max adopts the scanned value.
+        core.merge_token_totals((
+            Some(200),  // > live 100
+            Some(20),   // > live 10
+            Some(500),  // > live 50
+            Some(300),  // > live 20
+        ));
+        assert_eq!(
+            core.agent_token_totals(),
+            (200, 20, 500, 300),
+            "per-dimension atomic max adopts scan when it is larger"
+        );
+
+        // Step 4: passing `None` for any dimension leaves that
+        // dimension's counter unchanged — supports legacy meta files
+        // without cache fields.
+        core.merge_token_totals((None, None, Some(600), None));
+        assert_eq!(
+            core.agent_token_totals(),
+            (200, 20, 600, 300),
+            "None dimensions are skipped (legacy meta without cache fields)"
+        );
+
+        // Step 5: independent dimensions — input is smaller, output is
+        // larger.  Atomic max picks per-dimension, not as a tuple.
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 50,
+            completion_tokens: 1000,
+            ..Default::default()
+        });
+        // Live now: input=200+50=250, output=20+1000=1020, cache_read=600,
+        // cache_write=300.
+        core.merge_token_totals((
+            Some(100),  // < live 250, ignored
+            Some(5000), // > live 1020, adopted
+            Some(100),  // < live 600, ignored
+            Some(1000), // > live 300, adopted
+        ));
+        assert_eq!(
+            core.agent_token_totals(),
+            (250, 5000, 600, 1000),
+            "each dimension is max'd independently"
         );
     }
 }

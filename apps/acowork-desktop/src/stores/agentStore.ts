@@ -173,8 +173,18 @@ export interface AgentStorage {
    *  for the Results Panel when the live `context_usage` WebSocket push
    *  hasn't fired yet (e.g. fresh Runtime with no LLM calls, or session
    *  not yet active). Refreshed on every successful session-list fetch.
-   *  `null` = not yet fetched / older Runtime without ADR-028. */
-  agentTokenTotals: { input: number; output: number } | null;
+   *  `null` = not yet fetched / older Runtime without ADR-028.
+   *
+   *  ADR-066: widened with `cacheRead` and `cacheWrite` so the status
+   *  panel can render cumulative cache-hit / cache-write totals alongside
+   *  input / output. Legacy Runtimes (pre-ADR-066) leave the cache fields
+   *  at `0`, which the UI treats as "no cache activity reported". */
+  agentTokenTotals: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  } | null;
   /** Agent online/offline status — updated by agent_status MQTT event.
    *  Defaults to `true` so the first paint shows a "running" agent
    *  rather than a blank/inactive state — the Gateway's `/api/agents`
@@ -635,8 +645,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         total_pages: number;
         // ADR-028: optional fallback data source for agent-scoped token
         // totals. Absent on older Runtimes — both fields `undefined`.
+        // ADR-066: cache totals may be present alongside, also optional.
         agent_total_input_tokens?: number;
         agent_total_output_tokens?: number;
+        agent_total_cache_read_tokens?: number;
+        agent_total_cache_write_tokens?: number;
       };
       const sessions = (data.sessions ?? []).sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -652,10 +665,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // for the Results Panel. Both fields must be present and finite for
       // the fallback to be usable; otherwise we leave the previous value
       // (or `null` on first fetch) in place.
+      //
+      // ADR-066: cache totals follow the same gating — if a legacy Runtime
+      // omits `agent_total_cache_*`, default both to `0` so the status
+      // panel renders "no cache activity reported" rather than `NaN`.
       const agentTokenTotals =
         typeof data.agent_total_input_tokens === "number" &&
         typeof data.agent_total_output_tokens === "number"
-          ? { input: data.agent_total_input_tokens, output: data.agent_total_output_tokens }
+          ? {
+              input: data.agent_total_input_tokens,
+              output: data.agent_total_output_tokens,
+              cacheRead: data.agent_total_cache_read_tokens ?? 0,
+              cacheWrite: data.agent_total_cache_write_tokens ?? 0,
+            }
           : null;
 
       set((state) =>

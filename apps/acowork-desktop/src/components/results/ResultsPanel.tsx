@@ -8,6 +8,7 @@ import type { ChatMessage, SessionStatus } from "../../lib/types";
 import { getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { log } from "../../lib/logger";
+import { computeCacheHitRate, formatCacheHitRate } from "../../lib/cacheHitRate";
 import {
   WifiOff,
   Play,
@@ -128,6 +129,20 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     if (!agent?.activeSessionId) return EMPTY_MESSAGES;
     return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
   });
+
+  // ADR-066 §6: cache-hit ratio.  Provider billing model differs:
+  //   - Anthropic Messages: `cache_read / (input + cache_read + cache_write)`
+  //     (write is a real billable event — the denominator includes it).
+  //   - OpenAI Chat Completions: `cache_read / prompt_tokens`
+  //     (OpenAI has no write concept; auto-cache only).
+  //   - Other providers (ollama, deepseek, zhipuai, …): no cache
+  //     accounting at all → helper returns `null` and we hide the row.
+  // We deliberately do NOT compute this on the backend — the choice of
+  // denominator is a UX policy owned by the front-end so designers can
+  // tweak it without re-shipping the runtime.
+  const cacheHitRateLabel = formatCacheHitRate(
+    computeCacheHitRate(sessionProvider, contextUsage),
+  );
 
   // ── Debug store (always called, conditionally used) ──────────────
   const {
@@ -694,6 +709,59 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                         contextUsage?.agent_total_output_tokens ??
                         agentTokenTotals?.output
                       )?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  {/* ADR-066: cache rows.  Session-level cache (per-turn +
+                      cumulative) is sourced from `contextUsage`; agent-level
+                      cumulative cache comes from the same with the same
+                      live-vs-fallback precedence as input/output above. */}
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.cacheReadTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {contextUsage?.cache_read_tokens?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.cacheWriteTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {contextUsage?.cache_write_tokens?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.agentTotalCacheReadTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {(
+                        contextUsage?.agent_total_cache_read_tokens ??
+                        agentTokenTotals?.cacheRead
+                      )?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.agentTotalCacheWriteTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {(
+                        contextUsage?.agent_total_cache_write_tokens ??
+                        agentTokenTotals?.cacheWrite
+                      )?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  {/* ADR-066: cache hit ratio.  Provider-aware formula
+                      (Anthropic Messages vs OpenAI Chat Completions) —
+                      see the `computeCacheHitRate` helper and ADR-066
+                      §6 for the rationale. */}
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.cacheHitRatio")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {cacheHitRateLabel == null ? "—" : (
+                        <>
+                          <span className="font-medium" style={{ color: "var(--color-accent)" }}>
+                            {cacheHitRateLabel}
+                          </span>
+                          <span className="ml-1 text-zinc-400 dark:text-zinc-500">
+                            {t("resultsPanel.cached")}
+                          </span>
+                        </>
+                      )}
                     </span>
                   </div>
                 </>
