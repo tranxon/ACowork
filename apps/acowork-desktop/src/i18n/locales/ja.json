@@ -212,6 +212,17 @@
   },
   "contextUsage": {
     "ariaLabel": "コンテキスト使用量",
+    "title": "コンテキスト使用量",
+    "close": "閉じる",
+    "used": "使用済み",
+    "usageBarLabel": "カテゴリ別の使用量",
+    "categories": {
+      "systemPrompt": "システムプロンプト",
+      "tools": "ツール定義",
+      "messages": "会話メッセージ",
+      "connectors": "コネクター",
+      "skills": "スキル"
+    },
     "compressing": "圧縮中...",
     "agentRunning": "Agent実行中",
     "compressContext": "コンテキストを圧縮",

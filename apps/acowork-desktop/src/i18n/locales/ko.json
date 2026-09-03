@@ -211,6 +211,17 @@
   },
   "contextUsage": {
     "ariaLabel": "컨텍스트 사용량",
+    "title": "컨텍스트 사용량",
+    "close": "닫기",
+    "used": "사용됨",
+    "usageBarLabel": "카테고리별 사용량",
+    "categories": {
+      "systemPrompt": "시스템 프롬프트",
+      "tools": "도구 정의",
+      "messages": "대화 메시지",
+      "connectors": "커넥터",
+      "skills": "스킬"
+    },
     "compressing": "압축 중...",
     "agentRunning": "Agent 실행 중",
     "compressContext": "컨텍스트 압축",

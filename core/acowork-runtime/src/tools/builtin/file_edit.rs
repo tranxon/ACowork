@@ -21,19 +21,22 @@
 //!
 //! Line endings
 //! ------------
-//! For CRLF files, **callers MUST pass CRLF-terminated `old_text` and
-//! `new_text`**. The match range is computed in raw byte offsets against the
-//! file content. If `old_text` ends with `\n` and the corresponding file
-//! position terminates with `\r\n`, the trailing `\r` falls inside the
-//! replaced range — and a `\n`-only `new_text` drops it, producing a mixed
-//! LF/CRLF file. The whitespace-flexible fallback does NOT auto-restore the
-//! `\r` to preserve user intent. LF-only `old_text` is fine for matching
-//! against LF files; for CRLF files, use CRLF everywhere.
+//! CRLF normalization is automatic. `detect_line_ending` inspects the file
+//! content; if the file uses CRLF uniformly (or predominantly), both
+//! `old_text` and `new_text` are upgraded LF→CRLF before matching and
+//! splicing. Callers may therefore pass LF-only `old_text` against a CRLF
+//! repository without rewriting their input. The replacement byte range
+//! stays in raw file coordinates, so the file's existing line endings are
+//! preserved byte-for-byte outside the replaced region.
+//!
+//! Files with a genuinely mixed line ending (CRLF and LF interleaved with
+//! no clear majority) are left alone — auto-upgrade would silently turn LF
+//! lines into CRLF, which is not what the caller asked for. The caller
+//! should pre-normalize the file in that case.
 //!
 //! Internally `compute_line_spans` strips a leading `\r` from each line's
 //! `content_end` when followed by `\n`, so the comparison itself is
-//! line-terminator-agnostic — the constraint above is purely about the
-//! replaced byte range, not about matching.
+//! line-terminator-agnostic.
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
@@ -184,6 +187,67 @@ fn compute_line_spans(content: &str) -> Vec<LineSpan> {
     spans
 }
 
+/// Detected line-ending style of the target file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineEnding {
+    /// No newlines at all, or every newline is bare `\n`.
+    Lf,
+    /// Every newline is `\r\n`, or CRLF vastly outnumbers bare LF.
+    Crlf,
+    /// Both kinds are present in non-trivial amounts and no clear majority.
+    Mixed,
+}
+
+/// Count CRLF vs bare LF pairs in `content` and classify the file's
+/// dominant line ending. Empty content resolves to `Lf` (a no-op for the
+/// upgrader) since there is nothing to normalize.
+fn detect_line_ending(content: &str) -> LineEnding {
+    let bytes = content.as_bytes();
+    let mut crlf = 0usize;
+    let mut lf_only = 0usize;
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' {
+            if i > 0 && bytes[i - 1] == b'\r' {
+                crlf += 1;
+            } else {
+                lf_only += 1;
+            }
+        }
+    }
+    match (crlf, lf_only) {
+        (0, _) => LineEnding::Lf,
+        (_, 0) => LineEnding::Crlf,
+        (c, l) => {
+            if c >= l.saturating_mul(2) {
+                LineEnding::Crlf
+            } else if l >= c.saturating_mul(2) {
+                LineEnding::Lf
+            } else {
+                LineEnding::Mixed
+            }
+        }
+    }
+}
+
+/// Upgrade bare LF to CRLF inside `text` iff `target` is `Crlf`. Every `\n`
+/// not already preceded by `\r` gets a leading `\r` inserted. If `target`
+/// is `Lf` or `Mixed`, the text is returned unchanged.
+fn upgrade_to_target_line_ending(text: &str, target: LineEnding) -> String {
+    if target != LineEnding::Crlf {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut prev = '\0';
+    for ch in text.chars() {
+        if ch == '\n' && prev != '\r' {
+            out.push('\r');
+        }
+        out.push(ch);
+        prev = ch;
+    }
+    out
+}
+
 /// Match outcome with start/end byte offsets and a flag indicating whether
 /// whitespace-flexible matching was used.
 #[derive(Debug, Clone, Copy)]
@@ -203,6 +267,22 @@ fn try_flexible_line_match(content: &str, old_string: &str) -> Result<MatchOutco
 
     if old_spans.is_empty() || content_spans.len() < old_spans.len() {
         return Err("old_text not found in file".into());
+    }
+
+    // Refuse to match across mismatched line endings. `compute_line_spans`
+    // strips `\r` from each line's content, so the flexible matcher would
+    // otherwise happily match CRLF `old_text` against LF file content (or
+    // vice versa) and produce a mixed file. Catch it explicitly so the
+    // caller sees a clear error rather than silently corrupting the file.
+    let file_ending = detect_line_ending(content);
+    let old_ending = detect_line_ending(old_string);
+    if file_ending != old_ending
+        && file_ending != LineEnding::Mixed
+        && old_ending != LineEnding::Mixed
+    {
+        return Err(format!(
+            "old_text line ending does not match file line ending (old={old_ending:?}, file={file_ending:?}); refusing to mix line endings"
+        ));
     }
 
     let normalized_old_lines: Vec<String> = old_spans
@@ -267,8 +347,15 @@ fn try_flexible_line_match(content: &str, old_string: &str) -> Result<MatchOutco
 /// Tries exact string matching first. If no exact match is found, falls back
 /// to whitespace-flexible line matching.
 fn resolve_match(content: &str, old_string: &str) -> Result<MatchOutcome, String> {
+    // Auto-normalize `old_string` to the file's line ending so LF-only inputs
+    // match CRLF files. The replacement byte range stays in raw file
+    // coordinates; only the haystack string is rewritten. `Mixed` files fall
+    // through unchanged because we cannot infer the caller's intent.
+    let ending = detect_line_ending(content);
+    let normalized_old = upgrade_to_target_line_ending(old_string, ending);
+
     // 1. Exact match
-    let mut exact_matches = content.match_indices(old_string);
+    let mut exact_matches = content.match_indices(&normalized_old);
     if let Some((start, _)) = exact_matches.next() {
         if exact_matches.next().is_some() {
             let match_count = 2 + exact_matches.count();
@@ -278,13 +365,13 @@ fn resolve_match(content: &str, old_string: &str) -> Result<MatchOutcome, String
         }
         return Ok(MatchOutcome {
             start,
-            end: start + old_string.len(),
+            end: start + normalized_old.len(),
             used_whitespace_flex: false,
         });
     }
 
     // 2. Whitespace-flexible fallback
-    try_flexible_line_match(content, old_string)
+    try_flexible_line_match(content, &normalized_old)
 }
 
 #[async_trait]
@@ -345,6 +432,15 @@ impl Tool for FileEditTool {
             }
         };
 
+        // Auto-upgrade `new_text` to the file's line ending so CRLF files stay
+        // CRLF even when the caller passes LF-only `new_text`. `resolve_match`
+        // performs the same upgrade internally on `old_text`; we re-detect
+        // here rather than threading the value through the match return to
+        // keep `MatchOutcome` a plain `(start, end, used_whitespace_flex)`
+        // triple. Detection is O(n) on `content`, which is bounded.
+        let ending = detect_line_ending(&content);
+        let final_new_text = upgrade_to_target_line_ending(new_text, ending);
+
         // Resolve the match — exact first, then whitespace-flexible fallback
         let match_outcome = match resolve_match(&content, old_text) {
             Ok(outcome) => outcome,
@@ -371,7 +467,7 @@ impl Tool for FileEditTool {
             content.len() - (match_outcome.end - match_outcome.start) + new_text.len(),
         );
         new_content.push_str(&content[..match_outcome.start]);
-        new_content.push_str(new_text);
+        new_content.push_str(&final_new_text);
         new_content.push_str(&content[match_outcome.end..]);
 
         match tokio::fs::write(&full_path, &new_content).await {
@@ -642,5 +738,162 @@ mod tests {
 
         // CRLF preserved on every line, including the two we replaced.
         assert_eq!(final_content, "AAA_replaced\r\nBBB_replaced\r\nCCC\r\n");
+    }
+
+    /// LF-only `old_text` against a CRLF file must match AND the file must
+    /// remain CRLF end-to-end. This is the regression that motivated the
+    /// auto-upgrade: prior to this change, matching worked via the
+    /// whitespace-flexible fallback but the spliced `new_text` (LF) caused
+    /// the replaced lines to lose their `\r`, producing a mixed file.
+    #[tokio::test]
+    async fn crlf_file_lf_old_text_upgraded() {
+        let path = unique_tmp("lf_old");
+        let initial = "AAA\r\nBBB\r\nCCC\r\n";
+        tokio::fs::write(&path, initial).await.unwrap();
+
+        let tool = FileEditTool::new();
+        let r = tool
+            .execute(
+                serde_json::json!({
+                    "path": path.to_str().unwrap(),
+                    "old_text": "AAA\nBBB",
+                    "new_text": "AAA_replaced\nBBB_replaced",
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r.ok, "edit failed: {:?}", r.error);
+
+        let final_content = tokio::fs::read_to_string(&path).await.unwrap();
+        let _ = tokio::fs::remove_file(&path).await;
+
+        // Every line in the result must be CRLF, including the replaced
+        // ones — no mixed line endings.
+        assert_eq!(final_content, "AAA_replaced\r\nBBB_replaced\r\nCCC\r\n");
+        assert!(!final_content.contains("\r\n\r\n"), "no double CRLF");
+        // Sanity: zero bare LF left.
+        let crlf_count = final_content.matches("\r\n").count();
+        let lf_only_count = final_content.matches('\n').count() - crlf_count;
+        assert_eq!(lf_only_count, 0, "replaced lines leaked LF: {final_content:?}");
+    }
+
+    /// Trailing-newline variant: `old_text` ends with `\n`. CRLF upgrade
+    /// must still cover the trailing `\n`.
+    #[tokio::test]
+    async fn crlf_file_lf_old_text_with_trailing_newline() {
+        let path = unique_tmp("lf_old_trail");
+        let initial = "AAA\r\nBBB\r\nCCC\r\n";
+        tokio::fs::write(&path, initial).await.unwrap();
+
+        let tool = FileEditTool::new();
+        let r = tool
+            .execute(
+                serde_json::json!({
+                    "path": path.to_str().unwrap(),
+                    "old_text": "AAA\nBBB\n",
+                    "new_text": "AAA_replaced\nBBB_replaced\n",
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r.ok, "edit failed: {:?}", r.error);
+
+        let final_content = tokio::fs::read_to_string(&path).await.unwrap();
+        let _ = tokio::fs::remove_file(&path).await;
+
+        assert_eq!(final_content, "AAA_replaced\r\nBBB_replaced\r\nCCC\r\n");
+    }
+
+    /// LF files must NOT be upgraded. Passing CRLF `old_text` against an LF
+    /// file should error out clearly (rather than silently creating a mixed
+    /// file via the whitespace-flexible fallback).
+    #[tokio::test]
+    async fn lf_file_crlf_old_text_does_not_upgrade() {
+        let path = unique_tmp("lf_file");
+        let initial = "AAA\nBBB\nCCC\n";
+        tokio::fs::write(&path, initial).await.unwrap();
+
+        let tool = FileEditTool::new();
+        let r = tool
+            .execute(
+                serde_json::json!({
+                    "path": path.to_str().unwrap(),
+                    "old_text": "AAA\r\nBBB",
+                    "new_text": "AAA_replaced\r\nBBB_replaced",
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!r.ok, "should not have matched CRLF old_text against LF file");
+        let err = r.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("line ending"),
+            "expected line-ending mismatch error, got: {err:?}"
+        );
+
+        let final_content = tokio::fs::read_to_string(&path).await.unwrap();
+        let _ = tokio::fs::remove_file(&path).await;
+        // File must be unchanged — no partial write, no mixed line endings.
+        assert_eq!(final_content, initial);
+    }
+
+    /// Pure unit tests for `detect_line_ending` and the upgrader. These don't
+    /// touch the filesystem and pin down the edge cases that an integration
+    /// test might miss.
+    #[test]
+    fn detect_line_ending_classifies_correctly() {
+        assert_eq!(detect_line_ending(""), LineEnding::Lf);
+        assert_eq!(detect_line_ending("no newlines here"), LineEnding::Lf);
+        assert_eq!(detect_line_ending("AAA\nBBB\n"), LineEnding::Lf);
+        assert_eq!(detect_line_ending("AAA\r\nBBB\r\n"), LineEnding::Crlf);
+        // One bare LF + many CRLFs → CRLF (majority).
+        assert_eq!(
+            detect_line_ending("AAA\nBBB\r\nCCC\r\nDDD\r\n"),
+            LineEnding::Crlf
+        );
+        // Many CRLFs + one bare LF → Mixed (no 2x majority).
+        assert_eq!(
+            detect_line_ending("AAA\nBBB\r\n"),
+            LineEnding::Mixed
+        );
+    }
+
+    #[test]
+    fn upgrade_inserts_cr_only_for_unpaired_lf() {
+        let upgraded = upgrade_to_target_line_ending("AAA\nBBB\n", LineEnding::Crlf);
+        assert_eq!(upgraded, "AAA\r\nBBB\r\n");
+
+        // Already-CRLF input passes through unchanged (no double `\r`).
+        let passthrough = upgrade_to_target_line_ending("AAA\r\nBBB\r\n", LineEnding::Crlf);
+        assert_eq!(passthrough, "AAA\r\nBBB\r\n");
+
+        // Empty + non-newline content unchanged.
+        assert_eq!(upgrade_to_target_line_ending("", LineEnding::Crlf), "");
+        assert_eq!(
+            upgrade_to_target_line_ending("no newlines", LineEnding::Crlf),
+            "no newlines"
+        );
+
+        // Lf target: pass through regardless of input bytes.
+        assert_eq!(
+            upgrade_to_target_line_ending("AAA\nBBB\n", LineEnding::Lf),
+            "AAA\nBBB\n"
+        );
+        // Mixed target: pass through (no implicit upgrade).
+        assert_eq!(
+            upgrade_to_target_line_ending("AAA\nBBB\n", LineEnding::Mixed),
+            "AAA\nBBB\n"
+        );
+
+        // Non-ASCII content preserved verbatim; UTF-8 sequences never split.
+        let utf8 = "你好\n世界\n";
+        assert_eq!(
+            upgrade_to_target_line_ending(utf8, LineEnding::Crlf),
+            "你好\r\n世界\r\n"
+        );
+        assert_eq!(upgrade_to_target_line_ending(utf8, LineEnding::Lf), utf8);
     }
 }

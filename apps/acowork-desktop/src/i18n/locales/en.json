@@ -115,6 +115,17 @@
   },
   "contextUsage": {
     "ariaLabel": "Context usage",
+    "title": "Context Usage",
+    "close": "Close",
+    "used": "Used",
+    "usageBarLabel": "Usage by category",
+    "categories": {
+      "systemPrompt": "System Prompt",
+      "tools": "Tool Definitions",
+      "messages": "Conversation Messages",
+      "connectors": "Connectors",
+      "skills": "Skills"
+    },
     "compressing": "Compacting...",
     "agentRunning": "Agent running",
     "compressContext": "compact context",

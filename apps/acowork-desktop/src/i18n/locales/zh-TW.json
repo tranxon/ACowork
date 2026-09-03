@@ -211,6 +211,17 @@
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",
+    "title": "上下文用量",
+    "close": "關閉",
+    "used": "已使用",
+    "usageBarLabel": "分類用量佔比",
+    "categories": {
+      "systemPrompt": "系統提示詞",
+      "tools": "工具定義",
+      "messages": "對話訊息",
+      "connectors": "連接器",
+      "skills": "技能"
+    },
     "compressing": "壓縮中...",
     "agentRunning": "Agent 執行中",
     "compressContext": "壓縮上下文",
