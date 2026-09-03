@@ -6,8 +6,9 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
 import type { ChatMessage, SessionStatus } from "../../lib/types";
 import { getProcessingPhase } from "../../lib/types";
-import { cn } from "../../lib/utils";
+import { cn, formatPercent } from "../../lib/utils";
 import { log } from "../../lib/logger";
+import { computeCacheHitStats, formatCacheHitRate, hasCacheData, getCacheProtocol } from "../../lib/cacheHitRate";
 import {
   WifiOff,
   Play,
@@ -86,6 +87,16 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.provider ?? null;
   });
+  // ADR-066 §6: only Anthropic-protocol providers surface
+  // `cache_creation_input_tokens` (the cache-write counter); OpenAI
+  // Chat Completions and OpenAI-compatible providers never do. We use
+  // this to gate the agent-total cache-WRITE row in the Agent Status
+  // panel below — for OpenAI sessions that value is hard-wired to 0
+  // by the Runtime, so showing "0 累计缓存写入" next to a live cache
+  // READ counter is misleading (the metric simply doesn't exist for
+  // the chosen protocol). The cache-READ row is unconditional, since
+  // both protocol families report it.
+  const cacheProtocol = getCacheProtocol(sessionProvider);
   const modelRatio = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -128,6 +139,25 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     if (!agent?.activeSessionId) return EMPTY_MESSAGES;
     return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
   });
+
+  // ADR-066 §6: cache-hit ratio.  Provider billing model differs:
+  //   - Anthropic Messages: `cache_read / (input + cache_read + cache_write)`
+  //     (write is a real billable event — the denominator includes it).
+  //   - OpenAI Chat Completions: `cache_read / prompt_tokens`
+  //     (OpenAI has no write concept; auto-cache only).
+  //   - Other providers (ollama, deepseek, zhipuai, …): no cache
+  //     accounting at all → helper returns `null` and we hide the row.
+  // This block is the **session-status** surface, so it shows the
+  // session-lifetime (cumulative) rate — the input-box popover shows
+  // the per-turn rate instead.  We deliberately do NOT compute this on
+  // the backend — the choice of denominator is a UX policy owned by
+  // the front-end so designers can tweak it without re-shipping the
+  // runtime.
+  const cacheStats = computeCacheHitStats(sessionProvider, contextUsage, "cumulative");
+  const cacheHitRateLabel = formatCacheHitRate(cacheStats.ratio);
+  // Numeric 0-100 for the progress-bar width (mirrors `usage_percent`).
+  const cacheHitRatePercent =
+    cacheStats.ratio != null ? Math.round(cacheStats.ratio * 100) : 0;
 
   // ── Debug store (always called, conditionally used) ──────────────
   const {
@@ -519,6 +549,11 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                           }
                           onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
                           getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
+                          // Anchor per-section token counts to the real, LLM-billed
+                          // total for the latest call so they sum exactly to
+                          // the value the user sees in the context-usage popover
+                          // instead of the per-section `token_estimate` heuristic.
+                          realTotalTokens={contextUsage?.total_tokens ?? undefined}
                         />
                       ))}
                     </div>
@@ -549,7 +584,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-zinc-500">{t("resultsPanel.contextUsage")}</span>
                     <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
-                      {contextUsage.usage_percent}%
+                      {formatPercent(contextUsage.usage_percent)}%
                     </span>
                   </div>
                   <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700 mb-1.5">
@@ -573,6 +608,39 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               ) : (
                 <div className="mb-3 text-zinc-400 dark:text-zinc-500 italic">{t("resultsPanel.noContextData")}</div>
               )}
+              {/* ADR-066: cache hit ratio — same progress-bar style as the
+                  context-usage block above.  This is the session-status
+                  surface, so it shows the session-lifetime (cumulative)
+                  rate.  Shown whenever the Runtime reports any cumulative
+                  cache accounting (read or write); the ratio itself falls
+                  back to a dash when it isn't computable yet (e.g. a fresh
+                  Anthropic session that has only seeded the cache), in
+                  which case the progress bar is hidden.  The two numbers
+                  below are the ratio's numerator (cumulative cache-hit
+                  tokens) and denominator (cumulative input tokens) — never
+                  two independent cache counters. */}
+              {hasCacheData(contextUsage, "cumulative") && (
+                <div className="mb-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-zinc-500">{t("resultsPanel.cacheHitRatio")}</span>
+                    <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
+                      {cacheHitRateLabel ?? "\u2014"}
+                    </span>
+                  </div>
+                  {cacheHitRateLabel !== null && (
+                    <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700 mb-1.5">
+                      <div
+                        className="h-full rounded-full transition-all duration-300"
+                        style={{ backgroundColor: "var(--color-accent)", width: `${cacheHitRatePercent}%` }}
+                      />
+                    </div>
+                  )}
+                  <div className="flex justify-between text-zinc-400 dark:text-zinc-500">
+                    <span>{formatTokenCount(cacheStats.numerator)} {t("resultsPanel.cached")}</span>
+                    <span>{formatTokenCount(cacheStats.denominator)} {t("resultsPanel.promptTokens")}</span>
+                  </div>
+                </div>
+              )}
               {/* Divider */}
               {contextUsage && <div className="border-t border-zinc-100 dark:border-zinc-700/50 mb-2" />}
               <StatRow label={t("resultsPanel.promptTokens")} value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
@@ -590,6 +658,18 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                 label={t("resultsPanel.totalOutputTokens")}
                 value={contextUsage?.total_output_tokens?.toLocaleString()}
               />
+              {/* 字符/token — kept next to the token rows above so all
+                  token-related counters read as one block. A divider
+                  below separates this token cluster from the runtime
+                  / model / status fields that follow. */}
+              <StatRow label={t("resultsPanel.labelCharactersPerToken")} value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
+              {/* Divider — separates the token-count cluster above from
+                  the runtime / model / status fields below. Uses `my-2`
+                  (not `mb-2`) so the gap above and below the line is
+                  symmetric — `StatRow` already has `py-1`, so an
+                  asymmetric `mb-2` makes the line look glued to the
+                  text above and far from the text below. */}
+              <div className="my-2 border-t border-zinc-100 dark:border-zinc-700/50" />
               <StatRow label={t("resultsPanel.iterations")} value={iterations ? String(iterations) : undefined} />
               {sessionModel && (
                 <StatRow label={t("resultsPanel.labelModel")} value={sessionModel} />
@@ -597,7 +677,6 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               {sessionProvider && (
                 <StatRow label={t("resultsPanel.labelProvider")} value={sessionProvider} />
               )}
-              <StatRow label={t("resultsPanel.labelCharactersPerToken")} value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
               {reasoningEffort != null && (
                 <StatRow label={t("resultsPanel.labelThinkingLevel")} value={reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1)} />
               )}
@@ -665,6 +744,15 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     <span className="text-zinc-500">{t("resultsPanel.totalSessions")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{totalSessionCount}</span>
                   </div>
+                  {/* Divider — separates the identity / session-count
+                      cluster above from the agent-scoped token totals
+                      below. Mirrors the divider style used in the
+                      Session Status panel above the prompt/completion
+                      token rows. Uses `my-2` so the gap above and
+                      below the line is symmetric (the surrounding rows
+                      use `py-1`, so an asymmetric `mb-2` would make the
+                      line look glued to the row above). */}
+                  <div className="my-2 border-t border-zinc-100 dark:border-zinc-700/50" />
                   {/* ADR-028: agent-scoped cumulative totals across every LLM
                       call made by this Runtime process for this agent. These
                       are agent-level (not session-level) figures, so they
@@ -696,6 +784,45 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                       )?.toLocaleString() ?? "—"}
                     </span>
                   </div>
+                  {/* ADR-066: agent-level cumulative cache totals.  These are
+                      agent-scoped (across every LLM call for this agent), so
+                      they live in the Agent Status panel.  The session-level
+                      real-time cache hit rate lives in the Session Status
+                      block above — it is NOT duplicated here.  Precedence:
+                        1. live `context_usage` WebSocket push
+                           (contextUsage?.agent_total_cache_read_tokens) —
+                           most authoritative, updated on every LLM call;
+                        2. fallback stashed by
+                           `agentStore.agents[id].agentTokenTotals`,
+                           refreshed on every session-list fetch. */}
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.agentTotalCacheReadTokens")}</span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {(
+                        contextUsage?.agent_total_cache_read_tokens ??
+                        agentTokenTotals?.cacheRead
+                      )?.toLocaleString() ?? "—"}
+                    </span>
+                  </div>
+                  {/* ADR-066 §6: cache-write is an Anthropic-only concept.
+                      OpenAI Chat Completions has no cache-write event
+                      (caching is automatic and not surfaced as a per-
+                      call write token), and the Runtime hard-wires this
+                      counter to 0 for OpenAI-protocol providers. Showing
+                      "0 累计缓存写入" next to a live cache-READ value
+                      reads as a bug — better to hide the row entirely
+                      for non-Anthropic sessions. */}
+                  {cacheProtocol === "anthropic" && (
+                    <div className="flex justify-between py-1">
+                      <span className="text-zinc-500">{t("resultsPanel.agentTotalCacheWriteTokens")}</span>
+                      <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                        {(
+                          contextUsage?.agent_total_cache_write_tokens ??
+                          agentTokenTotals?.cacheWrite
+                        )?.toLocaleString() ?? "—"}
+                      </span>
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="py-1 text-zinc-400 dark:text-zinc-500">{t("resultsPanel.noAgentSelected")}</div>
@@ -736,7 +863,15 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
 }
 
 function formatTokenCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  // M uses 2 decimals (= 10K granularity) so e.g. 2.71M and 2.78M
+  // don't both collapse to "2.7M"; that was previously impossible
+  // to distinguish in the cache-vs-input pair of the Session Status
+  // panel because the gap between them was under 100K.
+  // K keeps 1 decimal (100-token granularity) — at K scale that
+  // resolution is still finer than any visual difference the eye
+  // can pick out next to a M-scale neighbour, and bumping it would
+  // just widen the column without adding real signal.
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toString();
 }

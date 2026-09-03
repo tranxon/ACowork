@@ -457,7 +457,9 @@ fi
 # The gateway reads this from `{exe_dir}/offline_embedding_providers.json`
 # (cloud embedding provider catalog). Missing file = empty catalog = the UI's
 # cloud-provider section shows an empty list.
+
 echo -e "${YELLOW}[4.6/7] Copying offline_embedding_providers.json to target/$PROFILE...${NC}"
+
 EMBEDDING_PROVIDERS_SRC="$WORKSPACE_ROOT/assets/offline_embedding_providers.json"
 if [ -f "$EMBEDDING_PROVIDERS_SRC" ]; then
     cp "$EMBEDDING_PROVIDERS_SRC" "$TARGET_DIR/offline_embedding_providers.json"

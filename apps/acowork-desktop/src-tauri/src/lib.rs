@@ -197,6 +197,7 @@ pub mod win_job {
 // seconds", causing false `location.reload()` triggers on normal minimise →
 // restore cycles.
 //
+
 // Detection now lives in the shared `acowork-mqtt-session` crate
 // (`power::detect_resume` / `power::run_power_probe_loop`, ADR-065 Step 1) so
 // Desktop / Node / Runtime recover from OS sleep/wake with identical timing.
@@ -205,11 +206,14 @@ pub mod win_job {
 // exceeds the threshold, the system was genuinely asleep — not merely
 // backgrounded.
 
+
 /// Recovery actions after a system wake.
 ///
 /// Called from both the 2-second polling task and the `Focused(true)`
+
 /// window event handler when [`acowork_mqtt_session::power::detect_resume`]
 /// reports genuine sleep:
+
 ///
 /// 1. **Rebuild the MQTT connection deterministically** – the OS tears
 ///    down TCP sockets during sleep, so the old EventLoop is unusable by
@@ -582,9 +586,11 @@ pub fn run() {
             }
 
             // Spawn async task for automatic sleep detection.
+
             // Polls biased/unbiased monotonic clocks every 2 s via the
             // shared `acowork_mqtt_session::power::run_power_probe_loop`
             // (ADR-065 Step 1 — same loop as Node / Runtime).  On
+
             // detecting real sleep, `recover_from_wake` deterministically
             // rebuilds the MQTT connection (the OS tears down TCP sockets
             // during sleep).  The `Focused(true)` handler below provides

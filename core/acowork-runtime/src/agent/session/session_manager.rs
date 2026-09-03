@@ -1407,11 +1407,19 @@ impl SessionManager {
             );
         }
 
-        // ADR-028: merge the resumed session's persisted token totals into
-        // the AgentCore counters so the live context_usage WebSocket push
-        // doesn't report agent_total < session_total after a process restart.
+        // ADR-028 / ADR-066: merge the resumed session's persisted token
+        // totals into the AgentCore counters so the live context_usage
+        // WebSocket push doesn't report agent_total < session_total
+        // after a process restart.  Cache fields use `Some` only when
+        // the persisted meta has them — older meta files default to 0
+        // (handled by `SessionTokens::default`).
         if let Some(t) = conv.tokens() {
-            self.core.merge_token_totals((Some(t.total_input), Some(t.total_output)));
+            self.core.merge_token_totals((
+                Some(t.total_input),
+                Some(t.total_output),
+                Some(t.total_cache_read),
+                Some(t.total_cache_write),
+            ));
         }
 
         self.create_session_with_id_and_conversation(session_id.to_string(), Some(conv), Some(committed_lines))

@@ -2656,10 +2656,10 @@ function ModelMenu({
                     setOpen(false);
                   }}
                   className={cn(
-                    "flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors",
+                    "flex w-full items-center justify-between px-2.5 py-1.5 text-xs font-medium transition-colors",
                     isActive
-                      ? "text-zinc-900 dark:text-white"
-                      : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
+                      ? "text-[var(--color-accent)]"
+                      : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
                   )}
                 >
                   <span className="flex items-center gap-1 min-w-0">
@@ -2698,7 +2698,7 @@ function ModelMenu({
               setShowAddDialog(true);
               setOpen(false);
             }}
-            className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+            className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("chatPanel.addModel")}
@@ -2795,10 +2795,10 @@ function ReasoningEffortMenu({
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-xs transition-colors",
+                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-xs font-medium transition-colors",
                   isActive
-                    ? "text-zinc-900 dark:text-white"
-                    : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50",
+                    ? "text-[var(--color-accent)]"
+                    : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
                 )}
               >
                 <span

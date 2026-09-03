@@ -769,6 +769,36 @@ pub struct ContextUsageInfo {
     /// for semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_total_output_tokens: Option<u64>,
+    // ── ADR-066: prompt cache tokens (Provider-reported) ──────────────
+    /// Prompt tokens served from cache on the most recent LLM call
+    /// (OpenAI `cached_tokens` / Anthropic `cache_read_input_tokens`).
+    /// `None` if the Provider does not report cache hits, or the call
+    /// is too old to be relevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt tokens written to cache on the most recent LLM call
+    /// (Anthropic `cache_creation_input_tokens`; OpenAI has no concept
+    /// → always `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Cumulative cache read tokens across all session LLM calls.
+    /// `None` until the first LLM call has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cache_read_tokens: Option<u64>,
+    /// Cumulative cache write tokens across all session LLM calls.
+    /// `None` until the first LLM call has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cache_write_tokens: Option<u64>,
+    /// ADR-066: cumulative cache read tokens across every LLM call
+    /// made by this Runtime process for this agent (live data source
+    /// from `AgentCore`).  Mirrors [`Self::agent_total_input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_total_cache_read_tokens: Option<u64>,
+    /// ADR-066: cumulative cache write tokens across every LLM call
+    /// made by this Runtime process for this agent.  Mirrors
+    /// [`Self::agent_total_cache_read_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_total_cache_write_tokens: Option<u64>,
 }
 
 /// LLM API protocol type, derived from models.dev npm field.
@@ -2150,5 +2180,111 @@ mod tests {
             }
             _ => panic!("Expected Paused variant"),
         }
+    }
+
+    // ── ADR-066: ContextUsageInfo cache token fields ─────────────────────
+
+    /// All six cache-token fields round-trip cleanly through JSON.
+    /// This is the wire-format contract between Runtime push (ContextUpdate)
+    /// and Desktop ResultsPanel.
+    #[test]
+    fn test_context_usage_info_cache_roundtrip_all_fields() {
+        let info = ContextUsageInfo {
+            context_window: 200_000,
+            input_tokens: 1000,
+            output_tokens: 200,
+            total_tokens: 1200,
+            max_input_tokens: Some(183_616),
+            usable_context: 183_616,
+            usage_percent: 1,
+            total_input_tokens: Some(4500),
+            total_output_tokens: Some(650),
+            agent_total_input_tokens: Some(4500),
+            agent_total_output_tokens: Some(650),
+            cache_read_tokens: Some(1600),
+            cache_write_tokens: Some(100),
+            total_cache_read_tokens: Some(1600),
+            total_cache_write_tokens: Some(100),
+            agent_total_cache_read_tokens: Some(1600),
+            agent_total_cache_write_tokens: Some(100),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: ContextUsageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.cache_read_tokens, Some(1600));
+        assert_eq!(parsed.cache_write_tokens, Some(100));
+        assert_eq!(parsed.total_cache_read_tokens, Some(1600));
+        assert_eq!(parsed.total_cache_write_tokens, Some(100));
+        assert_eq!(parsed.agent_total_cache_read_tokens, Some(1600));
+        assert_eq!(parsed.agent_total_cache_write_tokens, Some(100));
+        // Non-cache fields also preserved.
+        assert_eq!(parsed.input_tokens, 1000);
+        assert_eq!(parsed.usage_percent, 1);
+    }
+
+    /// Cache fields are `skip_serializing_if = "Option::is_none"`. When
+    /// every cache field is `None` (e.g. the Provider does not report
+    /// cache, or the call is too old to be relevant), they MUST be
+    /// omitted from the JSON — this is what the panel uses to render "—".
+    #[test]
+    fn test_context_usage_info_cache_none_omitted_from_json() {
+        let info = ContextUsageInfo {
+            context_window: 128_000,
+            input_tokens: 500,
+            output_tokens: 50,
+            total_tokens: 550,
+            max_input_tokens: None,
+            usable_context: 111_616,
+            usage_percent: 0,
+            total_input_tokens: Some(500),
+            total_output_tokens: Some(50),
+            agent_total_input_tokens: Some(500),
+            agent_total_output_tokens: Some(50),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_cache_read_tokens: None,
+            total_cache_write_tokens: None,
+            agent_total_cache_read_tokens: None,
+            agent_total_cache_write_tokens: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        // Cache fields absent → no `"cache_..."` substring in the JSON.
+        assert!(!json.contains("cache_read_tokens"), "field omitted");
+        assert!(!json.contains("cache_write_tokens"), "field omitted");
+        assert!(!json.contains("total_cache_read_tokens"), "field omitted");
+        assert!(!json.contains("total_cache_write_tokens"), "field omitted");
+        assert!(!json.contains("agent_total_cache_read_tokens"), "field omitted");
+        assert!(!json.contains("agent_total_cache_write_tokens"), "field omitted");
+    }
+
+    /// Backward compatibility: an older Runtime (ADR-066 not yet
+    /// implemented) sends a JSON without the six cache fields. The
+    /// frontend MUST still parse the payload and treat the cache fields
+    /// as `None` — this is what prevents the "—" / "0% cached" UI states
+    /// from being silently wiped by a downgrade.
+    #[test]
+    fn test_context_usage_info_cache_backward_compatible_legacy_payload() {
+        // Pre-ADR-066 wire format: only input/output fields, no cache_*
+        let legacy_json = r#"{
+            "context_window": 200000,
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+            "usable_context": 183616,
+            "usage_percent": 1,
+            "total_input_tokens": 4500,
+            "total_output_tokens": 650,
+            "agent_total_input_tokens": 4500,
+            "agent_total_output_tokens": 650
+        }"#;
+        let parsed: ContextUsageInfo = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.cache_read_tokens, None);
+        assert_eq!(parsed.cache_write_tokens, None);
+        assert_eq!(parsed.total_cache_read_tokens, None);
+        assert_eq!(parsed.total_cache_write_tokens, None);
+        assert_eq!(parsed.agent_total_cache_read_tokens, None);
+        assert_eq!(parsed.agent_total_cache_write_tokens, None);
+        // Non-cache fields are intact.
+        assert_eq!(parsed.context_window, 200_000);
+        assert_eq!(parsed.total_input_tokens, Some(4500));
     }
 }

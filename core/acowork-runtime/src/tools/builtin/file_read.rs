@@ -4,8 +4,6 @@ use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::tools::output;
-
 const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 
 /// File read tool — fragment reader, not a whole-file reader
@@ -190,7 +188,12 @@ impl Tool for FileReadTool {
                 let summary = format!("\n[Lines {}-{} of {total}]", s + 1, e);
 
                 let content = format!("{numbered}{summary}");
-                let (content, _truncated) = output::truncate_output(&content);
+                // No truncate_output here: the OutputBoundedTool wrapper
+                // is the single source of truth for the 32 KB cap. Per-
+                // tool truncation stays in tools that own a more useful
+                // recovery hint (head+tail for shell, array-cap for
+                // search, fail-fast for doc_reader); file_read just emits
+                // numbered lines and lets the wrapper enforce the cap.
 
                 Ok(ToolResult {
                     ok: true,

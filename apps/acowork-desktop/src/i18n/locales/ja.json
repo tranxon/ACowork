@@ -216,10 +216,24 @@
   },
   "contextUsage": {
     "ariaLabel": "コンテキスト使用量",
+    "title": "コンテキスト使用量",
+    "close": "閉じる",
+    "used": "使用済み",
+    "usageBarLabel": "カテゴリ別の使用量",
+    "categories": {
+      "systemPrompt": "システムプロンプト",
+      "tools": "ツール定義",
+      "messages": "会話メッセージ",
+      "connectors": "コネクター",
+      "skills": "スキル"
+    },
     "compressing": "圧縮中...",
     "agentRunning": "Agent実行中",
     "compressContext": "コンテキストを圧縮",
-    "compressSummary": "コンテキスト全体を圧縮"
+    "compressSummary": "コンテキスト全体を圧縮",
+    "contextUsedSuffix": "コンテキスト使用",
+    "cacheHitLabel": "キャッシュヒット率",
+    "cached": "キャッシュ済み"
   },
   "agentList": {
     "searchPlaceholder": "Agentを検索...",
@@ -620,6 +634,10 @@
     "totalOutputTokens": "累積出力トークン",
     "agentTotalInputTokens": "累計入力トークン",
     "agentTotalOutputTokens": "累計出力トークン",
+    "agentTotalCacheReadTokens": "累計キャッシュヒット",
+    "agentTotalCacheWriteTokens": "累計キャッシュ書き込み",
+    "cacheHitRatio": "キャッシュヒット率（累計）",
+    "cached": "キャッシュ済み",
     "iterations": "反復回数",
     "agentStatus": "Agentステータス",
     "running": "実行中",
@@ -894,6 +912,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "キャッシュ済み",
     "mqttDisconnected": "リアルタイム接続が切断されました{{reason}}。再接続中…"
   },
   "debugPanel": {
@@ -1260,7 +1279,8 @@
       "confirm": "却下"
     },
     "offlineHint": "PM service offline — board is read-only"
-  },  "prompts": {
+  },
+  "prompts": {
     "badgeBuiltin": "組み込み",
     "badgeMissing": "欠落",
     "badgeOverridden": "オーバーライド済み",

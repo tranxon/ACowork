@@ -310,6 +310,7 @@ mod from_rumqttc_0_25 {
             assert_eq!(classify(&desc), ErrClass::ConfigError);
         }
 
+
         #[test]
         fn mqtt_state_io_econnreset_classified_transient_node_gateway_path() {
             // ADR-065 §7 #3 regression test. Node and Gateway previously
@@ -359,6 +360,7 @@ mod from_rumqttc_0_25 {
                  otherwise Node/Gateway hit the 60s fatal backoff on every wake"
             );
         }
+
     }
 }
 

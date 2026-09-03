@@ -119,10 +119,24 @@
   },
   "contextUsage": {
     "ariaLabel": "Context usage",
+    "title": "Context Usage",
+    "close": "Close",
+    "used": "Used",
+    "usageBarLabel": "Usage by category",
+    "categories": {
+      "systemPrompt": "System Prompt",
+      "tools": "Tool Definitions",
+      "messages": "Conversation Messages",
+      "connectors": "Connectors",
+      "skills": "Skills"
+    },
     "compressing": "Compacting...",
     "agentRunning": "Agent running",
     "compressContext": "compact context",
-    "compressSummary": "Compress Summary"
+    "compressSummary": "Compress Summary",
+    "contextUsedSuffix": "context used",
+    "cacheHitLabel": "Cache hit rate",
+    "cached": "cached"
   },
   "onboarding": {
     "step": "Step {{current}} of {{total}}",
@@ -756,6 +770,10 @@
     "totalOutputTokens": "Total output tokens",
     "agentTotalInputTokens": "total input tokens",
     "agentTotalOutputTokens": "total output tokens",
+    "agentTotalCacheReadTokens": "agent total cache hit",
+    "agentTotalCacheWriteTokens": "agent total cache write",
+    "cacheHitRatio": "cache hit ratio (session)",
+    "cached": "cached",
     "iterations": "Iterations",
     "agentStatus": "Agent Status",
     "running": "Running",
@@ -980,6 +998,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "cached",
     "mqttDisconnected": "Realtime connection lost{{reason}}, retrying…"
   },
   "exploreBlock": {
@@ -1264,7 +1283,8 @@
       "confirm": "Reject"
     },
     "offlineHint": "PM service offline — board is read-only"
-  },  "prompts": {
+  },
+  "prompts": {
     "badgeBuiltin": "built-in",
     "badgeMissing": "missing",
     "badgeOverridden": "overridden",

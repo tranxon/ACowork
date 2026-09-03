@@ -216,10 +216,24 @@
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",
+    "title": "上下文用量",
+    "close": "关闭",
+    "used": "已使用",
+    "usageBarLabel": "分类用量占比",
+    "categories": {
+      "systemPrompt": "系统提示词",
+      "tools": "工具定义",
+      "messages": "对话消息",
+      "connectors": "连接器",
+      "skills": "技能"
+    },
     "compressing": "压缩中...",
     "agentRunning": "Agent 运行中",
     "compressContext": "压缩上下文",
-    "compressSummary": "压缩整个上下文"
+    "compressSummary": "压缩整个上下文",
+    "contextUsedSuffix": "上下文已用",
+    "cacheHitLabel": "缓存命中率",
+    "cached": "已缓存"
   },
   "agentList": {
     "doubleClickToStart": "双击启动",
@@ -633,6 +647,10 @@
     "totalOutputTokens": "总输出 Token",
     "agentTotalInputTokens": "累计输入 Token",
     "agentTotalOutputTokens": "累计输出 Token",
+    "agentTotalCacheReadTokens": "累计缓存命中",
+    "agentTotalCacheWriteTokens": "累计缓存写入",
+    "cacheHitRatio": "缓存命中率（累计）",
+    "cached": "已缓存",
     "iterations": "迭代次数",
     "agentStatus": "Agent 状态",
     "running": "运行中",
@@ -911,6 +929,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "已缓存",
     "mqttDisconnected": "实时连接已断开{{reason}}，正在自动重连…"
   },
   "debugPanel": {
@@ -1281,7 +1300,8 @@
       "confirm": "拒绝"
     },
     "offlineHint": "PM service offline — board is read-only"
-  },  "prompts": {
+  },
+  "prompts": {
     "badgeBuiltin": "内置",
     "badgeMissing": "缺失",
     "badgeOverridden": "已覆盖",

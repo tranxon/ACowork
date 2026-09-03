@@ -44,13 +44,24 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
     async fn list_sessions(&self, page: u32, size: u32) -> Result<SessionsListResponse> {
         let conversations = self.work_dir.join("conversations");
         let join = conversation::scan_sessions_async(conversations, Some(page), Some(size));
-        let (sessions, total_count, (disk_in, disk_out)) = join
-            .await
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+        // ADR-066: scan_sessions_async returns a 4-tuple
+        // (input, output, cache_read, cache_write) — feed all four into
+        // the AgentTokenService merge so the in-process counters
+        // recover the cache totals on first scan (e.g. after a
+        // process restart, matching the in/out recovery path).
+        let (sessions, total_count, (disk_in, disk_out, disk_cache_read, disk_cache_write)) =
+            join.await.map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
 
-        // ADR-028: merge disk totals into live counters and read back.
-        self.agent_token.merge_token_totals((Some(disk_in), Some(disk_out)));
-        let (agent_in, agent_out) = self.agent_token.agent_token_totals();
+        // ADR-028 / ADR-066: merge disk totals into live counters and
+        // read back.
+        self.agent_token.merge_token_totals((
+            Some(disk_in),
+            Some(disk_out),
+            Some(disk_cache_read),
+            Some(disk_cache_write),
+        ));
+        let (agent_in, agent_out, agent_cache_read, agent_cache_write) =
+            self.agent_token.agent_token_totals();
 
         let page_sessions: Vec<SessionSummary> = sessions
             .into_iter()
@@ -80,6 +91,8 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             size,
             agent_total_input_tokens: agent_in,
             agent_total_output_tokens: agent_out,
+            agent_total_cache_read_tokens: agent_cache_read,
+            agent_total_cache_write_tokens: agent_cache_write,
         })
     }
 

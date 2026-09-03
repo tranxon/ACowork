@@ -215,10 +215,24 @@
   },
   "contextUsage": {
     "ariaLabel": "컨텍스트 사용량",
+    "title": "컨텍스트 사용량",
+    "close": "닫기",
+    "used": "사용됨",
+    "usageBarLabel": "카테고리별 사용량",
+    "categories": {
+      "systemPrompt": "시스템 프롬프트",
+      "tools": "도구 정의",
+      "messages": "대화 메시지",
+      "connectors": "커넥터",
+      "skills": "스킬"
+    },
     "compressing": "압축 중...",
     "agentRunning": "Agent 실행 중",
     "compressContext": "컨텍스트 압축",
-    "compressSummary": "전체 컨텍스트 압축"
+    "compressSummary": "전체 컨텍스트 압축",
+    "contextUsedSuffix": "컨텍스트 사용",
+    "cacheHitLabel": "캐시 히트율",
+    "cached": "캐시됨"
   },
   "agentList": {
     "searchPlaceholder": "Agent 검색...",
@@ -621,6 +635,10 @@
     "totalOutputTokens": "누적 출력 토큰",
     "agentTotalInputTokens": "누적 입력 토큰",
     "agentTotalOutputTokens": "누적 출력 토큰",
+    "agentTotalCacheReadTokens": "누적 캐시 히트",
+    "agentTotalCacheWriteTokens": "누적 캐시 쓰기",
+    "cacheHitRatio": "캐시 히트율 (누적)",
+    "cached": "캐시됨",
     "iterations": "반복 횟수",
     "agentStatus": "Agent 상태",
     "running": "실행 중",
@@ -895,6 +913,7 @@
   "statusBar": {
     "agent": "agent",
     "context": "context",
+    "cached": "캐시됨",
     "mqttDisconnected": "실시간 연결이 끊겼습니다{{reason}}. 자동 재연결 중…"
   },
   "debugPanel": {
@@ -1261,7 +1280,8 @@
       "confirm": "거부"
     },
     "offlineHint": "PM service offline — board is read-only"
-  },  "prompts": {
+  },
+  "prompts": {
     "badgeBuiltin": "내장",
     "badgeMissing": "누락",
     "badgeOverridden": "오버라이드됨",
