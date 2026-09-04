@@ -46,16 +46,6 @@ name = "memory_store"
 [[tools]]
 name = "intent_send"
 
-# --- Context compression (ADR-061 §10.2) ---
-# `context_retrieve` is always registered (the manual recall channel
-# after compaction); `context_abandon` is deprecated and never
-# registered. Listing them here keeps the manifest schema stable.
-[[tools]]
-name = "context_abandon"
-
-[[tools]]
-name = "context_retrieve"
-
 [llm]
 temperature = 0.5
 

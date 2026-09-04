@@ -231,7 +231,8 @@
     "compressContext": "壓縮上下文",
     "compressSummary": "壓縮整個上下文",
     "contextUsedSuffix": "上下文已用",
-    "cacheHitLabel": "快取命中率",
+    "cacheHitLabel": "快取命中率（累計）",
+    "cacheHitPerTurnLabel": "快取命中率（即時）",
     "cached": "已快取"
   },
   "agentList": {

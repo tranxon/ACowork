@@ -3,11 +3,15 @@
  *
  * 对齐 UX 设计 §3.4：递归展示子任务（最多 5 级），支持折叠。
  * - 每行：折叠箭头 + 完成状态 + 标题 + 状态
- * - 子任务从 boardStore.childrenOf 递归取（同一看板数据源，无需额外请求）
+ * - 子任务从 boardStore.tasks 派生（与看板同源，无额外请求）
  * - 点击行 → 切换到该子任务详情（同 Drawer 内导航）
+ *
+ * ⚠️ Selector 契约（boardStore 顶部强制）：
+ * 订阅原始字段 s.tasks（稳定引用），children 派生在 useMemo 内完成，
+ * 整棵子树共享一份 byId / childrenByParent 索引，避免重复 O(N) 构建。
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { TaskTypeIcon } from "./TaskTypeIcon";
@@ -32,17 +36,17 @@ function StatusDot({ status }: { status: TaskStatus }) {
   );
 }
 
-function SubtaskRow({
-  task,
-  depth,
-  onSelect,
-}: {
+interface SubtaskRowProps {
   task: PmTaskResponse;
   depth: number;
+  byId: Map<string, PmTaskResponse>;
+  childrenByParent: Map<string, PmTaskResponse[]>;
   onSelect: (taskId: string) => void;
-}) {
+}
+
+function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRowProps) {
   const { t } = useTranslation();
-  const children = usePmBoardStore((s) => s.childrenOf(task.id));
+  const children = childrenByParent.get(task.id) ?? [];
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = children.length > 0;
 
@@ -96,12 +100,42 @@ function SubtaskRow({
       {hasChildren && !collapsed && (
         <ul className="space-y-0.5">
           {children.map((child) => (
-            <SubtaskRow key={child.id} task={child} depth={depth + 1} onSelect={onSelect} />
+            <SubtaskRow
+              key={child.id}
+              task={child}
+              depth={depth + 1}
+              byId={byId}
+              childrenByParent={childrenByParent}
+              onSelect={onSelect}
+            />
           ))}
         </ul>
       )}
     </li>
   );
+}
+
+interface TreeIndex {
+  byId: Map<string, PmTaskResponse>;
+  childrenByParent: Map<string, PmTaskResponse[]>;
+}
+
+function buildIndex(tasks: PmTaskResponse[]): TreeIndex {
+  const byId = new Map<string, PmTaskResponse>();
+  const childrenByParent = new Map<string, PmTaskResponse[]>();
+  for (const t of tasks) {
+    byId.set(t.id, t);
+    if (t.parent_id) {
+      const list = childrenByParent.get(t.parent_id) ?? [];
+      list.push(t);
+      childrenByParent.set(t.parent_id, list);
+    }
+  }
+  // 子任务按 created_at 升序（与 boardStore.childrenOf 行为对齐）
+  for (const list of childrenByParent.values()) {
+    list.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+  return { byId, childrenByParent };
 }
 
 export function SubtaskTree({
@@ -111,8 +145,12 @@ export function SubtaskTree({
   rootId: string;
   onSelect: (taskId: string) => void;
 }) {
-  const root = usePmBoardStore((s) => s.tasks.find((t) => t.id === rootId));
-  const children = usePmBoardStore((s) => s.childrenOf(rootId));
+  // 订阅稳定引用；派生在 useMemo 内完成（符合 boardStore 顶部 selector 契约）
+  const tasks = usePmBoardStore((s) => s.tasks);
+  const { byId, childrenByParent } = useMemo(() => buildIndex(tasks), [tasks]);
+
+  const root = byId.get(rootId);
+  const children = childrenByParent.get(rootId) ?? [];
 
   if (!root || children.length === 0) {
     return (
@@ -125,7 +163,14 @@ export function SubtaskTree({
   return (
     <ul className="space-y-0.5">
       {children.map((child) => (
-        <SubtaskRow key={child.id} task={child} depth={0} onSelect={onSelect} />
+        <SubtaskRow
+          key={child.id}
+          task={child}
+          depth={0}
+          byId={byId}
+          childrenByParent={childrenByParent}
+          onSelect={onSelect}
+        />
       ))}
     </ul>
   );

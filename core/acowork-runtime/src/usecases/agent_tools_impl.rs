@@ -52,8 +52,8 @@ use acowork_core::protocol::AgentSearchConfig;
 use crate::agent_config;
 use crate::usecases::agent_tools::{
     AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse,
-    MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutSearchConfigBody,
-    SearchConfigResponse,
+    McpToolsResponse, MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody,
+    PutMcpToolsBody, PutSearchConfigBody, SearchConfigResponse,
 };
 
 /// Concrete [`AgentToolsService`] backed by the
@@ -181,12 +181,7 @@ impl AgentToolsService for RuntimeAgentToolsService {
             .ok()
             .flatten()
             .map(|c| c.tools)
-            .unwrap_or_default()
-            // ADR-052: filter platform-protected tools out of the API
-            // response (defensive — see get_merged_tools for rationale).
-            .into_iter()
-            .filter(|e| !crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&e.name.as_str()))
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         BuiltinToolsResponse {
             agent_id: agent_id.to_string(),
             tools,
@@ -252,22 +247,38 @@ impl AgentToolsService for RuntimeAgentToolsService {
             .ok()
             .flatten()
             .map(|t| t.tools)
-            .unwrap_or_default()
-            // ADR-052: filter platform-protected tools out of the API
-            // response. The persistence layer (merge_tools_config /
-            // init_tools_config_from_manifest / apply_builtin_tools_patch)
-            // already strips these names from `agent_tools.json`, so
-            // this filter is defensive — it covers legacy files written
-            // before the filtering was added and any future code path
-            // that might bypass the merge functions.
-            .into_iter()
-            .filter(|e| !crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&e.name.as_str()))
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
 
-        let mcp_servers = agent_config::load_agent_mcp_config(&self.work_dir)
+        let mcp_cfg = agent_config::load_agent_mcp_config(&self.work_dir)
             .ok()
-            .flatten()
+            .flatten();
+
+        let mcp_servers = mcp_cfg
+            .as_ref()
             .map(|m| m.active_server_names())
+            .unwrap_or_default();
+
+        // Full per-agent merged list (catalog ∪ local) with active flags.
+        // This powers the per-agent switches in the Desktop Tools panel so
+        // agent-installed (local) and system-injected (pm) servers appear
+        // there too — not just gateway-global catalog entries.
+        let active_set: std::collections::HashSet<&str> =
+            mcp_servers.iter().map(String::as_str).collect();
+        let mcp_servers_defs = mcp_cfg
+            .as_ref()
+            .map(|m| {
+                m.merged()
+                    .into_iter()
+                    .map(|s| crate::usecases::agent_tools::McpServerView {
+                        name: s.name.clone(),
+                        transport: s.transport,
+                        url: s.url.clone(),
+                        command: s.command.clone(),
+                        args: s.args.clone(),
+                        active: active_set.contains(s.name.as_str()),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let search = agent_config::load_agent_search_config(&self.work_dir)
@@ -280,7 +291,44 @@ impl AgentToolsService for RuntimeAgentToolsService {
             agent_id: agent_id.to_string(),
             tools,
             mcp_servers,
+            mcp_servers_defs,
             search,
         }
+    }
+
+    async fn get_mcp_tools(&self, agent_id: &str) -> McpToolsResponse {
+        let servers = agent_config::load_agent_mcp_tools_config(&self.work_dir)
+            .ok()
+            .flatten()
+            .map(|cfg| cfg.servers)
+            .unwrap_or_default();
+        McpToolsResponse {
+            agent_id: agent_id.to_string(),
+            servers,
+        }
+    }
+
+    async fn put_mcp_tools(
+        &self,
+        agent_id: &str,
+        body: PutMcpToolsBody,
+    ) -> Result<McpToolsResponse, AgentToolsError> {
+        // The desktop PUTs the entire per-server tool list (same shape
+        // as GET). There is no server-side merge — the desktop's list
+        // is authoritative. Write verbatim to agent_mcp_tools.json.
+        agent_config::save_agent_mcp_tools_config(&self.work_dir, &body)
+            .map_err(AgentToolsError::Persistence)?;
+
+        tracing::info!(
+            agent_id,
+            server_count = body.servers.len(),
+            tool_count = body.servers.values().map(|v| v.len()).sum::<usize>(),
+            "RuntimeAgentToolsService::put_mcp_tools: persisted full tool list"
+        );
+
+        Ok(McpToolsResponse {
+            agent_id: agent_id.to_string(),
+            servers: body.servers,
+        })
     }
 }

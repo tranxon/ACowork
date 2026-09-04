@@ -34,6 +34,19 @@ const mocks = vi.hoisted(() => ({
     },
     sendCompressAction: vi.fn(),
   },
+  agentState: {
+    agents: {
+      "agent-1": {
+        meta: {
+          // DevMode off by default — the per-turn cache-hit comparison
+          // row is a debug-only diagnostic and must stay hidden unless
+          // a test explicitly flips this on.
+          debug_state: "disabled" as const,
+          running: true,
+        },
+      },
+    },
+  },
   t: (key: string): string => {
     const translations: Record<string, string> = {
       "contextUsage.title": "上下文用量",
@@ -47,7 +60,8 @@ const mocks = vi.hoisted(() => ({
       "contextUsage.categories.skills": "技能",
       "contextUsage.compressing": "压缩中...",
       "contextUsage.compressSummary": "压缩整个上下文",
-      "contextUsage.cacheHitLabel": "缓存命中率",
+      "contextUsage.cacheHitLabel": "缓存命中率（累计）",
+      "contextUsage.cacheHitPerTurnLabel": "缓存命中率（实时）",
     };
     return translations[key] ?? key;
   },
@@ -55,6 +69,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: (selector: (state: unknown) => unknown) => selector(mocks.chatState),
+}));
+
+vi.mock("../../stores/agentStore", () => ({
+  useAgentStore: (selector: (state: unknown) => unknown) => selector(mocks.agentState),
 }));
 
 vi.mock("../../i18n/useTranslation", () => ({
@@ -126,9 +144,62 @@ describe("ContextUsageIcon", () => {
 
     // OpenAI protocol, cumulative: 90K / 144.9K ≈ 0.6211 → "62%".
     expect(screen.getByText("62%")).toBeTruthy();
-    expect(screen.getByText("缓存命中率")).toBeTruthy();
+    expect(screen.getByText("缓存命中率（累计）")).toBeTruthy();
     expect(screen.getByText("90.0K")).toBeTruthy();
     expect(screen.getByText("144.9K")).toBeTruthy();
+  });
+
+  it("hides the per-turn cache-hit row while DevMode is off", () => {
+    // Even with per-turn cache accounting present, the real-time row is
+    // a debug-only diagnostic — it must NOT render unless the agent is
+    // in DevMode (`debug_state === "enabled"` && running).
+    mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage = {
+      ...mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage,
+      cache_read_tokens: 5_000,
+      input_tokens: 12_345,
+      total_cache_read_tokens: 90_000,
+      total_input_tokens: 144_900,
+    };
+
+    const { container } = render(
+      <ContextUsageIcon agentId="agent-1" sessionId="session-1" />,
+    );
+    fireEvent.mouseEnter(container.firstElementChild!);
+
+    // Cumulative row still rendered...
+    expect(screen.getByText("缓存命中率（累计）")).toBeTruthy();
+    // ...but the real-time comparison row is absent.
+    expect(screen.queryByText("缓存命中率（实时）")).toBeNull();
+  });
+
+  it("shows the real-time per-turn cache-hit row below the cumulative row in DevMode", () => {
+    // DevMode on: the popover renders BOTH windows side by side —
+    // cumulative (session-lifetime) on top, per-turn (last LLM call)
+    // below it, for direct comparison.
+    mocks.agentState.agents["agent-1"].meta.debug_state = "enabled";
+    mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage = {
+      ...mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage,
+      cache_read_tokens: 5_000,
+      input_tokens: 12_345,
+      total_cache_read_tokens: 90_000,
+      total_input_tokens: 144_900,
+    };
+
+    const { container } = render(
+      <ContextUsageIcon agentId="agent-1" sessionId="session-1" />,
+    );
+    fireEvent.mouseEnter(container.firstElementChild!);
+
+    // Cumulative row: 90K / 144.9K → "62%".
+    expect(screen.getByText("缓存命中率（累计）")).toBeTruthy();
+    expect(screen.getByText("62%")).toBeTruthy();
+    expect(screen.getByText("90.0K")).toBeTruthy();
+    expect(screen.getByText("144.9K")).toBeTruthy();
+    // Per-turn row: OpenAI protocol, 5K / 12.345K → floor(40.5) = "40%".
+    expect(screen.getByText("缓存命中率（实时）")).toBeTruthy();
+    expect(screen.getByText("40%")).toBeTruthy();
+    expect(screen.getByText("5.0K")).toBeTruthy();
+    expect(screen.getByText("12.3K")).toBeTruthy();
   });
 
   it("dispatches a Summary(1) compress action when the button is clicked", () => {

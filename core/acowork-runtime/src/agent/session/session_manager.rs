@@ -986,10 +986,8 @@ impl SessionManager {
 
             // NOTE: restore does not perform placeholder compression.
             //
-            // History is loaded from JSONL as-is. ADR-052 removed automatic
-            // event-driven compression; tool-result compression is now
-            // LLM-initiated via `context_abandon`. The JSONL stores the
-            // original tool output (placeholders were in-memory only), so
+            // History is loaded from JSONL as-is. Tool-result compression
+            // was retired; the JSONL stores the original tool output, so
             // `last_input` (restored from meta) already reflects the
             // uncompressed state — no re-compression needed at restore time.
             //
@@ -1504,8 +1502,9 @@ impl SessionManager {
         // each of which carries its own `core_mut` snapshot anyway. The
         // cost is bounded - `RuntimeConfigUpdate` is a rare event (user
         // toggles a setting in the Settings panel).
-        // (ADR-061 §10.2: the platform-tool hot-reload path is deleted;
-        // `context_retrieve` is always registered.)
+        // No platform-tool hot-reload path remains; runtime config
+        // updates apply through the standard `apply_runtime_config`
+        // hook.
         Arc::make_mut(&mut self.core).apply_runtime_config(overrides);
 
         // ── Step 1: broadcast to SessionTask inboxes (for tool definitions etc.) ──
@@ -1663,7 +1662,19 @@ After installation, ask the user to re-enable the MCP server.",
         // Disconnect previous MCP connections before connecting new ones
         self.mcp_manager.disconnect().await;
 
-        let (registry, wrappers, _specs, failures) = self.mcp_manager.connect(&configs).await;
+        // ADR-069: set work_dir so `connect` reconciles
+        // `agent_mcp_tools.json` with the live `tools/list` before
+        // filtering. The second arg is a defensive placeholder; the
+        // manager consults work_dir + the on-disk file, not the
+        // caller-supplied config.
+        let work_dir_path = std::path::Path::new(&self.core.config.work_dir);
+        self.mcp_manager
+            .set_work_dir(std::sync::Arc::from(work_dir_path));
+
+        let (registry, wrappers, _specs, failures) = self
+            .mcp_manager
+            .connect(&configs, &crate::agent_config::AgentMcpToolsConfig::default())
+            .await;
 
         // Store MCP tool wrappers (Arc<dyn Tool>) for dispatch
         let mcp_tool_arcs: Vec<Arc<dyn Tool>> = wrappers
@@ -1893,13 +1904,36 @@ After installation, ask the user to re-enable the MCP server.",
                 );
                 // Matches the startup path rate limit (`ToolRegistry::activate`
                 // in agent_init.rs).
-                self.register_dynamic_tool(tool, resolver, 60, true);
+                //
+                // Single source of truth: `agent_tools.json` holds the
+                // user's enable/disable preference for `codebase`. Respect
+                // it — only default to enabled when the tool has never been
+                // persisted (first appearance). This keeps a user's "off"
+                // choice effective across restarts even though the tool is
+                // registered dynamically after boot.
+                let persisted_enabled = crate::agent_config::load_agent_tools_config(
+                    std::path::Path::new(&self.core.config.work_dir),
+                )
+                .ok()
+                .flatten()
+                .and_then(|cfg| {
+                    cfg.tools
+                        .iter()
+                        .find(|e| e.name == "codebase")
+                        .map(|e| e.enabled)
+                })
+                .unwrap_or(true);
+                self.register_dynamic_tool(tool, resolver, 60, persisted_enabled);
                 crate::agent_config::ensure_tool_in_config(
                     std::path::Path::new(&self.core.config.work_dir),
                     "codebase",
-                    true,
+                    persisted_enabled,
                 );
-                tracing::info!(endpoint, "SessionManager: codebase tool registered (node LSP relay ready)");
+                tracing::info!(
+                    endpoint,
+                    enabled = persisted_enabled,
+                    "SessionManager: codebase tool registered (node LSP relay ready)"
+                );
             }
             None => {
                 self.unregister_dynamic_tool("codebase");
@@ -3479,164 +3513,6 @@ mod tests {
         assert!(SessionManager::require_session_id(&params).is_err());
     }
 
-    // ── ADR-052 §3.5 hot-reload regression: template drift ────────────
-    //
-    // Bug history (pre-fix): `apply_builtin_tools_enabled` only
-    // broadcast `SessionMessage::UpdateBuiltinTools` to active sessions
-    // via `send_to_session`. A session opened AFTER the PUT would
-    // deep-clone the shared `AgentCore` template's stale enabled flags
-    // - the same template-drift pattern that
-    // `apply_runtime_config_override`'s step 0 was created to fix for
-    // `RuntimeConfigUpdate`.
-    //
-    // Fix architecture: `apply_builtin_tools_enabled` now ALSO runs
-    // `Arc::make_mut(&mut self.core).apply_builtin_enabled_entries(entries)`
-    // before broadcasting, so the template the NEXT session will clone
-    // from already carries the new flags. This test pins that
-    // contract end-to-end.
-    #[tokio::test]
-    async fn test_builtin_tools_enabled_syncs_template_for_future_sessions() {
-        use crate::agent_config::AgentToolEntry;
-        use crate::agent::agent_core::BuiltinToolEntry;
-
-        // Boot an AgentCore with platform tools registered (compression
-        // = true at boot, mimicking a real production boot).
-        let config = crate::config::RuntimeConfig::default();
-        let manifest = acowork_core::AgentManifest::from_toml(
-            r#"
-            agent_id = "com.test.builtin_sync"
-            version = "1.0.0"
-            name = "Test builtin sync"
-            description = "Pin template drift fix"
-            author = "test"
-            runtime_version = "0.1.0"
-
-            [llm]
-            provider = "mock"
-            model = "test-model"
-            "#,
-        )
-        .unwrap();
-        let provider = Arc::new(
-            acowork_core::providers::mock::MockProvider::single_text("test"),
-        );
-        let probe = Arc::new(AgentCore::new(
-            config.clone(),
-            manifest.clone(),
-            provider.clone(),
-            Vec::<BuiltinToolEntry>::new(),
-        ));
-        let platform_tools = crate::tools::builtin::build_platform_protected_tools(
-            "/tmp",
-            probe.retrieve_queue.clone(),
-        );
-        let mut initial_builtins: Vec<BuiltinToolEntry> = Vec::new();
-        for tool in platform_tools {
-            initial_builtins.push(BuiltinToolEntry::with_resolved_enabled(false, tool));
-        }
-        let core = Arc::new(AgentCore::new(config, manifest, provider, initial_builtins));
-
-        let mut manager = SessionManager::new(core.clone(), SessionManagerConfig::default());
-
-        // Pre-condition: `shell` is NOT in the registry yet (only the
-        // platform tools were seeded). The PUT patch below will
-        // attempt to enable it; the template must gain it.
-        assert!(
-            manager
-                .core
-                .builtin_tools
-                .iter()
-                .find(|e| e.name() == "shell")
-                .is_none(),
-            "test precondition: shell must not be in the initial template"
-        );
-
-        // Hostile (but realistic) PUT payload that BOTH:
-        //   (a) tries to disable a platform tool (must be silently
-        //       dropped by the shared policy), and
-        //   (b) tries to enable a tool that isn't in the code registry
-        //       yet (must also be silently dropped - we only rewrite
-        //       enabled flags of ALREADY-registered slots).
-        // We use `shell` (a real builtin) for the enable assertion.
-        let patch = vec![
-            AgentToolEntry::new("context_retrieve", false),
-            AgentToolEntry::new("shell", true),
-        ];
-
-        // Inject a `shell` slot into the template so the policy has
-        // something to rewrite.
-        struct DummyShell;
-        #[async_trait::async_trait]
-        impl acowork_core::tools::traits::Tool for DummyShell {
-            fn name(&self) -> String { "shell".to_string() }
-            fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
-                acowork_core::tools::traits::ToolSpec {
-                    name: "shell".to_string(),
-                    description: "test shell".to_string(),
-                    input_schema: serde_json::json!({}),
-                }
-            }
-            async fn execute(
-                &self,
-                _params: serde_json::Value,
-                _work_dir: Option<&str>,
-            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
-                Ok(acowork_core::tools::traits::ToolResult {
-                    ok: true,
-                    content: String::new(),
-                    error: None,
-                    token_usage: None,
-                })
-            }
-        }
-        Arc::make_mut(&mut manager.core)
-            .builtin_tools
-            .push(BuiltinToolEntry::with_resolved_enabled(
-                false,
-                Arc::new(DummyShell),
-            ));
-        Arc::make_mut(&mut manager.core).rebuild_all_tools();
-
-        manager.apply_builtin_tools_enabled(&patch);
-
-        // Pin the new contract: a session opened AFTER the PUT must
-        // deep-clone a template that reflects the patch.
-        let mut future_session_core = (*manager.core).clone();
-        future_session_core.apply_runtime_config(&manager.runtime_overrides);
-        future_session_core.rebuild_all_tools();
-
-        let shell_enabled = future_session_core
-            .builtin_tools
-            .iter()
-            .find(|e| e.name() == "shell")
-            .expect("future session's template must include shell")
-            .enabled;
-        assert!(
-            shell_enabled,
-            "template must reflect the PUT patch for future sessions (the bug we fixed)"
-        );
-
-        // Platform tools must STILL be enabled in the template (the
-        // hostile disable request was filtered out by the shared
-        // policy). This is the bug-2 regression net at the
-        // SessionManager level. Only names actually registered are
-        // checked: `context_abandon` is no longer registered at all
-        // (ADR-061 §10.2), so it is absent rather than disabled.
-        for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let Some(entry) = future_session_core
-                .builtin_tools
-                .iter()
-                .find(|e| e.name() == *name)
-            else {
-                continue;
-            };
-            assert!(
-                entry.enabled,
-                "{name} must stay enabled in future-session template after PUT (Bug 2 regression net)"
-            );
-        }
-    }
-
     // ── DeliveryCursor storage tests (ADR-025) ──────────────────────
     //
     // These tests verify the cursor storage logic that SessionManager
@@ -3663,51 +3539,60 @@ mod tests {
 
         /// Mirrors SessionManager::get_delivery_cursor
         fn get(&self, sid: &str) -> DeliveryCursor {
-            {
-                let c = self.cursors.read().unwrap();
-                if let Some(&v) = c.get(sid) {
-                    return v;
-                }
+            if let Some(c) = self.cursors.read().unwrap().get(sid).cloned() {
+                return c;
             }
-            let cl = self.committed_lines.get(sid)
+            let cl = self
+                .committed_lines
+                .get(sid)
                 .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
                 .unwrap_or(0);
-            let initial = DeliveryCursor { line_number: cl, char_offset: 0 };
-            self.cursors.write().unwrap().entry(sid.to_string()).or_insert(initial);
-            initial
+            let cursor = DeliveryCursor {
+                line_number: cl,
+                char_offset: 0,
+            };
+            self.cursors
+                .write()
+                .unwrap()
+                .insert(sid.to_string(), cursor);
+            cursor
         }
 
-        /// Mirrors SessionManager::advance_delivery_cursor
-        fn advance(&self, sid: &str, line_number: usize, char_offset: usize) {
-            self.cursors.write().unwrap().insert(
+        fn set_committed_lines(&mut self, sid: &str, n: usize) {
+            self.committed_lines.insert(
                 sid.to_string(),
-                DeliveryCursor { line_number, char_offset },
+                Arc::new(std::sync::atomic::AtomicUsize::new(n)),
             );
         }
 
-        /// Mirrors SessionManager::reset_delivery_cursor
-        fn reset(&self, sid: &str, total_lines: usize) {
-            self.cursors.write().unwrap().insert(
+        fn advance(&mut self, sid: &str, line: usize, char_offset: usize) {
+            let mut g = self.cursors.write().unwrap();
+            g.insert(
                 sid.to_string(),
-                DeliveryCursor { line_number: total_lines, char_offset: 0 },
+                DeliveryCursor {
+                    line_number: line,
+                    char_offset,
+                },
             );
         }
 
-        /// Mirrors session cleanup (close/delete/evict)
-        fn remove(&self, sid: &str) {
+        fn reset(&mut self, sid: &str, total: usize) {
+            self.cursors.write().unwrap().insert(
+                sid.to_string(),
+                DeliveryCursor {
+                    line_number: total,
+                    char_offset: 0,
+                },
+            );
+        }
+
+        fn remove(&mut self, sid: &str) {
             self.cursors.write().unwrap().remove(sid);
         }
 
-        fn set_committed_lines(&mut self, sid: &str, count: usize) {
-            self.committed_lines.insert(
-                sid.to_string(),
-                Arc::new(std::sync::atomic::AtomicUsize::new(count)),
-            );
-        }
-
-        /// Mirrors SessionManager::committed_lines_for
         fn committed_lines_for(&self, sid: &str) -> usize {
-            self.committed_lines.get(sid)
+            self.committed_lines
+                .get(sid)
                 .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
                 .unwrap_or(0)
         }
@@ -3741,7 +3626,7 @@ mod tests {
 
     #[test]
     fn test_cursor_advance_updates_value() {
-        let store = CursorStore::new();
+        let mut store = CursorStore::new();
 
         store.advance("s1", 10, 5);
         let c = store.get("s1");
@@ -3757,7 +3642,7 @@ mod tests {
 
     #[test]
     fn test_cursor_reset_sets_to_total_lines() {
-        let store = CursorStore::new();
+        let mut store = CursorStore::new();
 
         // Advance to some position
         store.advance("s1", 5, 10);
@@ -3772,7 +3657,7 @@ mod tests {
 
     #[test]
     fn test_cursor_remove_clears_entry() {
-        let store = CursorStore::new();
+        let mut store = CursorStore::new();
         store.advance("s1", 10, 5);
         assert!(store.cursors.read().unwrap().contains_key("s1"));
 
@@ -3786,7 +3671,7 @@ mod tests {
 
     #[test]
     fn test_cursor_isolation_between_sessions() {
-        let store = CursorStore::new();
+        let mut store = CursorStore::new();
 
         store.advance("s1", 10, 5);
         store.advance("s2", 20, 15);
@@ -3795,7 +3680,7 @@ mod tests {
         assert_eq!(store.get("s2").line_number, 20);
 
         // Advancing s1 doesn't affect s2
-        store.advance("s1", 15, 0);
+        store.advance("s1", 15, 20);
         assert_eq!(store.get("s2").line_number, 20);
 
         // Removing s1 doesn't affect s2

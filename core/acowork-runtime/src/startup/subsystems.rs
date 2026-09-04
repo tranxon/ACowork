@@ -260,28 +260,20 @@ pub(crate) async fn phase_c_spawn_subsystems(
                 mcp_count = mcp_configs.len(),
                 "Auto-connecting to persisted MCP servers at startup (background)"
             );
+            // Owned copy so the spawned task does not borrow `config`
+            // (which is only valid for this function body).
+            let reload_work_dir = work_dir_path.to_path_buf();
             tokio::spawn(async move {
-                let (registry, failures) =
-                    acowork_mcp::client::McpRegistry::connect_all(&mcp_configs)
-                        .await
-                        .expect("connect_all is non-fatal and should never fail");
-                let registry = std::sync::Arc::new(registry);
-                let mut wrappers = Vec::new();
-                let mut specs = Vec::new();
-                for prefixed_name in registry.tool_names() {
-                    if let Some(def) = registry.get_tool_def(&prefixed_name) {
-                        let wrapper = acowork_mcp::wrapper::McpToolWrapper::new(
-                            prefixed_name.clone(),
-                            def,
-                            registry.clone(),
-                        );
-                        use acowork_core::tools::traits::Tool;
-                        let tool_spec = wrapper.spec();
-                        let serialized = serde_json::to_value(&tool_spec).unwrap_or_default();
-                        specs.push((tool_spec.name.clone(), serialized));
-                        wrappers.push(wrapper);
-                    }
-                }
+                // ADR-069: startup MCP auto-connect goes through the
+                // reconcile+filter path — reconcile agent_mcp_tools.json
+                // against the live tools/list, then expose only enabled
+                // tools.
+                let (registry, wrappers, specs, failures) =
+                    crate::tools::mcp_manager::connect_mcp_with_reconcile_and_filter(
+                        &reload_work_dir,
+                        &mcp_configs,
+                    )
+                    .await;
                 let _ = tx.send((registry, wrappers, specs, failures)).await;
             });
             Some(rx)

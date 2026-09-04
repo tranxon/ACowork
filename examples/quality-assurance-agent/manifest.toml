@@ -51,32 +51,20 @@ name = "memory_store"
 
 # --- Filesystem ---
 [[tools]]
-name = "file_read"
-
-[[tools]]
-name = "file_write"
-
-[[tools]]
 name = "file_edit"
 
 [[tools]]
 name = "doc_reader"
 
+# --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "glob_search"
+name = "bash"        # Windows (Git Bash installed)
 
 [[tools]]
-name = "content_search"
-
-# --- Network ---
-[[tools]]
-name = "http_request"
+name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
 
 [[tools]]
-name = "web_fetch"
-
-[[tools]]
-name = "web_search"  # conditional: needs search provider
+name = "shell"       # Linux / macOS
 
 # --- Inter-agent ---
 [[tools]]
@@ -88,16 +76,6 @@ name = "ask_user_question"
 
 [[tools]]
 name = "todo_write"
-
-# --- Context compression (ADR-061 §10.2) ---
-# `context_retrieve` is always registered (the manual recall channel
-# after compaction); `context_abandon` is deprecated and never
-# registered. Listing them here keeps the manifest schema stable.
-[[tools]]
-name = "context_abandon"
-
-[[tools]]
-name = "context_retrieve"
 
 [llm]
 temperature = 0.1

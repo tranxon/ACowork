@@ -9,7 +9,8 @@ import {
   useContextMenu,
   type ContextMenuItem,
 } from "../common/ContextMenu";
-import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
+import { Plus, Clock, Loader2, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
+import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -162,7 +163,7 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
                   {isActive ? (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-accent)]" />
                   ) : (
-                    <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                    <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                   )}
                   <span className={cn("min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300")}>
                     {session.title || "Untitled session"}
@@ -514,10 +515,31 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               onContextMenu={(e) => handleTabContextMenu(e, sessionId)}
               active={isActive}
             >
-              {/* Streaming indicator dot (only when processing and not active) */}
-              {isProc && !isActive && (
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
-              )}
+              {/* Streaming indicator dot was removed — it crowded the chat
+                  icon. The chat icon itself now breathes (animate-pulse)
+                  when an unselected tab is still streaming, see below. */}
+              {/* Chat icon — same pill bubble as the left NavBar.
+                  Three visual states (matches the NavBar's outline/filled
+                  toggle, plus a breathing variant for background tabs that
+                  are still streaming):
+                    • selected tab       → FilledChatIcon in --color-accent
+                      (the global highlight colour, most prominent)
+                    • unselected + streaming → FilledChatIcon (solid
+                      silhouette) in the normal foreground colour with
+                      animate-pulse — solid + breathing distinguishes it
+                      from both idle tabs and the accent-coloured selected
+                      tab. Replaces the old pulsing dot.
+                    • unselected + idle  → OutlineChatIcon in muted zinc
+                  Hidden during inline rename so the input gets the full
+                  slot. */}
+              {renamingSessionId !== sessionId &&
+                (isActive ? (
+                  <FilledChatIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                ) : isProc ? (
+                  <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-zinc-700 dark:text-zinc-200" />
+                ) : (
+                  <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                ))}
               {/* Title — double-click enters inline rename (same action as the
                   right-click "Rename" menu item). */}
               {renamingSessionId === sessionId ? (

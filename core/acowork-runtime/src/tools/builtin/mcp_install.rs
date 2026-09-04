@@ -212,6 +212,12 @@ impl Tool for McpInstallTool {
         let mut updated_config = current_config;
         updated_config.local.push(new_config.clone());
 
+        // Default-on: an agent-installed MCP is active right after install
+        // (the user installed it because they intend to use it). The Tools
+        // panel toggle can turn it off afterwards — `active_names` persists
+        // the user's choice.
+        crate::agent_config::activate_mcp_name(&mut updated_config.active_names, name);
+
         if let Err(e) = save_agent_mcp_config(work_dir_path, &updated_config) {
             return Ok(ToolResult {
                 ok: false,
