@@ -231,7 +231,8 @@
     "compressContext": "컨텍스트 압축",
     "compressSummary": "전체 컨텍스트 압축",
     "contextUsedSuffix": "컨텍스트 사용",
-    "cacheHitLabel": "캐시 히트율",
+    "cacheHitLabel": "캐시 히트율(누적)",
+    "cacheHitPerTurnLabel": "캐시 히트율(실시간)",
     "cached": "캐시됨"
   },
   "agentList": {

@@ -232,7 +232,8 @@
     "compressContext": "コンテキストを圧縮",
     "compressSummary": "コンテキスト全体を圧縮",
     "contextUsedSuffix": "コンテキスト使用",
-    "cacheHitLabel": "キャッシュヒット率",
+    "cacheHitLabel": "キャッシュヒット率（累計）",
+    "cacheHitPerTurnLabel": "キャッシュヒット率（リアルタイム）",
     "cached": "キャッシュ済み"
   },
   "agentList": {

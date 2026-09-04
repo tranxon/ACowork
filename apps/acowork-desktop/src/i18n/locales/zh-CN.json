@@ -232,7 +232,8 @@
     "compressContext": "压缩上下文",
     "compressSummary": "压缩整个上下文",
     "contextUsedSuffix": "上下文已用",
-    "cacheHitLabel": "缓存命中率",
+    "cacheHitLabel": "缓存命中率（累计）",
+    "cacheHitPerTurnLabel": "缓存命中率（实时）",
     "cached": "已缓存"
   },
   "agentList": {
