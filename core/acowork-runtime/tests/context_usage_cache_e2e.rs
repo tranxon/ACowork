@@ -112,6 +112,7 @@ fn patch_session_totals_populates_all_cumulative_fields() {
         total_cache_write_tokens: None,
         agent_total_cache_read_tokens: None,
         agent_total_cache_write_tokens: None,
+        sections: None,
     };
     // Before patch: cache fields default to None.
     assert_eq!(info.total_input_tokens, None);

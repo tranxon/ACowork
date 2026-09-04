@@ -1,3 +1,4 @@
+import type { ContextUsageSection } from "./contextUsageBreakdown";
 /** Gateway deployment mode */
 export type GatewayMode = "local" | "remote";
 
@@ -691,6 +692,12 @@ export interface ContextUsageInfo {
   /** ADR-066: cumulative cache-write tokens across every LLM call made by
    *  this Runtime process for this agent. */
   agent_total_cache_write_tokens?: number;
+  /** ADR-067: per-section byte sizes used by the input-box context-usage
+   *  popover. Always populated by ADR-067-aware Runtimes; `undefined` only
+   *  on legacy clients that haven't restarted since the upgrade. The bytes
+   *  are exact (UTF-8 `.len()`), not a heuristic.  See
+   *  `ContextUsageSection` in `./contextUsageBreakdown`. */
+  sections?: ContextUsageSection[];
 }
 
 /** Navigation view type */

@@ -1056,3 +1056,125 @@ describe("messagesStale: cache-integrity flag", () => {
     vi.unstubAllGlobals();
   });
 });
+
+// ── ADR-067: session_state must not clobber context_usage sections ──────
+//
+// The runtime computes per-section byte sizes only in `process_llm_response_usage`
+// (it has a `ContextBuilder`). The retained `session_state` snapshot carries a
+// persisted-token-derived `context_usage` with no `sections`; without the merge
+// in `handleMessageEvent`, the last session_state to arrive would overwrite the
+// sections delivered by the context_usage chunk and the popover breakdown would
+// always render 0%.
+describe("ADR-067: session_state preserves context_usage sections", () => {
+  beforeEach(() => {
+    clearTestState();
+  });
+
+  afterEach(() => {
+    clearTestState();
+  });
+
+  it("keeps sections from the context_usage chunk when a section-less session_state arrives", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+
+    // 1. context_usage chunk arrives with sections (always-on path).
+    handleMessageEvent(
+      {
+        type: "context_usage",
+        session_id: SESSION,
+        context_usage: {
+          context_window: 250000,
+          input_tokens: 100,
+          output_tokens: 10,
+          total_tokens: 110,
+          usable_context: 250000,
+          usage_percent: 5,
+          sections: [
+            { key: "system_prompt", size_bytes: 11010 },
+            { key: "messages", size_bytes: 391020 },
+          ],
+        },
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    let ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.contextUsage?.sections).toHaveLength(2);
+
+    // 2. session_state snapshot arrives with a persisted-token context_usage
+    //    that has NO sections (built from `build_context_usage_from_persisted`).
+    handleMessageEvent(
+      {
+        type: "session_state",
+        session_id: SESSION,
+        status: { status: "idle" },
+        ratio: 1.5,
+        context_usage: {
+          context_window: 250000,
+          input_tokens: 120,
+          output_tokens: 12,
+          total_tokens: 132,
+          usable_context: 250000,
+          usage_percent: 6,
+        },
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    // Sections must survive the section-less session_state overwrite.
+    expect(ss.contextUsage?.sections).toHaveLength(2);
+    expect(ss.contextUsage?.sections?.[0]).toEqual({ key: "system_prompt", size_bytes: 11010 });
+    // The billed totals still come from the latest session_state.
+    expect(ss.contextUsage?.usage_percent).toBe(6);
+  });
+
+  it("overwrites sections when the new context_usage carries its own", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+
+    handleMessageEvent(
+      {
+        type: "context_usage",
+        session_id: SESSION,
+        context_usage: {
+          context_window: 250000,
+          input_tokens: 100,
+          output_tokens: 10,
+          total_tokens: 110,
+          usable_context: 250000,
+          usage_percent: 5,
+          sections: [{ key: "system_prompt", size_bytes: 11010 }],
+        },
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    handleMessageEvent(
+      {
+        type: "context_usage",
+        session_id: SESSION,
+        context_usage: {
+          context_window: 250000,
+          input_tokens: 200,
+          output_tokens: 20,
+          total_tokens: 220,
+          usable_context: 250000,
+          usage_percent: 9,
+          sections: [{ key: "messages", size_bytes: 500 }],
+        },
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.contextUsage?.sections).toEqual([{ key: "messages", size_bytes: 500 }]);
+  });
+});

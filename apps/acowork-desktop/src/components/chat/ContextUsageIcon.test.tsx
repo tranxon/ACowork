@@ -15,6 +15,15 @@ const mocks = vi.hoisted(() => ({
               total_tokens: 200_000,
               usable_context: 262_100,
               usage_percent: 55.3,
+              // ADR-067: sections now sourced from chatStore so the
+              // popover works without DevMode. Same byte values the
+              // old debugState fixture provided.
+              sections: [
+                { key: "system_prompt", size_bytes: 11_010 },
+                { key: "tool_definitions", size_bytes: 29_910 },
+                { key: "messages", size_bytes: 391_020 },
+                { key: "skill_instructions", size_bytes: 3_150 },
+              ],
             },
             isCompacting: false,
             provider: "openai" as const,
@@ -24,28 +33,6 @@ const mocks = vi.hoisted(() => ({
       },
     },
     sendCompressAction: vi.fn(),
-  },
-  debugState: {
-    debugAgentId: "agent-1",
-    sessionStates: {
-      "session-1": {
-        snapshots: [
-          {
-            iteration: 7,
-            built_at: "2026-01-01T00:00:00.000Z",
-            sections: [
-              { key: "system_prompt", size_bytes: 11_010 },
-              { key: "tool_definitions", size_bytes: 29_910 },
-              { key: "messages", size_bytes: 391_020 },
-              { key: "skill_instructions", size_bytes: 3_150 },
-            ],
-            total_token_estimate: 145_030,
-            phase: "LlmCall" as const,
-            request_params: { model: "test-model" },
-          },
-        ],
-      },
-    },
   },
   t: (key: string): string => {
     const translations: Record<string, string> = {
@@ -68,10 +55,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: (selector: (state: unknown) => unknown) => selector(mocks.chatState),
-}));
-
-vi.mock("../../stores/debugStore", () => ({
-  useDebugStore: (selector: (state: unknown) => unknown) => selector(mocks.debugState),
 }));
 
 vi.mock("../../i18n/useTranslation", () => ({
@@ -179,5 +162,23 @@ describe("ContextUsageIcon", () => {
     // Restore so other tests aren't affected.
     mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].sessionStatus =
       { status: "idle" } as const;
+  });
+
+  it("popover breakdown is populated from chatStore (ADR-067) without needing DevMode", () => {
+    // No debugState mock, no useDebugStore selector — DevMode is off.
+    // The percentages must still come from `contextUsage.sections` on
+    // chatStore; before ADR-067 they read from `debugStore` and were
+    // all 0 when DevMode was disabled.
+    const { container } = render(
+      <ContextUsageIcon agentId="agent-1" sessionId="session-1" />,
+    );
+    fireEvent.mouseEnter(container.firstElementChild!);
+
+    // Same expectations as the primary test: with chatState-provided
+    // sections the breakdown percentages must be non-zero.
+    expect(screen.getByText("1.4%")).toBeTruthy();
+    expect(screen.getByText("3.8%")).toBeTruthy();
+    expect(screen.getByText("49.7%")).toBeTruthy();
+    expect(screen.getByText("0.4%")).toBeTruthy();
   });
 });

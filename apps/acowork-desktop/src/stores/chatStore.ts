@@ -22,6 +22,25 @@ import type { LlmAvailability } from "../lib/llmAvailability";
 import { llmAvailabilityFromWire } from "../lib/llmAvailability";
 
 // ---------------------------------------------------------------------------
+// ADR-067: context-usage section merge.
+//
+// The runtime computes per-section byte sizes only in `process_llm_response_usage`
+// (it has a `ContextBuilder`). The retained `session_state` snapshot and the
+// `fetchSessionState` HTTP pull build `context_usage` from persisted tokens and
+// therefore carry no `sections`. Without this merge, the last session_state
+// to arrive would overwrite the sections delivered by the context_usage chunk,
+// and the input-box popover breakdown would always render 0%.
+function mergeContextUsage(
+  prev: ContextUsageInfo | null | undefined,
+  next: ContextUsageInfo,
+): ContextUsageInfo {
+  if (prev?.sections && !next.sections) {
+    return { ...next, sections: prev.sections };
+  }
+  return next;
+}
+
+// ---------------------------------------------------------------------------
 // ADR-050 C2: the per-session active stream tracker, throttle timestamps,
 // and the 500ms cadence timer all moved to `chatAdapterStore` (see
 // `apps/acowork-desktop/src/components/chat/chatAdapterStore.ts`).
@@ -2104,7 +2123,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         // Context usage (token counts, window, percentage)
         if (liveState.context_usage && typeof liveState.context_usage === "object") {
-          sessionPatch.contextUsage = liveState.context_usage as ContextUsageInfo;
+          const prev = getAgentState(get(), agentId).sessionStates[sessionId]?.contextUsage;
+          sessionPatch.contextUsage = mergeContextUsage(
+            prev,
+            liveState.context_usage as ContextUsageInfo,
+          );
         }
       }
 
@@ -3047,7 +3070,11 @@ export function handleMessageEvent(
             // Runtime fields from SessionState proto.
             if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio as number;
             if (data.context_usage && typeof data.context_usage === "object") {
-              sessionPatch.contextUsage = data.context_usage as ContextUsageInfo;
+              const prev = getSessionState(get(), agentId, sid)?.contextUsage;
+              sessionPatch.contextUsage = mergeContextUsage(
+                prev,
+                data.context_usage as ContextUsageInfo,
+              );
             }
 
             // ADR-021: Start/stop polling based on status transitions.

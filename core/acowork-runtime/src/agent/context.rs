@@ -1362,6 +1362,110 @@ mod tests {
         let info = compute_context_usage(&caps, &usage, 32_768, None);
         assert_eq!(info.context_window, 128_000);
     }
+
+    // ── compute_section_sizes (ADR-067) ────────────────────────────────
+    //
+    // The input-box context-usage popup aggregates byte sizes from these
+    // sections to render the 5-category percentage breakdown (system /
+    // tools / messages / connectors / skills).  These tests pin the
+    // section ordering and sizes so the always-on observability path
+    // matches what `DebugObserverImpl::on_context_built` used to emit
+    // when DevMode was enabled.
+
+    fn lookup(sections: &[acowork_core::protocol::ContextUsageSection], key: &str) -> u64 {
+        sections
+            .iter()
+            .find(|s| s.key == key)
+            .map(|s| s.size_bytes)
+            .unwrap_or_else(|| panic!("section {key} missing; got: {:?}", sections))
+    }
+
+    #[test]
+    fn compute_section_sizes_emits_mandatory_sections_on_empty_builder() {
+        let history = HistoryManager::new(10_000);
+        let builder = ContextBuilder::new("Base prompt".to_string());
+        let mcp_tools: Vec<serde_json::Value> = vec![];
+
+        let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
+
+        assert_eq!(lookup(&sections, "system_prompt"), "Base prompt".len() as u64);
+        assert!(
+            sections.iter().any(|s| s.key == "environment"),
+            "environment section must always be present"
+        );
+        assert!(lookup(&sections, "messages") >= 2);
+        for optional in [
+            "identity_context",
+            "workspace_context",
+            "retrieved_memory",
+            "ambiguous_confirmation_hint",
+            "abstention_prompt",
+            "skill_instructions",
+            "workspace_prompt_file",
+            "tool_definitions",
+        ] {
+            assert!(
+                !sections.iter().any(|s| s.key == optional),
+                "{optional} must not appear when its field is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_section_sizes_aggregates_optional_sections_and_mcp_tools() {
+        let mut history = HistoryManager::new(10_000);
+        history.append(ChatMessage::user("hi"));
+
+        let identity = "Name: Alice";
+        let workspace = "Working dir: /tmp";
+        let retrieved = "Memory: previous chat about X";
+        let skills = "Skill: do_thing — read README first";
+        let hint = "Confirm ambiguous file path";
+        let abstention = "Refuse if blocked";
+        let prompt_file = "# AGENTS.md\nbe terse";
+
+        let builtin_tool = serde_json::json!({
+            "type": "function",
+            "function": { "name": "read_file" }
+        });
+        let mcp_tool = serde_json::json!({
+            "type": "function",
+            "function": { "name": "mcp_github_list_issues" }
+        });
+
+        let mut builder = ContextBuilder::new("Base prompt".to_string())
+            .with_identity(Some(identity.into()))
+            .with_workspace_context(Some(workspace.into()))
+            .with_workspace_prompt_file(Some(prompt_file.into()))
+            .with_tools(vec![builtin_tool.clone()]);
+        builder.set_retrieved_memory(retrieved.into());
+        builder.set_skill_instructions(skills.into());
+        builder.set_ambiguous_confirmation_hint(hint.into());
+        builder.set_abstention_prompt(abstention.into());
+
+        let mcp_tools = vec![mcp_tool.clone()];
+        let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
+
+        assert_eq!(lookup(&sections, "system_prompt"), "Base prompt".len() as u64);
+        assert_eq!(lookup(&sections, "identity_context"), identity.len() as u64);
+        assert_eq!(lookup(&sections, "workspace_context"), workspace.len() as u64);
+        assert_eq!(lookup(&sections, "retrieved_memory"), retrieved.len() as u64);
+        assert_eq!(lookup(&sections, "ambiguous_confirmation_hint"), hint.len() as u64);
+        assert_eq!(lookup(&sections, "abstention_prompt"), abstention.len() as u64);
+        assert_eq!(lookup(&sections, "skill_instructions"), skills.len() as u64);
+        assert_eq!(lookup(&sections, "workspace_prompt_file"), prompt_file.len() as u64);
+
+        let tool_defs_size = lookup(&sections, "tool_definitions");
+        let only_builtin = serde_json::to_string(&vec![builtin_tool.clone()])
+            .unwrap()
+            .len() as u64;
+        assert!(
+            tool_defs_size > only_builtin,
+            "tool_definitions must include MCP tools; only_builtin={only_builtin}, total={tool_defs_size}"
+        );
+
+        assert!(lookup(&sections, "messages") > 0);
+    }
 }
 
 /// Compute the total character count of a ChatRequest for token ratio calibration.
@@ -1407,6 +1511,153 @@ pub fn count_chat_request_chars(request: &ChatRequest) -> usize {
         .unwrap_or(0);
 
     msg_chars + tool_chars
+}
+
+// ── compute_section_sizes (ADR-067) ──────────────────────────────────
+//
+// This helper is the single source of truth for the "section byte sizes"
+// payload that drives the input-box context-usage popup (5-category
+// percentage breakdown: system / tools / messages / connectors / skills).
+//
+// ADR-067 separated it from the DevMode-only debug snapshot path so the
+// frontend always has a populated breakdown regardless of whether the
+// Debug Panel is open. Both consumers — the always-on
+// `process_llm_response_usage` push and the DevMode
+// `DebugObserverImpl::on_context_built` snapshot — must call
+// `compute_section_sizes` rather than rolling their own ordering. The
+// helper returns `Vec<ContextUsageSection>` (one entry per populated
+// section) — see `acowork_core::protocol::ContextUsageSection` for the
+// wire contract (the frontend `contextUsageBreakdown.ts` groups by
+// `.key`).
+//
+// The `messages` byte size is read from `HistoryManager::messages_json_bytes()`
+// (O(1) incremental counter) — the always-on path deliberately avoids
+// re-serializing the full history on every LLM call.
+
+/// Build the section-byte-sizes list for the current context.
+///
+/// Returns an empty `Vec` when the builder has no fields set — the
+/// frontend treats empty as "no composition data yet" and falls back
+/// to the 5 zero-percent rows.
+pub fn compute_section_sizes(
+    builder: &ContextBuilder,
+    history: &HistoryManager,
+    mcp_tools: &[serde_json::Value],
+    _model: &str,
+) -> Vec<acowork_core::protocol::ContextUsageSection> {
+    use acowork_core::protocol::ContextUsageSection;
+
+    let mut out: Vec<ContextUsageSection> = Vec::with_capacity(11);
+
+    // 1. Base system prompt — always present (required by `ContextBuilder::new`).
+    out.push(ContextUsageSection {
+        key: "system_prompt".to_string(),
+        size_bytes: builder.system_prompt().len() as u64,
+    });
+
+    // 2. Identity context
+    if let Some(identity) = builder.identity_context() {
+        out.push(ContextUsageSection {
+            key: "identity_context".to_string(),
+            size_bytes: identity.len() as u64,
+        });
+    }
+
+    // 2.2 Workspace context
+    if let Some(ws) = builder.workspace_context() {
+        out.push(ContextUsageSection {
+            key: "workspace_context".to_string(),
+            size_bytes: ws.len() as u64,
+        });
+    }
+
+    // 2.5 Retrieved memory
+    if let Some(mem) = builder.retrieved_memory() {
+        out.push(ContextUsageSection {
+            key: "retrieved_memory".to_string(),
+            size_bytes: mem.len() as u64,
+        });
+    }
+
+    // 2.5b Ambiguous-confirmation hint (P3-4)
+    if let Some(hint) = builder.ambiguous_confirmation_hint() {
+        out.push(ContextUsageSection {
+            key: "ambiguous_confirmation_hint".to_string(),
+            size_bytes: hint.len() as u64,
+        });
+    }
+
+    // 2.5c Abstention guidance (G9)
+    if let Some(prompt) = builder.abstention_prompt() {
+        out.push(ContextUsageSection {
+            key: "abstention_prompt".to_string(),
+            size_bytes: prompt.len() as u64,
+        });
+    }
+
+    // 2.6 Skill instructions
+    if let Some(skills) = builder.skill_instructions() {
+        out.push(ContextUsageSection {
+            key: "skill_instructions".to_string(),
+            size_bytes: skills.len() as u64,
+        });
+    }
+
+    // 3. Environment (override wins, else auto-detect). Memoized
+    // string in detect_environment_text so the `.len()` is O(1).
+    let env_size = builder
+        .environment_override()
+        .map(|s| s.len() as u64)
+        .unwrap_or_else(|| detect_environment_text().len() as u64);
+    out.push(ContextUsageSection {
+        key: "environment".to_string(),
+        size_bytes: env_size,
+    });
+
+    // 3.2 Workspace prompt file (CLAUDE.md / AGENTS.md)
+    if let Some(prompt_file) = builder.workspace_prompt_file() {
+        out.push(ContextUsageSection {
+            key: "workspace_prompt_file".to_string(),
+            size_bytes: prompt_file.len() as u64,
+        });
+    }
+
+    // 3.5 Tool definitions (passed separately in ChatRequest.tools)
+    //
+    // Merge built-in tools (held on ContextBuilder) with MCP tools (held
+    // on AgentCore, plumbed through by the caller). MCP tools are
+    // typically a few KB — undercounting them would skew the `tools`
+    // category percentage in the input-box popup, so we serialize the
+    // union and account for both.
+    let mut all_defs: Vec<serde_json::Value> = builder
+        .tool_definitions()
+        .map(|defs| defs.to_vec())
+        .unwrap_or_default();
+    if !mcp_tools.is_empty() {
+        all_defs.extend(mcp_tools.iter().cloned());
+    }
+    if !all_defs.is_empty() {
+        let size = serde_json::to_string(&all_defs)
+            .map(|s| s.len())
+            .unwrap_or(0) as u64;
+        out.push(ContextUsageSection {
+            key: "tool_definitions".to_string(),
+            size_bytes: size,
+        });
+    }
+
+    // 3.6 Messages — ADR-054 step 4.
+    //
+    // ADR-067: byte size comes from `HistoryManager::messages_json_bytes()`
+    // — an O(1) incrementally-maintained counter — instead of re-serializing
+    // the whole history on every LLM call. The value is exactly
+    // `serde_json::to_string(&history.messages()).len()`.
+    out.push(ContextUsageSection {
+        key: "messages".to_string(),
+        size_bytes: history.messages_json_bytes() as u64,
+    });
+
+    out
 }
 
 /// Compute context usage info from model capabilities and API usage response.
@@ -1471,6 +1722,8 @@ pub fn compute_context_usage(
         total_cache_write_tokens: None,
         agent_total_cache_read_tokens: None,
         agent_total_cache_write_tokens: None,
+        // ADR-067: see compute_section_sizes; populated by callers with a ContextBuilder
+        sections: None,
     }
 }
 

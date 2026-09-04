@@ -223,9 +223,25 @@ pub struct HistoryManager {
     /// stripped our previous inject), we skip re-injecting and re-persisting
     /// to avoid duplicate synthetic rows on disk.
     last_injected_todo_call_id: Option<String>,
+    /// ADR-067: byte length of `serde_json::to_string(&self.messages)` —
+    /// i.e. the exact JSON array serialization of the whole history.
+    ///
+    /// Maintained incrementally on the hot path (`append` / `extend` are
+    /// O(1) per message) and recomputed on the rare structural operations
+    /// (`load_restored`, `clear`, `truncate_to`, `fit_to_budget_lossless`,
+    /// `abandon_tool_result`, `retrieve_tool_result`). This lets the
+    /// always-on context-usage observability path report the `messages`
+    /// section byte size **without** re-serializing the entire history on
+    /// every LLM call.
+    messages_json_bytes: usize,
 }
 
 impl HistoryManager {
+    /// Byte length of the empty JSON array `[]` — the baseline for
+    /// [`Self::messages_json_bytes`] so the counter always equals
+    /// `serde_json::to_string(&self.messages).len()` (even when empty).
+    const EMPTY_JSON_ARRAY_BYTES: usize = 2;
+
     /// Create new history manager with token budget.
     pub fn new(max_tokens: u64) -> Self {
         Self {
@@ -236,7 +252,32 @@ impl HistoryManager {
             counter: TokenCounter::new(),
             model_name: None,
             last_injected_todo_call_id: None,
+            messages_json_bytes: Self::EMPTY_JSON_ARRAY_BYTES,
         }
+    }
+
+    /// Byte length of the JSON array serialization of the whole history
+    /// (`serde_json::to_string(&self.messages)`). O(1) — maintained
+    /// incrementally by [`Self::append`] / [`Self::extend`].
+    ///
+    /// ADR-067: the always-on context-usage path uses this instead of
+    /// re-serializing the history on every LLM call.
+    pub fn messages_json_bytes(&self) -> usize {
+        self.messages_json_bytes
+    }
+
+    /// Recompute `messages_json_bytes` from scratch (O(n) serialization).
+    /// Used by the rare structural mutations that don't go through
+    /// [`Self::append`] / [`Self::extend`].
+    fn recompute_messages_json_bytes(&mut self) {
+        self.messages_json_bytes = serde_json::to_string(&*self.messages)
+            .map(|s| s.len())
+            .unwrap_or(Self::EMPTY_JSON_ARRAY_BYTES);
+    }
+
+    /// Byte length of a single message's JSON serialization.
+    fn single_json_bytes(msg: &ChatMessage) -> usize {
+        serde_json::to_string(msg).map(|s| s.len()).unwrap_or(0)
     }
 
     /// Set the LLM protocol type for image token estimation.
@@ -391,7 +432,15 @@ impl HistoryManager {
             Some(&self.protocol_type),
         );
         self.current_tokens += tokens;
+        let was_empty = self.messages.is_empty();
+        let msg_bytes = Self::single_json_bytes(&message);
         self.messages_mut().push(message);
+        // ADR-067: `[]` → `[a]` adds json(a); `[...,a]` adds json(a) + 1 comma.
+        self.messages_json_bytes += if was_empty {
+            msg_bytes
+        } else {
+            msg_bytes + 1
+        };
     }
 
     /// Append multiple messages
@@ -403,7 +452,17 @@ impl HistoryManager {
                 Some(&self.protocol_type),
             );
         }
+        let prev_len = self.messages.len();
+        let extra_bytes: usize = messages.iter().map(Self::single_json_bytes).sum();
+        let separators = if prev_len == 0 {
+            // `[]` → `[a,b]` adds (n-1) commas
+            messages.len().saturating_sub(1)
+        } else {
+            // `[...,a,b]` adds one leading comma per appended message
+            messages.len()
+        };
         self.messages_mut().extend(messages);
+        self.messages_json_bytes += extra_bytes + separators;
     }
 
     /// Bulk-load a pre-built message sequence from session resume.
@@ -425,6 +484,7 @@ impl HistoryManager {
                     .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
             })
             .sum();
+        self.recompute_messages_json_bytes();
         tracing::info!(
             count = self.messages.len(),
             tokens = self.current_tokens,
@@ -513,6 +573,7 @@ impl HistoryManager {
         }
 
         if removed > 0 {
+            self.recompute_messages_json_bytes();
             tracing::warn!(
                 removed,
                 remaining = self.messages.len(),
@@ -528,6 +589,7 @@ impl HistoryManager {
     pub fn clear(&mut self) {
         self.messages = Arc::new(Vec::new());
         self.current_tokens = 0;
+        self.messages_json_bytes = Self::EMPTY_JSON_ARRAY_BYTES;
     }
 
     /// Get message count
@@ -559,6 +621,7 @@ impl HistoryManager {
                     .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
             })
             .sum();
+        self.recompute_messages_json_bytes();
         tracing::info!(
             target_len,
             new_token_count = self.current_tokens,
@@ -573,6 +636,7 @@ impl HistoryManager {
 
     /// Returns 1 if replaced, 0 if not found or already compressed.
     pub fn abandon_tool_result(&mut self, tool_call_id: &str) -> usize {
+        let mut changed = false;
         for msg in self.messages_mut() {
             if !matches!(msg.role, MessageRole::Tool) {
                 continue;
@@ -588,6 +652,11 @@ impl HistoryManager {
                 "[Tool result compressed. Call context_retrieve(id=\"{}\") to retrieve the full content.]",
                 tool_call_id
             );
+            changed = true;
+            break;
+        }
+        if changed {
+            self.recompute_messages_json_bytes();
             return 1;
         }
         0
@@ -600,6 +669,7 @@ impl HistoryManager {
     ///
     /// Returns 1 if restored, 0 if not found or already raw.
     pub fn retrieve_tool_result(&mut self, tool_call_id: &str, original_content: &str) -> usize {
+        let mut changed = false;
         for msg in self.messages_mut() {
             if !matches!(msg.role, MessageRole::Tool) {
                 continue;
@@ -612,6 +682,11 @@ impl HistoryManager {
                 return 0;
             }
             msg.content = original_content.to_string();
+            changed = true;
+            break;
+        }
+        if changed {
+            self.recompute_messages_json_bytes();
             return 1;
         }
         0
@@ -939,6 +1014,7 @@ impl HistoryManager {
         );
         self.messages_mut().insert(system_count, summary_msg);
         self.current_tokens += summary_tokens;
+        self.recompute_messages_json_bytes();
 
         tracing::debug!(
             removed = removed_count,
@@ -1194,6 +1270,7 @@ impl HistoryManager {
         // walks all messages — the only side effect, but it's the source of
         // truth (avoids manual `count_message` arithmetic that could drift).
         self.recalibrate_tokens();
+        self.recompute_messages_json_bytes();
 
         if self.current_tokens > self.max_tokens {
             tracing::warn!(
@@ -1463,6 +1540,7 @@ impl HistoryManager {
         let removed_messages = self.messages.len().saturating_sub(new_msgs.len());
         *self.messages_mut() = new_msgs;
         self.recalibrate_tokens();
+        self.recompute_messages_json_bytes();
 
         tracing::info!(
             level = plan.level,
@@ -3096,5 +3174,66 @@ mod tests {
             "two new messages inserted (Assistant + Tool) for the fresh round"
         );
         assert_eq!(len_after_first, marker_idx + 3, "sanity: first splice length matches");
+    }
+
+    // ── ADR-067: messages_json_bytes incremental counter ──────────────
+
+    fn assert_json_bytes_matches(hm: &HistoryManager) {
+        let expected = serde_json::to_string(&*hm.messages_arc())
+            .map(|s| s.len())
+            .unwrap_or(0);
+        assert_eq!(
+            hm.messages_json_bytes(),
+            expected,
+            "incremental counter must equal full serialization length"
+        );
+    }
+
+    #[test]
+    fn messages_json_bytes_tracks_append_and_extend() {
+        let mut hm = HistoryManager::new(10_000);
+        assert_eq!(hm.messages_json_bytes(), 2, "empty history serializes as `[]`");
+
+        hm.append(make_message(MessageRole::User, "hello"));
+        assert_json_bytes_matches(&hm);
+
+        hm.append(make_message(MessageRole::Assistant, "hi there"));
+        assert_json_bytes_matches(&hm);
+
+        hm.extend(vec![
+            make_message(MessageRole::User, "third"),
+            make_message(MessageRole::Assistant, "fourth"),
+        ]);
+        assert_json_bytes_matches(&hm);
+    }
+
+    #[test]
+    fn messages_json_bytes_tracks_clear_and_truncate() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_message(MessageRole::User, "a"));
+        hm.append(make_message(MessageRole::User, "b"));
+        hm.append(make_message(MessageRole::User, "c"));
+        assert_json_bytes_matches(&hm);
+
+        hm.truncate_to(2);
+        assert_eq!(hm.len(), 2);
+        assert_json_bytes_matches(&hm);
+
+        hm.clear();
+        assert_eq!(hm.messages_json_bytes(), 2, "cleared history serializes as `[]`");
+    }
+
+    #[test]
+    fn messages_json_bytes_tracks_abandon_and_retrieve() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_message(MessageRole::User, "q"));
+        hm.append(make_tool_message("LONG-TOOL-RESULT-CONTENT", "tc_1", None));
+        assert_json_bytes_matches(&hm);
+
+        assert_eq!(hm.abandon_tool_result("tc_1"), 1);
+        assert_json_bytes_matches(&hm);
+
+        assert_eq!(hm.retrieve_tool_result("tc_1", "LONG-TOOL-RESULT-CONTENT"), 1);
+        assert_json_bytes_matches(&hm);
     }
 }

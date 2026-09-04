@@ -799,6 +799,55 @@ pub struct ContextUsageInfo {
     /// [`Self::agent_total_cache_read_tokens`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_total_cache_write_tokens: Option<u64>,
+    /// ADR-067: per-section byte sizes of the most recent `ChatRequest`
+    /// assembled by `ContextBuilder::build()`. Empty/`None` until the
+    /// first LLM call after enabling this ADR's wiring in
+    /// `process_llm_response_usage`. Powers the input-box context-usage
+    /// popup's 5-category breakdown (system / tools / messages /
+    /// connectors / skills) **without** requiring DevMode to be on —
+    /// `DebugObserverSlot::Production` makes `on_context_built` a no-op,
+    /// but the per-section byte sizes are now computed in a separate,
+    /// cheap path that runs unconditionally.
+    ///
+    /// Only `key` + `size_bytes` are exposed here; full per-section
+    /// metadata (token estimate, SHA-256 hash, request params, lazy
+    /// content) stays on the DevMode-only `DebugContextBuiltEvent`
+    /// path. `skip_serializing_if = "Option::is_none"` keeps the wire
+    /// shape compatible with pre-ADR-067 Runtimes that never populate
+    /// the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<ContextUsageSection>>,
+}
+
+/// One entry in [`ContextUsageInfo::sections`].
+///
+/// Mirrors the key + size_bytes pair of [`crate::mqtt_proto::SectionMeta`]
+/// (proto `mqtt_payload.proto:1168`) but trimmed to the two fields the
+/// runtime observability path actually needs. The Debug Panel reads the
+/// full [`crate::mqtt_proto::SectionMeta`] from `DebugContextBuiltEvent`
+/// separately; this struct intentionally does not re-export
+/// `token_estimate` or `hash` to keep the always-on emission path light
+/// (no SHA-256, no per-section token counting).
+///
+/// Section keys (`system_prompt`, `identity_context`, `workspace_context`,
+/// `retrieved_memory`, `skill_instructions`, `environment`,
+/// `workspace_prompt_file`, `tool_definitions`, `messages`,
+/// `ambiguous_confirmation_hint`, `abstention_prompt`)
+/// match the keys surfaced by `compute_section_sizes` in
+/// `acowork-runtime/src/agent/context.rs` (ADR-067). Note: `todo_context`
+/// is intentionally absent — ADR-060 v2 removed the standalone todo block
+/// from the system prompt, so todo state lives only inside the `messages`
+/// tool results and is counted there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsageSection {
+    /// Section key, e.g. `"system_prompt"`, `"messages"`. Stable across
+    /// Runtime versions; the frontend (`contextUsageBreakdown.ts`)
+    /// groups by this string into the 5 popup categories.
+    pub key: String,
+    /// Byte size of the assembled section content — exact (UTF-8
+    /// `.len()`), not a heuristic. The frontend scales this by the
+    /// billed `usage_percent` to compute per-row percentages.
+    pub size_bytes: u64,
 }
 
 /// LLM API protocol type, derived from models.dev npm field.
@@ -2207,6 +2256,7 @@ mod tests {
             total_cache_write_tokens: Some(100),
             agent_total_cache_read_tokens: Some(1600),
             agent_total_cache_write_tokens: Some(100),
+            sections: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ContextUsageInfo = serde_json::from_str(&json).unwrap();
@@ -2245,6 +2295,7 @@ mod tests {
             total_cache_write_tokens: None,
             agent_total_cache_read_tokens: None,
             agent_total_cache_write_tokens: None,
+            sections: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         // Cache fields absent → no `"cache_..."` substring in the JSON.

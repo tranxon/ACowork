@@ -148,6 +148,15 @@ pub struct ContextSnapshotRequest<'a> {
     pub model: &'a str,
     /// All tools (built-in + MCP) — needed for tool definitions snapshot.
     pub all_tools: &'a [Arc<dyn Tool>],
+    /// ADR-067: the real MCP server tools (from `AgentCore::mcp_tools`).
+    ///
+    /// `all_tools` mixes built-in tools (`mcp_install` / `mcp_uninstall`)
+    /// with MCP server tools, so filtering `all_tools` by the `mcp_`
+    /// name prefix would over-count the `tool_definitions` byte size.
+    /// This field carries the exact set that `build_chat_request` injects
+    /// into `ChatRequest.tools`, keeping the always-on and DevMode section
+    /// byte counts identical to what the LLM actually sees.
+    pub mcp_tools: &'a [Arc<dyn Tool>],
     /// Final `max_tokens` of the built ChatRequest (post capping).
     ///
     /// ADR-054 step 2: not a `ContextBuilder` field — it is computed in

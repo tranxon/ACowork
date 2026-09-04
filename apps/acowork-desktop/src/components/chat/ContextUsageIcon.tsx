@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { X } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
-import { useDebugStore } from "../../stores/debugStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import {
   computeContextUsageBreakdown,
@@ -84,11 +83,13 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // providers that don't surface cache accounting (ollama, etc.).
   const sessionProvider = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.provider ?? null);
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
-  const latestContextSnapshot = useDebugStore((state) => {
-    if (state.debugAgentId !== agentId) return null;
-    const snapshots = state.sessionStates[sessionId]?.snapshots;
-    return snapshots && snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
-  });
+  // ADR-067: section byte sizes are emitted by the runtime's always-on
+  // `process_llm_response_usage` path and live on `contextUsage.sections`
+  // alongside the billed totals — no longer dependent on `useDebugStore`
+  // (which is gated by DevMode and only fires on the debug snapshot path).
+  // The popover is global UI; reading from chatStore ensures the
+  // breakdown is populated even when the Debug Panel is closed.
+  const sectionList = contextUsage?.sections ?? [];
 
   // ADR-066 §6: cache hit rate, provider-aware.  `null` means "no
   // signal" — either the provider doesn't report cache tokens, no LLM
@@ -134,7 +135,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
 
   const usagePercent = contextUsage?.usage_percent ?? 0;
   const usageBreakdown = computeContextUsageBreakdown(
-    latestContextSnapshot?.sections ?? [],
+    sectionList,
     usagePercent,
   );
   // ADR-049: derive from `getProcessingPhase()` instead of comparing status
