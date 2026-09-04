@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { X } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import {
   computeContextUsageBreakdown,
@@ -82,6 +83,13 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // can pick the right formula; falls back to null (= hide) for
   // providers that don't surface cache accounting (ollama, etc.).
   const sessionProvider = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.provider ?? null);
+  // Debug-mode gate for the per-turn cache-hit comparison row below.
+  // Mirrors AppLayout's `isDebugMode` (`debug_state === "enabled"` and
+  // `running`), so the extra diagnostic row appears exactly when the
+  // Debug Panel is live — and disappears when DevMode is torn down.
+  const agentDebugEnabled = useAgentStore(
+    (s) => s.agents[agentId]?.meta?.debug_state === "enabled" && !!s.agents[agentId]?.meta?.running,
+  );
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
   // ADR-067: section byte sizes are emitted by the runtime's always-on
   // `process_llm_response_usage` path and live on `contextUsage.sections`
@@ -105,6 +113,16 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
     "cumulative",
   );
   const cacheHitRateLabel = formatCacheHitRate(cacheStats.ratio);
+  // ADR-066 §6: the real-time (per-turn) view of the last LLM call's
+  // cache accounting. Debug-mode-only comparison row — the cumulative
+  // row above is the stable session-lifetime signal, the per-turn row
+  // exposes the volatile last-call signal for side-by-side testing.
+  const perTurnCacheStats = computeCacheHitStats(
+    sessionProvider,
+    contextUsage,
+    "per-turn",
+  );
+  const perTurnCacheHitRateLabel = formatCacheHitRate(perTurnCacheStats.ratio);
 
 // Open popover on hover (not click), with a small delay before closing
   const handleMouseEnter = useCallback(() => {
@@ -202,7 +220,7 @@ const handleCompressSummary = () => {
           className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[min(calc(100vh-120px),460px)] select-none overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-modal-surface text-zinc-700 shadow-lg dark:border-zinc-700 dark:text-zinc-200"
         >
           <div className="flex items-center justify-between px-3 pt-2.5">
-            <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-200">
+            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
               {t("contextUsage.title")}
             </h2>
             <button
@@ -218,7 +236,7 @@ const handleCompressSummary = () => {
 
           <div className="px-3 pt-2">
             <div className="flex items-baseline gap-2 whitespace-nowrap">
-              <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-semibold leading-none tracking-[-0.01em] text-zinc-700 tabular-nums dark:text-zinc-200">
+              <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] text-zinc-700 tabular-nums dark:text-zinc-200">
                 {formatDetailedPercent(usagePercent)}%
               </span>
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -268,7 +286,7 @@ const handleCompressSummary = () => {
                     className="h-2 w-2 shrink-0 rounded-full"
                     style={{ backgroundColor: meta.color }}
                   />
-                  <span className="font-medium text-zinc-700 dark:text-zinc-200">
+                  <span className="font-normal text-zinc-700 dark:text-zinc-200">
                     {t(meta.labelKey)}
                   </span>
                   <span className="ml-auto font-mono tabular-nums text-zinc-700 dark:text-zinc-300">
@@ -283,11 +301,11 @@ const handleCompressSummary = () => {
             <>
               <div className="border-t border-zinc-200 dark:border-zinc-700" />
               <div className="px-3 pt-2 pb-3">
-                <div className="text-sm font-semibold text-zinc-700 dark:text-zinc-200">
+                <div className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
                   {t("contextUsage.cacheHitLabel")}
                 </div>
                 <div className="mt-1 flex items-baseline gap-2 whitespace-nowrap">
-                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-semibold leading-none tracking-[-0.01em] tabular-nums text-zinc-700 dark:text-zinc-200">
+                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] tabular-nums text-zinc-700 dark:text-zinc-200">
                     {cacheHitRateLabel ?? "\u2014"}
                   </span>
                   <span className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -298,6 +316,32 @@ const handleCompressSummary = () => {
                     <span className="text-zinc-400 dark:text-zinc-500"> / </span>
                     <span className="font-mono text-zinc-700 dark:text-zinc-300">
                       {formatTokens(cacheStats.denominator)}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </>
+          ) : null}
+
+          {agentDebugEnabled && hasCacheData(contextUsage, "per-turn") ? (
+            <>
+              <div className="border-t border-zinc-200 dark:border-zinc-700" />
+              <div className="px-3 pt-2 pb-3">
+                <div className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+                  {t("contextUsage.cacheHitPerTurnLabel")}
+                </div>
+                <div className="mt-1 flex items-baseline gap-2 whitespace-nowrap">
+                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-semibold leading-none tracking-[-0.01em] tabular-nums text-zinc-700 dark:text-zinc-200">
+                    {perTurnCacheHitRateLabel ?? "\u2014"}
+                  </span>
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {t("contextUsage.cached")}{" "}
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {formatTokens(perTurnCacheStats.numerator)}
+                    </span>
+                    <span className="text-zinc-400 dark:text-zinc-500"> / </span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      {formatTokens(perTurnCacheStats.denominator)}
                     </span>
                   </span>
                 </div>

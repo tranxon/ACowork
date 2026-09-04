@@ -135,7 +135,8 @@
     "compressContext": "compact context",
     "compressSummary": "Compress Summary",
     "contextUsedSuffix": "context used",
-    "cacheHitLabel": "Cache hit rate",
+    "cacheHitLabel": "Cache hit rate (cumulative)",
+    "cacheHitPerTurnLabel": "Cache hit rate (real-time)",
     "cached": "cached"
   },
   "onboarding": {

@@ -26,45 +26,15 @@ use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
-// ── ADR-052 placeholder format constants ────────────────────────────────
+// ── ADR-052 placeholder format constants (RETIRED) ─────────────────────
 //
-// Shared between `HistoryManager::abandon_tool_result` (producer) and
-// `episode_distill::format_messages` (consumer at LLM-compaction time).
-// Both producer and consumer MUST agree on the prefix string for the
-// idempotency check; centralizing it here prevents the two from drifting.
+// Tool-result compression was retired; `context_retrieve` /
+// `context_abandon` are no longer registered with the LLM. The
+// `COMPRESSED_TOOL_PLACEHOLDER_PREFIX` constant and the
+// `abandon_tool_result` / `retrieve_tool_result` methods have been
+// removed. Their source files survive as dead code for future reference.
 
-/// Stable prefix for a compressed tool-result placeholder produced by
-/// [`HistoryManager::abandon_tool_result`]. Content with this prefix
-/// is treated as "already compressed" by both:
-/// - `abandon_tool_result` idempotency check
-/// - `retrieve_tool_result` round-trip check (placeholder → restored)
-/// - `format_messages` (LLM compaction prompt builder) for richer
-///   structured labelling in the summary prompt
-///
-/// ADR-052: When the LLM invokes `context_abandon`, the tool result
-/// content is replaced with:
-///   `[Tool result compressed. Call context_retrieve(id="{tool_call_id}") to retrieve the full content.]`
-///
-/// ## Format contract
-///
-/// The exact format string is a contract shared by **three** consumers:
-///
-/// 1. **`context_retrieve` built-in tool** — parses `tool_call_id` from the placeholder
-///    to fetch the original content from the in-memory inverted index.
-/// 2. **`format_messages` in episode_distill** — checks `starts_with` this prefix
-///    to label compressed tool results correctly in compaction prompts.
-/// 3. **LLM system prompt** — instructs the model to copy the `tool_call_id` from
-///    the placeholder verbatim when calling `context_retrieve`.
-///
-/// **Any change** to this prefix or the placeholder format **must** update all three
-/// consumers in lockstep.
-///
-/// ## Format invariant
-///
-/// The placeholder always includes the raw `tool_call_id` embedded inline
-/// (e.g. `toolu_abc123`), so the LLM can copy-paste it without parsing.
-/// Format: prefix + " Call context_retrieve(id=\"" + tool_call_id + "\") ..."
-pub(crate) const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str = "[Tool result compressed.";
+// (placeholder prefix removed — see above)
 
 /// Stable identifier string used by [`HistoryManager::replace_middle_with_summary`]
 /// to mark the synthetic Assistant message that replaces the compacted middle.
@@ -228,11 +198,10 @@ pub struct HistoryManager {
     ///
     /// Maintained incrementally on the hot path (`append` / `extend` are
     /// O(1) per message) and recomputed on the rare structural operations
-    /// (`load_restored`, `clear`, `truncate_to`, `fit_to_budget_lossless`,
-    /// `abandon_tool_result`, `retrieve_tool_result`). This lets the
-    /// always-on context-usage observability path report the `messages`
-    /// section byte size **without** re-serializing the entire history on
-    /// every LLM call.
+    /// (`load_restored`, `clear`, `truncate_to`, `fit_to_budget_lossless`).
+    /// This lets the always-on context-usage observability path report
+    /// the `messages` section byte size **without** re-serializing the
+    /// entire history on every LLM call.
     messages_json_bytes: usize,
 }
 
@@ -634,70 +603,12 @@ impl HistoryManager {
         self.current_tokens
     }
 
-    /// Returns 1 if replaced, 0 if not found or already compressed.
-    pub fn abandon_tool_result(&mut self, tool_call_id: &str) -> usize {
-        let mut changed = false;
-        for msg in self.messages_mut() {
-            if !matches!(msg.role, MessageRole::Tool) {
-                continue;
-            }
-            if msg.tool_call_id.as_deref() != Some(tool_call_id) {
-                continue;
-            }
-            // Idempotency: skip already-compressed messages
-            if msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
-                return 0;
-            }
-            msg.content = format!(
-                "[Tool result compressed. Call context_retrieve(id=\"{}\") to retrieve the full content.]",
-                tool_call_id
-            );
-            changed = true;
-            break;
-        }
-        if changed {
-            self.recompute_messages_json_bytes();
-            return 1;
-        }
-        0
-    }
-
-    /// ADR-052: Restore a Tool message's content from placeholder back to original.
-    /// Called by `drain_retrieve_queue` after the LLM invokes `context_retrieve`.
-    ///
-    /// Idempotent: if the message is already raw (not a placeholder), returns 0.
-    ///
-    /// Returns 1 if restored, 0 if not found or already raw.
-    pub fn retrieve_tool_result(&mut self, tool_call_id: &str, original_content: &str) -> usize {
-        let mut changed = false;
-        for msg in self.messages_mut() {
-            if !matches!(msg.role, MessageRole::Tool) {
-                continue;
-            }
-            if msg.tool_call_id.as_deref() != Some(tool_call_id) {
-                continue;
-            }
-            // Idempotency: skip already-restored messages
-            if !msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
-                return 0;
-            }
-            msg.content = original_content.to_string();
-            changed = true;
-            break;
-        }
-        if changed {
-            self.recompute_messages_json_bytes();
-            return 1;
-        }
-        0
-    }
-
     /// Recompute `current_tokens` from scratch.
     ///
-    /// Must be called after any in-place content mutation (e.g. after
-    /// `abandon_tool_result` or `retrieve_tool_result`) since these mutate
-    /// content in place but cannot update `current_tokens` under borrow
-    /// rules. O(N) over messages with constant-time token estimation each.
+    /// Must be called after any in-place content mutation (e.g. summary
+    /// replacement) since these mutate content in place but cannot
+    /// update `current_tokens` under borrow rules. O(N) over messages
+    /// with constant-time token estimation each.
     pub fn recalibrate_tokens(&mut self) {
         let model = self.model_for_counting().to_string();
         let pt = self.protocol_type.clone();
@@ -1591,17 +1502,6 @@ mod tests {
         }
     }
 
-    /// Helper: make a Tool-role message with a tool_call_id and optional `name`.
-    fn make_tool_message(content: &str, tool_call_id: &str, name: Option<&str>) -> ChatMessage {
-        ChatMessage {
-            role: MessageRole::Tool,
-            content: content.to_string(),
-            name: name.map(|s| s.to_string()),
-            tool_call_id: Some(tool_call_id.to_string()),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn test_append_and_count() {
         let mut hm = HistoryManager::new(1000);
@@ -1760,167 +1660,6 @@ mod tests {
         // Token count must be recomputed (not stale "old data" + new).
         let recomputed = hm.token_count();
         assert!(recomputed > 0);
-    }
-
-    // ── abandon_tool_result / retrieve_tool_result tests (ADR-052) ────
-
-    #[test]
-    fn test_abandon_tool_result_replaces_content() {
-        let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_abc", Some("content_search")));
-
-        let n = hm.abandon_tool_result("toolu_abc");
-        assert_eq!(n, 1);
-        assert!(
-            hm.messages()[0].content.starts_with("[Tool result compressed."),
-            "content should be replaced with placeholder"
-        );
-        assert!(
-            hm.messages()[0].content.contains("context_retrieve(id=\"toolu_abc\")"),
-            "placeholder should contain context_retrieve and the tool_call_id"
-        );
-    }
-
-    #[test]
-    fn test_abandon_tool_result_not_found_returns_zero() {
-        let mut hm = HistoryManager::new(100_000);
-        hm.append(make_tool_message("some content", "toolu_a", Some("shell")));
-
-        let n = hm.abandon_tool_result("toolu_nonexistent");
-        assert_eq!(n, 0);
-        assert_eq!(hm.messages()[0].content, "some content");
-    }
-
-    #[test]
-    fn test_abandon_tool_result_idempotent() {
-        let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_idem", Some("file_read")));
-
-        let n1 = hm.abandon_tool_result("toolu_idem");
-        assert_eq!(n1, 1);
-        let n2 = hm.abandon_tool_result("toolu_idem");
-        assert_eq!(n2, 0, "already-compressed message should not be re-processed");
-    }
-
-    #[test]
-    fn test_abandon_preserves_name_and_tool_call_id() {
-        let mut hm = HistoryManager::new(100_000);
-        let big = "y".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_q", Some("content_search")));
-
-        hm.abandon_tool_result("toolu_q");
-        assert_eq!(
-            hm.messages()[0].name.as_deref(),
-            Some("content_search"),
-            "name field must be preserved"
-        );
-        assert_eq!(
-            hm.messages()[0].tool_call_id.as_deref(),
-            Some("toolu_q"),
-            "tool_call_id must be preserved"
-        );
-    }
-
-    #[test]
-    fn test_abandon_skips_non_tool_roles() {
-        let mut hm = HistoryManager::new(100_000);
-        let big_user = "u".repeat(5000);
-        let big_tool = "t".repeat(5000);
-        hm.append(make_message(MessageRole::User, &big_user));
-        hm.append(make_tool_message(&big_tool, "toolu_w", Some("shell")));
-
-        let n = hm.abandon_tool_result("toolu_w");
-        assert_eq!(n, 1, "only the Tool message should be compressed");
-        // Non-Tool message must be byte-identical
-        assert_eq!(hm.messages()[0].content, big_user);
-    }
-
-    #[test]
-    fn test_retrieve_tool_result_restores_content() {
-        let mut hm = HistoryManager::new(100_000);
-        let original = "This is the original content".repeat(100);
-        hm.append(make_tool_message(&original, "toolu_abc", Some("file_read")));
-
-        // Abandon first
-        hm.abandon_tool_result("toolu_abc");
-        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
-
-        // Retrieve
-        let n = hm.retrieve_tool_result("toolu_abc", &original);
-        assert_eq!(n, 1);
-        assert_eq!(hm.messages()[0].content, original);
-    }
-
-    #[test]
-    fn test_retrieve_tool_result_not_found_returns_zero() {
-        let mut hm = HistoryManager::new(100_000);
-        hm.append(make_tool_message("content", "toolu_a", Some("shell")));
-
-        let n = hm.retrieve_tool_result("toolu_nonexistent", "some content");
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn test_retrieve_tool_result_idempotent() {
-        let mut hm = HistoryManager::new(100_000);
-        let original = "Original content here".repeat(50);
-        hm.append(make_tool_message(&original, "toolu_r", Some("file_read")));
-
-        // Abandon then retrieve
-        hm.abandon_tool_result("toolu_r");
-        let n1 = hm.retrieve_tool_result("toolu_r", &original);
-        assert_eq!(n1, 1);
-
-        // Second retrieve should be a no-op (already raw)
-        let n2 = hm.retrieve_tool_result("toolu_r", &original);
-        assert_eq!(n2, 0, "already-restored message should not be re-processed");
-    }
-
-    #[test]
-    fn test_retrieve_preserves_name_and_tool_call_id() {
-        // ADR-052 §3.3.4 + §3.2.3: retrieve is symmetric to abandon — both
-        // mutate `content` in-place but preserve `name` and `tool_call_id`
-        // to maintain tool_use ↔ tool_result protocol pairing.
-        let mut hm = HistoryManager::new(100_000);
-        let big = "z".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_preserve", Some("file_read")));
-
-        // Abandon then retrieve
-        hm.abandon_tool_result("toolu_preserve");
-        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
-        hm.retrieve_tool_result("toolu_preserve", &big);
-
-        assert_eq!(
-            hm.messages()[0].name.as_deref(),
-            Some("file_read"),
-            "name field must be preserved through retrieve"
-        );
-        assert_eq!(
-            hm.messages()[0].tool_call_id.as_deref(),
-            Some("toolu_preserve"),
-            "tool_call_id must be preserved through retrieve"
-        );
-    }
-
-    #[test]
-    fn test_abandon_retrieve_cycle() {
-        let mut hm = HistoryManager::new(100_000);
-        let original = "Cycle test content".repeat(50);
-        hm.append(make_tool_message(&original, "toolu_cycle", Some("shell")));
-
-        // Abandon
-        assert_eq!(hm.abandon_tool_result("toolu_cycle"), 1);
-        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
-
-        // Retrieve
-        assert_eq!(hm.retrieve_tool_result("toolu_cycle", &original), 1);
-        assert_eq!(hm.messages()[0].content, original);
-
-        // Re-abandon (close the loop)
-        assert_eq!(hm.abandon_tool_result("toolu_cycle"), 1);
-        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
     }
 
     // ── sanitize_messages tests ─────────────────────────────────────────
@@ -3221,19 +2960,5 @@ mod tests {
 
         hm.clear();
         assert_eq!(hm.messages_json_bytes(), 2, "cleared history serializes as `[]`");
-    }
-
-    #[test]
-    fn messages_json_bytes_tracks_abandon_and_retrieve() {
-        let mut hm = HistoryManager::new(10_000);
-        hm.append(make_message(MessageRole::User, "q"));
-        hm.append(make_tool_message("LONG-TOOL-RESULT-CONTENT", "tc_1", None));
-        assert_json_bytes_matches(&hm);
-
-        assert_eq!(hm.abandon_tool_result("tc_1"), 1);
-        assert_json_bytes_matches(&hm);
-
-        assert_eq!(hm.retrieve_tool_result("tc_1", "LONG-TOOL-RESULT-CONTENT"), 1);
-        assert_json_bytes_matches(&hm);
     }
 }
