@@ -1423,6 +1423,17 @@ export interface AgentMcpServersResponse {
   active_servers: string[];
 }
 
+/** Per-agent MCP server view (catalog ∪ local) for the Tools panel toggle */
+export interface McpServerView {
+  name: string;
+  transport: McpTransportDef;
+  url?: string;
+  command: string;
+  args: string[];
+  /** Whether this server is currently in this agent's active_names */
+  active: boolean;
+}
+
 /** MCP probe response — result of a health check against an MCP server */
 export interface McpProbeResponse {
   success: boolean;

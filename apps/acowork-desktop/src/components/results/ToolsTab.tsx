@@ -7,7 +7,7 @@ import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { Switch } from "../common/Switch";
-import type { SearchProviderListItem, AgentSearchProvider } from "../../lib/types";
+import type { SearchProviderListItem, AgentSearchProvider, McpServerView } from "../../lib/types";
 
 const EMPTY_ARRAY: string[] = [];
 
@@ -23,13 +23,19 @@ export function ToolsTab() {
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
 
-  // MCP server activation — per-agent selectors
-  const catalog = useMcpStore((s) => s.catalog);
+  // MCP server activation — per-agent selectors.
+  // The toggle list is rendered from the per-agent merged MCP list
+  // (`mcp_servers_defs` = catalog ∪ local) fetched from the merged
+  // /tools endpoint, so agent-installed (local) and system-injected
+  // (pm) servers appear here too — not just gateway-global catalog
+  // entries. Checked state comes from `activeServers` (active_names).
   const activeServers = useMcpStore((s) => selectedAgentId ? (s.activeServers[selectedAgentId] ?? EMPTY_ARRAY) : EMPTY_ARRAY);
   const activationLoading = useMcpStore((s) => selectedAgentId ? (s.activationLoading[selectedAgentId] ?? false) : false);
   const mcpError = useMcpStore((s) => s.error);
-  const loadCatalog = useMcpStore((s) => s.loadCatalog);
   const toggleServer = useMcpStore((s) => s.toggleServer);
+
+  // Per-agent MCP server definitions (catalog ∪ local) from merged /tools.
+  const [mcpServerDefs, setMcpServerDefs] = useState<McpServerView[]>([]);
 
   // Search provider configuration
   const [searchProviders, setSearchProviders] = useState<SearchProviderListItem[]>([]);
@@ -43,9 +49,6 @@ export function ToolsTab() {
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
-
-    // MCP catalog (gateway global, independent of agent state)
-    loadCatalog();
 
     // Tools, MCP servers, search providers — fetch once from merged /tools endpoint.
     // ADR-034 Phase 5: Replaces 3 separate calls (config, mcp-servers, search-providers).
@@ -71,6 +74,12 @@ export function ToolsTab() {
             useMcpStore.setState((s) => ({
               activeServers: { ...s.activeServers, [selectedAgentId!]: data.mcp_servers },
             }));
+          }
+          // mcp_servers_defs — full per-agent MCP list (catalog ∪ local)
+          // with active flags; powers the per-agent toggle rows so pm /
+          // agent-installed MCPs show up too.
+          if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
+            setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
           }
           // search — search providers (both available list and active config).
           // ADR-034 §7.6.5: the merged /tools endpoint returns a single
@@ -110,6 +119,9 @@ export function ToolsTab() {
           useMcpStore.setState((s) => ({
             activeServers: { ...s.activeServers, [selectedAgentId!]: data.mcp_servers },
           }));
+        }
+        if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
+          setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
         }
         if (data.search) {
           // ADR-034 §7.6.5: server returns a single `providers` array which
@@ -353,7 +365,7 @@ export function ToolsTab() {
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.mcpServers")}
         </label>
-        {catalog.length === 0 ? (
+        {mcpServerDefs.length === 0 ? (
           <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noMcpInCatalog")}
@@ -362,7 +374,7 @@ export function ToolsTab() {
         ) : (
           <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-              {catalog.map((server) => {
+              {mcpServerDefs.map((server) => {
                 const isChecked = activeServers.includes(server.name);
                 return (
                   <div

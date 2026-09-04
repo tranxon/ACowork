@@ -810,6 +810,31 @@ pub fn save_agent_mcp_config(work_dir: &Path, cfg: &AgentMcpConfig) -> Result<()
     Ok(())
 }
 
+/// Add `name` to `active_names` (initializing to an empty list if unset),
+/// unless already present.
+///
+/// Used by `mcp_install` so a freshly installed local MCP is **active by
+/// default** — the user installed it because they intend to use it. The
+/// Tools-panel toggle can still turn it off afterwards (`active_names`
+/// persists the choice).
+pub fn activate_mcp_name(active_names: &mut Option<Vec<String>>, name: &str) {
+    let active = active_names.get_or_insert_with(Vec::new);
+    if !active.iter().any(|n| n == name) {
+        active.push(name.to_string());
+    }
+}
+
+/// System-injected MCP server names that are **active by default**.
+///
+/// `pm` is injected by the Gateway into every agent's catalog
+/// (`auto_inject_mcp = true`, design §6.1 / T3-4) so agents get `pm_*`
+/// tools out of the box. The user can still toggle it off in the Tools
+/// panel — the choice is persisted in `active_names` and never clobbered
+/// by subsequent catalog pushes.
+fn is_system_injected_mcp_name(name: &str) -> bool {
+    name == "pm"
+}
+
 /// Save only the catalog portion of agent MCP config.
 ///
 /// This is used by the `acowork/global/mcps` MQTT handler: Gateway pushes
@@ -821,6 +846,13 @@ pub fn save_agent_mcp_config(work_dir: &Path, cfg: &AgentMcpConfig) -> Result<()
 /// the user's Tools-panel selection on every Gateway catalog push (e.g.
 /// every Gateway restart). That reset is now gone — the catalog update is
 /// orthogonal to the activation toggle.
+///
+/// Default-on (T3-4): when the user has **never expressed an activation
+/// choice** (`active_names` is `None`) and the pushed catalog contains a
+/// system-injected MCP (e.g. `pm`), we materialize it as active **once**.
+/// After that `active_names` is `Some(_)` and every later push preserves
+/// the user's selection verbatim — so a user who toggles `pm` off is not
+/// re-activated by the next Gateway restart.
 pub fn save_agent_mcp_config_catalog(
     work_dir: &Path,
     catalog_servers: &[McpServerConfigDef],
@@ -833,10 +865,26 @@ pub fn save_agent_mcp_config_catalog(
         })
         .unwrap_or_default();
 
+    let mut active_names = current.active_names;
+    if active_names.is_none() {
+        let system: Vec<String> = catalog_servers
+            .iter()
+            .filter(|s| is_system_injected_mcp_name(&s.name))
+            .map(|s| s.name.clone())
+            .collect();
+        if !system.is_empty() {
+            tracing::info!(
+                system_mcps = ?system,
+                "Default-activating system-injected MCPs (active_names was unset)"
+            );
+            active_names = Some(system);
+        }
+    }
+
     let updated = AgentMcpConfig {
         catalog: catalog_servers.to_vec(),
         local: current.local,
-        active_names: current.active_names,
+        active_names,
     };
 
     save_agent_mcp_config(work_dir, &updated)
@@ -1434,6 +1482,98 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let merged = load_merged_mcp_configs(dir.path());
         assert!(merged.is_empty());
+    }
+
+    // ── Default-on for system-injected MCPs (pm, design §6.1 / T3-4) ──
+    //
+    // The Gateway injects `pm` into every agent's catalog. It must be
+    // **active by default** (agents get pm_* tools out of the box) yet
+    // still toggleable — the user can turn it off and the next catalog
+    // push must not re-activate it. This is materialized by writing
+    // `active_names` ONCE, only when the user has never expressed a
+    // choice (`active_names` is None).
+
+    #[test]
+    fn save_catalog_default_activates_pm_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // Fresh agent: pm injected, active_names never set.
+        let catalog = vec![mcp_def("playwright"), mcp_def("pm")];
+        save_agent_mcp_config_catalog(dir.path(), &catalog).unwrap();
+
+        let reloaded = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            reloaded.active_names,
+            Some(vec!["pm".to_string()]),
+            "pm must be default-active; playwright stays opt-in"
+        );
+
+        // Second push (e.g. Gateway restart) must preserve the choice.
+        save_agent_mcp_config_catalog(dir.path(), &catalog).unwrap();
+        let reloaded = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(reloaded.active_names, Some(vec!["pm".to_string()]));
+    }
+
+    #[test]
+    fn save_catalog_does_not_clobber_user_turning_pm_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // User explicitly toggled EVERYTHING off (active_names = Some([])).
+        let initial = AgentMcpConfig {
+            catalog: vec![mcp_def("pm")],
+            local: vec![],
+            active_names: Some(vec![]),
+        };
+        save_agent_mcp_config(dir.path(), &initial).unwrap();
+
+        // Next catalog push must NOT re-activate pm.
+        save_agent_mcp_config_catalog(dir.path(), &[mcp_def("pm")]).unwrap();
+        let reloaded = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            reloaded.active_names,
+            Some(vec![]),
+            "a user who turned pm off must stay off across catalog pushes"
+        );
+    }
+
+    #[test]
+    fn save_catalog_no_default_when_no_system_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // No system-injected MCP → active_names stays None (opt-in).
+        save_agent_mcp_config_catalog(dir.path(), &[mcp_def("playwright")]).unwrap();
+        let reloaded = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(reloaded.active_names, None);
+    }
+
+    // ── mcp_install default-on (local MCPs) ─────────────────────────
+
+    #[test]
+    fn activate_mcp_name_initializes_and_dedupes() {
+        // Unset → initializes to Some([name]).
+        let mut active = None;
+        crate::agent_config::activate_mcp_name(&mut active, "docling");
+        assert_eq!(active, Some(vec!["docling".to_string()]));
+
+        // Already present → no duplicate.
+        crate::agent_config::activate_mcp_name(&mut active, "docling");
+        assert_eq!(active, Some(vec!["docling".to_string()]));
+
+        // Second name appends; existing choice preserved.
+        crate::agent_config::activate_mcp_name(&mut active, "pm");
+        assert_eq!(active, Some(vec!["docling".to_string(), "pm".to_string()]));
+
+        // User explicitly turned everything off → a fresh install still
+        // activates (installing implies intent to use).
+        let mut off = Some(vec![]);
+        crate::agent_config::activate_mcp_name(&mut off, "docling");
+        assert_eq!(off, Some(vec!["docling".to_string()]));
     }
 
     // ── Bug 1 regression suite (MCP active_merged) ───────────────────

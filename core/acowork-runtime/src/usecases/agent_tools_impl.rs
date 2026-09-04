@@ -249,10 +249,36 @@ impl AgentToolsService for RuntimeAgentToolsService {
             .map(|t| t.tools)
             .unwrap_or_default();
 
-        let mcp_servers = agent_config::load_agent_mcp_config(&self.work_dir)
+        let mcp_cfg = agent_config::load_agent_mcp_config(&self.work_dir)
             .ok()
-            .flatten()
+            .flatten();
+
+        let mcp_servers = mcp_cfg
+            .as_ref()
             .map(|m| m.active_server_names())
+            .unwrap_or_default();
+
+        // Full per-agent merged list (catalog ∪ local) with active flags.
+        // This powers the per-agent switches in the Desktop Tools panel so
+        // agent-installed (local) and system-injected (pm) servers appear
+        // there too — not just gateway-global catalog entries.
+        let active_set: std::collections::HashSet<&str> =
+            mcp_servers.iter().map(String::as_str).collect();
+        let mcp_servers_defs = mcp_cfg
+            .as_ref()
+            .map(|m| {
+                m.merged()
+                    .into_iter()
+                    .map(|s| crate::usecases::agent_tools::McpServerView {
+                        name: s.name.clone(),
+                        transport: s.transport,
+                        url: s.url.clone(),
+                        command: s.command.clone(),
+                        args: s.args.clone(),
+                        active: active_set.contains(s.name.as_str()),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let search = agent_config::load_agent_search_config(&self.work_dir)
@@ -265,6 +291,7 @@ impl AgentToolsService for RuntimeAgentToolsService {
             agent_id: agent_id.to_string(),
             tools,
             mcp_servers,
+            mcp_servers_defs,
             search,
         }
     }

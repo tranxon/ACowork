@@ -2510,6 +2510,7 @@ async fn get_agent_tools(
             "matches": false,
             "tools": [],
             "mcp_servers": [],
+            "mcp_servers_defs": [],
             "search": { "providers": [] },
         })));
     }
@@ -2531,6 +2532,7 @@ async fn get_agent_tools(
         "matches": true,
         "tools": resp.tools,
         "mcp_servers": resp.mcp_servers,
+        "mcp_servers_defs": resp.mcp_servers_defs,
         "search": resp.search,
     })))
 }
@@ -4169,6 +4171,17 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert_eq!(mcp_servers, vec!["context7".to_string()]);
+
+        // 3b) `mcp_servers_defs` carries the full per-agent merged list
+        //     (catalog ∪ local) with active flags — powers the per-agent
+        //     toggle rows (pm / local MCPs included, not just gateway
+        //     catalog). context7 is active, `search` is not.
+        let defs = tools["mcp_servers_defs"].as_array().unwrap();
+        assert_eq!(defs.len(), 2, "both seeded catalog entries listed");
+        assert_eq!(defs[0]["name"], "context7");
+        assert_eq!(defs[0]["active"], true);
+        assert_eq!(defs[1]["name"], "search");
+        assert_eq!(defs[1]["active"], false);
 
         // 4) PUT search-config — user activates `tavily` with priority 1.
         let search_url = format!("{}/agents/com.test.agent/search-config", base);

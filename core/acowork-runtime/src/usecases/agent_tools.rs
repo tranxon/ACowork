@@ -154,16 +154,37 @@ pub struct BuiltinToolsResponse {
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
 }
 
+/// Per-agent MCP server view for the Tools panel.
+///
+/// Rendered as a toggle row in the Desktop Tools tab. `active` is
+/// `true` when the server's name is currently in `active_names`.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerView {
+    pub name: String,
+    pub transport: acowork_core::protocol::McpTransportDef,
+    pub url: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub active: bool,
+}
+
 /// Response for `GET /agents/{id}/tools` - the merged Tools-panel view.
 ///
 /// Combines all three Tools-panel sources (builtin tools, MCP servers,
 /// search providers) in a single round-trip so the desktop can render
 /// the entire panel without chaining three separate calls.
+///
+/// `mcp_servers` keeps the active server **names** (backward-compatible
+/// with the per-agent activation store); `mcp_servers_defs` carries the
+/// full **per-agent** merged list (catalog ∪ local) with active flags so
+/// the panel can render switches for agent-installed and system-injected
+/// servers too — not just the gateway-global catalog.
 #[derive(Debug, Clone, Serialize)]
 pub struct MergedToolsResponse {
     pub agent_id: String,
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
     pub mcp_servers: Vec<String>,
+    pub mcp_servers_defs: Vec<McpServerView>,
     pub search: serde_json::Value,
 }
 
