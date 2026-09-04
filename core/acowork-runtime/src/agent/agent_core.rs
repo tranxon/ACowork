@@ -441,9 +441,11 @@ impl AgentCore {
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
             agent_total_output_tokens: AtomicU64::new(0),
+
             // ADR-066: cache counters follow the same lifecycle.
             agent_total_cache_read_tokens: AtomicU64::new(0),
             agent_total_cache_write_tokens: AtomicU64::new(0),
+
             retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -1353,6 +1355,7 @@ impl Clone for AgentCore {
             agent_total_output_tokens: AtomicU64::new(
                 self.agent_total_output_tokens.load(Ordering::Acquire),
             ),
+
             // ADR-066: cache counters inherit the same "snapshot value,
             // share updates across clones" semantics as the in/out
             // counters above.
@@ -1362,6 +1365,7 @@ impl Clone for AgentCore {
             agent_total_cache_write_tokens: AtomicU64::new(
                 self.agent_total_cache_write_tokens.load(Ordering::Acquire),
             ),
+
             retrieve_queue: self.retrieve_queue.clone(),
         }
     }
@@ -2312,6 +2316,7 @@ mod tests {
         );
     }
 
+
     // ── ADR-066: agent-level cache counter tests ─────────────────────
 
     /// Helper: build an AgentCore with default test config and no
@@ -2506,4 +2511,5 @@ mod tests {
             "each dimension is max'd independently"
         );
     }
+
 }

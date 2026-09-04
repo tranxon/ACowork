@@ -165,7 +165,8 @@ pub(crate) async fn start_http_server(
     // Write pidfile for Desktop App discovery
     let _pidfile_guard = write_pidfile(data_dir, actual_port)?;
 
-    // Build router
+    // Build router — PM routes are reverse-proxied to the standalone
+    // acowork-pm process (ADR-064); no in-process PM handle needed.
     let app = routes::build_router(app_state);
 
     // Convert std::net::TcpListener to tokio::net::TcpListener

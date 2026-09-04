@@ -1483,7 +1483,7 @@ fn urlencoding(s: &str) -> String {
 /// because the proxy targets a different upstream host, and
 /// `content-length` is excluded because reqwest recalculates it from the
 /// actual body bytes.
-fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
+pub(crate) fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
     // HeaderName stores names in lowercase, so comparison is safe.
     matches!(
         name.as_str(),

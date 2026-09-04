@@ -1567,6 +1567,7 @@ impl AgentLoop {
                 iteration: debug_iter,
                 model: current_model,
                 all_tools: &self.core.all_tools,
+                mcp_tools: self.core.mcp_tools.as_deref().unwrap_or(&[]),
                 max_tokens: chat_request.max_tokens,
                 history: &self.session.history,
             })
@@ -1625,7 +1626,7 @@ impl AgentLoop {
             .debug_observer
             .on_phase_enter(crate::debug::protocol::DebugPhase::ParseResponse)
             .await;
-        self.process_llm_response_usage(&response, current_model)
+        self.process_llm_response_usage(&response, context_builder, current_model)
             .await;
 
         // ── ④ Text response → early return ──

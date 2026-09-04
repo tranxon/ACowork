@@ -1120,10 +1120,31 @@ fn probe_health(port: u16) -> std::io::Result<()> {
 }
 
 impl NodeControlPlane {
-    /// Main loop: info heartbeat + graceful shutdown.
+    /// Main loop: info heartbeat + sleep/wake recovery + graceful
+    /// shutdown. HTTP server responsiveness is monitored out-of-band
+    /// by `spawn_http_watchdog` (separate OS thread — see the 2026-08
+    /// incident comment there).
     async fn run_loop(mut self) -> Result<(), NodeError> {
         let mut heartbeat = tokio::time::interval(INFO_HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // ADR-065 Step 1: sleep/wake recovery runs as an independent task
+        // using the shared `run_power_probe_loop` (2 s interval, same as
+        // Desktop / Runtime). System sleep freezes the whole process; after
+        // wake the MQTT connection is stale (the broker timed it out while
+        // we slept) and the poll task can stall until its watchdog fires
+        // (2026-08 incident: 5 sleep/wake cycles, each stalling MQTT + relay
+        // heartbeats for the full sleep duration). Force a fresh client +
+        // EventLoop immediately instead.
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            acowork_mqtt_session::power::run_power_probe_loop(
+                move || client.force_reconnect(),
+                acowork_mqtt_session::power::POWER_PROBE_INTERVAL,
+                "node",
+            )
+            .await;
+        });
 
         loop {
             tokio::select! {

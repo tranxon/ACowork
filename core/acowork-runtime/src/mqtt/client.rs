@@ -16,10 +16,9 @@
 //! See `docs/zh/protocols/mqtt.md` §5.1 (startup sequence) and §8.1 (Will Message).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use prost::Message as _;
-use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, QoS};
+use rumqttc::{AsyncClient, LastWill, QoS};
 use tokio::sync::{oneshot, Mutex};
 
 use acowork_core::defaults;
@@ -33,8 +32,7 @@ use acowork_core::mqtt_proto::{
     StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
 };
 use acowork_mqtt_session::{
-    classify as classify_err, ErrorDescriptor, ReconnectPolicy, SessionState, SessionStateRx,
-    SessionStateTx,
+    ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState, SessionStateRx,
 };
 
 use crate::mqtt::available_cache::SharedAvailableCache;
@@ -59,33 +57,6 @@ fn mcp_transport_to_def(t: i32) -> McpTransportDef {
         Ok(ProtoMcpTransport::Unspecified) | Err(_) => McpTransportDef::Stdio,
     }
 }
-
-/// Watchdog timeout for `eventloop.poll()`.
-///
-/// If poll() doesn't produce any event within this duration, the TCP
-/// connection is likely half-dead (e.g. after OS sleep/wake where the
-/// kernel hasn't detected the broken connection). We break to the
-/// soft-restart path to create a fresh `AsyncClient` + `EventLoop`.
-///
-/// 60 s = 2 × keepalive interval (30 s). Normal connections produce at
-/// least one PINGRESP within every keepalive interval, so 60 s without
-/// any event strongly indicates a stuck socket. Previously 20 s with
-/// keepalive=5 s, but the 5 s interval was aggressive enough to trip
-/// during long synchronous HTTP handler work (e.g. `POST /workspaces`
-/// which routinely exceeds 4 s), so we widened both
-/// ([`RUNTIME_KEEPALIVE_INTERVAL`]) and this watchdog to 30/60 s — see
-/// `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Default `keep_alive` value published to the broker.
-///
-/// 30 s matches the broker-side `(rumqttd)` default idle-detect window
-/// while giving Runtime plenty of slack to handle long HTTP handler
-/// requests (workspaces CRUD can take 4–6 s on slow disks). With this
-/// value, the broker will not see the connection as dead during a
-/// synchronous I/O burst shorter than 30 s — see
-/// `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
-const RUNTIME_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Error type for Runtime MQTT client operations.
 #[derive(Debug, thiserror::Error)]
@@ -437,23 +408,22 @@ pub struct ToolApprovalNeededEvent<'a> {
 /// - Global resource subscription → `AvailableResourceCache`
 /// - Control command subscription → caller-provided channel
 pub struct RuntimeMqttClient {
+    /// The unified MQTT client (ADR-065 Step 4). Owns the poll task,
+    /// session state, force-restart signal and the entity handler.
+    inner: MqttClient<RuntimeHandler>,
     /// Shared client handle, swappable during soft-restart.
     ///
-    /// The poll task holds a clone of this `Arc<Mutex<AsyncClient>>` and
-    /// swaps in a fresh `AsyncClient` when it recreates the `EventLoop`.
-    /// All publish methods obtain a clone via `self.client().await`,
-    /// ensuring they always use the current handle.
+    /// Points at the same `Arc<Mutex<AsyncClient>>` as
+    /// `inner.shared_handle()` — the poll task swaps in a fresh
+    /// `AsyncClient` when it recreates the `EventLoop`, and all publish
+    /// methods obtain a clone via `self.client().await`, ensuring they
+    /// always use the current handle.
     shared_client: Arc<Mutex<AsyncClient>>,
     /// The agent_id this client represents.
     agent_id: String,
     /// Cached inputs needed to re-run `run_bootstrap` on every
     /// (re)connect. See `docs/adr/zh/ADR-039-mqtt-client-lifecycle.md`.
     bootstrap_data: Arc<BootstrapData>,
-    /// Keep the event loop polling task alive.
-    _eventloop_guard: Arc<EventLoopGuard>,
-    /// ADR-039 Phase 2: session state broadcast channel.
-    /// External consumers can subscribe to state transitions.
-    state_tx: SessionStateTx,
 }
 
 // `Clone` lets the same underlying MQTT client be shared between
@@ -461,21 +431,16 @@ pub struct RuntimeMqttClient {
 // and gateway loop) and the HTTP server's late-bind slot (consumed by
 // `PUT /agents/{id}/config`). All fields are cheap-to-clone handles —
 // the AsyncClient is internally reference-counted by rumqttc and the
-// event-loop guard holds a JoinHandle, not owned state.
+// unified client holds a JoinHandle, not owned state.
 impl Clone for RuntimeMqttClient {
     fn clone(&self) -> Self {
         Self {
+            inner: self.inner.clone(),
             shared_client: Arc::clone(&self.shared_client),
             agent_id: self.agent_id.clone(),
             bootstrap_data: Arc::clone(&self.bootstrap_data),
-            _eventloop_guard: Arc::clone(&self._eventloop_guard),
-            state_tx: self.state_tx.clone(),
         }
     }
-}
-
-struct EventLoopGuard {
-    _task: tokio::task::JoinHandle<()>,
 }
 
 /// Cached inputs needed to re-run bootstrap on every (re)connect.
@@ -503,6 +468,353 @@ struct BootstrapData {
     /// (`acowork/nodes/{node_id}/lsps`). `None` when the Runtime runs
     /// without `--node-id` (standalone / Gateway-spawned).
     node_lsps_topic: Option<String>,
+}
+
+/// Runtime entity handler for the shared [`MqttClient`] (ADR-065 Step 4).
+///
+/// Implements the Runtime's per-process differences: global-resource
+/// cache updates + persistence + SessionManager fan-out on incoming
+/// publishes, and the ADR-039 bootstrap on every ConnAck. The shared
+/// client owns the poll loop, error classification, backoff and
+/// soft-restart.
+struct RuntimeHandler {
+    /// Cached inputs needed to re-run `run_bootstrap` on every
+    /// (re)connect.
+    bootstrap_data: Arc<BootstrapData>,
+    /// Shared global-resource cache (updated on `acowork/global/#`).
+    available_cache: SharedAvailableCache,
+    /// Sink for control commands (`acowork/agents/{id}/sessions/control/#`).
+    control_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+    /// Sink for user-profile updates (ADR-042).
+    identity_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>,
+    >,
+    /// Sink for provider list updates.
+    provider_update_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderUpdate>>,
+    /// Sink for search updates.
+    search_update_tx: Option<tokio::sync::mpsc::UnboundedSender<SearchUpdate>>,
+    /// Sink for embedding-model updates.
+    embedding_update_tx: Option<tokio::sync::mpsc::UnboundedSender<EmbeddingUpdate>>,
+    /// Sink for node LSP relay state changes (ADR-055 §6.7).
+    lsps_update_tx: Option<tokio::sync::mpsc::UnboundedSender<LspRelayUpdate>>,
+    /// Per-agent workspace directory (persist global catalogs).
+    work_dir: std::path::PathBuf,
+    /// The agent_id this client represents.
+    agent_id: String,
+    /// The node's LSP relay topic (ADR-055 §6.7). `None` standalone.
+    node_lsps_topic: Option<String>,
+    /// Signals `connect()` when the first ConnAck bootstrap completes.
+    first_conn_tx: tokio::sync::Mutex<Option<oneshot::Sender<Result<(), String>>>>,
+}
+
+#[async_trait::async_trait]
+impl MqttClientHandler for RuntimeHandler {
+    async fn on_publish(&self, topic: &str, payload: &[u8]) {
+        if topic.starts_with("acowork/global/") {
+            let mut cache_write = self.available_cache.write().await;
+            cache_write.update_from_mqtt(topic, payload);
+
+            if topic == "acowork/global/bootstrap" {
+                // ADR-059 Phase 5.3: the cache layer above already
+                // rejected stale retained re-delivery by `instance_id` +
+                // `version` and cleared old-generation resource snapshots
+                // on a generation switch (cold start, hot restart and
+                // reconnect share this one path). Log the currently
+                // authoritative snapshot for reconnect / restart
+                // diagnostics.
+                let snapshot = cache_write.bootstrap_snapshot().cloned();
+                drop(cache_write);
+                if let Some(bs) = snapshot {
+                    tracing::info!(
+                        instance_id = %bs.instance_id,
+                        version = bs.version,
+                        phase = ?acowork_core::mqtt_proto::BootstrapPhase::try_from(bs.phase).ok(),
+                        "acowork/global/bootstrap retained received (authoritative Gateway generation)"
+                    );
+                }
+            } else if topic == "acowork/global/user_profile" {
+                let profile = cache_write.active_user_profile();
+                tracing::debug!(
+                    has_profile = profile.is_some(),
+                    "acowork/global/user_profile retained received"
+                );
+                drop(cache_write);
+                if let (Some(tx), Some(profile)) = (self.identity_update_tx.as_ref(), profile) {
+                    let _ = tx.send(profile);
+                }
+            } else if topic == "acowork/global/mcps" {
+                // ADR-040 follow-up: persist catalog to disk so
+                // PUT /agents/{id}/mcp-servers validation can resolve
+                // names against merged(). See the long-form comment near
+                // `work_dir` for the full rationale.
+                let servers = cache_write
+                    .mcps
+                    .as_ref()
+                    .map(|m| m.servers.clone())
+                    .unwrap_or_default();
+                drop(cache_write);
+                // T3-4: 替换 `{agent_id}` 模板占位符。
+                //
+                // Gateway 注入的 pm MCP 通过
+                // `X-MCP-Actor: {agent_id}` 识别调用者
+                // （设计 §9.2）。这里是 Runtime 收到
+                // `acowork/global/mcps` 的唯一持久化点，
+                // `self.agent_id` 即本 agent 的真实身份；
+                // 在此替换后，连接路径（startup / config
+                // change）读到的是已解析的 header，无需
+                // 感知模板。env 同样替换以支持未来扩展。
+                let resolve_agent_id = |value: &str| {
+                    value.replace("{agent_id}", &self.agent_id)
+                };
+                let defs: Vec<acowork_core::protocol::McpServerConfigDef> = servers
+                    .into_iter()
+                    .map(|s| acowork_core::protocol::McpServerConfigDef {
+                        name: s.name.clone(),
+                        transport: mcp_transport_to_def(s.transport),
+                        url: if s.url.is_empty() { None } else { Some(s.url.clone()) },
+                        command: s.command.clone(),
+                        args: s.args.clone(),
+                        env: s
+                            .env
+                            .into_iter()
+                            .map(|(k, v)| (k, resolve_agent_id(&v)))
+                            .collect(),
+                        headers: s
+                            .headers
+                            .into_iter()
+                            .map(|(k, v)| (k, resolve_agent_id(&v)))
+                            .collect(),
+                        tool_timeout_secs: if s.tool_timeout_secs == 0 {
+                            None
+                        } else {
+                            Some(s.tool_timeout_secs)
+                        },
+                    })
+                    .collect();
+                if let Err(e) = crate::agent_config::save_agent_mcp_config_catalog(
+                    &self.work_dir,
+                    &defs,
+                ) {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        error = %e,
+                        "Failed to persist acowork/global/mcps catalog to agent_mcp.json (PUT /mcp-servers will reject catalog names until retry)"
+                    );
+                } else {
+                    tracing::info!(
+                        agent_id = %self.agent_id,
+                        catalog_count = defs.len(),
+                        "Synced MCP catalog from acowork/global/mcps into agent_mcp.json::catalog"
+                    );
+                }
+            } else if topic == "acowork/global/providers" {
+                // Persist provider list to agent_provider.json so the
+                // Runtime can load it on restart. API keys are NOT
+                // persisted - they stay in available_cache (in-memory
+                // only).
+                let (provider_list, version, key_vault, default_compact_model) =
+                    match cache_write.providers.as_ref() {
+                        Some(p) => {
+                            let list = map_provider_refs_to_list_items(&p.providers);
+                            let keys = extract_provider_keys(&p.providers);
+                            // ADR-056: forward the global default compact
+                            // model reference.
+                            let dcm = p.default_compact_model.as_ref()
+                                .map(|r| acowork_core::protocol::CompactModelRef {
+                                    provider_id: r.provider_id.clone(),
+                                    model_id: r.model_id.clone(),
+                                });
+                            (list, p.version, keys, dcm)
+                        }
+                        None => (vec![], 0, vec![], None),
+                    };
+                drop(cache_write);
+
+                // Persist to agent_provider.json (no API keys)
+                if let Err(e) = crate::agent_config::save_agent_provider_config_from_available(
+                    &self.work_dir,
+                    &provider_list,
+                    version,
+                    default_compact_model.as_ref(),
+                ) {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        error = %e,
+                        "Failed to persist acowork/global/providers to agent_provider.json"
+                    );
+                } else {
+                    tracing::info!(
+                        agent_id = %self.agent_id,
+                        provider_count = provider_list.len(),
+                        has_default_compact = default_compact_model.is_some(),
+                        "Synced provider list from acowork/global/providers into agent_provider.json"
+                    );
+                }
+
+                // Forward to SessionManager via channel
+                if let Some(ref tx) = self.provider_update_tx {
+                    let update = ProviderUpdate {
+                        provider_list,
+                        provider_list_version: version,
+                        provider_key_vault: key_vault,
+                        default_compact_model,
+                    };
+                    if let Err(e) = tx.send(update) {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            error = %e,
+                            "Failed to send provider update to SessionManager"
+                        );
+                    }
+                }
+            } else if topic == "acowork/global/searches" {
+                // Persist search provider catalog to agent_search.json
+                let (search_list, key_vault) =
+                    match cache_write.searches.as_ref() {
+                        Some(s) => {
+                            let list = map_search_refs_to_list_items(&s.providers);
+                            let keys = extract_search_keys(&s.providers);
+                            (list, keys)
+                        }
+                        None => (vec![], vec![]),
+                    };
+                drop(cache_write);
+
+                // Persist catalog to agent_search.json
+                if let Err(e) = crate::agent_config::save_agent_search_config_catalog(
+                    &self.work_dir,
+                    &search_list,
+                ) {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        error = %e,
+                        "Failed to persist acowork/global/searches catalog to agent_search.json"
+                    );
+                } else {
+                    tracing::info!(
+                        agent_id = %self.agent_id,
+                        search_count = search_list.len(),
+                        "Synced search catalog from acowork/global/searches into agent_search.json"
+                    );
+                }
+
+                // Forward to SessionManager via channel
+                if let Some(ref tx) = self.search_update_tx {
+                    let update = SearchUpdate {
+                        search_list,
+                        search_key_vault: key_vault,
+                    };
+                    if let Err(e) = tx.send(update) {
+                        tracing::warn!(
+                            agent_id = %self.agent_id,
+                            error = %e,
+                            "Failed to send search update to SessionManager"
+                        );
+                    }
+                }
+            } else if topic == "acowork/global/embedding_models" {
+                // ADR-033 MQTT replacement for the removed gRPC
+                // SidecarEndpointUpdate: forward the active embedding
+                // endpoint/model/dim to SessionManager so every session
+                // rebuilds its embedding provider in-place. This covers
+                // both the boot-time race (the Runtime starts before the
+                // embed sidecar is ready) and hot model switches.
+                let update = {
+                    let models = cache_write.embedding_models.as_ref();
+                    match models {
+                        Some(m) if !m.endpoint.is_empty()
+                            && !m.active_model_id.is_empty() =>
+                        {
+                            Some(EmbeddingUpdate {
+                                endpoint: m.endpoint.clone(),
+                                model_id: m.active_model_id.clone(),
+                                dimension: m.active_dimension as usize,
+                                provider_id: if m.active_provider_id.is_empty() {
+                                    None
+                                } else {
+                                    Some(m.active_provider_id.clone())
+                                },
+                                api_key: if m.active_api_key.is_empty() {
+                                    None
+                                } else {
+                                    Some(m.active_api_key.clone())
+                                },
+                            })
+                        }
+                        _ => None,
+                    }
+                };
+                drop(cache_write);
+                if let Some(ref tx) = self.embedding_update_tx
+                    && let Some(update) = update
+                    && let Err(e) = tx.send(update)
+                {
+                    tracing::warn!(
+                        agent_id = %self.agent_id,
+                        error = %e,
+                        "Failed to send embedding update to SessionManager"
+                    );
+                }
+            }
+        }
+
+        if topic.starts_with(&self.bootstrap_data.control_filter_prefix) {
+            let _ = self
+                .control_tx
+                .send((topic.to_string(), payload.to_vec()));
+        } else if let Some(lsps_topic) = self.node_lsps_topic.as_deref()
+            && topic == lsps_topic
+        {
+            // ADR-055 §6.7: the node's LSP relay state changed. Forward
+            // to SessionManager so it can register / unregister the
+            // codebase tool (retained snapshot or hot-push).
+            let update = decode_lsps_payload(payload);
+            if let Some(ref tx) = self.lsps_update_tx {
+                let _ = tx.send(update);
+            }
+        }
+    }
+
+    async fn on_connack(&self, client: &AsyncClient) -> Result<(), String> {
+        tracing::info!(
+            agent_id = %self.agent_id,
+            "Runtime MQTT broker confirmed (re)connection - re-running bootstrap"
+        );
+        let result = RuntimeMqttClient::run_bootstrap(client, &self.bootstrap_data).await;
+        if let Err(ref e) = result {
+            let _ = client
+                .publish(
+                    &self.bootstrap_data.status_topic,
+                    QoS::AtLeastOnce,
+                    true,
+                    "degraded",
+                )
+                .await;
+            tracing::error!(
+                agent_id = %self.agent_id,
+                error = %e,
+                "Runtime MQTT bootstrap after (re)connect failed - agent is degraded"
+            );
+        }
+        if let Some(tx) = self.first_conn_tx.lock().await.take() {
+            let _ = tx.send(
+                result
+                    .as_ref()
+                    .map_err(|e| e.to_string())
+                    .map(|_| ()),
+            );
+        }
+        result.map_err(|e| e.to_string())
+    }
+
+    async fn on_error(&self, _client: &AsyncClient, class: ErrClass, error: &str) {
+        tracing::warn!(
+            agent_id = %self.agent_id,
+            error,
+            err_class = class.label(),
+            "Runtime MQTT event loop error (backoff handled by shared client)"
+        );
+    }
 }
 
 impl RuntimeMqttClient {
@@ -547,103 +859,36 @@ impl RuntimeMqttClient {
                 .map(acowork_core::node::node_lsps_topic),
         });
 
-        // Configure MQTT options with Last Will.
-        let mut options = MqttOptions::new(client_id.clone(), cfg.host, cfg.port);
-        // Align the keep-alive interval with [`RUNTIME_KEEPALIVE_INTERVAL`]
-        // (30 s). Previously this was set to 5 s to match the broker's
-        // `connection_timeout_ms` (`core/acowork-gateway/src/mqtt/broker.rs`)
-        // — the value caused the broker to disconnect the Runtime on
-        // OS sleep/wake, and (more commonly) tripped KeepAlive(Elapsed)
-        // during long synchronous HTTP handler work such as
-        // `POST /workspaces`, which can take 4–6 s. See
-        // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
-        options.set_keep_alive(RUNTIME_KEEPALIVE_INTERVAL);
-        options.set_clean_session(true);
+        // ADR-065 Step 4: build the entity-only config for the shared
+        // `MqttClient`. Timing (keepalive 5 s / watchdog 5 s / backoff)
+        // is owned by `acowork-mqtt-session` — the Runtime no longer
+        // overrides it (previously 30 s keepalive + 60 s watchdog, see
+        // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3; ADR-065 §2.3
+        // unifies on 5 s).
+        let config = MqttClientConfig {
+            client_id: client_id.clone(),
+            host: cfg.host.to_string(),
+            port: cfg.port,
+            // ADR-055 Phase 5a: authenticate when the broker requires it
+            // (username `agent:{id}` + the spawning node's token).
+            credentials: cfg
+                .username
+                .zip(cfg.password)
+                .map(|(u, p)| (u.to_string(), p.to_string())),
+            // Last Will: if Runtime crashes/disconnects, broker
+            // publishes "offline" retained.
+            last_will: Some(LastWill::new(
+                &bootstrap_data.status_topic,
+                "offline",
+                QoS::AtLeastOnce,
+                true,
+            )),
+            // ADR-039: align outgoing packet size with the broker's
+            // `max_payload_size` (`GATEWAY_MQTT_MAX_PACKET_SIZE`).
+            max_packet_size: defaults::GATEWAY_MQTT_MAX_PACKET_SIZE,
+            queue_capacity: 100,
+        };
 
-        // ADR-055 Phase 5a: authenticate when the broker requires it
-        // (username `agent:{id}` + the spawning node's token).
-        if let (Some(u), Some(p)) = (cfg.username, cfg.password) {
-            options.set_credentials(u.to_string(), p.to_string());
-        }
-
-        // ADR-039: align outgoing packet size with the broker's
-        // `max_payload_size` (`GATEWAY_MQTT_MAX_PACKET_SIZE`). Without
-        // this, large stream_delta packets (e.g. long thought content)
-        // hit rumqttc's default 10 KB outgoing limit and trigger
-        // `OutgoingPacketTooLarge`, which the broker translates into a
-        // `connection closed by peer`.
-        let pkt_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
-        options.set_max_packet_size(pkt_size, pkt_size);
-
-        // Last Will: if Runtime crashes/disconnects, broker publishes
-        // "offline" retained.
-        let will = LastWill::new(&bootstrap_data.status_topic, "offline", QoS::AtLeastOnce, true);
-        options.set_last_will(will);
-
-        let (client, mut eventloop) = AsyncClient::new(options.clone(), 100);
-        let client_for_poll = client.clone();
-
-        // The `AsyncClient` is shared between the struct (for publishes)
-        // and the poll task (for soft-restart).  Wrapping it in
-        // `Arc<Mutex<AsyncClient>>` allows the poll task to swap in a
-        // fresh client after a soft-restart while publish callers
-        // always observe the current handle.
-        let shared_client: Arc<Mutex<AsyncClient>> = Arc::new(Mutex::new(client));
-
-        // Spawn the event-loop poller. It owns `eventloop` for the
-        // lifetime of the client. In addition to per-publish routing
-        // it now observes `ConnAck` and re-runs `run_bootstrap` after
-        // every (re)connect so that:
-        //   - the Last Will cancellation (`status=online`) is re-asserted
-        //   - retained meta/config are republished
-        //   - the persistent `control/#` subscription is rebuilt
-        // With `clean_session = true` the broker does NOT persist
-        // subscriptions, so omitting this step makes the agent look
-        // online but unresponsive - the exact symptom captured by ADR-039.
-        let poll_agent_id = cfg.agent_id.to_string();
-        let poll_cache = cfg.available_cache.clone();
-        let poll_control_tx = cfg.control_tx.clone();
-        let poll_identity_tx = cfg.identity_update_tx.clone();
-        let poll_provider_tx = cfg.provider_update_tx.clone();
-        let poll_search_tx = cfg.search_update_tx.clone();
-        let poll_embedding_tx = cfg.embedding_update_tx.clone();
-        let poll_lsps_tx = cfg.lsps_update_tx.clone();
-        let poll_node_lsps_topic = bootstrap_data.node_lsps_topic.clone();
-        let poll_bootstrap = bootstrap_data.clone();
-        let task_shared_client = Arc::clone(&shared_client);
-        let task_options = options; // moved into poll task for soft-restart
-        let _poll_client = client_for_poll; // needed for the old API
-        // ADR-040 follow-up: the gRPC `handle_agent_hello` path used to
-        // call `agent_config::save_agent_mcp_config_catalog` on every
-        // (re)connect to refresh the per-agent catalog from the
-        // Gateway-side source of truth. That path was deleted when the
-        // gRPC hello-config transport went away (ADR-033 + ADR-040). The
-        // MQTT path replaces the transport, but the **persistence** step
-        // was left out — see `startup/subsystems.rs:89` for the residue.
-        //
-        // We close that gap here: when `acowork/global/mcps` retained is
-        // received, after updating the in-memory `available_cache`, we
-        // also persist the catalog (sans `auth_token`) into
-        // `agent_mcp.json::catalog` so that:
-        //
-        //   1. `PUT /agents/{id}/mcp-servers` validation in
-        //      `usecases::agent_tools_impl::put_mcp_servers` can resolve
-        //      catalog names against `merged()` — without this, every
-        //      PUT fails with "unknown MCP server names (not in
-        //      catalog+local)" (regression introduced by ADR-040).
-        //   2. The Tools-panel display in the Desktop can render the
-        //      catalog by reading `GET /agents/{id}/mcp-catalog` from
-        //      the Runtime (rather than from the Gateway, which is a
-        //      different source of truth).
-        //
-        // `auth_token` is NOT persisted — it stays in-memory only,
-        // mirroring the existing `provider_key_vault` pattern (see
-        // `agent/agent_core.rs::provider_key_vault`). Wiring it into an
-        // in-memory `mcp_key_vault` is a follow-up; today the Runtime
-        // only reads the token via the existing catalog path (the agent
-        // connect step does not require it because the Desktop's
-        // Tools-panel PUT does not connect).
-        let poll_work_dir = cfg.work_dir.clone();
         // ADR-039 §5.2.1: use a oneshot channel to synchronise
         // connect() with the first ConnAck instead of the old
         // wait_for_connection() anti-pattern (subscribe to a dummy
@@ -651,423 +896,26 @@ impl RuntimeMqttClient {
         // the first ConnAck only; subsequent reconnects just
         // re-run bootstrap and log.
         let (first_conn_tx, first_conn_rx) =
-            oneshot::channel::<Result<(), RuntimeMqttClientError>>();
-        let mut first_conn_tx = Some(first_conn_tx);
+            oneshot::channel::<Result<(), String>>();
 
-        // ADR-039 Phase 2: session state broadcast + reconnect policy.
-        let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
-        let poll_state_tx = state_tx.clone();
-        let reconnect_policy = ReconnectPolicy::default();
+        let handler = RuntimeHandler {
+            bootstrap_data: bootstrap_data.clone(),
+            available_cache: cfg.available_cache.clone(),
+            control_tx: cfg.control_tx.clone(),
+            identity_update_tx: cfg.identity_update_tx.clone(),
+            provider_update_tx: cfg.provider_update_tx.clone(),
+            search_update_tx: cfg.search_update_tx.clone(),
+            embedding_update_tx: cfg.embedding_update_tx.clone(),
+            lsps_update_tx: cfg.lsps_update_tx.clone(),
+            work_dir: cfg.work_dir.clone(),
+            agent_id: cfg.agent_id.to_string(),
+            node_lsps_topic: bootstrap_data.node_lsps_topic.clone(),
+            first_conn_tx: tokio::sync::Mutex::new(Some(first_conn_tx)),
+        };
 
-        let poll_task = tokio::spawn(async move {
-            let mut soft_restart_count: u32 = 0;
-
-            // Outer loop: each iteration is a fresh client + eventloop.
-            // On fatal errors or watchdog timeout we break the inner
-            // loop and recreate the AsyncClient + EventLoop from
-            // scratch - a soft-restart that recovers from half-dead
-            // sockets and corrupted state machines (e.g. after OS
-            // sleep/wake).
-            loop {
-                let mut consecutive_failures: u32 = 0;
-
-                // Inner loop: poll the current eventloop.
-                loop {
-                    tokio::select! {
-                        event_result = eventloop.poll() => {
-                            match event_result {
-                                Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
-                                    let topic = &publish.topic;
-
-                                    if topic.starts_with("acowork/global/") {
-                                        let mut cache_write = poll_cache.write().await;
-                                        cache_write.update_from_mqtt(topic, &publish.payload);
-
-                                        if topic == "acowork/global/bootstrap" {
-                                            // ADR-059 Phase 5.3: the cache
-                                            // layer above already rejected
-                                            // stale retained re-delivery by
-                                            // `instance_id` + `version` and
-                                            // cleared old-generation resource
-                                            // snapshots on a generation switch
-                                            // (cold start, hot restart and
-                                            // reconnect share this one path).
-                                            // Log the currently authoritative
-                                            // snapshot for reconnect / restart
-                                            // diagnostics.
-                                            let snapshot = cache_write.bootstrap_snapshot().cloned();
-                                            drop(cache_write);
-                                            if let Some(bs) = snapshot {
-                                                tracing::info!(
-                                                    instance_id = %bs.instance_id,
-                                                    version = bs.version,
-                                                    phase = ?acowork_core::mqtt_proto::BootstrapPhase::try_from(bs.phase).ok(),
-                                                    "acowork/global/bootstrap retained received (authoritative Gateway generation)"
-                                                );
-                                            }
-                                        } else if topic == "acowork/global/user_profile" {
-                                            let profile = cache_write.active_user_profile();
-                                            tracing::debug!(
-                                                has_profile = profile.is_some(),
-                                                "acowork/global/user_profile retained received"
-                                            );
-                                            drop(cache_write);
-                                            if let (Some(tx), Some(profile)) = (poll_identity_tx.as_ref(), profile) {
-                                                let _ = tx.send(profile);
-                                            }
-                                        } else if topic == "acowork/global/mcps" {
-                                            // ADR-040 follow-up: persist catalog to disk
-                                            // so PUT /agents/{id}/mcp-servers validation
-                                            // can resolve names against merged(). See
-                                            // the long-form comment near `poll_work_dir`
-                                            // for the full rationale.
-                                            let servers = cache_write
-                                                .mcps
-                                                .as_ref()
-                                                .map(|m| m.servers.clone())
-                                                .unwrap_or_default();
-                                            drop(cache_write);
-                                            let defs: Vec<
-                                                acowork_core::protocol::McpServerConfigDef,
-                                            > = servers
-                                                .into_iter()
-                                                .map(|s| acowork_core::protocol::McpServerConfigDef {
-                                                    name: s.name.clone(),
-                                                    transport: mcp_transport_to_def(s.transport),
-                                                    url: if s.url.is_empty() { None } else { Some(s.url.clone()) },
-                                                    command: s.command.clone(),
-                                                    args: s.args.clone(),
-                                                    env: s.env.clone(),
-                                                    headers: s.headers.clone(),
-                                                    tool_timeout_secs: if s.tool_timeout_secs == 0 {
-                                                        None
-                                                    } else {
-                                                        Some(s.tool_timeout_secs)
-                                                    },
-                                                })
-                                                .collect();
-                                            if let Err(e) =
-                                                crate::agent_config::save_agent_mcp_config_catalog(
-                                                    &poll_work_dir,
-                                                    &defs,
-                                                )
-                                            {
-                                                tracing::warn!(
-                                                    agent_id = %poll_agent_id,
-                                                    error = %e,
-                                                    "Failed to persist acowork/global/mcps catalog to agent_mcp.json (PUT /mcp-servers will reject catalog names until retry)"
-                                                );
-                                            } else {
-                                                tracing::info!(
-                                                    agent_id = %poll_agent_id,
-                                                    catalog_count = defs.len(),
-                                                    "Synced MCP catalog from acowork/global/mcps into agent_mcp.json::catalog"
-                                                );
-                                            }
-                                        } else if topic == "acowork/global/providers" {
-                                            // Persist provider list to agent_provider.json
-                                            // so the Runtime can load it on restart.
-                                            // API keys are NOT persisted - they stay in
-                                            // available_cache (in-memory only).
-                                            let (provider_list, version, key_vault, default_compact_model) =
-                                                match cache_write.providers.as_ref() {
-                                                    Some(p) => {
-                                                        let list =
-                                                            map_provider_refs_to_list_items(
-                                                                &p.providers,
-                                                            );
-                                                        let keys =
-                                                            extract_provider_keys(&p.providers);
-                                                        // ADR-056: forward the global default
-                                                        // compact model reference.
-                                                        let dcm = p.default_compact_model.as_ref()
-                                                            .map(|r| acowork_core::protocol::CompactModelRef {
-                                                                provider_id: r.provider_id.clone(),
-                                                                model_id: r.model_id.clone(),
-                                                            });
-                                                        (list, p.version, keys, dcm)
-                                                    }
-                                                    None => (vec![], 0, vec![], None),
-                                                };
-                                            drop(cache_write);
-
-                                            // Persist to agent_provider.json (no API keys)
-                                            if let Err(e) = crate::agent_config::save_agent_provider_config_from_available(
-                                                &poll_work_dir,
-                                                &provider_list,
-                                                version,
-                                                default_compact_model.as_ref(),
-                                            ) {
-                                                tracing::warn!(
-                                                    agent_id = %poll_agent_id,
-                                                    error = %e,
-                                                    "Failed to persist acowork/global/providers to agent_provider.json"
-                                                );
-                                            } else {
-                                                tracing::info!(
-                                                    agent_id = %poll_agent_id,
-                                                    provider_count = provider_list.len(),
-                                                    has_default_compact = default_compact_model.is_some(),
-                                                    "Synced provider list from acowork/global/providers into agent_provider.json"
-                                                );
-                                            }
-
-                                            // Forward to SessionManager via channel
-                                            if let Some(ref tx) = poll_provider_tx {
-                                                let update = ProviderUpdate {
-                                                    provider_list,
-                                                    provider_list_version: version,
-                                                    provider_key_vault: key_vault,
-                                                    default_compact_model,
-                                                };
-                                                if let Err(e) = tx.send(update) {
-                                                    tracing::warn!(
-                                                        agent_id = %poll_agent_id,
-                                                        error = %e,
-                                                        "Failed to send provider update to SessionManager"
-                                                    );
-                                                }
-                                            }
-                                        } else if topic == "acowork/global/searches" {
-                                            // Persist search provider catalog to agent_search.json
-                                            let (search_list, key_vault) =
-                                                match cache_write.searches.as_ref() {
-                                                    Some(s) => {
-                                                        let list =
-                                                            map_search_refs_to_list_items(
-                                                                &s.providers,
-                                                            );
-                                                        let keys =
-                                                            extract_search_keys(&s.providers);
-                                                        (list, keys)
-                                                    }
-                                                    None => (vec![], vec![]),
-                                                };
-                                            drop(cache_write);
-
-                                            // Persist catalog to agent_search.json
-                                            if let Err(e) = crate::agent_config::save_agent_search_config_catalog(
-                                                &poll_work_dir,
-                                                &search_list,
-                                            ) {
-                                                tracing::warn!(
-                                                    agent_id = %poll_agent_id,
-                                                    error = %e,
-                                                    "Failed to persist acowork/global/searches catalog to agent_search.json"
-                                                );
-                                            } else {
-                                                tracing::info!(
-                                                    agent_id = %poll_agent_id,
-                                                    search_count = search_list.len(),
-                                                    "Synced search catalog from acowork/global/searches into agent_search.json"
-                                                );
-                                            }
-
-                                            // Forward to SessionManager via channel
-                                            if let Some(ref tx) = poll_search_tx {
-                                                let update = SearchUpdate {
-                                                    search_list,
-                                                    search_key_vault: key_vault,
-                                                };
-                                                if let Err(e) = tx.send(update) {
-                                                    tracing::warn!(
-                                                        agent_id = %poll_agent_id,
-                                                        error = %e,
-                                                        "Failed to send search update to SessionManager"
-                                                    );
-                                                }
-                                            }
-                                        } else if topic == "acowork/global/embedding_models" {
-                                            // ADR-033 MQTT replacement for the
-                                            // removed gRPC SidecarEndpointUpdate:
-                                            // forward the active embedding
-                                            // endpoint/model/dim to SessionManager
-                                            // so every session rebuilds its
-                                            // embedding provider in-place. This
-                                            // covers both the boot-time race (the
-                                            // Runtime starts before the embed
-                                            // sidecar is ready) and hot model
-                                            // switches.
-                                            let update = {
-                                                let models = cache_write.embedding_models.as_ref();
-                                                match models {
-                                                    Some(m) if !m.endpoint.is_empty()
-                                                        && !m.active_model_id.is_empty() =>
-                                                    {
-                                                        Some(EmbeddingUpdate {
-                                                            endpoint: m.endpoint.clone(),
-                                                            model_id: m.active_model_id.clone(),
-                                                            dimension: m.active_dimension as usize,
-                                                            provider_id: if m.active_provider_id.is_empty() {
-                                                                None
-                                                            } else {
-                                                                Some(m.active_provider_id.clone())
-                                                            },
-                                                            api_key: if m.active_api_key.is_empty() {
-                                                                None
-                                                            } else {
-                                                                Some(m.active_api_key.clone())
-                                                            },
-                                                        })
-                                                    }
-                                                    _ => None,
-                                                }
-                                            };
-                                            drop(cache_write);
-                                            if let Some(ref tx) = poll_embedding_tx
-                                                && let Some(update) = update
-                                                && let Err(e) = tx.send(update)
-                                            {
-                                                tracing::warn!(
-                                                    agent_id = %poll_agent_id,
-                                                    error = %e,
-                                                    "Failed to send embedding update to SessionManager"
-                                                );
-                                            }
-                                        }
-                                    }
-
-                                    if topic.starts_with(&poll_bootstrap.control_filter_prefix) {
-                                        let _ = poll_control_tx.send((topic.clone(), publish.payload.to_vec()));
-                                    } else if let Some(lsps_topic) =
-                                        poll_node_lsps_topic.as_deref()
-                                        && topic == lsps_topic
-                                    {
-                                        // ADR-055 §6.7: the node's LSP relay state
-                                        // changed. Forward to SessionManager so it
-                                        // can register / unregister the codebase
-                                        // tool (retained snapshot or hot-push).
-                                        let update = decode_lsps_payload(&publish.payload);
-                                        if let Some(ref tx) = poll_lsps_tx {
-                                            let _ = tx.send(update);
-                                        }
-                                    }
-                                }
-                                Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
-                                    tracing::info!(
-                                        agent_id = %poll_agent_id,
-                                        "Runtime MQTT broker confirmed (re)connection - re-running bootstrap"
-                                    );
-                                    let poll_client = task_shared_client.lock().await.clone();
-                                    let result =
-                                        Self::run_bootstrap(&poll_client, &poll_bootstrap).await;
-                                    if let Err(ref e) = result {
-                                        let _ = poll_client
-                                            .publish(
-                                                &poll_bootstrap.status_topic,
-                                                QoS::AtLeastOnce,
-                                                true,
-                                                "degraded",
-                                            )
-                                            .await;
-                                        tracing::error!(
-                                            agent_id = %poll_agent_id,
-                                            error = %e,
-                                            "Runtime MQTT bootstrap after (re)connect failed - agent is degraded"
-                                        );
-                                        poll_state_tx.set(SessionState::Disconnected {
-                                            reason: format!("bootstrap failed: {e}"),
-                                        });
-                                    } else {
-                                        consecutive_failures = 0;
-                                        poll_state_tx.set(SessionState::Connected);
-                                    }
-                                    if let Some(tx) = first_conn_tx.take() {
-                                        let _ = tx.send(result);
-                                    }
-                                }
-                                Ok(_) => continue,
-                                Err(e) => {
-                                    let class = classify_err(&ErrorDescriptor::from(&e));
-                                    tracing::warn!(
-                                        agent_id = %poll_agent_id,
-                                        error = %e,
-                                        err_class = class.label(),
-                                        consecutive_failures,
-                                        "Runtime MQTT event loop error"
-                                    );
-
-                                    if class.is_fatal() {
-                                        // E2/E3/E4/E6: the EventLoop's internal
-                                        // state may be corrupt. Break to the
-                                        // soft-restart path instead of terminating
-                                        // the poll task. A fresh EventLoop +
-                                        // AsyncClient recovers from state-machine
-                                        // corruption caused by network disruptions
-                                        // (e.g. OS sleep/wake).
-                                        poll_state_tx.set(SessionState::Disconnected {
-                                            reason: format!("{}: {}", class.label(), e),
-                                        });
-                                        break;
-                                    }
-
-                                    poll_state_tx.set(SessionState::Reconnecting);
-                                    consecutive_failures += 1;
-                                    if let Some(backoff) =
-                                        reconnect_policy.backoff(class, consecutive_failures - 1)
-                                    {
-                                        tracing::info!(
-                                            agent_id = %poll_agent_id,
-                                            attempt = backoff.attempt,
-                                            sleep_ms = backoff.duration.as_millis(),
-                                            "Backing off before reconnect attempt"
-                                        );
-                                        tokio::time::sleep(backoff.duration).await;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Watchdog: if poll() hasn't produced any event in
-                        // POLL_WATCHDOG_TIMEOUT, the TCP socket is likely
-                        // half-dead (e.g. after OS sleep/wake). Break to
-                        // the soft-restart path to create a fresh connection.
-                        _ = tokio::time::sleep(POLL_WATCHDOG_TIMEOUT) => {
-                            tracing::warn!(
-                                agent_id = %poll_agent_id,
-                                timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
-                                "Runtime MQTT poll() watchdog timeout - forcing soft-restart (possible half-dead socket)"
-                            );
-                            poll_state_tx.set(SessionState::Reconnecting);
-                            break;
-                        }
-
-                        // Fix-3 observability: if the poll loop has been
-                        // idle for `keepalive × 0.8` or more, emit a
-                        // trace-level message so future KeepAlive disconnects
-                        // can be correlated with the agent's idle window
-                        // (e.g. long synchronous HTTP handlers like
-                        // `POST /workspaces`). The trace is enabled only at
-                        // RUST_LOG=trace — it does not spam INFO logs in
-                        // normal operation. See
-                        // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
-                        _ = tokio::time::sleep(RUNTIME_KEEPALIVE_INTERVAL.mul_f32(0.8)) => {
-                            let idle_s = RUNTIME_KEEPALIVE_INTERVAL.as_secs() as f32 * 0.8;
-                            tracing::trace!(
-                                agent_id = %poll_agent_id,
-                                keepalive_s = RUNTIME_KEEPALIVE_INTERVAL.as_secs(),
-                                idle_s = idle_s,
-                                "Runtime MQTT event loop idle near keepalive boundary — next PINGREQ imminent"
-                            );
-                            continue;
-                        }
-                    }
-                }
-
-                // Soft-restart: recreate client + EventLoop
-                poll_state_tx.set(SessionState::Connecting);
-                let (new_client, new_eventloop) =
-                    AsyncClient::new(task_options.clone(), 100);
-                *task_shared_client.lock().await = new_client;
-                eventloop = new_eventloop;
-                soft_restart_count += 1;
-                tracing::info!(
-                    agent_id = %poll_agent_id,
-                    soft_restart_count,
-                    "Runtime MQTT client soft-restarted with fresh EventLoop"
-                );
-            }
-        });
+        let inner = MqttClient::connect(config, handler, None)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Connection(e.to_string()))?;
 
         // ADR-039 §5.2.1: wait for the first ConnAck bootstrap to
         // complete via a oneshot channel instead of the old
@@ -1079,7 +927,7 @@ impl RuntimeMqttClient {
                 "bootstrap signal channel closed (event loop dropped)".into(),
             )
         })?;
-        bootstrap_result?;
+        bootstrap_result.map_err(RuntimeMqttClientError::Connection)?;
 
         tracing::info!(
             host = %cfg.host,
@@ -1090,12 +938,12 @@ impl RuntimeMqttClient {
              (status/meta/config + global/control)"
         );
 
+        let shared_client = inner.shared_handle();
         let mqtt_client = Self {
+            inner,
             shared_client,
             agent_id: cfg.agent_id.to_string(),
-            bootstrap_data: bootstrap_data.clone(),
-            _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
-            state_tx,
+            bootstrap_data,
         };
 
         Ok(mqtt_client)
@@ -1190,21 +1038,32 @@ impl RuntimeMqttClient {
         Ok(())
     }
 
+    /// ADR-065 §2.5/§5.4: force a soft-restart of the MQTT event loop.
+    ///
+    /// Used by the shared `run_power_probe_loop` wake recovery: in
+    /// never-sleep / standalone mode the Runtime is a resident process
+    /// with no parent to restart it, so after an OS sleep/wake it must
+    /// recover its stale MQTT connection by itself. The unified client
+    /// owns the `ForceRestart` (AtomicBool + Notify) signal; this is a
+    /// thin passthrough.
+    pub fn force_reconnect(&self) {
+        self.inner.force_reconnect();
+    }
+
     /// ADR-039 Phase 2: returns the current MQTT session state.
     ///
     /// External consumers (health checks, DevMode) can poll this to
     /// see if the agent is connected, reconnecting, or permanently
     /// disconnected.
     pub fn session_state(&self) -> SessionState {
-        self.state_tx.current()
+        self.inner.current_state()
     }
 
     /// ADR-039 Phase 2: subscribe to session state changes.
     pub fn session_state_rx(&self) -> SessionStateRx {
-        // Create a receiver from the existing watch sender.
-        // SessionStateTx wraps watch::Sender, and we can get a new
-        // receiver via subscribe().
-        self.state_tx.subscribe()
+        // The unified client owns the session-state watch channel
+        // (ADR-065 Step 4); subscribe to it directly.
+        self.inner.state_rx()
     }
 
     /// Publish a `DataEnvelope` payload to a topic.
@@ -2158,6 +2017,8 @@ fn truncate_tool_result_lines(result_json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rumqttc::Event;
+    use std::time::Duration;
 
     // ── decode_lsps_payload (ADR-055 §6.7) ────────────────────────────
 
@@ -2252,7 +2113,7 @@ mod tests {
         // Mirror production keep-alive so the test broker does not
         // disconnect the subscriber while we are still collecting
         // published topics.
-        sub_opts.set_keep_alive(RUNTIME_KEEPALIVE_INTERVAL);
+        sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_eventloop) = SubClient::new(sub_opts, 10);
         sub_client
             .subscribe("acowork/agents/com.test.agent/#", QoS::AtLeastOnce)
@@ -2366,7 +2227,7 @@ mod tests {
         // Mirror production keep-alive so the test broker does not
         // disconnect the subscriber while we are still collecting
         // published topics.
-        sub_opts.set_keep_alive(RUNTIME_KEEPALIVE_INTERVAL);
+        sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_loop) = SubClient::new(sub_opts, 10);
         sub_client
             .subscribe("acowork/agents/com.test.bootstrap/#", QoS::AtLeastOnce)

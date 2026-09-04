@@ -549,6 +549,11 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                           }
                           onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
                           getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
+                          // Anchor per-section token counts to the real, LLM-billed
+                          // total for the latest call so they sum exactly to
+                          // the value the user sees in the context-usage popover
+                          // instead of the per-section `token_estimate` heuristic.
+                          realTotalTokens={contextUsage?.total_tokens ?? undefined}
                         />
                       ))}
                     </div>

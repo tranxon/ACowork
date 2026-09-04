@@ -13,7 +13,9 @@ use std::sync::Arc;
 use acowork_core::providers::traits::Provider;
 
 use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
-use crate::agent::context::{count_chat_request_chars, patch_session_totals};
+use crate::agent::context::{
+    count_chat_request_chars, patch_session_totals, ContextBuilder,
+};
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
@@ -147,6 +149,7 @@ impl AgentLoop {
                     total_cache_write_tokens: None,
                     agent_total_cache_read_tokens: None,
                     agent_total_cache_write_tokens: None,
+                    sections: None,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -1125,6 +1128,7 @@ impl AgentLoop {
                     total_cache_write_tokens: None,
                     agent_total_cache_read_tokens: None,
                     agent_total_cache_write_tokens: None,
+                    sections: None,
                 };
                 // ADR-028 + ADR-066: patch session + agent totals in one place.
                 let mut ctx_info = ctx_info;
@@ -1381,6 +1385,7 @@ impl AgentLoop {
     pub(crate) async fn process_llm_response_usage(
         &mut self,
         response: &acowork_core::providers::traits::ChatResponse,
+        context_builder: &ContextBuilder,
         current_model: &str,
     ) {
         let local_estimate = self.session.history.token_count();
@@ -1473,6 +1478,7 @@ impl AgentLoop {
                         total_cache_write_tokens: None,
                         agent_total_cache_read_tokens: None,
                         agent_total_cache_write_tokens: None,
+                        sections: None,
                     }
                 };
                 tracing::debug!(
@@ -1528,6 +1534,45 @@ impl AgentLoop {
                 ctx_usage.agent_total_output_tokens = Some(agent_out);
                 ctx_usage.agent_total_cache_read_tokens = Some(agent_cache_read);
                 ctx_usage.agent_total_cache_write_tokens = Some(agent_cache_write);
+
+                // ADR-067: populate the per-section byte sizes so the
+                // input-box context-usage popup's 5-category breakdown
+                // works without DevMode. The helper mirrors the section
+                // list produced by the DevMode Debug Panel (same keys,
+                // same order) — the only differences are the absence of
+                // token estimates / SHA-256 hashes (DebugPanel-only).
+                //
+                // MCP tools come from `self.core.mcp_tools` (the exact set
+                // injected into `ChatRequest.tools`) — NOT `all_tools`
+                // filtered by the `mcp_` prefix, which would over-count by
+                // including the built-in `mcp_install` / `mcp_uninstall`
+                // tools (see `build_chat_request` for the same distinction).
+                let mcp_tools: Vec<serde_json::Value> = self
+                    .core
+                    .mcp_tools
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|tool| serde_json::to_value(tool.spec()).ok())
+                    .collect();
+                ctx_usage.sections = Some(crate::agent::context::compute_section_sizes(
+                    context_builder,
+                    &self.session.history,
+                    &mcp_tools,
+                    current_model,
+                ));
+
+                // ADR-067: cache the typed sections directly so the retained
+                // `session_state` snapshot (built by `emit_session_state`
+                // from persisted tokens, which has no `ContextBuilder` to
+                // recompute sections) does not clobber the breakdown with
+                // an empty `sections`. The frontend also merges sections
+                // from whichever source arrives last (defense in depth).
+                if let Some(ref conv) = self.session.conversation
+                    && let Some(sections) = ctx_usage.sections.as_ref()
+                {
+                    conv.cache_context_usage_sections(sections.clone());
+                }
 
                 if !self
                     .session_core

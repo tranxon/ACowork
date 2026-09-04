@@ -134,7 +134,7 @@ stop_process() {
 
 # Step 1: Stop running processes (only when we are about to start a new one)
 if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
-    echo -e "${YELLOW}[1/6] Stopping running Gateway, Runtime, Embed, LSP Relay, and Node Agent processes...${NC}"
+    echo -e "${YELLOW}[1/7] Stopping running Gateway, Runtime, Embed, LSP Relay, Node Agent, and PM processes...${NC}"
     stop_process "acowork-gateway" "Gateway"
     stop_process "acowork-runtime" "Runtime"
     stop_process "acowork-embed"  "Embed"
@@ -149,6 +149,11 @@ if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
     # child of the Gateway's process group; kill it explicitly so a node left
     # behind by a killed Gateway does not keep a stale broker connection.
     stop_process "acowork-node" "Node Agent"
+    # The PM service is a standalone process (ADR-064) spawned by the Gateway
+    # supervisor. It self-exits via the ADR-018 watchdog when the Gateway dies,
+    # but the watchdog poll can lag — kill it explicitly so the stop step is
+    # idempotent and port 18082 is released before the next start.
+    stop_process "acowork-pm" "PM"
 
     # Ensure embed port is released before starting a new gateway.
     # On Unix, pkill may not have finished releasing port 18080 within the
@@ -183,12 +188,28 @@ if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
                 break
             fi
         done
+
+        # Free PM port 18082 (ADR-064 standalone process). The PM supervisor
+        # auto-increments on conflict, but a stale process from a killed Gateway
+        # would otherwise hold the default port and shift PM to 18083+.
+        if command -v fuser &>/dev/null; then
+            fuser -k 18082/tcp 2>/dev/null || true
+        fi
+        pm_waited=0
+        while command -v ss &>/dev/null && ss -tlnp 2>/dev/null | grep -q ":18082 "; do
+            sleep 0.5
+            pm_waited=$((pm_waited + 1))
+            if [ $pm_waited -ge 6 ]; then
+                echo -e "${RED}  WARNING: Port 18082 still in use after 3s${NC}"
+                break
+            fi
+        done
     fi
     echo ""
 fi
 
 # Step 2: Build Gateway
-echo -e "${YELLOW}[2/6] Building Gateway ($PROFILE mode)...${NC}"
+echo -e "${YELLOW}[2/7] Building Gateway ($PROFILE mode)...${NC}"
 cd "$CORE_DIR"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-gateway)
@@ -208,7 +229,7 @@ fi
 echo ""
 
 # Step 3: Build Runtime
-echo -e "${YELLOW}[3/6] Building Runtime ($PROFILE mode)...${NC}"
+echo -e "${YELLOW}[3/7] Building Runtime ($PROFILE mode)...${NC}"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-runtime)
 else
@@ -235,9 +256,9 @@ echo ""
 # Users can skip this step entirely with: ./dev/build_core.sh --skip-embed
 
 if [ "$SKIP_EMBED" = "true" ]; then
-    echo -e "${YELLOW}[3.5/6] Skipping Embedding Runtime (--skip-embed).${NC}"
+    echo -e "${YELLOW}[3.5/7] Skipping Embedding Runtime (--skip-embed).${NC}"
 else
-    echo -e "${YELLOW}[3.5/6] Building Embedding Runtime ($PROFILE mode)...${NC}"
+    echo -e "${YELLOW}[3.5/7] Building Embedding Runtime ($PROFILE mode)...${NC}"
 
     # Auto-detect local ONNX Runtime install under .ort/
     if [ -z "$ORT_LIB_LOCATION" ]; then
@@ -324,7 +345,7 @@ echo ""
 # We unconditionally build (no --skip-lsp-relay flag) because every Gateway
 # needs an LSP Relay process to serve the runtime codebase tool and the
 # desktop Monaco client.
-echo -e "${YELLOW}[3.6/6] Building LSP Relay ($PROFILE mode)...${NC}"
+echo -e "${YELLOW}[3.6/7] Building LSP Relay ($PROFILE mode)...${NC}"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-lsp-relay)
 else
@@ -351,7 +372,7 @@ echo ""
 # the node topology ("acowork-node binary not found — local node agent
 # disabled"), node 'local' never enrolls, and agent installs fail with 503
 # "Node 'local' has never enrolled (offline)".
-echo -e "${YELLOW}[3.7/6] Building Node Agent ($PROFILE mode)...${NC}"
+echo -e "${YELLOW}[3.7/7] Building Node Agent ($PROFILE mode)...${NC}"
 if [ "$PROFILE" = "release" ]; then
     cargo_args=(cargo build --release -p acowork-node)
 else
@@ -370,6 +391,31 @@ fi
 rm -f /tmp/node_build.log
 echo ""
 
+# Step 3.8: Build PM service (standalone binary, sibling of acowork-gateway)
+#
+# ADR-064: the PM service is a standalone process (`acowork-pm`), located via
+# `current_exe().parent().join("acowork-pm")` — so the binary MUST sit next to
+# acowork-gateway. Without it the Gateway supervisor logs "acowork-pm binary
+# not found" and `/api/pm/*` returns 503.
+echo -e "${YELLOW}[3.8/7] Building PM service ($PROFILE mode)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-pm)
+else
+    cargo_args=(cargo build -p acowork-pm)
+fi
+if "${cargo_args[@]}" 2>&1 | tee /tmp/pm_build.log; then
+    if grep -q "error\[" /tmp/pm_build.log 2>/dev/null; then
+        echo -e "${RED}  PM service build failed with errors.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}  PM service build completed.${NC}"
+else
+    echo -e "${RED}  PM service build failed.${NC}"
+    exit 1
+fi
+rm -f /tmp/pm_build.log
+echo ""
+
 # Step 4: Copy offline_providers.json from assets to target dir
 #
 # The gateway (and embed) read this from `{exe_dir}/offline_providers.json`.
@@ -381,7 +427,7 @@ echo ""
 # "stage to both target/release and target/debug" pattern required `mkdir -p`
 # to avoid the silent stray-file behavior of `cp` (and the silent wrong-target
 # behavior of PowerShell `Copy-Item`).
-echo -e "${YELLOW}[4/6] Copying offline_providers.json to target/$PROFILE...${NC}"
+echo -e "${YELLOW}[4/7] Copying offline_providers.json to target/$PROFILE...${NC}"
 OFFLINE_SRC="$WORKSPACE_ROOT/assets/offline_providers.json"
 mkdir -p "$TARGET_DIR"
 if [ -f "$OFFLINE_SRC" ]; then
@@ -397,7 +443,7 @@ fi
 # Whoever distributes the binary (this script for dev, the package installer
 # for release, the Tauri bundler for desktop) is responsible for placing it
 # there. Source of truth is core/acowork-embed/assets/embedding_models.json.
-echo -e "${YELLOW}[4.5/6] Copying embedding_models.json to target/$PROFILE...${NC}"
+echo -e "${YELLOW}[4.5/7] Copying embedding_models.json to target/$PROFILE...${NC}"
 EMBED_MODELS_SRC="$WORKSPACE_ROOT/core/acowork-embed/assets/embedding_models.json"
 if [ -f "$EMBED_MODELS_SRC" ]; then
     cp "$EMBED_MODELS_SRC" "$TARGET_DIR/embedding_models.json"
@@ -411,7 +457,9 @@ fi
 # The gateway reads this from `{exe_dir}/offline_embedding_providers.json`
 # (cloud embedding provider catalog). Missing file = empty catalog = the UI's
 # cloud-provider section shows an empty list.
-echo -e "${YELLOW}[4.6/6] Copying offline_embedding_providers.json to target/$PROFILE...${NC}"
+
+echo -e "${YELLOW}[4.6/7] Copying offline_embedding_providers.json to target/$PROFILE...${NC}"
+
 EMBEDDING_PROVIDERS_SRC="$WORKSPACE_ROOT/assets/offline_embedding_providers.json"
 if [ -f "$EMBEDDING_PROVIDERS_SRC" ]; then
     cp "$EMBEDDING_PROVIDERS_SRC" "$TARGET_DIR/offline_embedding_providers.json"

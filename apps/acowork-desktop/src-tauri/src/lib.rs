@@ -197,135 +197,23 @@ pub mod win_job {
 // seconds", causing false `location.reload()` triggers on normal minimise →
 // restore cycles.
 //
-// Instead, the Rust backend samples two monotonic clocks on each `Focused(true)`
-// event:
-//
-//   • **biased**   — includes time spent in sleep / suspend
-//   • **unbiased** — excludes time spent in sleep / suspend
-//
-// If `biased_delta - unbiased_delta > threshold`, the system was genuinely
-// asleep — not merely backgrounded.
-//
-// Platform implementations:
-//   • Windows: `GetTickCount64()` (biased) vs `QueryUnbiasedInterruptTime()` (unbiased)
-//   • macOS:   `clock_gettime(CLOCK_MONOTONIC_RAW)` (biased) vs `CLOCK_UPTIME_RAW` (unbiased)
-//   • Linux:   `clock_gettime(CLOCK_BOOTTIME)` (biased) vs `CLOCK_MONOTONIC` (unbiased)
 
-mod power {
-    use std::sync::atomic::{AtomicU64, Ordering};
+// Detection now lives in the shared `acowork-mqtt-session` crate
+// (`power::detect_resume` / `power::run_power_probe_loop`, ADR-065 Step 1) so
+// Desktop / Node / Runtime recover from OS sleep/wake with identical timing.
+// The Rust backend samples two monotonic clocks (biased vs unbiased) on each
+// `Focused(true)` event and on a 2 s polling task; if the biased/unbiased gap
+// exceeds the threshold, the system was genuinely asleep — not merely
+// backgrounded.
 
-    static LAST_BIASED_MS: AtomicU64 = AtomicU64::new(0);
-    static LAST_UNBIASED_MS: AtomicU64 = AtomicU64::new(0);
-
-    /// Minimum *actual* sleep duration (ms) to trigger recovery.
-    /// We measure real sleep, not wall-clock gaps, so even a few seconds
-    /// is significant.  5 s filters timer imprecision.
-    const SLEEP_THRESHOLD_MS: u64 = 5_000;
-
-    // ── Windows FFI ──────────────────────────────────────────────────────
-
-    #[cfg(target_os = "windows")]
-    unsafe extern "system" {
-        fn GetTickCount64() -> u64;
-        fn QueryUnbiasedInterruptTime(unbiased_time: *mut u64) -> i32;
-    }
-
-    // ── Platform-specific clock sampling ─────────────────────────────────
-
-    /// Returns `(biased_ms, unbiased_ms)` where biased includes sleep time
-    /// and unbiased excludes it.  Returns `None` on API failure or on
-    /// unsupported platforms.
-    fn sample() -> Option<(u64, u64)> {
-        #[cfg(target_os = "windows")]
-        {
-            unsafe {
-                let biased_ms = GetTickCount64();
-                let mut unbiased_100ns: u64 = 0;
-                if QueryUnbiasedInterruptTime(&mut unbiased_100ns) == 0 {
-                    return None; // API failure
-                }
-                Some((biased_ms, unbiased_100ns / 10_000))
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // CLOCK_MONOTONIC_RAW advances during sleep; CLOCK_UPTIME_RAW does not.
-            sample_unix(libc::CLOCK_MONOTONIC_RAW, libc::CLOCK_UPTIME_RAW)
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // CLOCK_BOOTTIME includes suspend time; CLOCK_MONOTONIC does not.
-            sample_unix(libc::CLOCK_BOOTTIME, libc::CLOCK_MONOTONIC)
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        {
-            None // Unsupported platform — no sleep detection
-        }
-    }
-
-    /// Shared `clock_gettime` helper for macOS and Linux.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn sample_unix(
-        biased_clk: libc::clockid_t,
-        unbiased_clk: libc::clockid_t,
-    ) -> Option<(u64, u64)> {
-        fn read_clk(clk: libc::clockid_t) -> Option<u64> {
-            let mut ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            if unsafe { libc::clock_gettime(clk, &mut ts) } != 0 {
-                return None;
-            }
-            Some((ts.tv_sec as u64) * 1_000 + (ts.tv_nsec as u64) / 1_000_000)
-        }
-        Some((read_clk(biased_clk)?, read_clk(unbiased_clk)?))
-    }
-
-    /// Returns `true` if the system was genuinely asleep (not merely
-    /// minimised or backgrounded) since the last call.
-    ///
-    /// Updates the clock baseline on every call so that subsequent calls
-    /// measure sleep since the *last* call.
-    pub fn detect_resume() -> bool {
-        let Some((biased_ms, unbiased_ms)) = sample() else {
-            return false; // API failure or unsupported platform
-        };
-
-        let prev_biased = LAST_BIASED_MS.swap(biased_ms, Ordering::Relaxed);
-        let prev_unbiased = LAST_UNBIASED_MS.swap(unbiased_ms, Ordering::Relaxed);
-
-        if prev_biased == 0 || prev_unbiased == 0 {
-            return false; // First call — seed values, don't trigger
-        }
-
-        let biased_delta = biased_ms.saturating_sub(prev_biased);
-        let unbiased_delta = unbiased_ms.saturating_sub(prev_unbiased);
-        let sleep_ms = biased_delta.saturating_sub(unbiased_delta);
-
-        if sleep_ms > SLEEP_THRESHOLD_MS {
-            tracing::info!(
-                sleep_ms,
-                biased_delta_ms = biased_delta,
-                unbiased_delta_ms = unbiased_delta,
-                "Actual system sleep detected"
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-}
 
 /// Recovery actions after a system wake.
 ///
 /// Called from both the 2-second polling task and the `Focused(true)`
-/// window event handler when [`power::detect_resume`] reports genuine
-/// sleep:
+
+/// window event handler when [`acowork_mqtt_session::power::detect_resume`]
+/// reports genuine sleep:
+
 ///
 /// 1. **Rebuild the MQTT connection deterministically** – the OS tears
 ///    down TCP sockets during sleep, so the old EventLoop is unusable by
@@ -698,20 +586,23 @@ pub fn run() {
             }
 
             // Spawn async task for automatic sleep detection.
-            // Polls biased/unbiased monotonic clocks every 2 s.  On
+
+            // Polls biased/unbiased monotonic clocks every 2 s via the
+            // shared `acowork_mqtt_session::power::run_power_probe_loop`
+            // (ADR-065 Step 1 — same loop as Node / Runtime).  On
+
             // detecting real sleep, `recover_from_wake` deterministically
             // rebuilds the MQTT connection (the OS tears down TCP sockets
             // during sleep).  The `Focused(true)` handler below provides
             // immediate detection when the user clicks the window.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-                loop {
-                    interval.tick().await;
-                    if power::detect_resume() {
-                        recover_from_wake(&app_handle);
-                    }
-                }
+                acowork_mqtt_session::power::run_power_probe_loop(
+                    move || recover_from_wake(&app_handle),
+                    acowork_mqtt_session::power::POWER_PROBE_INTERVAL,
+                    "desktop",
+                )
+                .await;
             });
 
             // NOTE: The local Gateway is no longer spawned here. The frontend
@@ -727,9 +618,11 @@ pub fn run() {
                 // ── System-resume detection ────────────────────────────────
                 // Compares biased vs unbiased monotonic clocks to detect
                 // *actual* system sleep — not merely window minimise/restore.
-                // See the `power` module docs above for platform details.
+                // Detection lives in the shared `acowork-mqtt-session` crate
+                // (ADR-065 Step 1); see the module docs above for platform
+                // details.
                 tauri::WindowEvent::Focused(true) => {
-                    if power::detect_resume() {
+                    if acowork_mqtt_session::power::detect_resume() {
                         recover_from_wake(window.app_handle());
                     }
                 }

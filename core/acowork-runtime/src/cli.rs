@@ -281,6 +281,23 @@ async fn async_main(
         let handles =
             phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await?;
 
+        // ADR-065 §2.5/§5.4: in never-sleep mode the Runtime is a resident
+        // process with no parent to restart it after an OS sleep/wake, so
+        // it must recover its stale MQTT connection by itself. Spawn the
+        // shared power-probe loop (2 s interval, same as Desktop / Node)
+        // which force-restarts the MQTT client on genuine sleep detection.
+        // Standalone mode has no MQTT client, so no probe is needed there.
+        if let Some(mqtt_client) = agent_ctx.mqtt_client.clone() {
+            tokio::spawn(async move {
+                acowork_mqtt_session::power::run_power_probe_loop(
+                    move || mqtt_client.force_reconnect(),
+                    acowork_mqtt_session::power::POWER_PROBE_INTERVAL,
+                    "runtime",
+                )
+                .await;
+            });
+        }
+
         // Phase D: announce ready + run Gateway message loop.
         phase_d_run(&mut agent_ctx, session_ctx, handles, &config, log_reload_handle).await
     } else {

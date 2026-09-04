@@ -57,11 +57,37 @@ pub fn router(state: NodeHttpState) -> Router {
 }
 
 /// Liveness probe for the Node itself (ADR-055 §6.7 — the LSP relay
-/// watchdog target). Returns 200 `{"status":"ok"}` whenever the node
-/// HTTP server is serving; the LSP relay self-exits once this stops
-/// answering (ADR-018 pattern).
-async fn health() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({ "status": "ok" }))
+/// watchdog target).
+///
+/// Returns 200 `{"status":"ok"}` whenever the node HTTP server is
+/// serving AND the shared process-table lock is acquirable within
+/// 500 ms; returns 503 `{"status":"stalled"}` when a business task
+/// holds the write lock across an await (the 2026-08 reaper deadlock
+/// class). Probing the lock is what turns "accept loop alive" into
+/// "business logic can run": during that incident `/health` stayed
+/// 200 (3f688e04 hindsight) while every `/agents/*` request stalled,
+/// so neither the relay watchdog nor the node HTTP watchdog could
+/// see the hang. With the lock probe, both self-heal triggers fire
+/// on a genuine stall.
+async fn health(State(state): State<NodeHttpState>) -> Response {
+    // 2 s timeout: covers slow-but-valid state-mutating operations
+    // (install/uninstall/clone/upgrade/upgrade_publish in control/mod.rs
+    // acquire the write lock for the full sync filesystem round-trip
+    // and can exceed 500 ms on large packages or slow disks). Anything
+    // truly stalled longer than this returns 503 and triggers the
+    // relay / node HTTP watchdogs to self-heal.
+    match tokio::time::timeout(Duration::from_millis(2000), state.node.read()).await {
+        Ok(_guard) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "status": "ok" })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({ "status": "stalled" })),
+        )
+            .into_response(),
+    }
 }
 
 /// Forward `/agents/{id}/{*rest}` to `http://127.0.0.1:{http_port}/{rest}`.
@@ -314,6 +340,38 @@ mod tests {
         let app = router(http_state(None));
         // No token required pre-enrollment; unknown agent → 503.
         let resp = app.oneshot(proxy_request(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn health_request() -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .uri("/health")
+            .method("GET")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_answers_200_when_state_lock_is_free() {
+        let app = router(http_state(None));
+        let resp = app.oneshot(health_request()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_answers_503_when_state_write_lock_is_held() {
+        // Simulate the 2026-08 reaper deadlock: a write guard held
+        // across an await stalls every reader, and the health probe
+        // must report 503 ("stalled") instead of a healthy 200 so the
+        // LSP relay watchdog and the node HTTP watchdog can trigger
+        // recovery. The 500 ms probe timeout bounds the test.
+        let state = http_state(None);
+        // Hold the write lock through the probe (borrow a local Arc so
+        // `state` can still move into the router).
+        let held = state.node.clone();
+        let _guard = held.write().await;
+        let app = router(state);
+        let resp = app.oneshot(health_request()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

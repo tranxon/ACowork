@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use acowork_core::providers::traits::{ChatMessage, MessageRole};
+use acowork_core::providers::traits::ChatMessage;
 use tokio::sync::Notify;
 
 use super::DebugHandles;
@@ -24,44 +24,53 @@ use super::controller::{
 use super::observer::ContextSnapshotRequest;
 use super::protocol::{DebugPhase, RequestParams};
 use super::events::{DebugEvent, DebugEventSender};
-use crate::agent::context::ContextBuilder;
+use crate::agent::context::{compute_section_sizes, ContextBuilder};
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
 use crate::util::text::TextPreview;
 
-/// ADR-060 v2: extract the latest `todo_write` tool result content from the
-/// request messages.
+// ── Debug Observer Implementation ─────────────────────────────────────
+
+/// Re-materialize the source string for a `ContextUsageSection` key from
+/// a [`ContextBuilder`]. Used by `DebugObserverImpl::on_context_built` to
+/// enrich the size-only section list with full content for the Debug
+/// Panel.
 ///
-/// Replaces the removed `ContextBuilder::todo_context()` getter. Todo state
-/// lives in Block B's real `todo_write` tool results; the debug panel
-/// surfaces it by scanning backwards through messages. The section key
-/// (`"todo_context"`) is preserved so the UI client contract is unchanged.
-fn latest_todo_write_content(messages: &[ChatMessage]) -> Option<String> {
-    // Reverse-scan: find the LATEST Assistant with a todo_write tool_call.
-    let todo_call_id = messages.iter().rev().find_map(|m| {
-        if m.role != MessageRole::Assistant {
-            return None;
+/// ADR-067: the helper is the **only** place that maps section keys to
+/// their source strings — both this function and the always-on emission
+/// path (`process_llm_response_usage`) MUST agree on the key list, but
+/// only the DevMode path needs the full content. Returns `None` for
+/// keys that don't have a single source string (`tool_definitions` and
+/// `messages` are handled specially by the caller because they need
+/// additional JSON / SHA-256 work).
+fn section_text_from_builder(key: &str, builder: &ContextBuilder) -> Option<String> {
+    match key {
+        "system_prompt" => Some(builder.system_prompt().to_string()),
+        "identity_context" => builder.identity_context().map(|s| s.to_string()),
+        "workspace_context" => builder.workspace_context().map(|s| s.to_string()),
+        "retrieved_memory" => builder.retrieved_memory().map(|s| s.to_string()),
+        "ambiguous_confirmation_hint" => {
+            builder.ambiguous_confirmation_hint().map(|s| s.to_string())
         }
-        m.tool_calls.as_ref().and_then(|tcs| {
-            tcs.iter()
-                .find(|tc| tc.function.name == "todo_write")
-                .map(|tc| tc.id.clone())
-        })
-    })?;
-    // Match the Tool result (Tool normally follows the Assistant; scan
-    // backwards from the end to find it robustly).
-    messages.iter().rev().find_map(|m| {
-        if m.role == MessageRole::Tool
-            && m.tool_call_id.as_deref() == Some(todo_call_id.as_str())
-        {
-            Some(m.content.clone())
-        } else {
+        "abstention_prompt" => builder.abstention_prompt().map(|s| s.to_string()),
+        "skill_instructions" => builder.skill_instructions().map(|s| s.to_string()),
+        "environment" => Some(
+            builder
+                .environment_override()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    crate::agent::context::detect_environment_text().to_string()
+                }),
+        ),
+        "workspace_prompt_file" => builder.workspace_prompt_file().map(|s| s.to_string()),
+        // Caller handles these specially.
+        "tool_definitions" | "messages" => None,
+        other => {
+            tracing::warn!(key = other, "section_text_from_builder: unknown section key");
             None
         }
-    })
+    }
 }
-
-// ── Debug Observer Implementation ─────────────────────────────────────
 
 /// Real debug observer backed by DebugController, event sender, and notify handles.
 ///
@@ -352,20 +361,26 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             return;
         };
 
-        // Build tool_definitions string: merge ContextBuilder's built-in tools
-        // with MCP tools from all_tools.
+        // Build the merged tool_definitions list (built-in + MCP).
+        // ADR-067: MCP tools come from `req.mcp_tools` (the exact set
+        // injected into `ChatRequest.tools`) — NOT `req.all_tools` filtered
+        // by the `mcp_` prefix, which would over-count by including the
+        // built-in `mcp_install` / `mcp_uninstall` tools.
+        let mut mcp_tools: Vec<serde_json::Value> = Vec::new();
+        for tool in req.mcp_tools {
+            let spec = tool.spec();
+            let val = serde_json::to_value(&spec).unwrap_or_default();
+            mcp_tools.push(val);
+        }
+        // tool_defs_str is still needed below to materialize the full
+        // NamedSection content for the Debug Panel. Cheap (typically
+        // < 50KB) and reused via serde_json::Value::to_string() once.
         let mut all_defs: Vec<serde_json::Value> = req
             .context_builder
             .tool_definitions()
             .map(|defs| defs.to_vec())
             .unwrap_or_default();
-        for tool in req.all_tools {
-            let spec = tool.spec();
-            if spec.name.starts_with("mcp_") {
-                let val = serde_json::to_value(&spec).unwrap_or_default();
-                all_defs.push(val);
-            }
-        }
+        all_defs.extend(mcp_tools.iter().cloned());
         let tool_defs_str = serde_json::Value::Array(all_defs).to_string();
 
         tracing::info!(
@@ -376,114 +391,78 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             "capture_context_snapshot: workspace_context status"
         );
 
-        // Produce the section list in build() injection order (ADR-054 §3.1).
-        // The list mirrors exactly what ContextBuilder::build() appends to
-        // the system content (plus tool_definitions which travels separately
-        // in ChatRequest.tools, and messages which is step 4).
-        let mut named: Vec<NamedSection> = Vec::with_capacity(10);
-
-        // 1. Base system prompt (standalone — workspace_prompt_file is NOT
-        //    merged in anymore; ADR-054 step 3 un-split so the panel can
-        //    patch each independently).
-        named.push(NamedSection::new(
-            "system_prompt",
-            req.context_builder.system_prompt().to_string(),
+        // ADR-067: section list now comes from `compute_section_sizes`
+        // (the always-on observability helper). The helper owns the
+        // ordering and the section keys — both consumers (this
+        // DevMode snapshot path and `process_llm_response_usage`'s
+        // always-on emission) MUST go through it so the frontend sees
+        // consistent section keys regardless of DevMode state.
+        let base_sections = compute_section_sizes(
+            req.context_builder,
+            req.history,
+            &mcp_tools,
             req.model,
-        ));
+        );
 
-        // 2. Identity context
-        if let Some(identity) = req.context_builder.identity_context() {
-            named.push(NamedSection::new("identity_context", identity.to_string(), req.model));
-        }
-
-        // 2.2 Workspace context
-        if let Some(ws) = req.context_builder.workspace_context() {
-            named.push(NamedSection::new("workspace_context", ws.to_string(), req.model));
-        }
-
-        // 2.5 Retrieved memory
-        if let Some(mem) = req.context_builder.retrieved_memory() {
-            named.push(NamedSection::new("retrieved_memory", mem.to_string(), req.model));
-        }
-
-        // 2.5b Ambiguous-confirmation hint (P3-4) — NEW in ADR-054 step 3.
-        if let Some(hint) = req.context_builder.ambiguous_confirmation_hint() {
-            named.push(NamedSection::new(
-                "ambiguous_confirmation_hint",
-                hint.to_string(),
-                req.model,
-            ));
-        }
-
-        // 2.5c Abstention guidance (G9) — same slot as the ambiguous hint.
-        if let Some(prompt) = req.context_builder.abstention_prompt() {
-            named.push(NamedSection::new(
-                "abstention_prompt",
-                prompt.to_string(),
-                req.model,
-            ));
-        }
-
-        // 2.6 Skill instructions
-        if let Some(skills) = req.context_builder.skill_instructions() {
-            named.push(NamedSection::new("skill_instructions", skills.to_string(), req.model));
-        }
-
-        // 3. Environment (override wins, else auto-detect)
-        let env_text = req
-            .context_builder
-            .environment_override()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| crate::agent::context::detect_environment_text().to_string());
-        named.push(NamedSection::new("environment", env_text, req.model));
-
-        // 3.2 Workspace prompt file (CLAUDE.md / AGENTS.md) — NEW standalone
-        //    section in ADR-054 step 3 (was merged into system_prompt).
-        if let Some(prompt_file) = req.context_builder.workspace_prompt_file() {
-            named.push(NamedSection::new(
-                "workspace_prompt_file",
-                prompt_file.to_string(),
-                req.model,
-            ));
-        }
-
-        // 3.5 Tool definitions (passed separately in ChatRequest.tools)
-        named.push(NamedSection::new("tool_definitions", tool_defs_str, req.model));
-
-        // 3.6 Messages (conversation history) — ADR-054 step 4.
-        // Metadata only: the full content is lazy-loaded via
-        // `getSection(iteration, "messages")` from `messages_by_iteration`.
-        // ADR-054: the snapshot holds a SHALLOW `Arc` clone of the history
-        // (O(1), no deep copy); HistoryManager mutates copy-on-write so the
-        // stored Arc retains the exact history as of this build iteration.
-        // The JSON is serialized once here (to compute size/token/hash) and
-        // again on demand — acceptable for a developer tool (ADR-054 §6).
+        // Enrich each base section with DevMode-only metadata (full
+        // content, token estimate, hash for `messages`). The byte size
+        // on `base_sections` is the authoritative value; we don't
+        // recompute it here.
+        // ADR-054 step 4: hoist messages_snapshot + JSON out of the loop
+        // so the controller's `store_messages` (post-loop) can reuse the
+        // exact Arc without re-cloning. Hash is computed once.
         let messages_snapshot: Arc<Vec<ChatMessage>> = req.history.messages_arc();
         let messages_json = serde_json::to_string(&messages_snapshot).unwrap_or_default();
-        let messages_meta = {
+        let messages_hash = {
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(messages_json.as_bytes());
-            SectionContent::metadata_only(
-                messages_json.len(),
-                crate::token::count_text(&messages_json, req.model),
-                format!("{:x}", hasher.finalize()),
-            )
+            format!("{:x}", hasher.finalize())
         };
-        named.push(NamedSection {
-            key: "messages".to_string(),
-            content: messages_meta,
-        });
+        let messages_token_estimate = crate::token::count_text(&messages_json, req.model);
 
-        // ADR-060 v2: todo state lives in Block B's real `todo_write` tool
-        // results. Surface the latest one in the debug panel via the same
-        // `"todo_context"` section key so client-side rendering keeps
-        // working (no UI contract change).
-        if let Some(todos) = latest_todo_write_content(req.history.messages()) {
-            named.push(NamedSection::new("todo_context", todos, req.model));
+        let mut named: Vec<NamedSection> = Vec::with_capacity(base_sections.len());
+        for sec in base_sections {
+            match sec.key.as_str() {
+                "messages" => {
+                    // ADR-054 step 4: store metadata only (no content);
+                    // full content is lazy-loaded via `getSection`.
+                    named.push(NamedSection {
+                        key: sec.key,
+                        content: SectionContent::metadata_only(
+                            messages_json.len(),
+                            messages_token_estimate,
+                            messages_hash.clone(),
+                        ),
+                    });
+                }
+                "tool_definitions" => {
+                    // Reuse the JSON we already serialized above.
+                    named.push(NamedSection {
+                        key: sec.key,
+                        content: SectionContent::new(tool_defs_str.clone(), req.model),
+                    });
+                }
+                _ => {
+                    // Standard text section: re-materialize from
+                    // ContextBuilder. We dispatch by key (rather than
+                    // caching the source string at helper-call time) so
+                    // the helper stays a pure size-only function with
+                    // no borrow conflicts.
+                    let content = section_text_from_builder(&sec.key, req.context_builder);
+                    if let Some(text) = content {
+                        named.push(NamedSection {
+                            key: sec.key,
+                            content: SectionContent::new(text, req.model),
+                        });
+                    }
+                }
+            }
         }
 
         let sections = ContextSnapshotSections { sections: named };
+
+
 
         let total_token_estimate = sections.total_token_estimate();
 

@@ -160,7 +160,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
                       >
                         <Sparkles className={cn("h-3.5 w-3.5 shrink-0")} style={isActive ? { color: "var(--color-accent)" } : { color: "" }} />
                         <div className="min-w-0 flex-1">
-                          <div className={cn("truncate text-xs", isActive ? "font-medium" : "text-zinc-800 dark:text-zinc-200")} style={isActive ? { color: "var(--color-accent)" } : undefined}>
+                          <div className={cn("truncate text-xs font-medium", isActive ? "text-[var(--color-accent)]" : "text-zinc-700 dark:text-zinc-200")}>
                             {skill.name}
                           </div>
                           {skill.description && (
@@ -190,7 +190,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             {/* Import Skills button */}
             <button
               onClick={handleImportClick}
-              className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("skillsPanel.buttonImportSkills")}

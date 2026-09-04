@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 use crate::error::Result;
 use crate::agent::session_state::TodoItem;
 use acowork_core::providers::traits::UsageInfo;
+use acowork_core::protocol::ContextUsageSection;
 
 /// Format version for the JSONL conversation file.
 ///
@@ -591,6 +592,14 @@ pub struct ConversationSession {
     last_status: std::sync::Mutex<String>,
     last_ratio: std::sync::Mutex<f64>,
     last_context_usage: std::sync::Mutex<String>,
+    /// ADR-067: per-section byte sizes from the most recent LLM call.
+    ///
+    /// Cached as the typed `Vec<ContextUsageSection>` directly — no JSON
+    /// round-trip — so [`Self::last_context_usage_sections`] can hand the
+    /// list straight to `emit_session_state` for merging into the
+    /// persisted-token-derived `ContextUsageInfo`. `None` until the first
+    /// LLM call populates it via [`Self::cache_context_usage_sections`].
+    last_context_usage_sections: std::sync::Mutex<Option<Vec<ContextUsageSection>>>,
     /// ADR-024: absolute byte offset of the most recent compaction marker
     /// in the JSONL. Shared with `ConversationWriter` (the writer updates
     /// it synchronously on every compaction write via
@@ -765,6 +774,36 @@ impl ConversationSession {
         }
     }
 
+    /// Cache per-section byte sizes from the most recent LLM call.
+    ///
+    /// ADR-067: called by `process_llm_response_usage` right after it
+    /// computes `sections`, so the sections survive into the retained
+    /// `session_state` snapshot. [`Self::update_runtime_state_cache`] is
+    /// called by `emit_session_state` with a persisted-token-derived
+    /// `ContextUsageInfo` that has no `ContextBuilder` and therefore no
+    /// `sections` — that path re-merges the sections cached here.
+    ///
+    /// Stores the typed `Vec<ContextUsageSection>` directly so callers can
+    /// recover the sections without paying the JSON serialize/deserialize
+    /// round-trip on every LLM call.
+    pub fn cache_context_usage_sections(&self, sections: Vec<ContextUsageSection>) {
+        if let Ok(mut c) = self.last_context_usage_sections.lock() {
+            *c = Some(sections);
+        }
+    }
+
+    /// Read the most recently cached per-section byte sizes.
+    ///
+    /// ADR-067: used by `emit_session_state` to merge sections into the
+    /// persisted-token-derived `ContextUsageInfo`. Returns `None` until
+    /// the first LLM call has populated the cache.
+    pub fn last_context_usage_sections(&self) -> Option<Vec<ContextUsageSection>> {
+        self.last_context_usage_sections
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+    }
+
     /// Notify the config relay of a config field change.
     ///
     /// Builds a `SessionConfig` snapshot and sends it through
@@ -904,6 +943,7 @@ impl ConversationSession {
             last_status: std::sync::Mutex::new(String::new()),
             last_ratio: std::sync::Mutex::new(0.0),
             last_context_usage: std::sync::Mutex::new(String::new()),
+            last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
         };
 
@@ -997,6 +1037,7 @@ impl ConversationSession {
                 last_status: std::sync::Mutex::new(String::new()),
                 last_ratio: std::sync::Mutex::new(0.0),
                 last_context_usage: std::sync::Mutex::new(String::new()),
+                last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
             },
             config_rx,
@@ -1751,6 +1792,12 @@ impl Clone for ConversationSession {
             last_context_usage: std::sync::Mutex::new(
                 self.last_context_usage.lock().ok().map(|s| s.clone()).unwrap_or_default(),
             ),
+            // ADR-067: the sections cache is owned per-session — each clone
+            // starts empty and receives its own writes. Sharing it (Arc)
+            // would require an Arc<Mutex<…>> for no benefit, since
+            // `cache_context_usage_sections` always overwrites with the
+            // latest value and the writer is single-threaded per session.
+            last_context_usage_sections: std::sync::Mutex::new(None),
             // ADR-024: share the same Arc with the original — clones observe
             // future compaction writes from the writer thread exactly like
             // the parent does. This matches the comment above that the
