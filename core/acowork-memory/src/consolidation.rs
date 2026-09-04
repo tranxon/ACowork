@@ -369,3 +369,249 @@ impl Default for SchedulerConfig {
         }
     }
 }
+
+// ============================================================================
+// EpisodicDistiller types (ADR-068)
+// ============================================================================
+//
+// Two-axis orthogonalization: LLM writes ONLY to the Episodic layer (with a
+// `knowledge_subtype` classification). The semantic layer (Knowledge /
+// Procedural / Autobiographical nodes) is produced exclusively by the offline
+// `EpisodicDistiller`, driven by these shared types.
+//
+// Design: ADR-068 §3.4, §9.2. All types use `u64` for node IDs (not
+// grafeo_common::NodeId) to keep this crate independent of the storage engine.
+
+/// Autobiographical aspect recognized by the server-side LLM (ADR-068 Step 2a).
+///
+/// A subset of [`AutobioCategory`] — the aspects the distiller may promote
+/// from Episodic evidence. `Identity`/`Capability` remain manifest-bootstrap
+/// only (ADR-068 §2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AutobioAspect {
+    /// Feedback about the agent's capability boundary.
+    Limitation,
+    /// Feedback about the agent's style/behavior (self-preference).
+    Preference,
+    /// Feedback about the agent's relationship with the user.
+    Relationship,
+    /// Significant events in the agent's trajectory.
+    History,
+}
+
+impl AutobioAspect {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AutobioAspect::Limitation => "limitation",
+            AutobioAspect::Preference => "preference",
+            AutobioAspect::Relationship => "relationship",
+            AutobioAspect::History => "history",
+        }
+    }
+}
+
+impl std::str::FromStr for AutobioAspect {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "limitation" => Ok(AutobioAspect::Limitation),
+            "preference" => Ok(AutobioAspect::Preference),
+            "relationship" => Ok(AutobioAspect::Relationship),
+            "history" => Ok(AutobioAspect::History),
+            _ => Err(format!("unknown AutobioAspect: {s}")),
+        }
+    }
+}
+
+/// Autobiographical candidate identified by the server-side LLM during
+/// Step 2a. Never persisted on the Episode — exists only in the distiller's
+/// in-memory extraction results (ADR-068 §3.4.2 design decision 2/3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutobioCandidate {
+    /// Which self-knowledge aspect this episode evidences.
+    pub aspect: AutobioAspect,
+    /// LLM-provided hint key (e.g. "verbose_response").
+    pub key_hint: String,
+}
+
+/// Structured representation extracted by the server-side LLM from an
+/// Episode's content. Exists only in distiller memory (ADR-068 §9.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractedStructure {
+    /// Episode storage node id this structure was extracted from.
+    pub episode_id: u64,
+    /// Structured knowledge (triple / procedure / autobio-only / failure).
+    pub kind: ExtractedKind,
+    /// Autobiographical candidate detected in the same LLM call (independent
+    /// of `kind` — an episode may carry both a triple and agent self-feedback).
+    pub autobio_candidate: Option<AutobioCandidate>,
+}
+
+/// The kind of structure extracted for clustering (ADR-068 §3.4.2, 二次修正版).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtractedKind {
+    /// Triple (used for Fact/Preference/Relation clustering).
+    Triple {
+        subject: String,
+        predicate: String,
+        object: String,
+    },
+    /// Procedural pattern (used for Procedure clustering).
+    Procedure {
+        trigger_condition: String,
+        action_pattern: String,
+    },
+    /// Autobiographical candidate (used when the episode carries no
+    /// knowledge triple but does carry agent self-feedback).
+    AutobioCandidate {
+        aspect: AutobioAspect,
+        key_hint: String,
+    },
+    /// Extraction failed — episode is skipped (deferred to next run).
+    ExtractionFailed { reason: String },
+}
+
+/// What kind of semantic node a promotion produced (audit trail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromotionKind {
+    /// `KnowledgeNode{sub_type=Fact}`
+    Fact,
+    /// `KnowledgeNode{sub_type=Preference}`
+    Preference,
+    /// `KnowledgeNode{sub_type=Relation}`
+    Relation,
+    /// `ProceduralNode`
+    Procedure,
+    /// `AutobiographicalNode{category=Limitation}`
+    AutobioLimitation,
+    /// `AutobiographicalNode{category=Preference}`
+    AutobioPreference,
+    /// `AutobiographicalNode{category=Relationship}`
+    AutobioRelationship,
+    /// `AutobiographicalNode{category=History}`
+    AutobioHistory,
+}
+
+/// Promotion outcome for a candidate cluster (ADR-068 Step 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionDecision {
+    /// Node created and episodes marked consolidated.
+    Promoted,
+    /// Cluster will never be promoted (e.g. LLM judge rejected it).
+    Skipped { reason: String },
+    /// Not enough evidence yet — retry on a future distillation run.
+    Deferred { reason: String },
+}
+
+/// Promotion provenance stamped on promoted semantic nodes (ADR-068 §3.6/§9.3).
+///
+/// Attached to Knowledge/Procedural/Autobiographical nodes created by the
+/// `EpisodicDistiller` (or manifest bootstrap) — the audit trail connecting a
+/// semantic node back to its episodic evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromotionMetadata {
+    /// When the promotion happened.
+    pub promoted_at: DateTime<Utc>,
+    /// Who/what performed the promotion:
+    /// `"episodic_distiller"` | `"manifest_bootstrap"`.
+    pub promoted_by: String,
+    /// Episode node ids that formed the evidence (synonym of the node's
+    /// `source_episode_ids` — duplicated for index-friendly retrieval).
+    pub evidence_episode_ids: Vec<u64>,
+    /// Time span in days between oldest and newest evidence episode.
+    pub evidence_span_days: i64,
+    /// LLM judge confidence [0.0, 1.0].
+    pub llm_judge_confidence: f32,
+    /// LLM judge's explanation of why promotion was warranted.
+    pub llm_judge_reasoning: String,
+}
+
+/// One auditable promotion decision for one candidate cluster (ADR-068 §3.4.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotionEvaluation {
+    /// Episode node ids that form the evidence for this decision.
+    pub source_episode_ids: Vec<u64>,
+    /// Which semantic node kind this cluster targets.
+    pub promoted_kind: PromotionKind,
+    /// Storage id of the created node (None when the provider does not
+    /// return ids from its store methods, or when not promoted).
+    pub promoted_node_id: Option<u64>,
+    /// LLM judge's reasoning (full audit trail).
+    pub llm_reasoning: String,
+    /// LLM judge confidence [0.0, 1.0].
+    pub llm_confidence: f32,
+    /// Evidence strength [0.0, 1.0].
+    pub evidence_score: f32,
+    /// Final outcome.
+    pub decision: PromotionDecision,
+}
+
+/// Configuration for one `EpisodicDistiller` run (ADR-068 §3.4.1).
+#[derive(Debug, Clone)]
+pub struct DistillerConfig {
+    /// Max episodes scanned per distillation run. Default: 100.
+    pub batch_size: usize,
+    /// Embedding cosine threshold for cluster merging (Step 2b).
+    /// Default: 0.85.
+    pub cluster_threshold: f32,
+    /// Max members per cluster (OOM guard). Default: 1000.
+    pub max_cluster_size: usize,
+    /// Min episodes per (predicate) cluster required to promote a Fact.
+    /// Default: 2 (same predicate, different episodes).
+    pub fact_min_evidence: usize,
+    /// Min episodes required to promote a Preference. Default: 3.
+    pub preference_min_evidence: usize,
+    /// Min episodes required to promote a Relation. Default: 2.
+    pub relation_min_evidence: usize,
+    /// Min episodes required to promote a Procedure. Default: 5.
+    pub procedure_min_evidence: usize,
+    /// Min episodes + min span required to promote autobiographical.
+    /// Default: 3.
+    pub autobio_min_evidence: usize,
+    /// Min time span (days) between oldest/newest evidence for autobio
+    /// promotion. Default: 14.
+    pub autobio_min_span_days: i64,
+    /// Min LLM judge confidence for promotion. Default: 0.85.
+    pub promotion_confidence_threshold: f32,
+    /// LLM temperature for promotion decisions. Default: 0.2.
+    pub llm_temperature: f32,
+}
+
+impl Default for DistillerConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 100,
+            cluster_threshold: 0.85,
+            max_cluster_size: 1000,
+            fact_min_evidence: 2,
+            preference_min_evidence: 3,
+            relation_min_evidence: 2,
+            procedure_min_evidence: 5,
+            autobio_min_evidence: 3,
+            autobio_min_span_days: 14,
+            promotion_confidence_threshold: 0.85,
+            llm_temperature: 0.2,
+        }
+    }
+}
+
+/// Result of one distillation run with a full audit trail (ADR-068 §3.4.1).
+#[derive(Debug, Clone, Default)]
+pub struct DistillerResult {
+    /// Episodes scanned in Step 1.
+    pub episodes_scanned: usize,
+    /// Knowledge nodes promoted (Fact).
+    pub facts_promoted: usize,
+    /// Knowledge nodes promoted (Preference).
+    pub preferences_promoted: usize,
+    /// Knowledge nodes promoted (Relation).
+    pub relations_promoted: usize,
+    /// Procedural nodes promoted.
+    pub procedures_promoted: usize,
+    /// Autobiographical nodes promoted (all aspects combined).
+    pub autobio_promoted: usize,
+    /// Episodes marked `consolidated = true` after promotion.
+    pub episodes_marked_consolidated: usize,
+    /// One entry per candidate cluster evaluated — the audit trail.
+    pub promotion_evaluations: Vec<PromotionEvaluation>,
+}

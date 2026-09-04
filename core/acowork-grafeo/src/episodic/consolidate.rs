@@ -44,6 +44,48 @@ impl GrafeoStore {
         Ok(episodes)
     }
 
+    /// Retrieve unconsolidated episodes, optionally filtered by knowledge
+    /// subtype, ordered by timestamp ascending (ADR-068 Step 1).
+    ///
+    /// When `subtype` is `Some`, only episodes carrying that `knowledge_subtype`
+    /// are returned; `None` returns all unconsolidated episodes regardless of
+    /// classification. The episode node id is preserved so the distillation
+    /// pipeline can mark episodes consolidated after promotion.
+    pub fn get_unconsolidated_episodes_by_subtype(
+        &self,
+        subtype: Option<crate::types::KnowledgeSubType>,
+        limit: usize,
+    ) -> Result<Vec<crate::types::Episode>> {
+        // Clamp to the GQL int64 range — a raw usize::MAX literal is rejected
+        // by the engine with a syntax error.
+        let limit = limit.min(i64::MAX as usize);
+        let session = self.db.session();
+        // Note: GQL ORDER BY / WHERE returns bare Int64 IDs instead of full
+        // node maps in the current grafeo-engine version. Fetch all and
+        // filter/sort in Rust.
+        let gql = format!("MATCH (e:Episodic) RETURN e LIMIT {}", limit);
+        let result = session.execute(&gql)?;
+
+        let mut episodes: Vec<crate::types::Episode> = Vec::new();
+        for row in result.rows() {
+            if let Some(Value::Map(map)) = row.first() {
+                if let Ok(ep) = crate::episodic::value_to_episode(&Value::Map(map.clone())) {
+                    episodes.push(ep);
+                }
+            }
+        }
+        // Filter unconsolidated + subtype, then sort by timestamp ascending.
+        episodes.retain(|ep| {
+            !ep.consolidated
+                && subtype
+                    .as_ref()
+                    .is_none_or(|st| ep.knowledge_subtype == Some(st.clone()))
+        });
+        episodes.sort_by_key(|ep| ep.timestamp);
+        episodes.truncate(limit);
+        Ok(episodes)
+    }
+
     /// Remove old consolidated episodes beyond the retention period.
     ///
     /// Returns the number of deleted episodes.
@@ -104,6 +146,7 @@ mod tests {
             consolidated: false,
             metadata: HashMap::new(),
             importance: 0.5,
+            knowledge_subtype: None,
         }
     }
 

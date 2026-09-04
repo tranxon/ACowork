@@ -13,6 +13,7 @@
 pub mod ambiguous;
 pub mod conflict_llm;
 pub mod distill;
+pub mod distiller;
 pub mod generalization;
 pub mod instant;
 pub mod offline;
@@ -21,6 +22,7 @@ pub mod triple_extraction;
 
 pub use ambiguous::AmbiguousConflict;
 pub use conflict_llm::{ConflictClassification, LlmConflictType, classify_conflict};
+pub use distiller::{DefaultEpisodicDistiller, EpisodicDistiller};
 
 // Types migrated to acowork-memory are re-exported from the submodules.
 // The submodules themselves re-export from acowork_memory::consolidation.

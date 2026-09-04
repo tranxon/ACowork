@@ -171,6 +171,28 @@ impl MemoryProvider for InMemoryProvider {
         Ok(filtered)
     }
 
+    fn get_episodes_by_subtype(
+        &self,
+        subtype: Option<KnowledgeSubType>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Episode)>> {
+        let episodes = self.episodes.read().unwrap();
+        let mut unconsolidated: Vec<(u64, Episode)> = episodes
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                !e.consolidated
+                    && subtype
+                        .as_ref()
+                        .is_none_or(|st| e.knowledge_subtype == Some(st.clone()))
+            })
+            .map(|(idx, e)| (idx as u64 + 1, e.clone()))
+            .collect();
+        unconsolidated.sort_by_key(|(_, e)| e.timestamp);
+        unconsolidated.truncate(limit);
+        Ok(unconsolidated)
+    }
+
     // ── Semantic layer ──────────────────────────────────────────────────
 
     fn store_knowledge(&self, node: &KnowledgeNode) -> Result<()> {

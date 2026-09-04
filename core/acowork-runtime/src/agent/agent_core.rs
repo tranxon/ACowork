@@ -939,6 +939,8 @@ impl AgentCore {
             let node = AutobiographicalNode {
                 id: None, category: AutobioCategory::Identity, key: key.to_string(),
                 value: value.clone(), confidence: 1.0, source_episode_id: None,
+                source_episode_ids: Vec::new(),
+                promotion_metadata: None,
                 embedding: None, status: NodeStatus::Active,
                 created_at: now, updated_at: now,
                 // Bootstrapped from the agent manifest — not a user statement.
@@ -952,6 +954,8 @@ impl AgentCore {
             let node = AutobiographicalNode {
                 id: None, category: AutobioCategory::Capability, key: cap_key.clone(),
                 value: cap_def.description.clone(), confidence: 1.0, source_episode_id: None,
+                source_episode_ids: Vec::new(),
+                promotion_metadata: None,
                 embedding: None, status: NodeStatus::Active,
                 created_at: now, updated_at: now,
                 // Bootstrapped from the agent manifest — not a user statement.

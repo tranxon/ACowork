@@ -136,6 +136,8 @@ mod tests {
             value: value.to_string(),
             confidence: 1.0,
             source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Dormant, // intentionally wrong; store should force Active
             created_at: test_dt(),

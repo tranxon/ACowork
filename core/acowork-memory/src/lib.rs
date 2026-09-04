@@ -41,9 +41,11 @@ pub use manager::{
 
 // Re-exports: consolidation types
 pub use consolidation::{
-    BehaviorPattern, ConflictAction, ConflictResolutionDetail, EmbeddingFn, GeneralizationConfig,
-    GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput, MemoryStoreResult,
-    OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory, SchedulerConfig,
+    AutobioAspect, AutobioCandidate, BehaviorPattern, ConflictAction, ConflictResolutionDetail,
+    DistillerConfig, DistillerResult, EmbeddingFn, ExtractedKind, ExtractedStructure,
+    GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,
+    MemoryStoreResult, OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory,
+    PromotionDecision, PromotionEvaluation, PromotionKind, PromotionMetadata, SchedulerConfig,
     TripleExtractorLlm,
 };
 

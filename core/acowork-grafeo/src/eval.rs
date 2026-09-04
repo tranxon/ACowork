@@ -300,6 +300,8 @@ fn eval_abstraction() -> f32 {
         value: "Test User".to_string(),
         confidence: 0.95,
         source_episode_id: None,
+        source_episode_ids: Vec::new(),
+        promotion_metadata: None,
         embedding: None,
         status: NodeStatus::Active,
         created_at: chrono::Utc::now(),

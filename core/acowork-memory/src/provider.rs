@@ -27,7 +27,8 @@ use crate::consolidation::{
 use crate::quality::MemoryQualityConfig;
 use crate::types::{
     AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult,
+    StoreHealth, StoreStats,
 };
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
@@ -64,6 +65,22 @@ pub trait MemoryProvider: Send + Sync {
     /// If `session_id` is provided, returns episodes for that session ordered by
     /// timestamp descending. Otherwise returns all episodes across all sessions.
     fn get_episodes(&self, session_id: Option<&str>, limit: usize) -> Result<Vec<Episode>>;
+
+    /// Retrieve unconsolidated episodes for offline distillation (ADR-068).
+    ///
+    /// Returns only episodes with `consolidated == false`, optionally filtered
+    /// by `knowledge_subtype`. Each entry carries the episode's storage node id
+    /// (`u64`) alongside the [`Episode`] — the id is required by callers to
+    /// mark episodes consolidated after promotion and to record
+    /// `source_episode_ids` on promoted nodes.
+    ///
+    /// Ordered by timestamp ascending (oldest first) so evidence accumulates
+    /// across runs in a stable order.
+    fn get_episodes_by_subtype(
+        &self,
+        subtype: Option<KnowledgeSubType>,
+        limit: usize,
+    ) -> Result<Vec<(u64, Episode)>>;
 
     // ── Semantic layer ───────────────────────────────────────────────────
 

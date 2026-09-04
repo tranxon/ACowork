@@ -798,6 +798,7 @@ impl MemoryManager {
             consolidated: false,
             metadata,
             importance: 0.7,
+            knowledge_subtype: None,
         };
         provider.store_episode(&ep)?;
 
@@ -1052,6 +1053,8 @@ impl MemoryManager {
                     value,
                     confidence: 0.9,
                     source_episode_id: None,
+                    source_episode_ids: Vec::new(),
+                    promotion_metadata: None,
                     embedding: None,
                     status: NodeStatus::Active,
                     created_at: now,

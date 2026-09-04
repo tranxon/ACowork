@@ -15,8 +15,8 @@ use acowork_memory::consolidation::{
 use acowork_memory::provider::MemoryProvider;
 use acowork_memory::{
     AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    MemoryQualityConfig, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult,
-    StoreHealth, StoreStats,
+    KnowledgeSubType, MemoryQualityConfig, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult,
+    SearchResult, StoreHealth, StoreStats,
 };
 use chrono::{DateTime, Utc};
 
@@ -50,6 +50,12 @@ fn grafeo_to_memory_procedural(node: GrafeoProceduralNode) -> ProceduralNode {
         status: node.status,
         created_at: node.created_at,
         updated_at: node.updated_at,
+        source_episode_ids: node
+            .source_episode_ids
+            .into_iter()
+            .map(|id| id.0)
+            .collect(),
+        promotion_metadata: node.promotion_metadata,
         metadata: node.metadata,
     }
 }
@@ -75,6 +81,13 @@ fn memory_to_grafeo_procedural(node: &ProceduralNode) -> GrafeoProceduralNode {
         status: node.status.clone(),
         created_at: node.created_at,
         updated_at: node.updated_at,
+        source_episode_ids: node
+            .source_episode_ids
+            .iter()
+            .copied()
+            .map(NodeId::new)
+            .collect(),
+        promotion_metadata: node.promotion_metadata.clone(),
         metadata: node.metadata.clone(),
     }
 }
@@ -87,6 +100,12 @@ fn grafeo_to_memory_autobiographical(node: GrafeoAutobiographicalNode) -> Autobi
         value: node.value,
         confidence: node.confidence,
         source_episode_id: node.source_episode_id.map(|id| id.0),
+        source_episode_ids: node
+            .source_episode_ids
+            .into_iter()
+            .map(|id| id.0)
+            .collect(),
+        promotion_metadata: node.promotion_metadata,
         embedding: node.embedding,
         status: node.status,
         created_at: node.created_at,
@@ -104,6 +123,13 @@ fn memory_to_grafeo_autobiographical(node: &AutobiographicalNode) -> GrafeoAutob
         value: node.value.clone(),
         confidence: node.confidence,
         source_episode_id: node.source_episode_id.map(NodeId::new),
+        source_episode_ids: node
+            .source_episode_ids
+            .iter()
+            .copied()
+            .map(NodeId::new)
+            .collect(),
+        promotion_metadata: node.promotion_metadata.clone(),
         embedding: node.embedding.clone(),
         status: node.status.clone(),
         created_at: node.created_at,
@@ -124,6 +150,7 @@ fn grafeo_to_memory_episode(ep: GrafeoEpisode) -> Episode {
         consolidated: ep.consolidated,
         metadata: ep.metadata,
         importance: ep.importance,
+        knowledge_subtype: ep.knowledge_subtype,
     }
 }
 
@@ -139,6 +166,7 @@ fn memory_to_grafeo_episode(ep: &Episode) -> GrafeoEpisode {
         consolidated: ep.consolidated,
         metadata: ep.metadata.clone(),
         importance: ep.importance,
+        knowledge_subtype: ep.knowledge_subtype.clone(),
     }
 }
 
@@ -150,7 +178,14 @@ fn memory_to_grafeo_knowledge(node: &KnowledgeNode) -> GrafeoKnowledgeNode {
         object: node.object.clone(),
         sub_type: node.sub_type.clone(),
         confidence: node.confidence,
-        source_episode_id: None,
+        source_episode_id: node.source_episode_id.map(NodeId::new),
+        source_episode_ids: node
+            .source_episode_ids
+            .iter()
+            .copied()
+            .map(NodeId::new)
+            .collect(),
+        promotion_metadata: node.promotion_metadata.clone(),
         embedding: node.embedding.clone(),
         status: node.status.clone(),
         created_at: node.created_at,
@@ -242,6 +277,23 @@ impl MemoryProvider for GrafeoStore {
             self.list_all_episodes(limit).map_err(err_to_acowork)?
         };
         Ok(grafeo_eps.into_iter().map(grafeo_to_memory_episode).collect())
+    }
+
+    fn get_episodes_by_subtype(
+        &self,
+        subtype: Option<KnowledgeSubType>,
+        limit: usize,
+    ) -> AcoworkResult<Vec<(u64, Episode)>> {
+        let grafeo_eps = self
+            .get_unconsolidated_episodes_by_subtype(subtype, limit)
+            .map_err(err_to_acowork)?;
+        Ok(grafeo_eps
+            .into_iter()
+            .map(|ep| {
+                let id = ep.id.map(|n| n.0).unwrap_or(0);
+                (id, grafeo_to_memory_episode(ep))
+            })
+            .collect())
     }
 
     // ── Semantic layer ───────────────────────────────────────────────────

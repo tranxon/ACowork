@@ -394,6 +394,8 @@ mod tests {
             activation_count: 3,
             source_skill: None,
             learned_from: "user_feedback".to_string(),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Active,
             created_at: chrono::Utc::now(),
@@ -442,6 +444,7 @@ mod tests {
             consolidated: false,
             metadata: std::collections::HashMap::new(),
             importance: 0.5,
+            knowledge_subtype: None,
         };
         store.store_episode(&episode).unwrap();
 
@@ -488,6 +491,8 @@ mod tests {
             confidence: 0.9,
             source_episode_id: None,
             source: "user_statement".to_string(),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Active,
             created_at: chrono::Utc::now(),
@@ -523,6 +528,7 @@ mod tests {
             consolidated: false,
             metadata: std::collections::HashMap::new(),
             importance: 0.5,
+            knowledge_subtype: None,
         };
         store.store_episode(&episode).unwrap();
 

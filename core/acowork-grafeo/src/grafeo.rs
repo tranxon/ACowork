@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;
 
 use crate::types::labels;
@@ -557,6 +557,7 @@ impl MemoryStore for GrafeoStore {
             consolidated: episode.consolidated,
             metadata: episode.metadata.clone(),
             importance: episode.importance,
+            knowledge_subtype: episode.knowledge_subtype.clone(),
         };
         GrafeoStore::store_episode(self, &grafeo_episode)
             .map(|_| ())
@@ -650,6 +651,7 @@ impl MemoryStore for GrafeoStore {
                 consolidated: ep.consolidated,
                 metadata: ep.metadata,
                 importance: ep.importance,
+                knowledge_subtype: ep.knowledge_subtype,
             })
             .collect())
     }
@@ -662,7 +664,14 @@ impl MemoryStore for GrafeoStore {
             object: node.object.clone(),
             sub_type: node.sub_type.clone(),
             confidence: node.confidence,
-            source_episode_id: None,
+            source_episode_id: node.source_episode_id.map(NodeId::new),
+            source_episode_ids: node
+                .source_episode_ids
+                .iter()
+                .copied()
+                .map(NodeId::new)
+                .collect(),
+            promotion_metadata: node.promotion_metadata.clone(),
             embedding: node.embedding.clone(),
             status: node.status.clone(),
             created_at: node.created_at,
@@ -690,6 +699,8 @@ impl MemoryStore for GrafeoStore {
             learned_from: node.learned_from.clone(),
             // Memory contract carries a required Vec; storage layer keeps
             // Option. Empty vector means "no vector" (storage round-trip).
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: if node.embedding.is_empty() {
                 None
             } else {
@@ -715,7 +726,14 @@ impl MemoryStore for GrafeoStore {
             key: node.key.clone(),
             value: node.value.clone(),
             confidence: node.confidence,
-            source_episode_id: None,
+            source_episode_id: node.source_episode_id.map(NodeId::new),
+            source_episode_ids: node
+                .source_episode_ids
+                .iter()
+                .copied()
+                .map(NodeId::new)
+                .collect(),
+            promotion_metadata: node.promotion_metadata.clone(),
             embedding: node.embedding.clone(),
             status: node.status.clone(),
             created_at: node.created_at,

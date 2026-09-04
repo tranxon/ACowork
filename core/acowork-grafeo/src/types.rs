@@ -115,7 +115,9 @@ pub mod edge_types {
 // KnowledgeSubType, NodeStatus, and AutobioCategory are defined in
 // acowork_memory and re-exported here for grafeo-internal use.
 
-pub use acowork_memory::{AutobioCategory, KnowledgeSubType, NodeStatus, PrivacyLevel};
+pub use acowork_memory::{
+    AutobioCategory, KnowledgeSubType, NodeStatus, PrivacyLevel, PromotionMetadata,
+};
 
 // ---------------------------------------------------------------------------
 // Structs
@@ -145,6 +147,10 @@ pub struct Episode {
     /// Importance score assigned by LLM at write time [0.0, 1.0].
     #[serde(default)]
     pub importance: f32,
+    /// Optional knowledge classification (ADR-068). None = pure dialogue
+    /// fragment, never promoted. Mirrors `acowork_memory::Episode`.
+    #[serde(default)]
+    pub knowledge_subtype: Option<KnowledgeSubType>,
 }
 
 /// Default importance score for nodes without an explicit value.
@@ -169,6 +175,14 @@ pub struct KnowledgeNode {
     pub confidence: f32,
     /// Source episode ID (traceability).
     pub source_episode_id: Option<NodeId>,
+    /// Multiple source episode IDs (ADR-068 §3.6/§9.3) — supports promotion
+    /// from N evidence episodes.
+    #[serde(default)]
+    pub source_episode_ids: Vec<NodeId>,
+    /// Promotion provenance (ADR-068 §9.3) — set when the node was created by
+    /// the EpisodicDistiller from episodic evidence.
+    #[serde(default)]
+    pub promotion_metadata: Option<PromotionMetadata>,
     /// Semantic embedding.
     pub embedding: Option<Vec<f32>>,
     /// Lifecycle status.
@@ -221,6 +235,13 @@ pub struct ProceduralNode {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Source episode IDs that evidence this procedure (ADR-068 §3.6).
+    #[serde(default)]
+    pub source_episode_ids: Vec<NodeId>,
+    /// Promotion provenance (ADR-068 §3.6) — set when created by the
+    /// EpisodicDistiller from episodic evidence.
+    #[serde(default)]
+    pub promotion_metadata: Option<PromotionMetadata>,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -248,6 +269,13 @@ pub struct AutobiographicalNode {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Source episode IDs that evidence this self-knowledge (ADR-068 §3.6).
+    #[serde(default)]
+    pub source_episode_ids: Vec<NodeId>,
+    /// Promotion provenance (ADR-068 §3.6) — set when created by the
+    /// EpisodicDistiller from episodic evidence.
+    #[serde(default)]
+    pub promotion_metadata: Option<PromotionMetadata>,
     /// Provenance of this self-knowledge.
     ///
     /// Conventional values: `"user_statement"`, `"important_event"`,
@@ -304,6 +332,47 @@ fn value_to_metadata(value: Option<&Value>) -> Result<HashMap<String, serde_json
             serde_json::from_str(s).map_err(GrafeoError::Serialization)
         }
         _ => Ok(HashMap::new()),
+    }
+}
+
+/// Serialize `source_episode_ids` to a JSON array string Value (ADR-068 §9.3).
+fn source_episode_ids_to_value(ids: &[NodeId]) -> Value {
+    let json: Vec<serde_json::Value> = ids.iter().map(|id| serde_json::json!(id.as_u64())).collect();
+    match serde_json::to_string(&json) {
+        Ok(s) => Value::String(s.into()),
+        Err(_) => Value::Null,
+    }
+}
+
+/// Deserialize `source_episode_ids` from a JSON array string Value.
+fn value_to_source_episode_ids(value: Option<&Value>) -> Vec<NodeId> {
+    match value {
+        Some(Value::String(s)) if !s.is_empty() => {
+            serde_json::from_str::<Vec<u64>>(s)
+                .map(|v| v.into_iter().map(NodeId::new).collect())
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Serialize `PromotionMetadata` to a JSON string Value (ADR-068 §9.3).
+fn promotion_metadata_to_value(meta: &PromotionMetadata) -> Value {
+    match serde_json::to_string(meta) {
+        Ok(s) => Value::String(s.into()),
+        Err(_) => Value::Null,
+    }
+}
+
+/// Deserialize `PromotionMetadata` from a JSON string Value.
+fn value_to_promotion_metadata(value: Option<&Value>) -> Result<Option<PromotionMetadata>> {
+    match value {
+        Some(Value::String(s)) if !s.is_empty() => {
+            serde_json::from_str(s)
+                .map(Some)
+                .map_err(GrafeoError::Serialization)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -399,12 +468,24 @@ impl Episode {
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
         }
+        if let Some(ref subtype) = self.knowledge_subtype {
+            props.push((
+                "knowledge_subtype".to_string(),
+                Value::from(subtype.as_str()),
+            ));
+        }
         props
     }
 
     /// Reconstruct from Grafeo node properties.
     pub fn from_properties(id: NodeId, props: &[(String, Value)]) -> Result<Self> {
         let map = prop_map(props);
+        let knowledge_subtype = map
+            .get("knowledge_subtype")
+            .and_then(|v| v.as_str())
+            .map(str::parse::<KnowledgeSubType>)
+            .transpose()
+            .map_err(|e| GrafeoError::Memory(format!("invalid knowledge_subtype: {e}")))?;
         Ok(Episode {
             id: Some(id),
             session_id: get_string(&map, "session_id")?.to_string(),
@@ -424,6 +505,7 @@ impl Episode {
                 .and_then(|v| v.as_float64())
                 .map(|f| f as f32)
                 .unwrap_or(0.0),
+            knowledge_subtype,
         })
     }
 }
@@ -474,6 +556,18 @@ impl KnowledgeNode {
                 Value::from(id.as_u64() as i64),
             ));
         }
+        if !self.source_episode_ids.is_empty() {
+            props.push((
+                "source_episode_ids".to_string(),
+                source_episode_ids_to_value(&self.source_episode_ids),
+            ));
+        }
+        if let Some(ref meta) = self.promotion_metadata {
+            props.push((
+                "promotion_metadata".to_string(),
+                promotion_metadata_to_value(meta),
+            ));
+        }
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
         }
@@ -491,6 +585,8 @@ impl KnowledgeNode {
             sub_type: get_string(&map, "sub_type")?.parse()?,
             confidence: get_f32(&map, "confidence")?,
             source_episode_id: get_optional_node_id(&map, "source_episode_id"),
+            source_episode_ids: value_to_source_episode_ids(map.get("source_episode_ids").copied()),
+            promotion_metadata: value_to_promotion_metadata(map.get("promotion_metadata").copied())?,
             embedding: value_to_embedding(map.get("embedding").copied()),
             status: get_string(&map, "status")?.parse()?,
             created_at: timestamp_to_dt(
@@ -576,6 +672,18 @@ impl ProceduralNode {
         if let Some(ref skill) = self.source_skill {
             props.push(("source_skill".to_string(), Value::from(skill.as_str())));
         }
+        if !self.source_episode_ids.is_empty() {
+            props.push((
+                "source_episode_ids".to_string(),
+                source_episode_ids_to_value(&self.source_episode_ids),
+            ));
+        }
+        if let Some(ref meta) = self.promotion_metadata {
+            props.push((
+                "promotion_metadata".to_string(),
+                promotion_metadata_to_value(meta),
+            ));
+        }
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
         }
@@ -609,6 +717,8 @@ impl ProceduralNode {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: value_to_embedding(map.get("embedding").copied()),
             status: get_string(&map, "status")?.parse()?,
             created_at: timestamp_to_dt(
@@ -661,6 +771,18 @@ impl AutobiographicalNode {
                 Value::from(id.as_u64() as i64),
             ));
         }
+        if !self.source_episode_ids.is_empty() {
+            props.push((
+                "source_episode_ids".to_string(),
+                source_episode_ids_to_value(&self.source_episode_ids),
+            ));
+        }
+        if let Some(ref meta) = self.promotion_metadata {
+            props.push((
+                "promotion_metadata".to_string(),
+                promotion_metadata_to_value(meta),
+            ));
+        }
         if let Some(ref emb) = self.embedding {
             props.push(("embedding".to_string(), embedding_to_value(Some(emb))));
         }
@@ -689,6 +811,8 @@ impl AutobiographicalNode {
                     .and_then(|v| v.as_timestamp())
                     .ok_or_else(|| GrafeoError::Memory("missing updated_at".to_string()))?,
             )?,
+            source_episode_ids: value_to_source_episode_ids(map.get("source_episode_ids").copied()),
+            promotion_metadata: value_to_promotion_metadata(map.get("promotion_metadata").copied())?,
             // Old stores may lack the `source` property — default to
             // "user_statement" for backward compatibility (G7).
             source: map
@@ -740,6 +864,7 @@ mod tests {
                 m
             },
             importance: 0.5,
+            knowledge_subtype: None,
         };
 
         let props = original.to_properties();
@@ -769,6 +894,7 @@ mod tests {
             consolidated: true,
             metadata: HashMap::new(),
             importance: 0.8,
+            knowledge_subtype: None,
         };
 
         let props = original.to_properties();
@@ -791,6 +917,8 @@ mod tests {
             sub_type: KnowledgeSubType::Fact,
             confidence: 0.95,
             source_episode_id: Some(NodeId::new(10)),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: Some(test_embedding()),
             status: NodeStatus::Active,
             created_at: test_dt(),
@@ -822,6 +950,8 @@ mod tests {
             sub_type: KnowledgeSubType::Preference,
             confidence: 0.8,
             source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Pending,
             created_at: test_dt(),
@@ -857,6 +987,8 @@ mod tests {
             activation_count: 0,
             source_skill: None,
             learned_from: "unknown".to_string(),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: Some(test_embedding()),
             status: NodeStatus::Active,
             created_at: test_dt(),
@@ -889,6 +1021,8 @@ mod tests {
             activation_count: 0,
             source_skill: None,
             learned_from: "unknown".to_string(),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Dormant,
             created_at: test_dt(),
@@ -916,6 +1050,8 @@ mod tests {
             value: "WeatherBot".to_string(),
             confidence: 1.0,
             source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: Some(test_embedding()),
             status: NodeStatus::Active,
             created_at: test_dt(),
@@ -945,6 +1081,8 @@ mod tests {
             value: "learned weekly-report".to_string(),
             confidence: 0.9,
             source_episode_id: Some(NodeId::new(20)),
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Active,
             created_at: test_dt(),
@@ -973,6 +1111,8 @@ mod tests {
             value: "concise".to_string(),
             confidence: 0.9,
             source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
             embedding: None,
             status: NodeStatus::Active,
             created_at: test_dt(),

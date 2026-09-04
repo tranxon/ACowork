@@ -116,6 +116,7 @@ mod tests {
             consolidated: false,
             metadata: HashMap::new(),
             importance: 0.5,
+            knowledge_subtype: None,
         }
     }
 

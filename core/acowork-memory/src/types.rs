@@ -13,6 +13,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::consolidation::PromotionMetadata;
+
 // Re-export from acowork-core
 pub use acowork_core::memory::traits::{MemoryNode, PrivacyLevel};
 
@@ -408,6 +410,12 @@ pub struct Episode {
     /// Importance score assigned by LLM at write time [0.0, 1.0].
     #[serde(default = "default_importance")]
     pub importance: f32,
+    /// Optional knowledge classification set by LLM when writing through the
+    /// `memory_store` tool (ADR-068). None = pure dialogue fragment (never
+    /// promoted). Some = "this episode carries an observation that may be
+    /// promoted to the semantic layer by EpisodicDistiller".
+    #[serde(default)]
+    pub knowledge_subtype: Option<KnowledgeSubType>,
 }
 
 fn default_importance() -> f32 {
@@ -429,6 +437,15 @@ pub struct KnowledgeNode {
     pub confidence: f32,
     /// Source episode ID (traceability).
     pub source_episode_id: Option<u64>,
+    /// Multiple source episode IDs (ADR-068 §3.6/§9.3) — supports promotion
+    /// from N evidence episodes. `source_episode_id` remains for backward
+    /// compatibility (single-value legacy field).
+    #[serde(default)]
+    pub source_episode_ids: Vec<u64>,
+    /// Promotion provenance (ADR-068 §9.3) — set when the node was created by
+    /// the EpisodicDistiller from episodic evidence.
+    #[serde(default)]
+    pub promotion_metadata: Option<PromotionMetadata>,
     /// Semantic embedding.
     pub embedding: Option<Vec<f32>>,
     /// Lifecycle status.
@@ -489,6 +506,13 @@ pub struct ProceduralNode {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Source episode IDs that evidence this procedure (ADR-068 §3.6).
+    #[serde(default)]
+    pub source_episode_ids: Vec<u64>,
+    /// Promotion provenance (ADR-068 §3.6) — set when created by the
+    /// EpisodicDistiller from episodic evidence.
+    #[serde(default)]
+    pub promotion_metadata: Option<PromotionMetadata>,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -521,7 +545,15 @@ pub struct AutobiographicalNode {
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
+    /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Source episode IDs that evidence this self-knowledge (ADR-068 §3.6).
+    #[serde(default)]
+    pub source_episode_ids: Vec<u64>,
+    /// Promotion provenance (ADR-068 §3.6) — set when created by the
+    /// EpisodicDistiller from episodic evidence.
+    #[serde(default)]
+    pub promotion_metadata: Option<PromotionMetadata>,
     /// Provenance of this self-knowledge.
     ///
     /// Conventional values: `"user_statement"`, `"important_event"`,
