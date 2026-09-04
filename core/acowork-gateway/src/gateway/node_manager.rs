@@ -53,12 +53,10 @@ const REUSE_WINDOW: Duration = Duration::from_millis(500);
 const RESPAWN_DELAY: Duration = Duration::from_secs(60);
 
 /// Grace period after SIGTERM before escalating to SIGKILL.
-
 ///
 /// Only referenced in the `#[cfg(unix)]` branch of `kill_process_group`;
 /// Windows uses `taskkill /F` (no grace). Gated to unix so non-unix
 /// targets don't even compile the constant.
-
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(5);
 

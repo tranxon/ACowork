@@ -223,9 +223,10 @@ async fn spawn_pm(cfg: &PmSupervisorConfig) -> Result<(tokio::process::Child, u3
 
     // On Unix, create a new process group so a Gateway shutdown does not
     // cascade a SIGHUP to PM (PM self-exits via the ADR-018 watchdog).
+    // `tokio::process::Command` exposes `process_group` directly, so the
+    // `std::os::unix::process::CommandExt` trait import is unnecessary here.
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
 
