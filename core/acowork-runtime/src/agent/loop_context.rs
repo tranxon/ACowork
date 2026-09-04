@@ -1298,9 +1298,7 @@ impl AgentLoop {
         // LLM-perspective tool dump: AFTER builtin + MCP merge.
         // This is the most authoritative view of what the LLM actually sees
         // in the next provider call. tool_names is the literal contents of
-        // the tools array sent on the wire -- filter it for any platform
-        // tool like context_abandon / context_retrieve to verify hot reload
-        // of the compression switch (ADR-052).
+        // the tools array sent on the wire.
         if let Some(ref tools) = chat_request.tools {
             let tool_names: Vec<String> = tools
                 .iter()

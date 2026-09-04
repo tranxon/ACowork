@@ -50,22 +50,20 @@ name = "memory_store"
 
 # --- Filesystem ---
 [[tools]]
-name = "file_read"
-
-[[tools]]
-name = "file_write"
-
-[[tools]]
 name = "file_edit"
 
 [[tools]]
 name = "doc_reader"
 
+# --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
-name = "glob_search"
+name = "bash"        # Windows (Git Bash installed)
 
 [[tools]]
-name = "content_search"
+name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+
+[[tools]]
+name = "shell"       # Linux / macOS
 
 # --- Network ---
 [[tools]]
@@ -87,18 +85,6 @@ name = "ask_user_question"
 
 [[tools]]
 name = "todo_write"
-
-# --- Context compression (ADR-052) ---
-# Boot-only opt-in: `tool_compression_enabled` in agent_config.json
-# also gates whether these tools are registered at runtime (default
-# `true` in `agent_init.rs`). Listing them here exposes them to the
-# LLM; toggling `tool_compression_enabled=false` then unregisters
-# them entirely (no-op for the LLM either way).
-[[tools]]
-name = "context_abandon"
-
-[[tools]]
-name = "context_retrieve"
 
 [llm]
 temperature = 0.3

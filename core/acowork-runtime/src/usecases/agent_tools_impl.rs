@@ -181,12 +181,7 @@ impl AgentToolsService for RuntimeAgentToolsService {
             .ok()
             .flatten()
             .map(|c| c.tools)
-            .unwrap_or_default()
-            // ADR-052: filter platform-protected tools out of the API
-            // response (defensive — see get_merged_tools for rationale).
-            .into_iter()
-            .filter(|e| !crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&e.name.as_str()))
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         BuiltinToolsResponse {
             agent_id: agent_id.to_string(),
             tools,
@@ -252,17 +247,7 @@ impl AgentToolsService for RuntimeAgentToolsService {
             .ok()
             .flatten()
             .map(|t| t.tools)
-            .unwrap_or_default()
-            // ADR-052: filter platform-protected tools out of the API
-            // response. The persistence layer (merge_tools_config /
-            // init_tools_config_from_manifest / apply_builtin_tools_patch)
-            // already strips these names from `agent_tools.json`, so
-            // this filter is defensive — it covers legacy files written
-            // before the filtering was added and any future code path
-            // that might bypass the merge functions.
-            .into_iter()
-            .filter(|e| !crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&e.name.as_str()))
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
 
         let mcp_servers = agent_config::load_agent_mcp_config(&self.work_dir)
             .ok()

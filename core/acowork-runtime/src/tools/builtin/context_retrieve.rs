@@ -1,3 +1,15 @@
+//! Tool compression (ADR-052) was retired. The `context_retrieve` /
+//! `context_abandon` tools are no longer registered with the LLM;
+//! their source files survive in this module as dead code for future
+//! reference. See `context_compression.rs` for the contract that used
+//! to bind the two sides.
+//!
+//! `context_retrieve` (originally an LLM-initiated "re-expand
+//! compressed tool result" tool) is kept here so the in-place restore
+//! mechanics can be revisited if a future ADR re-introduces manual
+//! tool-result recall.
+#![allow(dead_code)]
+
 //! ADR-052 context_retrieve tool - retrieve original tool result by tool_call_id.
 //!
 //! When a Tool message is compressed (replaced with a placeholder by

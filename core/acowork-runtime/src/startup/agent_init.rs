@@ -801,10 +801,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     ));
     let mcp_notifier = Arc::new(crate::mcp_notify::McpConfigNotifier::default());
 
-    // ADR-061 §10.2: only the retrieve queue survives — `context_retrieve`
-    // is always registered, `context_abandon` (and its queue) is deleted.
-    let retrieve_queue = crate::agent::context_compression::new_retrieve_queue();
-
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(
         &workspace_resolver,
@@ -817,7 +813,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         config.work_dir.clone(),
         lsp_relay_endpoint,
         mqtt_client_slot.clone(),
-        retrieve_queue.clone(),
     ) {
         registry.register(tool);
     }
@@ -1199,7 +1194,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         search_key_vault,
         search_provider_list,
         session_configs,
-        retrieve_queue,
     })
 }
 

@@ -20,8 +20,8 @@
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
-//! | context_retrieve | context:read — retrieve original tool result content |
-//! | context_abandon | context:write - replace tool result with placeholder |
+//! | context_retrieve | context:read — RETIRED (dead code, not registered) |
+//! | context_abandon | context:write - RETIRED (dead code, not registered) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 
 pub mod ask_user_question;
@@ -47,6 +47,26 @@ pub mod todo_write;
 pub mod web_fetch;
 pub mod web_search;
 
+/// Names of builtin tools that may be **conditionally registered** —
+/// present in the codebase and fully valid, but only constructed when a
+/// runtime dependency is available at the moment of registration:
+///
+/// - `codebase` — requires the node LSP relay (arrives asynchronously
+///   over MQTT after boot; see `SessionManager::handle_lsp_relay_update`)
+/// - `web_search` — requires at least one configured search provider
+/// - `rag_query` — requires a manifest `[[tools]]` entry of `type = "rag"`
+///
+/// At startup (`agent_init.rs`) these tools can be absent from the code
+/// registry even though the user has a persisted entry for them in
+/// `agent_tools.json`. The persistence layer
+/// ([`crate::agent_config::merge_tools_config`]) must NOT treat such an
+/// entry as "removed by a Runtime upgrade" and drop it — dropping (and
+/// then writing the merge result back to disk) would erase the user's
+/// enable/disable preference. This constant is the single source of
+/// truth for that distinction.
+pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] =
+    &["codebase", "web_search", "rag_query"];
+
 // ── Shared limits ──────────────────────────────────────────────────────
 
 /// Maximum number of lines any single fragment-reader call may return.
@@ -68,41 +88,11 @@ use acowork_core::tools::traits::Tool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::agent::context_compression::RetrieveQueue;
 use crate::mcp_notify::McpNotifyRef;
 use crate::tools::workspace_resolver::SharedResolver;
 use search_backends::WebSearchEngine;
 
-/// Construct the `context_retrieve` platform-protected tool.
-///
-/// ADR-061 §10.2: `context_abandon` is no longer registered — LLM
-/// autonomous tool compression is closed, and its in-place replacement
-/// would invalidate the ADR-060 Block B prompt cache. `context_retrieve`
-/// stays as the manual recall channel for compressed tool results.
-///
-/// Centralizing the construction here means there is exactly one place
-/// to extend when a new platform tool is added (a single
-/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`] match-arm
-/// edit, plus one push below — same pattern as `all_builtin_tools`).
-///
-/// Reused by:
-/// - [`crate::tools::builtin::all_builtin_tools`] at startup (always
-///   registered — the `tool_compression_enabled` gate is removed)
-///
-/// The tool's internal queue (`retrieve_queue`) is an `Arc<Mutex<...>>`
-/// clone of the per-`AgentCore` shared queue; the hot-reload path passes
-/// the same `Arc` clone so any agent-loop side that drains the queue
-/// keeps seeing the same backing storage regardless of how many times
-/// the registry rebuilds.
-pub fn build_platform_protected_tools(
-    agent_home: &str,
-    retrieve_queue: RetrieveQueue,
-) -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(context_retrieve::ContextRetrieveTool::new(
-        agent_home,
-        retrieve_queue,
-    ))]
-}
+
 
 /// Create the standard built-in tools (without RAG).
 ///
@@ -124,9 +114,6 @@ pub fn build_platform_protected_tools(
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
 ///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
 ///   not per-project. No fallback: must always be set explicitly.
-/// * `retrieve_queue` - Shared queue for context_retrieve tool (ADR-052). Injected into the tool
-///   and the agent loop. ADR-061 §10.2: `context_retrieve` is **always** registered (manual recall
-///   channel); the `tool_compression_enabled` gate and `context_abandon` are removed.
 ///
 /// `#[allow(clippy::too_many_arguments)]` follows the project convention
 /// for thin pass-through facades (cf. `AgentCore::new_with_observer`): the
@@ -143,7 +130,6 @@ pub fn all_builtin_tools(
     agent_home: String,
     lsp_relay_endpoint: Option<String>,
     mqtt_slot: crate::http::server::SharedMqttClientSlot,
-    retrieve_queue: RetrieveQueue,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -198,13 +184,6 @@ pub fn all_builtin_tools(
         )),
     ];
 
-    // ADR-061 §10.2: `context_retrieve` is ALWAYS registered (manual
-    // recall channel after compression). `context_abandon` is NOT
-    // registered — LLM autonomous tool compression is closed; the
-    // deprecated tool implementation stays in the crate for backward
-    // compatibility but is never exposed to the LLM.
-    tools.extend(build_platform_protected_tools(&agent_home, retrieve_queue));
-
     // Only register web_search when at least one search provider is configured
     // (checked from the shared provider list). Without providers, the tool
     // always fails with "Provider not configured", wasting LLM inference
@@ -245,8 +224,7 @@ mod tests {
 
     /// Build a minimal set of dependencies for `all_builtin_tools` testing.
     /// Most dependencies are empty/default so the test focuses on the
-    /// platform-tool registration (ADR-061 §10.2: retrieve always,
-    /// abandon never).
+    /// builtin tool registration surface.
     ///
     /// `#[allow(clippy::type_complexity)]`: the returned tuple mirrors
     /// `all_builtin_tools`'s assembly dependencies one-to-one; naming a
@@ -263,7 +241,6 @@ mod tests {
         String,         // agent_home
         Option<String>, // lsp_relay_endpoint
         crate::http::server::SharedMqttClientSlot,
-        RetrieveQueue,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
@@ -277,8 +254,6 @@ mod tests {
         let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
         let mqtt_slot: crate::http::server::SharedMqttClientSlot =
             Arc::new(tokio::sync::Mutex::new(None));
-        let retrieve_queue: RetrieveQueue =
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
         (
             resolver,
@@ -291,7 +266,6 @@ mod tests {
             "/tmp/test-agent".to_string(),
             None,
             mqtt_slot,
-            retrieve_queue,
         )
     }
 
@@ -303,11 +277,11 @@ mod tests {
     }
 
     #[test]
-    fn test_all_builtin_tools_registers_context_retrieve_only() {
-        // ADR-061 §10.2: context_retrieve is ALWAYS registered (manual
-        // recall channel); context_abandon is NEVER registered (LLM
-        // autonomous compression closed). The tool_compression_enabled
-        // gate is removed.
+    fn test_all_builtin_tools_does_not_register_compression_tools() {
+        // Tool compression (context_retrieve / context_abandon) has been
+        // retired from the LLM-facing tool surface. Neither tool should
+        // appear in the registered builtin tools list; their source
+        // files survive as dead code for future reference.
         let (
             resolver,
             agent_id,
@@ -319,23 +293,21 @@ mod tests {
             agent_home,
             lsp,
             mqtt,
-            retrieve_q,
         ) = make_test_deps();
 
         let tools = all_builtin_tools(
             &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
-            retrieve_q,
         );
 
         let names = tool_names(&tools);
         assert!(
-            names.contains(&"context_retrieve".to_string()),
-            "context_retrieve should always be registered; got: {:?}",
+            !names.contains(&"context_retrieve".to_string()),
+            "context_retrieve must NOT be registered (compression retired); got: {:?}",
             names
         );
         assert!(
             !names.contains(&"context_abandon".to_string()),
-            "context_abandon must NOT be registered (ADR-061 §10.2); got: {:?}",
+            "context_abandon must NOT be registered (compression retired); got: {:?}",
             names
         );
     }
@@ -355,12 +327,10 @@ mod tests {
             agent_home,
             lsp,
             mqtt,
-            retrieve_q,
         ) = make_test_deps();
 
         let tools = all_builtin_tools(
             &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
-            retrieve_q,
         );
 
         let names = tool_names(&tools);

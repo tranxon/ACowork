@@ -636,7 +636,7 @@ async fn mqtt_only_loop(
 /// - `CompressAction` → `SessionMessage::CompressAction(CompressionAction)`
 ///   with explicit CompressType i32 → CompressionAction mapping
 ///   (1=SUMMARY → CompressSummary; ADR-052 removed TOOL_RESULTS because
-///   tool-result compression is now LLM-initiated via `context_abandon`)
+///   tool-result compression is retired)
 /// - `SystemNotification` → legacy fallback (Phase 7: no longer produced by control path)
 async fn dispatch_inbound(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,

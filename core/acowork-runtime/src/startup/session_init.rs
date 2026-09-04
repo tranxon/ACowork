@@ -678,12 +678,6 @@ pub(crate) async fn phase_b_init_session(
             }
         }
 
-        // ADR-061 §10.2: inject the shared retrieve queue from the boot
-        // context into AgentCore — the same instance passed to the
-        // `context_retrieve` tool in agent_init.rs. The AgentLoop reads
-        // it from core and drains it each iteration.
-        c.retrieve_queue = ctx.retrieve_queue.clone();
-
         // ADR-046: Publish attachment blob store to the HTTP server's
         // late-bind slot. The same `Arc` instance is shared with
         // `AgentCore::attachment_service` (set above), so any upload

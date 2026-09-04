@@ -296,12 +296,6 @@ pub struct AgentCore {
     /// call made by this agent process (Anthropic
     /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
     pub(crate) agent_total_cache_write_tokens: AtomicU64,
-
-    /// ADR-061 §10.2: Shared queue for the `context_retrieve` tool (the
-    /// manual recall channel after compaction). Created in agent_init
-    /// and passed to the tool at registration time.
-    pub(crate) retrieve_queue:
-        crate::agent::context_compression::RetrieveQueue,
 }
 
 impl AgentCore {
@@ -476,10 +470,6 @@ impl AgentCore {
             // ADR-066: cache counters follow the same lifecycle.
             agent_total_cache_read_tokens: AtomicU64::new(0),
             agent_total_cache_write_tokens: AtomicU64::new(0),
-
-            retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
         }
     }
 
@@ -503,8 +493,8 @@ impl AgentCore {
     /// - Agent startup (after `builtin_tools` is initialized with flags)
     /// - MCP connect/disconnect
     /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
-    ///   (ADR-061 §10.2: `context_retrieve` is always registered, so
-    ///   there is no platform-tool hot-reload path anymore)
+    ///   (tool-result compression is retired, so there is no
+    ///   platform-tool hot-reload path anymore)
     pub(crate) fn rebuild_all_tools(&mut self) {
         let mut merged: Vec<Arc<dyn Tool>> = self
             .builtin_tools
@@ -528,12 +518,6 @@ impl AgentCore {
     /// [`crate::agent_config::apply_builtin_tools_patch`] with an empty
     /// patch, so the persistence layer and the in-memory layer can
     /// never diverge):
-    /// - Platform-protected names ([`PLATFORM_PROTECTED_TOOLS`]) are
-    ///   filtered out of the resolution - their enabled flag is
-    ///   platform-managed (registered unconditionally by
-    ///   [`crate::tools::builtin::all_builtin_tools`], ADR-061 §10.2),
-    ///   never user-toggleable. Their registered slots keep the current
-    ///   flag.
     /// - Names not currently registered are dropped (defensive against
     ///   drift between the persisted file and the code registry).
     /// - Only the `enabled` flag is rewritten; the wrapped `tool` impl
@@ -866,10 +850,6 @@ impl AgentCore {
             );
             self.compression_ratio_threshold = Some(threshold);
         }
-
-        // ADR-061 §10.2: the `tool_compression_enabled` toggle and its
-        // platform-tools hot-reload are deleted; `context_retrieve` is
-        // always registered and `context_abandon` is never registered.
     }
 
     pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
@@ -1401,8 +1381,6 @@ impl Clone for AgentCore {
             agent_total_cache_write_tokens: AtomicU64::new(
                 self.agent_total_cache_write_tokens.load(Ordering::Acquire),
             ),
-
-            retrieve_queue: self.retrieve_queue.clone(),
         }
     }
 }
@@ -1413,6 +1391,43 @@ mod tests {
     use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
     use acowork_core::providers::mock::MockProvider;
     use crate::config::RuntimeConfig;
+
+    /// Add a single dummy tool entry with the given name + initial
+    /// enabled flag. Used by tests that need at least one entry in
+    /// `builtin_tools` to exercise the enabled-rewrite path.
+    fn seed_one_tool(core: &mut AgentCore, name: &str, enabled: bool) {
+        struct DummyTool(String);
+        #[async_trait::async_trait]
+        impl acowork_core::tools::traits::Tool for DummyTool {
+            fn name(&self) -> String {
+                self.0.clone()
+            }
+            fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+                acowork_core::tools::traits::ToolSpec {
+                    name: self.0.clone(),
+                    description: "test".to_string(),
+                    input_schema: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+                Ok(acowork_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: String::new(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+        core.builtin_tools
+            .push(BuiltinToolEntry::with_resolved_enabled(
+                enabled,
+                Arc::new(DummyTool(name.to_string())),
+            ));
+    }
 
     /// Build a minimal AgentCore for testing context_trim_budget.
     fn make_core(
@@ -1772,99 +1787,6 @@ mod tests {
 
     use crate::agent_config::AgentToolEntry;
 
-    /// Pre-populate `builtin_tools` with a small mixed set so the
-    /// enabled-rewrite path has both platform and non-platform entries
-    /// to work with. Mirrors a real boot where `context_retrieve` is
-    /// always registered (ADR-061 §10.2).
-    fn seed_with_mixed_builtins(core: &mut AgentCore) {
-        use crate::tools::builtin::build_platform_protected_tools;
-        // Add a non-platform tool for the rewrite to land on.
-        struct DummyTool;
-        #[async_trait::async_trait]
-        impl acowork_core::tools::traits::Tool for DummyTool {
-            fn name(&self) -> String {
-                "shell".to_string()
-            }
-            fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
-                acowork_core::tools::traits::ToolSpec {
-                    name: "shell".to_string(),
-                    description: "test".to_string(),
-                    input_schema: serde_json::json!({}),
-                }
-            }
-            async fn execute(
-                &self,
-                _params: serde_json::Value,
-                _work_dir: Option<&str>,
-            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
-                Ok(acowork_core::tools::traits::ToolResult {
-                    ok: true,
-                    content: String::new(),
-                    error: None,
-                    token_usage: None,
-                })
-            }
-        }
-        core.builtin_tools.push(BuiltinToolEntry::with_resolved_enabled(
-            true,
-            Arc::new(DummyTool),
-        ));
-        for tool in build_platform_protected_tools(
-            &core.config.work_dir,
-            core.retrieve_queue.clone(),
-        ) {
-            core.builtin_tools
-                .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
-        }
-        core.rebuild_all_tools();
-    }
-
-    #[test]
-    fn apply_builtin_enabled_entries_filters_platform_tools_out_of_resolution() {
-        // The shared policy MUST delegate to
-        // `agent_config::apply_builtin_tools_patch` with an empty patch,
-        // so platform-protected names are stripped from the resolution
-        // map regardless of what the incoming `entries` say. If this
-        // ever changes, the platform-protected UX invariant is broken.
-        let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_mixed_builtins(&mut core);
-
-        // Hostile patch tries to disable both platform tools.
-        core.apply_builtin_enabled_entries(&[
-            AgentToolEntry::new("shell", false),
-            AgentToolEntry::new("context_retrieve", false),
-            AgentToolEntry::new("context_abandon", false),
-        ]);
-
-        // Non-platform tool follows the patch verbatim.
-        let shell = core
-            .builtin_tools
-            .iter()
-            .find(|e| e.name() == "shell")
-            .expect("shell must still be registered");
-        assert!(
-            !shell.enabled,
-            "non-platform tool must follow the patch"
-        );
-
-        // Platform tools are filtered OUT of the resolution map, so
-        // their registered slots keep whatever enabled flag they had
-        // before the call (here, force-enabled by `with_resolved_enabled`
-        // -> true). Only names actually registered are checked:
-        // `context_abandon` is no longer registered at all (ADR-061
-        // §10.2), so it is simply absent rather than disabled.
-        for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let Some(entry) = core.builtin_tools.iter().find(|e| e.name() == *name)
-            else {
-                continue;
-            };
-            assert!(
-                entry.enabled,
-                "{name} must keep its prior enabled flag (platform tools are filter-out, not force-disable)"
-            );
-        }
-    }
-
     #[test]
     fn apply_builtin_enabled_entries_drops_unknown_names() {
         // Defensive: an `entries` payload that mentions a tool name not
@@ -1872,7 +1794,7 @@ mod tests {
         // panic and not auto-register it (that would let a hostile
         // `agent_tools.json` smuggle arbitrary tools into the registry).
         let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_mixed_builtins(&mut core);
+        seed_one_tool(&mut core, "shell", true);
         let before = core.builtin_tools.len();
 
         core.apply_builtin_enabled_entries(&[
@@ -1893,7 +1815,7 @@ mod tests {
         // wrapped `tool` impl (security decorators applied during
         // `ToolRegistry::activate`) must survive untouched.
         let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_mixed_builtins(&mut core);
+        seed_one_tool(&mut core, "shell", true);
 
         let shell_before: Arc<dyn acowork_core::tools::traits::Tool> = core
             .builtin_tools
