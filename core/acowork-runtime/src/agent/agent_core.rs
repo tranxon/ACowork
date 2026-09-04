@@ -201,24 +201,18 @@ pub struct AgentCore {
     /// `{user_message}` placeholders.
     pub(crate) title_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
-    /// Override for grafeo's `EXTRACTION_SYSTEM_PROMPT`
-    /// (`prompts/extraction.md`). Note: grafeo holds a process-level
-    /// singleton; L2 reload for this field is NOT in ADR-063 scope —
-    /// PUT writes to disk + updates this field, but the live grafeo
-    /// cache only refreshes after Runtime restart. See ADR-063 §6.1.
-    pub(crate) extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
-    /// Override for grafeo's `CONFLICT_CLASSIFICATION_PROMPT`
-    /// (`prompts/conflict-classification.md`). Same reload caveat as
-    /// `extraction_prompt`.
-    pub(crate) conflict_classification_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
-    /// Override for grafeo's `GENERALIZATION_PROMPT`
-    /// (`prompts/generalization.md`). Same reload caveat.
-    pub(crate) generalization_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
     /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
     /// (`prompts/abstention.md`). Same reload caveat.
+    ///
+    /// **ADR-068 note**: Three grafeo-specific override fields
+    /// (`extraction_prompt`, `conflict_classification_prompt`,
+    /// `generalization_prompt`) were removed in this revision because
+    /// ADR-068 rewrites the LLM→memory boundary — LLM writes only
+    /// Episode nodes via `memory_store`; grafeo's distillation is
+    /// driven by the offline `EpisodicDistiller` pipeline (which
+    /// owns its own internal prompts and constants). Grafeo-internal
+    /// prompt constants remain in `acowork-grafeo` for any future
+    /// intra-crate caller.
     pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -348,28 +342,6 @@ impl AgentCore {
         self.title_prompt.read().unwrap().clone()
     }
 
-    /// Override accessor — `prompts/extraction.md` (grafeo-level, **deferred
-    /// plumbing**, see ADR-063 §6.1). Loaded into the struct, PUT-writable
-    /// via HTTP, but the live grafeo singleton does not yet consult it.
-    pub fn extraction_prompt(&self) -> Option<String> {
-        self.extraction_prompt.read().unwrap().clone()
-    }
-
-    /// Override accessor — `prompts/conflict-classification.md` (grafeo,
-    /// deferred). See ADR-063 §6.1.
-    pub fn conflict_classification_prompt(&self) -> Option<String> {
-        self.conflict_classification_prompt
-            .read()
-            .unwrap()
-            .clone()
-    }
-
-    /// Override accessor — `prompts/generalization.md` (grafeo, deferred).
-    /// See ADR-063 §6.1.
-    pub fn generalization_prompt(&self) -> Option<String> {
-        self.generalization_prompt.read().unwrap().clone()
-    }
-
     /// Override accessor — `prompts/abstention.md` (memory, deferred).
     /// See ADR-063 §6.1.
     pub fn abstention_prompt(&self) -> Option<String> {
@@ -441,9 +413,6 @@ impl AgentCore {
             search_prompt: Arc::new(std::sync::RwLock::new(None)),
             compact_template: Arc::new(std::sync::RwLock::new(None)),
             title_prompt: Arc::new(std::sync::RwLock::new(None)),
-            extraction_prompt: Arc::new(std::sync::RwLock::new(None)),
-            conflict_classification_prompt: Arc::new(std::sync::RwLock::new(None)),
-            generalization_prompt: Arc::new(std::sync::RwLock::new(None)),
             abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
@@ -1352,11 +1321,6 @@ impl Clone for AgentCore {
             search_prompt: Arc::clone(&self.search_prompt),
             compact_template: Arc::clone(&self.compact_template),
             title_prompt: Arc::clone(&self.title_prompt),
-            extraction_prompt: Arc::clone(&self.extraction_prompt),
-            conflict_classification_prompt: Arc::clone(
-                &self.conflict_classification_prompt,
-            ),
-            generalization_prompt: Arc::clone(&self.generalization_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
@@ -2268,12 +2232,6 @@ mod tests {
         assert!(core.compaction_prompt().is_none(), "compaction_prompt must default to None");
         assert!(core.search_prompt().is_none(), "search_prompt must default to None");
         assert!(core.title_prompt().is_none(), "title_prompt must default to None");
-        assert!(core.extraction_prompt().is_none(), "extraction_prompt must default to None");
-        assert!(
-            core.conflict_classification_prompt().is_none(),
-            "conflict_classification_prompt must default to None"
-        );
-        assert!(core.generalization_prompt().is_none(), "generalization_prompt must default to None");
         assert!(core.abstention_prompt().is_none(), "abstention_prompt must default to None");
         assert!(core.compact_template().is_none(), "compact_template must default to None");
     }

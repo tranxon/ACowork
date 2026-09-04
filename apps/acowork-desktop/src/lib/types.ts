@@ -790,7 +790,18 @@ export interface MemoryNodeResponse {
    */
   sub_type?: string;
   content: string;
+  /**
+   * Raw `confidence` property on the node. 0 when the node type has no
+   * such property (e.g. Episodic). Passed through verbatim — never derived.
+   */
   confidence: number;
+  /**
+   * Raw `importance` property on the node. 0 when the node type has no
+   * such property (e.g. Procedural / Autobiographical). Passed through
+   * verbatim — never derived. For Episodic nodes this is the meaningful
+   * score (compaction writes importance=0.7).
+   */
+  importance: number;
   decay_score: number;
   created_at: number;
   last_accessed_at: number;

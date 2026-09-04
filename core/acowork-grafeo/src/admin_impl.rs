@@ -6,7 +6,7 @@
 //! implementation itself. The Runtime no longer needs to know grafeo
 //! graph internals (`db()`, `graph_store()`, `Node`, `Value`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use acowork_core::error::{AcoworkError, Result};
 use acowork_memory::admin::{
@@ -33,6 +33,70 @@ const MEMORY_LABELS: [&str; 4] = [
     labels::PROCEDURAL,
     labels::AUTOBIOGRAPHICAL,
 ];
+
+/// Snapshot of node-level embedding health across `MEMORY_LABELS`.
+///
+/// Produced by [`GrafeoStore::audit_embedding_health`] and surfaced via
+/// the `memory_diag` tracing target from `MemoryAdminService::get_stats`
+/// whenever `nodes_with_embedding < total_nodes` — i.e. the exact
+/// condition that drives the desktop Memory panel's
+/// "部分节点缺少向量嵌入" banner (`MemoryPanel.tsx:140`).
+///
+/// `missing_ids` is bounded by the caller's `limit`; `dim_histogram` is
+/// always complete so a stale-dimension regression is visible even when
+/// only a handful of nodes are affected.
+#[derive(Debug, Default, Clone)]
+pub struct EmbeddingAudit {
+    /// Up to `limit` `(node_id, label)` tuples for nodes whose
+    /// `embedding` property is missing or non-vector, in label /
+    /// node-id order.
+    pub missing_ids: Vec<(u64, String)>,
+    /// Histogram of observed embedding vector dimensions across every
+    /// memory-label node. Bucket `0` counts nodes whose `embedding`
+    /// property is absent or malformed (see `audit_embedding_health`).
+    pub dim_histogram: BTreeMap<usize, u64>,
+}
+
+impl GrafeoStore {
+    /// Walk every `MEMORY_LABEL` node and report embedding health.
+    ///
+    /// Differs from [`Self::count_nodes_with_embedding`] in two ways:
+    /// 1. Captures up to `limit` node ids that lack a vector `embedding`
+    ///    property — needed to pinpoint the "missing 1 node" failure
+    ///    mode reported by the desktop Memory panel banner.
+    /// 2. Reports the actual dimension distribution so a stale "embedding
+    ///    present but wrong dimension" condition (e.g. after a half-finished
+    ///    model migration) becomes visible.
+    ///
+    /// `limit` bounds the `missing_ids` allocation; the histogram is
+    /// always complete across all four memory labels.
+    pub fn audit_embedding_health(&self, limit: usize) -> EmbeddingAudit {
+        let mut audit = EmbeddingAudit::default();
+        for label in MEMORY_LABELS {
+            let node_ids = self.db().graph_store().nodes_by_label(label);
+            for &node_id in &node_ids {
+                let Some(node) = self.db().get_node(node_id) else {
+                    continue;
+                };
+                match node.get_property("embedding") {
+                    Some(Value::Vector(arc)) => {
+                        *audit.dim_histogram.entry(arc.len()).or_insert(0) += 1;
+                    }
+                    // Either the property is absent (`None`) or holds a
+                    // non-vector value (corruption). Both are bucketed as
+                    // `0` so the histogram makes the regression obvious.
+                    Some(_) | None => {
+                        *audit.dim_histogram.entry(0).or_insert(0) += 1;
+                        if audit.missing_ids.len() < limit {
+                            audit.missing_ids.push((node_id.0, label.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        audit
+    }
+}
 
 impl MemoryAdminService for GrafeoStore {
     fn list_nodes(&self, params: &AdminListNodesParams) -> AdminListNodesOutput {
@@ -144,6 +208,13 @@ impl MemoryAdminService for GrafeoStore {
                         .get_property("confidence")
                         .and_then(|v| v.as_float64())
                         .unwrap_or(0.0);
+                    // Raw `importance` property — passed through verbatim.
+                    // Node types without this property (Procedural /
+                    // Autobiographical) legitimately report 0.0.
+                    let importance = n
+                        .get_property("importance")
+                        .and_then(|v| v.as_float64())
+                        .unwrap_or(0.0);
                     let decay_score = n
                         .get_property("decay_score")
                         .and_then(|v| v.as_float64())
@@ -160,6 +231,7 @@ impl MemoryAdminService for GrafeoStore {
                         sub_type,
                         content,
                         confidence,
+                        importance,
                         decay_score,
                         created_at,
                         last_accessed_at,
@@ -249,6 +321,13 @@ impl MemoryAdminService for GrafeoStore {
                 .get_property("confidence")
                 .and_then(|v| v.as_float64())
                 .unwrap_or(0.0);
+            // Raw `importance` property — passed through verbatim.
+            // Node types without this property (Procedural /
+            // Autobiographical) legitimately report 0.0.
+            let importance = n
+                .get_property("importance")
+                .and_then(|v| v.as_float64())
+                .unwrap_or(0.0);
             let decay_score = n
                 .get_property("decay_score")
                 .and_then(|v| v.as_float64())
@@ -274,6 +353,7 @@ impl MemoryAdminService for GrafeoStore {
                 sub_type: extract_sub_type(label, &n),
                 content,
                 confidence,
+                importance,
                 decay_score,
                 created_at,
                 last_accessed_at,
@@ -291,6 +371,7 @@ impl MemoryAdminService for GrafeoStore {
             sub_type: None,
             content: String::new(),
             confidence: 0.0,
+            importance: 0.0,
             decay_score: 0.0,
             created_at: 0,
             last_accessed_at: 0,
@@ -366,6 +447,34 @@ impl MemoryAdminService for GrafeoStore {
                 let index_health = "healthy".to_string();
                 let stored_dim = self.embedding_dim() as u64;
                 let nodes_with_embedding = self.count_nodes_with_embedding();
+
+                // Surface embedding health to logs whenever the runtime's
+                // Memory panel would show "部分节点缺少向量嵌入". The cheap
+                // path (`nodes_with_embedding == total_nodes`) does no
+                // extra work; only the discrepancy case walks every
+                // MEMORY_LABEL node to capture the first few missing ids
+                // and the embedding-dimension distribution.
+                //
+                // Grep target: `target: "memory_diag"` (set via
+                // RUST_LOG=memory_diag=warn in the runtime).
+                if total_nodes > 0 && nodes_with_embedding < total_nodes {
+                    let audit = self.audit_embedding_health(10);
+                    let dim_summary: Vec<String> = audit
+                        .dim_histogram
+                        .iter()
+                        .map(|(d, c)| format!("{d}:{c}"))
+                        .collect();
+                    tracing::warn!(
+                        target: "memory_diag",
+                        total_nodes,
+                        nodes_with_embedding,
+                        missing = total_nodes - nodes_with_embedding,
+                        missing_ids = ?audit.missing_ids,
+                        dim_histogram = ?dim_summary,
+                        stored_dim,
+                        "memory_store: detected nodes without vector embeddings"
+                    );
+                }
 
                 AdminStats {
                     total_nodes,
@@ -701,5 +810,206 @@ mod tests {
         });
         assert_eq!(out.total, 1, "sub_type filter must not affect Episodic nodes");
         assert_eq!(out.nodes[0].node_type, "Episodic");
+    }
+
+    // ── audit_embedding_health ───────────────────────────────────────
+    //
+    // Backed by the `memory_diag` warning emitted from `get_stats` when
+    // `nodes_with_embedding < total_nodes`. The tests below pin the
+    // contract used by the desktop Memory panel's "部分节点缺少向量嵌入"
+    // banner to a paper trail in the runtime log.
+
+    use std::sync::Arc;
+
+    /// Create a node under `label` and (optionally) attach an embedding
+    /// vector of `dim` floats. Returns the new node id.
+    fn make_node(
+        store: &GrafeoStore,
+        label: &str,
+        content: &str,
+        embedding_dim: Option<usize>,
+    ) -> u64 {
+        let id = store
+            .store_node(label, [("content", Value::from(content))])
+            .expect("store_node should succeed in test store");
+        if let Some(dim) = embedding_dim {
+            let vec: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
+            store
+                .db()
+                .set_node_property(id, "embedding", Value::Vector(Arc::from(vec.as_slice())));
+        }
+        id.0
+    }
+
+    #[test]
+    fn audit_embedding_health_empty_store_reports_no_missing() {
+        let store = test_store();
+        let audit = store.audit_embedding_health(10);
+        assert!(audit.missing_ids.is_empty(), "fresh store has no missing");
+        assert!(
+            audit.dim_histogram.is_empty(),
+            "fresh store has no embedding observations"
+        );
+    }
+
+    #[test]
+    fn audit_embedding_health_lists_missing_node_ids() {
+        let store = test_store();
+        // The in-memory store's HNSW config defaults to `DEFAULT_EMBEDDING_DIM`
+        // (384), so all test embeddings must match that dim to avoid
+        // triggering the engine's dimension-mismatch panic.
+        const EMB_DIM: usize = acowork_memory::types::DEFAULT_EMBEDDING_DIM;
+
+        let healthy = make_node(&store, labels::EPISODIC, "with emb", Some(EMB_DIM));
+        let broken = make_node(&store, labels::EPISODIC, "without emb", None);
+        let _autobio =
+            make_node(&store, labels::AUTOBIOGRAPHICAL, "self", Some(EMB_DIM));
+
+        let audit = store.audit_embedding_health(10);
+
+        assert_eq!(audit.missing_ids, vec![(broken, labels::EPISODIC.to_string())]);
+        assert_eq!(audit.dim_histogram.get(&EMB_DIM), Some(&2));
+        // The `0` bucket counts every node without a vector embedding,
+        // including the one we deliberately left bare.
+        assert_eq!(audit.dim_histogram.get(&0), Some(&1));
+        // Sanity: the healthy id must not appear in the missing list.
+        assert!(!audit.missing_ids.iter().any(|(id, _)| *id == healthy));
+    }
+
+    #[test]
+    fn audit_embedding_health_respects_limit() {
+        let store = test_store();
+        // Five Episodic nodes, none carrying an embedding.
+        for i in 0..5 {
+            make_node(&store, labels::EPISODIC, &format!("bare-{i}"), None);
+        }
+
+        let audit = store.audit_embedding_health(2);
+        assert_eq!(
+            audit.missing_ids.len(),
+            2,
+            "limit=2 must cap the reported missing ids"
+        );
+        assert_eq!(audit.dim_histogram.get(&0), Some(&5));
+    }
+
+    // =====================================================================
+    // Raw-field passthrough: `confidence` and `importance` are returned
+    // verbatim from the node properties — never derived, never remapped by
+    // node type. A node type that lacks a property legitimately reports 0.0
+    // (that IS the truth, not a bug). This is the contract the Desktop
+    // memory panel relies on to render "置信度" vs "重要程度" per type.
+    // =====================================================================
+
+    /// Seed one node of each label with the exact `confidence` / `importance`
+    /// property values that the real write paths produce:
+    ///
+    /// | label            | confidence | importance |
+    /// |------------------|-----------|-----------|
+    /// | Episodic         | (absent)  | 0.7       |  (compaction: record_distilled)
+    /// | Knowledge        | 0.7       | 0.5       |  (memory_store tool)
+    /// | Procedural       | 0.9       | (absent)  |  (generalization)
+    /// | Autobiographical | 1.0       | (absent)  |  (manifest bootstrap)
+    fn seed_raw_field_store() -> GrafeoStore {
+        let store = test_store();
+        store
+            .store_node(
+                labels::EPISODIC,
+                [
+                    ("content", Value::from("compacted summary")),
+                    ("importance", Value::from(0.7f64)),
+                ],
+            )
+            .unwrap();
+        store
+            .store_node(
+                labels::KNOWLEDGE,
+                [
+                    ("content", Value::from("user prefers dark mode")),
+                    ("confidence", Value::from(0.7f64)),
+                    ("importance", Value::from(0.5f64)),
+                ],
+            )
+            .unwrap();
+        store
+            .store_node(
+                labels::PROCEDURAL,
+                [
+                    ("content", Value::from("when X then Y")),
+                    ("confidence", Value::from(0.9f64)),
+                ],
+            )
+            .unwrap();
+        store
+            .store_node(
+                labels::AUTOBIOGRAPHICAL,
+                [
+                    ("content", Value::from("name: acowork")),
+                    ("confidence", Value::from(1.0f64)),
+                ],
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn list_nodes_passes_confidence_and_importance_verbatim() {
+        let store = seed_raw_field_store();
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            ..Default::default()
+        });
+
+        let by_type: std::collections::HashMap<&str, &AdminNodeRecord> = out
+            .nodes
+            .iter()
+            .map(|n| (n.node_type.as_str(), n))
+            .collect();
+
+        // Episodic: importance present, confidence absent → 0.0 is the truth.
+        let ep = by_type[labels::EPISODIC];
+        assert_eq!(ep.confidence, 0.0, "Episodic has no confidence property");
+        assert_eq!(ep.importance, 0.7, "Episodic importance must pass through");
+
+        // Knowledge: both present.
+        let kn = by_type[labels::KNOWLEDGE];
+        assert_eq!(kn.confidence, 0.7);
+        assert_eq!(kn.importance, 0.5);
+
+        // Procedural: confidence present, importance absent → 0.0 is the truth.
+        let pr = by_type[labels::PROCEDURAL];
+        assert_eq!(pr.confidence, 0.9);
+        assert_eq!(pr.importance, 0.0, "Procedural has no importance property");
+
+        // Autobiographical: confidence present, importance absent → 0.0.
+        let au = by_type[labels::AUTOBIOGRAPHICAL];
+        assert_eq!(au.confidence, 1.0);
+        assert_eq!(au.importance, 0.0, "Autobiographical has no importance property");
+    }
+
+    #[test]
+    fn get_node_passes_confidence_and_importance_verbatim() {
+        let store = seed_raw_field_store();
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            ..Default::default()
+        });
+
+        for rec in &out.nodes {
+            let detail = MemoryAdminService::get_node(&store, rec.node_id);
+            assert!(detail.found);
+            assert_eq!(
+                detail.confidence, rec.confidence,
+                "get_node confidence must match list_nodes for {}",
+                rec.node_type
+            );
+            assert_eq!(
+                detail.importance, rec.importance,
+                "get_node importance must match list_nodes for {}",
+                rec.node_type
+            );
+        }
     }
 }

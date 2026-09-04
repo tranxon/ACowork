@@ -521,11 +521,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let search_prompt = load_or_trace("search.md", "SEARCH_SYSTEM_PROMPT");
     let compact_template = load_or_trace("compact-template.md", "COMPACT_PROMPT");
     let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
-    let extraction_prompt = load_or_trace("extraction.md", "EXTRACTION_SYSTEM_PROMPT (grafeo)");
-    let conflict_classification_prompt =
-        load_or_trace("conflict-classification.md", "CONFLICT_CLASSIFICATION_PROMPT (grafeo)");
-    let generalization_prompt =
-        load_or_trace("generalization.md", "GENERALIZATION_PROMPT (grafeo)");
     let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
@@ -1145,16 +1140,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_tool_specs,
         system_prompt,
         compaction_prompt,
-        // ADR-063: 7 additional package-level overrides (Phase A loaded
+        // ADR-063: 4 additional package-level overrides (Phase A loaded
         // each from `prompts/<file>.md`; see load_or_trace above). Wired
         // through `AgentBootContext` so Phase B's session_init.rs can
         // inject them into `AgentCore` as `Arc<RwLock<Option<String>>>`.
+        //
+        // ADR-068: 3 grafeo-specific overrides (extraction /
+        // conflict-classification / generalization) removed — see the
+        // matching comment in `agent_core.rs` for rationale.
         search_prompt,
         compact_template,
         title_prompt,
-        extraction_prompt,
-        conflict_classification_prompt,
-        generalization_prompt,
         abstention_prompt,
         memory_session,
         mcp_notifier,

@@ -1113,6 +1113,7 @@
     "content": "内容",
     "labelStatus": "状态",
     "labelConfidence": "置信度",
+    "labelImportance": "重要程度",
     "labelAccessCount": "访问次数",
     "labelCreated": "创建时间",
     "labelLastAccessed": "最后访问",

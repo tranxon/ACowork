@@ -1092,6 +1092,7 @@
     "content": "内容",
     "labelStatus": "ステータス",
     "labelConfidence": "信頼度",
+    "labelImportance": "重要度",
     "labelAccessCount": "アクセス回数",
     "labelCreated": "作成日時",
     "labelLastAccessed": "最終アクセス",

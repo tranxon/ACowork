@@ -34,7 +34,13 @@ pub(crate) struct MemoryNodeRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_type: Option<String>,
     pub content: String,
+    /// Raw `confidence` property on the node (0.0 when the node type has no
+    /// such property — e.g. Episodic). Passed through verbatim, never derived.
     pub confidence: f64,
+    /// Raw `importance` property on the node (0.0 when the node type has no
+    /// such property — e.g. Procedural/Autobiographical). Passed through
+    /// verbatim, never derived.
+    pub importance: f64,
     pub decay_score: f64,
     pub created_at: i64,
     pub last_accessed_at: i64,
@@ -79,7 +85,13 @@ pub(crate) struct GetNodeOutput {
     pub node_type: String,
     pub sub_type: Option<String>,
     pub content: String,
+    /// Raw `confidence` property on the node (0.0 when the node type has no
+    /// such property — e.g. Episodic). Passed through verbatim, never derived.
     pub confidence: f64,
+    /// Raw `importance` property on the node (0.0 when the node type has no
+    /// such property — e.g. Procedural/Autobiographical). Passed through
+    /// verbatim, never derived.
+    pub importance: f64,
     pub decay_score: f64,
     pub created_at: i64,
     pub last_accessed_at: i64,
@@ -113,6 +125,7 @@ pub(crate) fn get_output_to_json(out: &GetNodeOutput) -> serde_json::Value {
         "node_type": out.node_type,
         "content": out.content,
         "confidence": out.confidence,
+        "importance": out.importance,
         "decay_score": out.decay_score,
         "created_at": out.created_at,
         "last_accessed_at": out.last_accessed_at,
@@ -189,6 +202,7 @@ pub(crate) fn list_nodes(
                 sub_type: n.sub_type,
                 content: n.content,
                 confidence: n.confidence,
+                importance: n.importance,
                 decay_score: n.decay_score,
                 created_at: n.created_at,
                 last_accessed_at: n.last_accessed_at,
@@ -239,6 +253,7 @@ pub(crate) fn get_node(
                 sub_type: None,
                 content: String::new(),
                 confidence: 0.0,
+                importance: 0.0,
                 decay_score: 0.0,
                 created_at: 0,
                 last_accessed_at: 0,
@@ -257,6 +272,7 @@ pub(crate) fn get_node(
         sub_type: detail.sub_type,
         content: detail.content,
         confidence: detail.confidence,
+        importance: detail.importance,
         decay_score: detail.decay_score,
         created_at: detail.created_at,
         last_accessed_at: detail.last_accessed_at,
@@ -424,6 +440,7 @@ mod tests {
             sub_type: None,
             content: "[user] hi".to_string(),
             confidence: 0.5,
+            importance: 0.7,
             decay_score: 0.9,
             created_at: 100,
             last_accessed_at: 100,
@@ -437,6 +454,9 @@ mod tests {
         assert_eq!(v["found"], true);
         assert_eq!(v["node_type"], "Episodic");
         assert_eq!(v["message"], "ok");
+        // Raw fields are passed through verbatim — no derivation.
+        assert_eq!(v["confidence"], 0.5);
+        assert_eq!(v["importance"], 0.7);
         // sub_type is omitted when None
         assert!(v.get("sub_type").is_none());
     }
@@ -450,6 +470,7 @@ mod tests {
             sub_type: Some("preference".to_string()),
             content: "likes dark mode".to_string(),
             confidence: 0.9,
+            importance: 0.5,
             decay_score: 0.5,
             created_at: 100,
             last_accessed_at: 100,
@@ -460,5 +481,7 @@ mod tests {
         };
         let v = get_output_to_json(&out);
         assert_eq!(v["sub_type"], "preference");
+        assert_eq!(v["confidence"], 0.9);
+        assert_eq!(v["importance"], 0.5);
     }
 }

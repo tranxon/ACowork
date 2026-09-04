@@ -105,10 +105,17 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       tier === "Stable" ? t("memoryNodeDetail.statusStable")
       : tier === "Decaying" ? t("memoryNodeDetail.statusDecaying")
       : t("memoryNodeDetail.statusCritical");
+    const scoreLine =
+      node.node_type === "Episodic"
+        ? `${t("memoryNodeDetail.labelImportance")}: ${(node.importance * 100).toFixed(1)}%`
+        : `${t("memoryNodeDetail.labelConfidence")}: ${(node.confidence * 100).toFixed(1)}%`;
     const lines = [
       `Memory Node #${node.node_id}`,
       `${t("memoryNodeDetail.labelStatus")}: ${node.status}`,
-      `${t("memoryNodeDetail.labelConfidence")}: ${(node.confidence * 100).toFixed(1)}%`,
+      scoreLine,
+      ...(node.node_type === "Knowledge"
+        ? [`${t("memoryNodeDetail.labelImportance")}: ${(node.importance * 100).toFixed(1)}%`]
+        : []),
       `Type: ${typeLabelStr}${node.sub_type ? ` (${subTypeLabelStr ?? node.sub_type})` : ""}`,
       `${t("memoryNodeDetail.labelCreated")}: ${formatDate(node.created_at)}`,
       `${t("memoryNodeDetail.labelLastAccessed")}: ${formatDate(node.last_accessed_at)}`,
@@ -202,10 +209,29 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
           <p className="whitespace-pre-wrap text-xs text-zinc-800 dark:text-zinc-200">{node.content}</p>
         </div>
 
-        {/* Metadata grid */}
+        {/* Metadata grid.
+            Episodic nodes carry `importance` (重要程度) but no `confidence`;
+            the other three types carry `confidence` (置信度). Knowledge is
+            the only type that carries BOTH, so it shows both verbatim. */}
         <div className="mb-3 grid grid-cols-2 gap-2">
           <MetaItem label={t("memoryNodeDetail.labelStatus")} value={node.status} />
-          <MetaItem label={t("memoryNodeDetail.labelConfidence")} value={`${(node.confidence * 100).toFixed(1)}%`} />
+          {node.node_type === "Episodic" ? (
+            <MetaItem
+              label={t("memoryNodeDetail.labelImportance")}
+              value={`${(node.importance * 100).toFixed(1)}%`}
+            />
+          ) : (
+            <MetaItem
+              label={t("memoryNodeDetail.labelConfidence")}
+              value={`${(node.confidence * 100).toFixed(1)}%`}
+            />
+          )}
+          {node.node_type === "Knowledge" && (
+            <MetaItem
+              label={t("memoryNodeDetail.labelImportance")}
+              value={`${(node.importance * 100).toFixed(1)}%`}
+            />
+          )}
           <MetaItem label={t("memoryNodeDetail.labelAccessCount")} value={String(node.access_count)} />
           <MetaItem label={t("memoryNodeDetail.labelCreated")} value={formatDate(node.created_at)} />
           <MetaItem label={t("memoryNodeDetail.labelLastAccessed")} value={formatDate(node.last_accessed_at)} />

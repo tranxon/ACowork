@@ -139,27 +139,16 @@ pub(crate) struct AgentBootContext {
     /// `{language}` and `{user_message}` placeholders per their style.
     pub title_prompt: Option<String>,
 
-    /// Override for `acowork-grafeo::consolidation::triple_extraction::EXTRACTION_SYSTEM_PROMPT`
-    /// (package file: `prompts/extraction.md`). Note: grafeo holds a
-    /// process-level singleton; the L2 reload (§3.7.4) for grafeo is NOT
-    /// in this ADR's scope — this field is loaded but the reload report
-    /// only covers runtime prompt.rs entries until ADR-051 trait
-    /// refactor lands.
-    pub extraction_prompt: Option<String>,
-
-    /// Override for
-    /// `acowork-grafeo::consolidation::conflict_llm::CONFLICT_CLASSIFICATION_PROMPT`
-    /// (package file: `prompts/conflict-classification.md`).
-    pub conflict_classification_prompt: Option<String>,
-
-    /// Override for
-    /// `acowork-grafeo::consolidation::generalization::GENERALIZATION_PROMPT`
-    /// (package file: `prompts/generalization.md`).
-    pub generalization_prompt: Option<String>,
-
     /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
     /// (package file: `prompts/abstention.md`). Note: memory holds a
     /// process-level singleton; L2 reload is out of scope here too.
+    ///
+    /// **ADR-068 note**: Three grafeo-specific override fields
+    /// (`extraction_prompt`, `conflict_classification_prompt`,
+    /// `generalization_prompt`) were removed in this revision because
+    /// ADR-068 rewrites the LLM→memory boundary — LLM writes only
+    /// Episode nodes via `memory_store`; grafeo's offline
+    /// `EpisodicDistiller` owns its own internal prompts.
     pub abstention_prompt: Option<String>,
 
     // Shared handles

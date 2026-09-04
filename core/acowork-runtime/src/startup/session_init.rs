@@ -354,10 +354,6 @@ pub(crate) async fn phase_b_init_session(
         *c.search_prompt.write().unwrap() = ctx.search_prompt.clone();
         *c.compact_template.write().unwrap() = ctx.compact_template.clone();
         *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
-        *c.extraction_prompt.write().unwrap() = ctx.extraction_prompt.clone();
-        *c.conflict_classification_prompt.write().unwrap() =
-            ctx.conflict_classification_prompt.clone();
-        *c.generalization_prompt.write().unwrap() = ctx.generalization_prompt.clone();
         *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
 
         // Provider list is loaded from agent_provider.json (persisted by the

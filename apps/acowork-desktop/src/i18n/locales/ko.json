@@ -1093,6 +1093,7 @@
     "content": "내용",
     "labelStatus": "상태",
     "labelConfidence": "신뢰도",
+    "labelImportance": "중요도",
     "labelAccessCount": "접근 횟수",
     "labelCreated": "생성 시간",
     "labelLastAccessed": "마지막 접근",

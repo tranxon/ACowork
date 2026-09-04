@@ -1091,6 +1091,7 @@
     "content": "內容",
     "labelStatus": "狀態",
     "labelConfidence": "信心度",
+    "labelImportance": "重要程度",
     "labelAccessCount": "存取次數",
     "labelCreated": "建立時間",
     "labelLastAccessed": "最後存取",

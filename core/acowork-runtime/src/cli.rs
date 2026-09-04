@@ -318,14 +318,6 @@ async fn async_main(
         *agent_loop.core.compact_template.write().unwrap() =
             agent_ctx.compact_template.clone();
         *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
-        *agent_loop.core.extraction_prompt.write().unwrap() =
-            agent_ctx.extraction_prompt.clone();
-        *agent_loop.core
-            .conflict_classification_prompt
-            .write()
-            .unwrap() = agent_ctx.conflict_classification_prompt.clone();
-        *agent_loop.core.generalization_prompt.write().unwrap() =
-            agent_ctx.generalization_prompt.clone();
         *agent_loop.core.abstention_prompt.write().unwrap() =
             agent_ctx.abstention_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
