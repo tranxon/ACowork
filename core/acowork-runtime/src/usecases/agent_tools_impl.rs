@@ -52,8 +52,8 @@ use acowork_core::protocol::AgentSearchConfig;
 use crate::agent_config;
 use crate::usecases::agent_tools::{
     AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse,
-    MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutSearchConfigBody,
-    SearchConfigResponse,
+    McpToolsResponse, MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody,
+    PutMcpToolsBody, PutSearchConfigBody, SearchConfigResponse,
 };
 
 /// Concrete [`AgentToolsService`] backed by the
@@ -294,5 +294,41 @@ impl AgentToolsService for RuntimeAgentToolsService {
             mcp_servers_defs,
             search,
         }
+    }
+
+    async fn get_mcp_tools(&self, agent_id: &str) -> McpToolsResponse {
+        let servers = agent_config::load_agent_mcp_tools_config(&self.work_dir)
+            .ok()
+            .flatten()
+            .map(|cfg| cfg.servers)
+            .unwrap_or_default();
+        McpToolsResponse {
+            agent_id: agent_id.to_string(),
+            servers,
+        }
+    }
+
+    async fn put_mcp_tools(
+        &self,
+        agent_id: &str,
+        body: PutMcpToolsBody,
+    ) -> Result<McpToolsResponse, AgentToolsError> {
+        // The desktop PUTs the entire per-server tool list (same shape
+        // as GET). There is no server-side merge — the desktop's list
+        // is authoritative. Write verbatim to agent_mcp_tools.json.
+        agent_config::save_agent_mcp_tools_config(&self.work_dir, &body)
+            .map_err(AgentToolsError::Persistence)?;
+
+        tracing::info!(
+            agent_id,
+            server_count = body.servers.len(),
+            tool_count = body.servers.values().map(|v| v.len()).sum::<usize>(),
+            "RuntimeAgentToolsService::put_mcp_tools: persisted full tool list"
+        );
+
+        Ok(McpToolsResponse {
+            agent_id: agent_id.to_string(),
+            servers: body.servers,
+        })
     }
 }

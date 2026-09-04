@@ -11,6 +11,7 @@
 //! Model selection is per-session (ADR-012), persisted in JSONL SessionMetadata.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
@@ -929,6 +930,241 @@ pub fn load_merged_mcp_configs(work_dir: &Path) -> Vec<McpServerConfigDef> {
         })
         .unwrap_or_default()
         .merged()
+}
+
+// ── Per-agent MCP tools allowlist (ADR-069) ────────────────────────────
+//
+// Companion of `AgentMcpConfig` (above) which gates **server-level**
+// activation. This section gates **tool-level** activation within an
+// active server — the same per-tool opt-in model that ADR-029 brings to
+// builtin tools, but applied per-MCP-server.
+//
+// File: workspace/config/agent_mcp_tools.json
+// Schema (v2 — flat per-tool, three-way identity with the GET response
+// and PUT request body so the frontend never hardcodes a tool list):
+//
+// ```jsonc
+// {
+//   "servers": {
+//     "pm": [
+//       { "name": "pm_list_my_tasks",  "enabled": true,  "description": "..." },
+//       { "name": "pm_claim_task",     "enabled": true,  "description": "..." },
+//       { "name": "pm_create_project", "enabled": false, "description": "..." }
+//     ]
+//   }
+// }
+// ```
+//
+// The frontend never hardcodes any tool name; the runtime reconciles
+// persisted choices with the live `tools/list` from each connected
+// server at every startup / hot-reload and writes the canonical flat
+// list back to `agent_mcp_tools.json`. The frontend reads that file via
+// GET and renders directly.
+
+/// Filename for the per-agent MCP tools config.
+const AGENT_MCP_TOOLS_CONFIG_FILE: &str = "agent_mcp_tools.json";
+
+fn mcp_tools_config_path(work_dir: &Path) -> PathBuf {
+    work_dir
+        .join("config")
+        .join(AGENT_MCP_TOOLS_CONFIG_FILE)
+}
+
+/// Backend policy: which tools in a system-injected MCP server default
+/// to enabled for a freshly-installed agent. **The frontend never reads
+/// or references this constant** — it lives entirely on the backend
+/// side of the contract and is materialised into
+/// `agent_mcp_tools.json` by `merge_mcp_tools_config` at startup.
+pub const PM_DEFAULT_ENABLED_TOOLS: &[&str] = &[
+    "pm_list_my_tasks",
+    "pm_claim_task",
+    "pm_submit_task",
+    "pm_check_task",
+];
+
+/// Look up the default-enabled tool subset for a given server.
+/// Non-system-injected servers get `None` — for those the merge treats
+/// every discovered tool as `enabled = true` initially.
+pub fn default_enabled_tools_for(server_name: &str) -> Option<&'static [&'static str]> {
+    match server_name {
+        "pm" => Some(PM_DEFAULT_ENABLED_TOOLS),
+        _ => None,
+    }
+}
+
+/// Per-agent MCP tools config (flat per-server list).
+///
+/// Wire shape matches the GET response and PUT request body — three-way
+/// identity between `agent_mcp_tools.json`, the HTTP wire format, and
+/// the desktop render.
+///
+/// `deny_unknown_fields` ensures a v1-shape file
+/// (`{"pm": {"enabled_tools": [...]}}`) fails to parse rather than
+/// silently mapping to an empty config — there is no automatic
+/// migration by design (project is in active development).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMcpToolsConfig {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub servers: HashMap<String, Vec<AgentMcpToolItem>>,
+}
+
+/// Single MCP tool row inside a server's flat list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMcpToolItem {
+    pub name: String,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl AgentMcpToolItem {
+    pub fn new(name: impl Into<String>, enabled: bool) -> Self {
+        Self {
+            name: name.into(),
+            enabled,
+            description: None,
+        }
+    }
+
+    pub fn with_description(
+        name: impl Into<String>,
+        enabled: bool,
+        description: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            enabled,
+            description,
+        }
+    }
+}
+
+/// Look up a single tool's `enabled` flag from the flat config.
+/// Returns `Some(enabled)` if the row exists, `None` if absent.
+pub fn tool_enabled_in(
+    tools: &[AgentMcpToolItem],
+    tool_name: &str,
+) -> Option<bool> {
+    tools
+        .iter()
+        .find(|t| t.name == tool_name)
+        .map(|t| t.enabled)
+}
+
+/// Minimal MCP tool descriptor used as the input shape for
+/// `merge_mcp_tools_config`. Keeps `agent_config` independent of the
+/// `acowork-mcp` crate's wire types.
+#[derive(Debug, Clone)]
+pub struct McpToolDescriptor {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// Reconcile persisted MCP tool choices with the live `tools/list`
+/// from each connected server. Servers absent from `server_tools` are
+/// dropped. The persisted row's `enabled` flag wins when present;
+/// otherwise the server default decides. `description` is always
+/// refreshed from the live `tools/list`.
+pub fn merge_mcp_tools_config(
+    persisted: &AgentMcpToolsConfig,
+    server_tools: &HashMap<String, Vec<McpToolDescriptor>>,
+) -> AgentMcpToolsConfig {
+    let mut merged: AgentMcpToolsConfig = AgentMcpToolsConfig::default();
+
+    for (server_name, defs) in server_tools {
+        let defaults = default_enabled_tools_for(server_name);
+        let prior = persisted.servers.get(server_name);
+
+        let mut items: Vec<AgentMcpToolItem> = Vec::with_capacity(defs.len());
+        for def in defs {
+            let enabled = match prior.and_then(|rows| tool_enabled_in(rows, &def.name)) {
+                Some(user_choice) => user_choice,
+                None => match defaults {
+                    Some(list) => list.contains(&def.name.as_str()),
+                    None => true,
+                },
+            };
+            items.push(AgentMcpToolItem::with_description(
+                def.name.clone(),
+                enabled,
+                def.description.clone(),
+            ));
+        }
+
+        merged.servers.insert(server_name.to_string(), items);
+    }
+
+    merged
+}
+
+/// Load per-agent MCP tools config. Returns `None` when file missing;
+/// errors when present but unparseable (no silent migration).
+pub fn load_agent_mcp_tools_config(
+    work_dir: &Path,
+) -> Result<Option<AgentMcpToolsConfig>, String> {
+    let path = mcp_tools_config_path(work_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let cfg: AgentMcpToolsConfig = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "Failed to parse {} as AgentMcpToolsConfig (delete the file if it predates the current schema): {}",
+            path.display(),
+            e
+        )
+    })?;
+
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        server_count = cfg.servers.len(),
+        "Loaded agent MCP tools config from workspace"
+    );
+    Ok(Some(cfg))
+}
+
+/// Save the full per-agent MCP tools config (atomic write-tmp-rename).
+pub fn save_agent_mcp_tools_config(
+    work_dir: &Path,
+    cfg: &AgentMcpToolsConfig,
+) -> Result<(), String> {
+    let config_dir = work_dir.join("config");
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
+
+    let path = mcp_tools_config_path(work_dir);
+    let tmp_path = path.with_extension("tmp");
+
+    let json = serde_json::to_string_pretty(cfg)
+        .map_err(|e| format!("Failed to serialize agent MCP tools config: {}", e))?;
+
+    std::fs::write(&tmp_path, &json)
+        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })?;
+
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        server_count = cfg.servers.len(),
+        "Saved agent MCP tools config to workspace"
+    );
+    Ok(())
 }
 
 // ── Per-agent search config ────────────────────────────────────────────
@@ -1930,5 +2166,296 @@ mod tests {
         let cfg = all_enabled_tools_config(&code);
         assert_eq!(cfg.len(), code.len());
         assert!(cfg.iter().all(|e| e.enabled));
+    }
+
+    // ── AgentMcpToolsConfig (ADR-069) ─────────────────────────────────
+    //
+    // Tests for the flat per-tool allowlist model. The wire format is
+    // `servers: { name -> [{name, enabled, description}] }` and the
+    // `merge_mcp_tools_config` function reconciles persisted choices
+    // with the live `tools/list` from each connected MCP server.
+
+    /// Default config has no servers.
+    #[test]
+    fn agent_mcp_tools_config_default_is_empty() {
+        let cfg = AgentMcpToolsConfig::default();
+        assert!(cfg.servers.is_empty());
+    }
+
+    /// JSON round-trip preserves the flat per-tool entries exactly,
+    /// including `description` when present and absence when None.
+    #[test]
+    fn agent_mcp_tools_config_round_trip_preserves_flat_items() {
+        let mut cfg = AgentMcpToolsConfig::default();
+        cfg.servers.insert(
+            "pm".to_string(),
+            vec![
+                AgentMcpToolItem::with_description(
+                    "pm_claim_task",
+                    true,
+                    Some("Claim a pending task".into()),
+                ),
+                AgentMcpToolItem::new("pm_submit_task", true),
+                AgentMcpToolItem::new("pm_list_projects", false),
+            ],
+        );
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: AgentMcpToolsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.servers.len(), 1);
+        let pm = restored.servers.get("pm").unwrap();
+        assert_eq!(pm.len(), 3);
+        assert_eq!(pm[0].name, "pm_claim_task");
+        assert!(pm[0].enabled);
+        assert_eq!(pm[0].description.as_deref(), Some("Claim a pending task"));
+        assert_eq!(pm[1].name, "pm_submit_task");
+        assert!(pm[1].enabled);
+        assert!(pm[1].description.is_none());
+        assert_eq!(pm[2].name, "pm_list_projects");
+        assert!(!pm[2].enabled);
+    }
+
+    /// `description` is `skip_serializing_if = "Option::is_none"`, so a
+    /// tool row with no description does not add the field to JSON.
+    #[test]
+    fn agent_mcp_tool_item_omits_description_when_none() {
+        let item = AgentMcpToolItem::new("pm_claim_task", true);
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("description"));
+    }
+
+    /// `tool_enabled_in` returns `Some(enabled)` for known tools,
+    /// `None` for absent ones — no tri-state gymnastics.
+    #[test]
+    fn tool_enabled_in_returns_flag_when_present_none_when_absent() {
+        let items = vec![
+            AgentMcpToolItem::new("pm_claim_task", true),
+            AgentMcpToolItem::new("pm_submit_task", false),
+        ];
+        assert_eq!(tool_enabled_in(&items, "pm_claim_task"), Some(true));
+        assert_eq!(tool_enabled_in(&items, "pm_submit_task"), Some(false));
+        assert_eq!(tool_enabled_in(&items, "pm_list_projects"), None);
+    }
+
+    /// `merge_mcp_tools_config` with empty persisted + 12 pm tools
+    /// yields 12 rows with `enabled` matching `PM_DEFAULT_ENABLED_TOOLS`
+    /// and `description` lifted from `tools/list`.
+    #[test]
+    fn merge_mcp_tools_config_seeds_defaults_for_pm_from_registry() {
+        let persisted = AgentMcpToolsConfig::default();
+        let names = [
+            "pm_list_projects",
+            "pm_get_project",
+            "pm_create_project",
+            "pm_list_tasks",
+            "pm_get_task",
+            "pm_create_task",
+            "pm_check_task",
+            "pm_update_task",
+            "pm_claim_task",
+            "pm_submit_task",
+            "pm_list_my_tasks",
+            "pm_reparent_task",
+        ];
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let defs: Vec<McpToolDescriptor> = names
+            .iter()
+            .map(|n| McpToolDescriptor {
+                name: (*n).to_string(),
+                description: Some(format!("desc for {}", n)),
+            })
+            .collect();
+        server_tools.insert("pm".to_string(), defs);
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let pm = merged.servers.get("pm").unwrap();
+        assert_eq!(pm.len(), 12);
+
+        let enabled_names: std::collections::HashSet<&str> = pm
+            .iter()
+            .filter(|t| t.enabled)
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(
+            enabled_names,
+            std::collections::HashSet::from([
+                "pm_list_my_tasks",
+                "pm_claim_task",
+                "pm_submit_task",
+                "pm_check_task",
+            ])
+        );
+
+        assert_eq!(
+            pm.iter()
+                .find(|t| t.name == "pm_claim_task")
+                .unwrap()
+                .description
+                .as_deref(),
+            Some("desc for pm_claim_task")
+        );
+    }
+
+    /// Non-system-injected server with empty persisted -> all tools
+    /// enabled (the "opt-out" baseline; the Tools panel can flip any
+    /// of them to disabled afterwards).
+    #[test]
+    fn merge_mcp_tools_config_enables_all_for_non_system_servers() {
+        let persisted = AgentMcpToolsConfig::default();
+        let defs = vec![
+            McpToolDescriptor { name: "search".into(), description: None },
+            McpToolDescriptor { name: "summarize".into(), description: None },
+        ];
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        server_tools.insert("user-installed".to_string(), defs);
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let rows = merged.servers.get("user-installed").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|t| t.enabled));
+    }
+
+    /// Persisted choices win over defaults.
+    #[test]
+    fn merge_mcp_tools_config_preserves_user_choice_over_default() {
+        let mut persisted = AgentMcpToolsConfig::default();
+        persisted.servers.insert(
+            "pm".to_string(),
+            vec![
+                AgentMcpToolItem::new("pm_claim_task", false),    // user disabled
+                AgentMcpToolItem::new("pm_create_project", true),  // user enabled
+            ],
+        );
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        server_tools.insert(
+            "pm".to_string(),
+            vec![
+                McpToolDescriptor { name: "pm_claim_task".into(), description: Some("Claim".into()) },
+                McpToolDescriptor { name: "pm_create_project".into(), description: Some("Create".into()) },
+                McpToolDescriptor { name: "pm_list_my_tasks".into(), description: Some("List mine".into()) },
+            ],
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let pm = merged.servers.get("pm").unwrap();
+        assert_eq!(pm.len(), 3);
+        assert!(!tool_enabled_in(pm, "pm_claim_task").unwrap());
+        assert!(tool_enabled_in(pm, "pm_create_project").unwrap());
+        assert!(tool_enabled_in(pm, "pm_list_my_tasks").unwrap());
+    }
+
+    /// Description is always refreshed from the live `tools/list`.
+    #[test]
+    fn merge_mcp_tools_config_refreshes_description_from_registry() {
+        let mut persisted = AgentMcpToolsConfig::default();
+        persisted.servers.insert(
+            "pm".to_string(),
+            vec![AgentMcpToolItem::with_description(
+                "pm_claim_task",
+                true,
+                Some("stale description from yesterday".into()),
+            )],
+        );
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        server_tools.insert(
+            "pm".to_string(),
+            vec![McpToolDescriptor {
+                name: "pm_claim_task".into(),
+                description: Some("up-to-date description".into()),
+            }],
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let pm = merged.servers.get("pm").unwrap();
+        assert_eq!(pm[0].description.as_deref(), Some("up-to-date description"));
+    }
+
+    /// Persisted rows whose `(server, tool)` pair is no longer in the
+    /// live `tools/list` are dropped.
+    #[test]
+    fn merge_mcp_tools_config_drops_persisted_rows_no_longer_advertised() {
+        let mut persisted = AgentMcpToolsConfig::default();
+        persisted.servers.insert(
+            "pm".to_string(),
+            vec![
+                AgentMcpToolItem::new("pm_claim_task", true),
+                AgentMcpToolItem::new("pm_old_removed_tool", true),
+            ],
+        );
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        server_tools.insert(
+            "pm".to_string(),
+            vec![McpToolDescriptor { name: "pm_claim_task".into(), description: None }],
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let pm = merged.servers.get("pm").unwrap();
+        assert_eq!(pm.len(), 1);
+        assert_eq!(pm[0].name, "pm_claim_task");
+    }
+
+    /// Servers absent from the registry are removed from merged config.
+    #[test]
+    fn merge_mcp_tools_config_drops_servers_absent_from_registry() {
+        let mut persisted = AgentMcpToolsConfig::default();
+        persisted.servers.insert(
+            "pm".to_string(),
+            vec![AgentMcpToolItem::new("pm_claim_task", true)],
+        );
+        persisted.servers.insert(
+            "docling".to_string(),
+            vec![AgentMcpToolItem::new("parse_pdf", true)],
+        );
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        server_tools.insert(
+            "pm".to_string(),
+            vec![McpToolDescriptor { name: "pm_claim_task".into(), description: None }],
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        assert!(merged.servers.contains_key("pm"));
+        assert!(!merged.servers.contains_key("docling"));
+    }
+
+    /// Full persistence round-trip: merge -> save -> load.
+    #[test]
+    fn merge_mcp_tools_config_persists_and_loads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let persisted = AgentMcpToolsConfig::default();
+        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        server_tools.insert(
+            "pm".to_string(),
+            vec![
+                McpToolDescriptor { name: "pm_claim_task".into(), description: Some("Claim a pending task".into()) },
+                McpToolDescriptor { name: "pm_submit_task".into(), description: None },
+            ],
+        );
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        save_agent_mcp_tools_config(dir.path(), &merged).unwrap();
+        let loaded = load_agent_mcp_tools_config(dir.path())
+            .unwrap()
+            .expect("file was just created, must load");
+        assert_eq!(loaded, merged);
+    }
+
+    /// Missing file -> `Ok(None)`.
+    #[test]
+    fn load_agent_mcp_tools_config_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = load_agent_mcp_tools_config(dir.path()).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    /// Malformed JSON (e.g. a v1-shape file) surfaces as an error —
+    /// no silent migration. Delete and let the next reconcile
+    /// regenerate it.
+    #[test]
+    fn load_agent_mcp_tools_config_v1_shape_returns_error_no_silent_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let v1_payload = r#"{ "pm": { "enabled_tools": ["pm_claim_task"] } }"#;
+        std::fs::write(config_dir.join("agent_mcp_tools.json"), v1_payload).unwrap();
+        let result = load_agent_mcp_tools_config(dir.path());
+        assert!(result.is_err(), "v1-shape file must not silently load as v2");
     }
 }

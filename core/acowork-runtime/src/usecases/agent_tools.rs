@@ -256,4 +256,44 @@ pub trait AgentToolsService: Send + Sync {
     /// MCP + search). Read-only aggregation of the three Tools-panel
     /// config files; the handler does not merge anything itself.
     async fn get_merged_tools(&self, agent_id: &str) -> MergedToolsResponse;
+
+    /// `GET /agents/{id}/mcp-tools` — return the **full** per-tool
+    /// list for every MCP server, each row carrying `name`, `enabled`
+    /// and `description`. This is the single source of truth the
+    /// desktop Tools panel renders directly — the frontend never
+    /// maintains its own tool list or defaults (ADR-069).
+    async fn get_mcp_tools(&self, agent_id: &str) -> McpToolsResponse;
+
+    /// `PUT /agents/{id}/mcp-tools` — persist the complete
+    /// `AgentMcpToolsConfig` sent by the desktop. The body is the
+    /// **entire** per-server tool list (same shape as the GET
+    /// response), so a single-row toggle carries the full list; the
+    /// backend writes it verbatim to `agent_mcp_tools.json`. There is
+    /// no server-side merge — the desktop's list is authoritative.
+    async fn put_mcp_tools(
+        &self,
+        agent_id: &str,
+        body: PutMcpToolsBody,
+    ) -> Result<McpToolsResponse, AgentToolsError>;
+}
+
+// ── MCP tools (ADR-069) ────────────────────────────────────────────────
+
+/// Request body for `PUT /agents/{id}/mcp-tools`.
+///
+/// Wire shape mirrors `agent_mcp_tools.json` exactly — three-way
+/// identity between the on-disk file, the GET response, and the PUT
+/// body. Each per-server entry is a flat array of every tool the
+/// server advertises, each carrying its own `enabled` flag and
+/// `description` (sourced from the live MCP `tools/list`).
+pub type PutMcpToolsBody = crate::agent_config::AgentMcpToolsConfig;
+
+/// Response for `GET /agents/{id}/mcp-tools`.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpToolsResponse {
+    pub agent_id: String,
+    pub servers: std::collections::HashMap<
+        String,
+        Vec<crate::agent_config::AgentMcpToolItem>,
+    >,
 }
