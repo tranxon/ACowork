@@ -1434,6 +1434,17 @@ export interface AgentMcpServersResponse {
   active_servers: string[];
 }
 
+/** Per-agent MCP server view (catalog ∪ local) for the Tools panel toggle */
+export interface McpServerView {
+  name: string;
+  transport: McpTransportDef;
+  url?: string;
+  command: string;
+  args: string[];
+  /** Whether this server is currently in this agent's active_names */
+  active: boolean;
+}
+
 /** MCP probe response — result of a health check against an MCP server */
 export interface McpProbeResponse {
   success: boolean;
@@ -1445,6 +1456,34 @@ export interface McpProbeResponse {
 
 /** MCP server health status (frontend-only, derived from probe results) */
 export type McpHealthStatus = "unknown" | "probing" | "healthy" | "unhealthy";
+
+/**
+ * Single MCP tool row inside a server's flat list (ADR-069).
+ *
+ * Mirrors `crate::agent_config::AgentMcpToolItem` on the wire. The
+ * backend is the single source of truth: it reconciles
+ * `agent_mcp_tools.json` against the live MCP `tools/list` at connect
+ * time, so every server's list is **complete** (name + enabled +
+ * description). The frontend renders this directly and never maintains
+ * its own tool list or defaults.
+ */
+export interface AgentMcpToolItem {
+  name: string;
+  enabled: boolean;
+  description?: string | null;
+}
+
+/**
+ * Response of `GET /api/agents/{id}/mcp-tools` and request body of
+ * `PUT /api/agents/{id}/mcp-tools` (ADR-069). Map keyed by MCP server
+ * name → flat array of every tool the server advertises. The PUT body
+ * is the same shape (sans `agent_id`) — the desktop sends the complete
+ * list verbatim and the backend persists it as-is.
+ */
+export interface AgentMcpToolsConfig {
+  agent_id: string;
+  servers: Record<string, AgentMcpToolItem[]>;
+}
 
 /** Request body for PUT /api/agents/{id}/mcp-servers */
 export interface UpdateMcpServersRequest {

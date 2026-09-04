@@ -1662,7 +1662,19 @@ After installation, ask the user to re-enable the MCP server.",
         // Disconnect previous MCP connections before connecting new ones
         self.mcp_manager.disconnect().await;
 
-        let (registry, wrappers, _specs, failures) = self.mcp_manager.connect(&configs).await;
+        // ADR-069: set work_dir so `connect` reconciles
+        // `agent_mcp_tools.json` with the live `tools/list` before
+        // filtering. The second arg is a defensive placeholder; the
+        // manager consults work_dir + the on-disk file, not the
+        // caller-supplied config.
+        let work_dir_path = std::path::Path::new(&self.core.config.work_dir);
+        self.mcp_manager
+            .set_work_dir(std::sync::Arc::from(work_dir_path));
+
+        let (registry, wrappers, _specs, failures) = self
+            .mcp_manager
+            .connect(&configs, &crate::agent_config::AgentMcpToolsConfig::default())
+            .await;
 
         // Store MCP tool wrappers (Arc<dyn Tool>) for dispatch
         let mcp_tool_arcs: Vec<Arc<dyn Tool>> = wrappers

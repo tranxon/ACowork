@@ -321,6 +321,20 @@ pub(crate) struct HttpState {
     /// agent. `None` outside Phase B (e.g. early boot, tests that
     /// never build a SessionManager).
     pub(crate) session_manager_slot: crate::http::server::SharedSessionManagerSlot,
+    /// ADR-069 follow-up: MCP config change notifier. Created inside
+    /// `start_with_bind_port` (so the same Arc lives on this state AND
+    /// the returned handle) and cloned out by `agent_init` so the
+    /// builtin `mcp_install`/`mcp_uninstall` tools and the gateway loop
+    /// subscribe to the **same** notifier.
+    ///
+    /// `PUT /agents/{id}/mcp-servers` and `PUT /agents/{id}/mcp-tools`
+    /// call `notify()` after persisting so the gateway loop's
+    /// `mcp_config_rx.changed()` branch reconnects MCP servers in the
+    /// background and re-reconciles `agent_mcp_tools.json` — without
+    /// this, enabling a server (e.g. `playwright`) never connects it,
+    /// so its tool list never materialises and the Tools panel shows an
+    /// empty expansion.
+    pub(crate) mcp_notifier: crate::mcp_notify::McpNotifyRef,
     /// ADR-058: workspace FS watcher set. Created empty in Phase A,
     /// populated by Phase C (`start_workspace_watchers`) and reconciled
     /// after every workspace CRUD mutation (see
@@ -340,6 +354,12 @@ pub struct RuntimeHttpServer {
     /// state. Clone this into the boot context so Phase C and the CRUD
     /// mutation hooks reconcile the same set.
     pub workspace_watchers: crate::workspace::SharedWorkspaceWatcherSet,
+    /// ADR-069 follow-up: MCP config change notifier — the **same** Arc
+    /// stored on `HttpState`. `agent_init` clones this out (before the
+    /// handle is dropped) so the builtin MCP tools and the gateway loop
+    /// subscribe to the notifier that the HTTP `PUT /mcp-servers` /
+    /// `PUT /mcp-tools` handlers fire.
+    pub mcp_notifier: crate::mcp_notify::McpNotifyRef,
     /// The join handle for the server task. Dropping this aborts the server.
     _handle: tokio::task::JoinHandle<()>,
 }
@@ -461,6 +481,14 @@ impl RuntimeHttpServer {
                     mqtt_client.clone(),
                 ),
             ));
+        // ADR-069 follow-up: one shared notifier for HTTP handlers +
+        // builtin MCP tools + gateway loop. Created here (rather than
+        // by the caller) so `start`/`start_with_bind_port` call sites —
+        // including 27+ tests — need no new argument. The handle exposes
+        // the same Arc so `agent_init` can clone it out for the tools
+        // and boot context.
+        let mcp_notifier: crate::mcp_notify::McpNotifyRef =
+            Some(Arc::new(crate::mcp_notify::McpConfigNotifier::default()));
         let shell_risk_rules = crate::security::shell_risk::ShellRiskRules::load(&work_dir)
             .unwrap_or_default();
         let state = HttpState {
@@ -489,6 +517,7 @@ impl RuntimeHttpServer {
             session_manager_slot,
             agent_core,
             workspace_watchers: workspace_watchers.clone(),
+            mcp_notifier: mcp_notifier.clone(),
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -652,6 +681,17 @@ impl RuntimeHttpServer {
                 "/agents/{id}/search-config",
                 get(get_agent_search_config).put(put_agent_search_config),
             )
+            // ADR-069: per-tool MCP opt-in. GET returns the **full**
+            // per-server tool list (name + enabled + description) that
+            // the Desktop Tools panel renders directly — the frontend
+            // never maintains its own tool list or defaults. PUT
+            // persists the complete list verbatim to
+            // agent_mcp_tools.json; a session-level reconnect picks up
+            // the new filter on next connect.
+            .route(
+                "/agents/{id}/mcp-tools",
+                get(get_agent_mcp_tools).put(put_agent_mcp_tools),
+            )
             // ADR-040 follow-up: provider list endpoint — reads from
             // agent_provider.json (persisted by MQTT handler on every
             // acowork/global/providers retained update). The Gateway
@@ -735,6 +775,7 @@ impl RuntimeHttpServer {
             listen_addr,
             port,
             workspace_watchers: workspace_watchers.clone(),
+            mcp_notifier: mcp_notifier.clone(),
             _handle: handle,
         })
     }
@@ -2510,6 +2551,7 @@ async fn get_agent_tools(
             "matches": false,
             "tools": [],
             "mcp_servers": [],
+            "mcp_servers_defs": [],
             "search": { "providers": [] },
         })));
     }
@@ -2531,6 +2573,7 @@ async fn get_agent_tools(
         "matches": true,
         "tools": resp.tools,
         "mcp_servers": resp.mcp_servers,
+        "mcp_servers_defs": resp.mcp_servers_defs,
         "search": resp.search,
     })))
 }
@@ -2636,10 +2679,28 @@ async fn put_agent_mcp_servers(
         servers: req.servers,
     };
     match svc.put_mcp_servers(&id, body).await {
-        Ok(resp) => Ok(Json(serde_json::json!({
-            "agent_id": resp.agent_id,
-            "active_servers": resp.active_servers,
-        }))),
+        Ok(resp) => {
+            // ADR-069 follow-up: persistence alone is not enough — the
+            // Runtime's MCP connection pool must reconnect so the newly
+            // active server (e.g. `playwright`) is actually connected
+            // and its tools reconciled into agent_mcp_tools.json. Fire
+            // the shared notifier; the gateway loop's
+            // `mcp_config_rx.changed()` branch does the background
+            // reconnect. Without this, enabling a server updates
+            // `active_names` but the Tools panel still shows an empty
+            // expansion (no tools data).
+            if let Some(notifier) = &state.mcp_notifier {
+                tracing::info!(
+                    agent_id = %id,
+                    "PUT /mcp-servers persisted — signaling MCP config change for reconnect"
+                );
+                notifier.notify();
+            }
+            Ok(Json(serde_json::json!({
+                "agent_id": resp.agent_id,
+                "active_servers": resp.active_servers,
+            })))
+        }
         Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -2651,6 +2712,118 @@ async fn put_agent_mcp_servers(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "error": format!("failed to persist agent_mcp.json: {}", msg),
+            })),
+        )),
+    }
+}
+
+// ── Per-agent MCP tools endpoints (ADR-069) ──────────────────────────
+//
+// These two routes expose the full per-tool opt-in list. The desktop
+// Tools panel renders this list directly (default-collapsed MCP server
+// cards, one switch per tool). The backend is the single source of
+// truth: `agent_mcp_tools.json` is reconciled against the live MCP
+// `tools/list` at connect time, so the list the frontend sees always
+// matches what the runtime filters.
+
+/// `GET /agents/{id}/mcp-tools` — return the full per-tool list.
+async fn get_agent_mcp_tools(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let resp = svc.get_mcp_tools(&id).await;
+    Ok(Json(serde_json::json!({
+        "agent_id": resp.agent_id,
+        "servers": resp.servers,
+    })))
+}
+
+/// `PUT /agents/{id}/mcp-tools` — persist the complete per-server tool
+/// list. Body shape is identical to the GET response (three-way
+/// identity between agent_mcp_tools.json, the wire format, and the
+/// desktop render). The backend writes it verbatim — the desktop's
+/// list is authoritative and there is no server-side merge (ADR-069).
+async fn put_agent_mcp_tools(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::usecases::PutMcpToolsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    match svc.put_mcp_tools(&id, req).await {
+        Ok(resp) => {
+            // ADR-069 follow-up: after persisting the per-tool opt-in
+            // list, signal the gateway loop to reconnect MCP servers so
+            // the new `enabled` filter is applied to the live
+            // tool_definitions immediately (same notifier the
+            // `PUT /mcp-servers` handler fires).
+            if let Some(notifier) = &state.mcp_notifier {
+                tracing::info!(
+                    agent_id = %id,
+                    "PUT /mcp-tools persisted — signaling MCP config change for reconnect"
+                );
+                notifier.notify();
+            }
+            Ok(Json(serde_json::json!({
+                "agent_id": resp.agent_id,
+                "servers": resp.servers,
+            })))
+        }
+        Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "unknown MCP server names",
+                "unknown": unknown,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to persist agent_mcp_tools.json: {}", msg),
             })),
         )),
     }
@@ -4169,6 +4342,17 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert_eq!(mcp_servers, vec!["context7".to_string()]);
+
+        // 3b) `mcp_servers_defs` carries the full per-agent merged list
+        //     (catalog ∪ local) with active flags — powers the per-agent
+        //     toggle rows (pm / local MCPs included, not just gateway
+        //     catalog). context7 is active, `search` is not.
+        let defs = tools["mcp_servers_defs"].as_array().unwrap();
+        assert_eq!(defs.len(), 2, "both seeded catalog entries listed");
+        assert_eq!(defs[0]["name"], "context7");
+        assert_eq!(defs[0]["active"], true);
+        assert_eq!(defs[1]["name"], "search");
+        assert_eq!(defs[1]["active"], false);
 
         // 4) PUT search-config — user activates `tavily` with priority 1.
         let search_url = format!("{}/agents/com.test.agent/search-config", base);

@@ -471,28 +471,18 @@ async fn mqtt_only_loop(
                     std::path::Path::new(&work_dir),
                 );
                 let tx = mcp_runtime_tx.clone();
+                let reload_work_dir = std::path::PathBuf::from(&work_dir);
                 tokio::spawn(async move {
-                    let (registry, failures) =
-                        acowork_mcp::client::McpRegistry::connect_all(&merged)
-                            .await
-                            .expect("connect_all is non-fatal and should never fail");
-                    let registry = std::sync::Arc::new(registry);
-                    let mut wrappers = Vec::new();
-                    let mut specs = Vec::new();
-                    for prefixed_name in registry.tool_names() {
-                        if let Some(def) = registry.get_tool_def(&prefixed_name) {
-                            let wrapper = acowork_mcp::wrapper::McpToolWrapper::new(
-                                prefixed_name.clone(),
-                                def,
-                                registry.clone(),
-                            );
-                            use acowork_core::tools::traits::Tool;
-                            let tool_spec = wrapper.spec();
-                            let serialized = serde_json::to_value(&tool_spec).unwrap_or_default();
-                            specs.push((tool_spec.name.clone(), serialized));
-                            wrappers.push(wrapper);
-                        }
-                    }
+                    // ADR-069: hot reload goes through the same
+                    // reconcile+filter path as startup — reconcile
+                    // agent_mcp_tools.json against the live tools/list,
+                    // then expose only enabled tools.
+                    let (registry, wrappers, specs, failures) =
+                        crate::tools::mcp_manager::connect_mcp_with_reconcile_and_filter(
+                            &reload_work_dir,
+                            &merged,
+                        )
+                        .await;
                     let _ = tx.send((registry, wrappers, specs, failures)).await;
                 });
             }

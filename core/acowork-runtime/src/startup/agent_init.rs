@@ -226,6 +226,14 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // `mqtt_client_slot` the HTTP server holds.
     let mut workspace_watcher_set: Option<crate::workspace::SharedWorkspaceWatcherSet> = None;
 
+    // ADR-069 follow-up: shared MCP config notifier. When the HTTP
+    // server starts it creates the notifier (and exposes it on the
+    // handle); we clone it out above. Otherwise (no `--http-port`,
+    // standalone) we create a fresh one below the `if let` — either way
+    // the builtin MCP tools and the gateway loop subscribe to one Arc.
+    let mut mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier> =
+        Arc::new(crate::mcp_notify::McpConfigNotifier::default());
+
     if let Some(bind_port) = config.http_port {
         // ADR-055 §6.4: bind the Node-allocated loopback port so the
         // Node reverse proxy has a stable `{agent_id} → port` mapping.
@@ -270,6 +278,16 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             Ok(server) => {
                 runtime_http_port = Some(server.port);
                 workspace_watcher_set = Some(server.workspace_watchers.clone());
+                // ADR-069 follow-up: the HTTP server created the shared
+                // MCP config notifier (same Arc on HttpState). Clone it
+                // out now — the handle is `mem::forget`-ed below, and the
+                // notifier must be shared with the builtin MCP tools +
+                // gateway loop so `PUT /mcp-servers` / `PUT /mcp-tools`
+                // (which fire it via HttpState) actually trigger a
+                // reconnect.
+                if let Some(n) = server.mcp_notifier.clone() {
+                    mcp_notifier = n;
+                }
                 tracing::info!(port = server.port, "Runtime HTTP server started");
                 std::mem::forget(server);
             }
@@ -794,7 +812,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
         emb_provider.clone(),
     ));
-    let mcp_notifier = Arc::new(crate::mcp_notify::McpConfigNotifier::default());
 
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(

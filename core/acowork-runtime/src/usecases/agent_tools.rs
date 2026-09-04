@@ -154,16 +154,37 @@ pub struct BuiltinToolsResponse {
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
 }
 
+/// Per-agent MCP server view for the Tools panel.
+///
+/// Rendered as a toggle row in the Desktop Tools tab. `active` is
+/// `true` when the server's name is currently in `active_names`.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerView {
+    pub name: String,
+    pub transport: acowork_core::protocol::McpTransportDef,
+    pub url: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub active: bool,
+}
+
 /// Response for `GET /agents/{id}/tools` - the merged Tools-panel view.
 ///
 /// Combines all three Tools-panel sources (builtin tools, MCP servers,
 /// search providers) in a single round-trip so the desktop can render
 /// the entire panel without chaining three separate calls.
+///
+/// `mcp_servers` keeps the active server **names** (backward-compatible
+/// with the per-agent activation store); `mcp_servers_defs` carries the
+/// full **per-agent** merged list (catalog ∪ local) with active flags so
+/// the panel can render switches for agent-installed and system-injected
+/// servers too — not just the gateway-global catalog.
 #[derive(Debug, Clone, Serialize)]
 pub struct MergedToolsResponse {
     pub agent_id: String,
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
     pub mcp_servers: Vec<String>,
+    pub mcp_servers_defs: Vec<McpServerView>,
     pub search: serde_json::Value,
 }
 
@@ -235,4 +256,44 @@ pub trait AgentToolsService: Send + Sync {
     /// MCP + search). Read-only aggregation of the three Tools-panel
     /// config files; the handler does not merge anything itself.
     async fn get_merged_tools(&self, agent_id: &str) -> MergedToolsResponse;
+
+    /// `GET /agents/{id}/mcp-tools` — return the **full** per-tool
+    /// list for every MCP server, each row carrying `name`, `enabled`
+    /// and `description`. This is the single source of truth the
+    /// desktop Tools panel renders directly — the frontend never
+    /// maintains its own tool list or defaults (ADR-069).
+    async fn get_mcp_tools(&self, agent_id: &str) -> McpToolsResponse;
+
+    /// `PUT /agents/{id}/mcp-tools` — persist the complete
+    /// `AgentMcpToolsConfig` sent by the desktop. The body is the
+    /// **entire** per-server tool list (same shape as the GET
+    /// response), so a single-row toggle carries the full list; the
+    /// backend writes it verbatim to `agent_mcp_tools.json`. There is
+    /// no server-side merge — the desktop's list is authoritative.
+    async fn put_mcp_tools(
+        &self,
+        agent_id: &str,
+        body: PutMcpToolsBody,
+    ) -> Result<McpToolsResponse, AgentToolsError>;
+}
+
+// ── MCP tools (ADR-069) ────────────────────────────────────────────────
+
+/// Request body for `PUT /agents/{id}/mcp-tools`.
+///
+/// Wire shape mirrors `agent_mcp_tools.json` exactly — three-way
+/// identity between the on-disk file, the GET response, and the PUT
+/// body. Each per-server entry is a flat array of every tool the
+/// server advertises, each carrying its own `enabled` flag and
+/// `description` (sourced from the live MCP `tools/list`).
+pub type PutMcpToolsBody = crate::agent_config::AgentMcpToolsConfig;
+
+/// Response for `GET /agents/{id}/mcp-tools`.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpToolsResponse {
+    pub agent_id: String,
+    pub servers: std::collections::HashMap<
+        String,
+        Vec<crate::agent_config::AgentMcpToolItem>,
+    >,
 }
