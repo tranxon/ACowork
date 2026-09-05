@@ -195,14 +195,27 @@ pub fn restore_history_from_jsonl(
 
     // Pass 4: translate entries into ChatMessages, merging adjacent tool_call
     // rows onto their preceding assistant.
+    //
+    // DeepSeek thinking mode requires each assistant turn that carries
+    // `tool_calls` to echo back its `reasoning_content` on subsequent
+    // requests (HTTP 400 otherwise).  In JSONL the reasoning lives on the
+    // `thought` rows that immediately precede the tool-call assistant turn.
+    // Restoring those rows straight into history would pollute the LLM
+    // context (thought text is internal monologue), so instead we carry the
+    // most recent `thought` as `pending_reasoning` and fold it into the
+    // *next assistant message that actually makes tool calls*.  Text-only
+    // assistant turns deliberately keep `reasoning_content: None` to stay
+    // consistent with `handle_text_response`'s runtime behaviour.
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut replayed = 0usize;
+    let mut pending_reasoning: Option<String> = None;
 
-    for entry in &working {
+    for (entry_idx, entry) in working.iter().enumerate() {
         // Compaction event → synthetic assistant marker (only honored once;
         // older compactions inside `working` shouldn't exist by construction,
         // but defensively skip them).
         if entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION) {
+            pending_reasoning = None;
             // Compaction markers live at `User` role in memory (see
             // `HistoryManager::replace_middle_with_summary`).  Using
             // `Assistant` here would recreate the
@@ -220,10 +233,15 @@ pub fn restore_history_from_jsonl(
 
         match entry.role.as_str() {
             "thought" => {
-                // Frontend-only; never enters LLM context.
+                // Reasoning content for the upcoming tool-call assistant
+                // turn. Kept out of `messages` (never a standalone LLM
+                // message) but preserved as `reasoning_content` on the
+                // assistant that actually carries tool_calls.
+                pending_reasoning = Some(entry.content.clone());
                 skipped += 1;
             }
             "system" => {
+                pending_reasoning = None;
                 messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: entry.content.clone(),
@@ -232,11 +250,31 @@ pub fn restore_history_from_jsonl(
                 replayed += 1;
             }
             "user" => {
+                pending_reasoning = None;
                 messages.push(ChatMessage::user(entry.content.clone()));
                 replayed += 1;
             }
             "assistant" => {
-                messages.push(ChatMessage::assistant(entry.content.clone()));
+                // Only a tool-call turn carries its own `thought` back onto
+                // the wire. Text-only turns leave it None (matches the
+                // runtime path and avoids sending `reasoning_content` to
+                // providers that do not accept it).
+                let next_is_tool_call = working
+                    .get(entry_idx + 1)
+                    .map(|e| e.role == "tool_call")
+                    .unwrap_or(false);
+                let reasoning = if next_is_tool_call {
+                    pending_reasoning.take()
+                } else {
+                    pending_reasoning = None;
+                    None
+                };
+                messages.push(ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: entry.content.clone(),
+                    reasoning_content: reasoning,
+                    ..Default::default()
+                });
                 replayed += 1;
             }
             "tool_call" => {
@@ -273,12 +311,18 @@ pub fn restore_history_from_jsonl(
                     },
                 };
 
-                // Merge into the immediately preceding assistant if present;
-                // otherwise synthesize an empty-content assistant.
-                let merged = matches!(
-                    messages.last(),
-                    Some(m) if m.role == MessageRole::Assistant
-                );
+                // A `thought` directly before this tool_call means the model
+                // started a NEW assistant turn (the JSONL writer does not
+                // emit an `assistant` row when that turn's content is empty),
+                // so we must NOT merge into an earlier assistant. Otherwise
+                // merge into the immediately preceding assistant, or
+                // synthesize an empty-content assistant when none precedes.
+                let is_new_round = pending_reasoning.is_some();
+                let merged = !is_new_round
+                    && matches!(
+                        messages.last(),
+                        Some(m) if m.role == MessageRole::Assistant
+                    );
                 if merged {
                     let last = messages.last_mut().unwrap();
                     last.tool_calls
@@ -288,6 +332,7 @@ pub fn restore_history_from_jsonl(
                     messages.push(ChatMessage {
                         role: MessageRole::Assistant,
                         content: String::new(),
+                        reasoning_content: pending_reasoning.take(),
                         tool_calls: Some(vec![new_call]),
                         ..Default::default()
                     });
@@ -476,6 +521,88 @@ mod tests {
         assert_eq!(outcome.messages.len(), 2, "thought should not enter context");
         assert!(outcome.messages.iter().all(|m| !matches!(m.role, MessageRole::System)));
         assert!(outcome.skipped_entry_count >= 1);
+    }
+
+    #[test]
+    fn restore_folds_reasoning_onto_tool_call_rounds() {
+        // DeepSeek thinking mode: a tool-call assistant turn must echo its
+        // reasoning_content back on the wire (400 otherwise). JSONL stores
+        // that reasoning as `thought` rows. This test locks in that
+        // recovery restores them onto the assistant that carries tool_calls
+        // — for both the "thought + assistant + tool_call" shape and the
+        // "thought + tool_call only (empty assistant content)" shape —
+        // while keeping text-only turns free of reasoning_content.
+        let work = temp_workdir("rc-tool-round");
+        let session_id = "sess-rc-tool";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        session.append_message("user", "q1", None);
+        // Round 1: thought + assistant content + tool_call
+        session.append_message("thought", "rc-one", None);
+        session.append_message("assistant", "listing", None);
+        session.append_message(
+            "tool_call",
+            r#"{"path":"."}"#,
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_1"})),
+        );
+        session.append_message(
+            "tool_result",
+            "a.rs",
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_1"})),
+        );
+        // Round 2: thought + tool_call only (empty assistant content) —
+        // must start a NEW assistant turn, not merge into round 1.
+        session.append_message("thought", "rc-two", None);
+        session.append_message(
+            "tool_call",
+            r#"{"path":"./src"}"#,
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_2"})),
+        );
+        session.append_message(
+            "tool_result",
+            "main.rs",
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_2"})),
+        );
+        flush();
+
+        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
+
+        // User, Assistant{tc_1, rc-one}, Tool(tc_1),
+        // Assistant{tc_2, rc-two}, Tool(tc_2)
+        assert_eq!(outcome.messages.len(), 5);
+        assert!(matches!(outcome.messages[0].role, MessageRole::User));
+        assert!(matches!(outcome.messages[1].role, MessageRole::Assistant));
+        assert_eq!(
+            outcome.messages[1].reasoning_content.as_deref(),
+            Some("rc-one")
+        );
+        let calls1 = outcome.messages[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls1.len(), 1);
+        assert_eq!(calls1[0].id, "tc_1");
+        assert!(matches!(outcome.messages[2].role, MessageRole::Tool));
+        assert!(matches!(outcome.messages[3].role, MessageRole::Assistant));
+        assert_eq!(
+            outcome.messages[3].reasoning_content.as_deref(),
+            Some("rc-two"),
+            "thought before an empty-content tool round must become that \
+             round's reasoning_content (not merge into the previous round)"
+        );
+        let calls2 = outcome.messages[3].tool_calls.as_ref().unwrap();
+        assert_eq!(calls2.len(), 1);
+        assert_eq!(calls2[0].id, "tc_2");
+        assert!(matches!(outcome.messages[4].role, MessageRole::Tool));
+        assert_eq!(outcome.messages[4].tool_call_id.as_deref(), Some("tc_2"));
     }
 
     #[test]

@@ -221,11 +221,11 @@ impl AgentLoop {
     /// provides early warning at 80% usage.
     ///
     /// ADR-061 §11.2: ensure history fits the model budget by routing
-    /// through the 8-level compression plan exclusively.
+    /// through the ADR-061 v3 5-level compression plan exclusively.
     ///
     /// FIFO trim and emergency trim are deleted; when history exceeds the
     /// budget, [`Self::compact_history_if_needed`] is forced so the
-    /// 8-level plan runs (level 8 is guaranteed to fit once the summary
+    /// 5-level plan runs (level 5 is guaranteed to fit once the summary
     /// size is known — §19.5). Failure is explicit: the compaction path
     /// emits `ChunkEvent::Error` and leaves history untouched (§11.3)
     /// instead of silently destroying cache continuity.
@@ -566,10 +566,10 @@ impl AgentLoop {
     /// Check context usage after LLM response and trigger compaction if needed.
     ///
     /// Per [ADR-011], this implements the three-stage compaction strategy:
-    /// - 80% usage → LLM-based compaction (`compact_via_llm` + 8-level plan)
+    /// - 80% usage → LLM-based compaction (`compact_via_llm` + 5-level plan)
     ///
     /// ADR-061: the `CONTEXT_CRITICAL_PERCENT` emergency-trim stage is
-    /// deleted (§11); the 8-level plan (level 8 floor) replaces it, and
+    /// deleted (§11); the 5-level plan (level 5 floor) replaces it, and
     /// LLM failure emits `ChunkEvent::Error` instead of FIFO trimming (§11.3).
     ///
     /// When `force` is true (manual trigger from user), the 80% threshold is
@@ -735,7 +735,7 @@ impl AgentLoop {
                         Some(&self.session.history.user_intent_fallback_text()),
                     );
                     // ADR-061: summary first (input = full history), then
-                    // pick the 8-level plan against the now-known summary
+                    // pick the 5-level plan against the now-known summary
                     // size, then apply (§19.1). History is untouched when no
                     // plan fits the budget (§19.5).
                     //
@@ -790,7 +790,7 @@ impl AgentLoop {
                                         new_tokens = outcome.new_tokens,
                                         compression_ratio = ?outcome.compression_ratio,
                                         removed_messages = outcome.removed_messages,
-                                        "ADR-061: 8-level compression plan applied"
+                                        "ADR-061: 5-level compression plan applied"
                                     );
 
                                     // ADR-060 v2 §5.4: idempotent — inject
@@ -1028,9 +1028,9 @@ impl AgentLoop {
                         "LLM compaction completed"
                     );
 
-                    // Stage 3: 95% → the 8-level plan already guarantees
+                    // Stage 3: 95% → the 5-level plan already guarantees
                     // post-compaction size ≤ budget (apply validates
-                    // projected ≤ budget; level 8 is the floor — §19.5).
+                    // projected ≤ budget; level 5 is the floor — §19.5).
                     // Usage ≥ CRITICAL here simply means the conversation
                     // is still large after a successful level-1..7 fit;
                     // emergency trim is deleted (ADR-061 §11) and the next
@@ -1148,7 +1148,7 @@ impl AgentLoop {
             // (80) < CONTEXT_CRITICAL_PERCENT (95), so any usage ≥ 95% enters
             // the compaction branch above first. It is kept as documentation
             // of the deleted Stage-3 emergency-trim safety net (ADR-061 §11):
-            // the 8-level plan replaces it, and explicit failure (ChunkEvent::Error)
+            // the 5-level plan replaces it, and explicit failure (ChunkEvent::Error)
             // replaces silent FIFO trimming.
             tracing::error!(
                 usage_percent = ?usage_percent,
@@ -1339,7 +1339,7 @@ impl AgentLoop {
         chat_request
     }
 
-    /// ②.6 Context usage circuit-breaking — run the 8-level compression
+    /// ②.6 Context usage circuit-breaking — run the ADR-061 v3 5-level compression
     /// plan when context exceeds the hard threshold (90%), warn when
     /// approaching the limit (70%).
     ///

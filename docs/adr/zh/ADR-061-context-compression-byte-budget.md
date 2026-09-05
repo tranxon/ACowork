@@ -1,7 +1,10 @@
-# ADR-061：上下文压缩机制改造 - 8 级递减策略替代按轮数保留
+# ADR-061：上下文压缩机制改造 - 5 级递减策略替代按轮数保留
 
-**状态**：提案（2026-08-30 定稿修订，见 §19；与正文冲突处以 §19 为准）
-**日期**：2026-09-14（自 ADR-060 §12 拆分独立，含代码级事实修正；2026-08-30 完成定稿修订）
+**状态**：v3 修订（2026-09-05；见 §20 三原子重构 + §6 5 级策略 + §10 占位符语义修正；与 §19/正文冲突处以 §20 为准）
+**日期**：
+- 2026-09-14：自 ADR-060 §12 拆分独立
+- 2026-08-30：完成 v2 定稿修订（§19）
+- **2026-09-05：v3 修订（5 级策略 + 三原子 + 占位符语义修正，§20）**
 **决策者**：大鱼
 **前置**：
 - [ADR-010](./ADR-010-context-compression-simplification.md)（程序化压缩废止的历史决策）
@@ -139,34 +142,45 @@ ADR-010 的核心结论是"**程序能做的是什么时候叫 LLM 来做摘要�
 
 ---
 
-## 6. 8 级递减策略定义
+## 6. 5 级递减策略定义（v3 重构）
+
+> **2026-09-05 修订**：原 8 级表（§6.2 v2）经生产环境实测，Lv1-Lv3 在所有 session 中**从未触发**，示例包与真实 agent 任务的工具分布均不满足 Lv1-Lv3 的宽松保留比例（默认 90% 压缩比）。Lv1-Lv3 作为"长尾工具任务"场景的预留实现被取消，重构为 5 级；**沿用原 Lv4-Lv8 的阈值与保留策略，重新编号为新 L1-L5**（详见 §6.2 新表）。详细修订理由与三原子化的封装策略见 §20。
 
 ### 6.1 设计思路
 
 **核心洞察**：以"保留 N 轮"为指标是脆弱的——N 轮的 token 数随工具调用体量变化巨大（N=1 在 long-running task 场景下就可能撑满 budget）。**真正应该优化的指标是"压缩比"**——只要压缩比 ≥ 阈值（默认 90% = 节省 ≥ 90%、剩余 ≤ 10%），cache 牺牲就值得且后续会话有充足缓冲；否则降一级再压。阈值见 §3.3（per-agent 可调）。
 
-**逐级递减的语义**：从最宽松的保留（级 1）开始尝试，如果压缩比不达标（< 阈值），进入更激进的级（级 2），以此类推，直到级 8 仍不达标则放弃压缩（`NoCompressionNeeded`）。
+**逐级递减的语义**：从最宽松的保留（新级 1 = 原级 4）开始尝试，如果压缩比不达标（< 阈值），进入更激进的级（新级 2 = 原级 5），以此类推，直到新级 5（原级 8）仍不达标则放弃压缩（`NoCompressionNeeded`）。
 
-**Lv1-3 的设计意图（场景定位）**：Lv1-3 只压工具（保留所有 user/assistant），是为"单用户输入一句话 + agent 执行很长工具任务"场景保留——此时工具调用集中分布在尾部几个 assistant 窗口，Lv1-3 能保留尾部工具上下文而压掉远期。**常规多轮对话场景（user+assistant 占小头 + 工具是大头且均匀分布）下 Lv1-3 几乎不可能满足默认 90% 阈值，会跳过至 Lv4-7 直至 Lv8**——这是预期行为，不视为退化（实现保留给低阈值调整或特定数据分布场景）。
+**为什么从 8 级收敛到 5 级**：原 Lv1-Lv3 的设计意图（"长尾工具任务"）在生产环境中**从未被命中**——工具调用在历史中均匀分布时，Lv1-Lv3 的"保留所有 user/assistant + 尾部工具"无法满足 90% 压缩比阈值，自动跳过至 Lv4+。Lv1-Lv3 仅在低阈值（< 50%）或特殊数据分布下才有意义，属于 YAGNI 范围。删除后策略从 8 级收敛为 5 级：每级对应一个稳定命中的工具保留档位，**实现简单、可观测、可测试**。
 
 **为什么不用单一策略**：long-running task 场景下，用户消息稀疏但每个 assistant 后都有大量工具调用。固定"保留最近 K 轮"要么 K=3 就撑满 budget，要么 K=1 丢光信息。逐级递减自动适配不同场景的"信息密度"。
 
-### 6.2 8 级策略定义
+**v3 重构的核心**：把"assistant 保留"和"tool 保留"两个维度独立决策（v2 设计）改为**以 round（assistant+紧随其后的 tool 集合）为原子单位**封装——具体见 §20 三原子设计。
+
+### 6.2 5 级策略定义（v3）
 
 按"user/assistant 保留度"和"工具调用保留度"两个维度递减：
 
-| 级 | user 消息 | assistant 消息 | 工具调用保留 | 说明 |
-|---|---|---|---|---|
-| **1** | 全部 | 全部 | 最近 5 个 assistant 消息之间的所有 tool_* | 最宽松，先试这个 |
-| **2** | 全部 | 全部 | 最近 3 个 assistant 消息之间的所有 tool_* | 收紧工具范围 |
-| **3** | 全部 | 全部 | 最近 1 个 assistant 消息之间的所有 tool_* | 只保留最近轮的工具 |
-| **4** | 全部 | 最近 5 个 | 最近 1 个 assistant 消息之间的所有 tool_* | 开始丢远期 assistant |
-| **5** | 全部 | 最近 5 个 | **全部丢弃**（全部走 LLM 摘要） | 只剩骨架 |
-| **6** | 全部 | 最近 3 个 | **全部丢弃** | 进一步收紧 |
-| **7** | 全部 | 最近 1 个 | **全部丢弃** | 极简骨架 |
-| **8** | (全部走 LLM 摘要) | (全部走 LLM 摘要) | (全部走 LLM 摘要) | 仅保留 system block + summary + 当前 user message |
+| 新级 | 原级 | user 消息 | assistant 消息 | 工具调用保留 | 说明 |
+|---|---|---|---|---|---|
+| **L1** | L4 | 全部 | 最近 5 个 | 最近 1 个 assistant 之间的所有 tool_* | 默认命中点：多轮对话工具均匀分布场景 |
+| **L2** | L5 | 全部 | 最近 5 个 | **全部用占位符折叠**（assistant.tool_calls 保留） | 只剩骨架 |
+| **L3** | L6 | 全部 | 最近 3 个 | **全部用占位符折叠** | 进一步收紧 |
+| **L4** | L7 | 全部 | 最近 1 个 | **全部用占位符折叠** | 极简骨架 |
+| **L5** | L8 | (全部走 LLM 摘要) | (全部走 LLM 摘要) | (全部走 LLM 摘要) | 仅保留 system block + summary + 当前 user message |
 
 **关键澄清**：`ask_user` 工具调用**不构成 user 消息**——它是 round 内部的事件，用户在 ask_user 后的"选择/确认"是 `tool_result`，不是新一轮 user 输入。`user 消息` 只指 `MessageRole::User` 类型的消息。
+
+**v3 与 v2 的关键差异**：
+
+| 维度 | v2（已废弃） | v3（现行） |
+|---|---|---|
+| 级别数 | 8 | 5 |
+| Lv1-Lv3 宽松工具保留 | 实现保留，实际永不触发 | **删除**（生产数据证明 YAGNI） |
+| 工具"丢弃"语义 | 物理删除 tool 消息（破坏 schema） | **原地 content 替换为占位符**（schema 完整保留） |
+| 占位符可召回性 | 提示用 `context_retrieve` 取回 | **无召回通道**：`context_retrieve` 已废弃，提示改为"结果已回收，需要重新调用工具再次获取结果" |
+| 决策原子 | assistant / tool 双维度独立 | **round 为单位**（见 §20 三原子） |
 
 ---
 
@@ -354,26 +368,58 @@ fn build_summary_metadata(plan: &CompressionPlan, original_tokens: u64, new_toke
 
 ---
 
-## 10. 工具自动压缩的归宿
+## 10. 工具自动压缩的归宿（v3 修正）
 
 ### 10.1 决策
 
-**结论**：**关闭 LLM 自主工具压缩**，`context_abandon` 不再注册。
+**结论**：**关闭 LLM 自主工具压缩**，`context_abandon` 不再注册（v2 决策维持）。**v3 关键修正**：占位符**不可召回**——`context_retrieve` 同样处于废弃状态（ADR-052 §12 已决定 deprecated），提示文本改为"结果已回收，需要重新调用工具再次获取结果"。
 
 **理由**：
-- LLM 自主调用 `context_abandon` → 原位替换占位符 → 中间字节变化 → Block B cache 失效（与 ADR-060 核心理念冲突）。
-- 其价值完全可由 8 级策略覆盖（级 1-7 把"工具调用保留"作为可调维度），且 8 级策略由 Runtime 统一调度，不把 cache 决策权交给不理解 cache 的实体。
+1. LLM 自主调用 `context_abandon` → 原位替换占位符 → 中间字节变化 → Block B cache 失效（与 ADR-060 核心理念冲突）。
+2. v3 引入的"5 级策略 + 占位符折叠"由 Runtime 统一调度（见 §20 三原子），不把 cache 决策权交给 LLM。
+3. **占位符不可召回的语义决定**（v3 新增）：`context_retrieve` 工具已 deprecated（ADR-052 v3 修订：见 ADR-052 §12 关键决策），不可再作为占位符的召回通道被提示。提示 LLM "结果已回收，需要重新调用工具" 是诚实语义——压缩结果**真的**不在历史里了，唯一的召回路径是**重新执行工具**。这种"诚实失败"比"假装可召回"更安全：避免 LLM 基于不可达的 context_retrieve 做出错误假设。
 
-### 10.2 改造（以实际代码为准）
+### 10.2 占位符格式（v3 修正）
 
-| 项 | 现状 | 改造 |
+```rust
+/// 5 级策略压缩工具结果时的占位符前缀。
+///
+/// v3 修正：占位符**不**提供召回通道。提示 LLM 该结果已被压缩、需重新调用工具
+/// 再次获取（ADR-052 v3 已废弃 context_retrieve）。完整格式：
+///
+///     "--- compressed: tool=<name> result reclaimed, re-invoke to re-fetch --- "
+///
+/// 字段解释：
+/// - `<name>`：原工具名（file_edit / bash / content_search 等），便于 LLM 决策是否值得重新调用
+/// - "result reclaimed"：明确告知结果已被回收，不是被截断或部分折叠
+/// - "re-invoke to re-fetch"：唯一的召回路径是重新执行工具
+///
+/// 不变量：
+/// - content 长度 ≤ 200 字节（远小于典型 tool_result 的几 KB~几十 KB）
+/// - 幂等：检测前缀即可判定"已被占位"（重复调用 clear_round 是 no-op）
+/// - schema 完整：tool_call_id 不变、role 不变，仅 content 字段被替换
+pub const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str =
+    "--- compressed: tool=";
+
+pub fn make_compressed_placeholder(tool_name: &str) -> String {
+    format!(
+        "{}{} result reclaimed, re-invoke to re-fetch --- ",
+        COMPRESSED_TOOL_PLACEHOLDER_PREFIX, tool_name
+    )
+}
+```
+
+### 10.3 改造（以实际代码为准，v3 修正）
+
+| 项 | 现状 | v3 改造 |
 |---|---|---|
-| 工具注册门控 | `tool_compression_enabled`（默认 true）同时门控 `context_retrieve` + `context_abandon`（[builtin/mod.rs:195-201](core/acowork-runtime/src/tools/builtin/mod.rs#L195-L201)） | 拆开门控：`context_retrieve` **固定注册**（压缩后取回通道）；`context_abandon` **不再注册**（deprecated，代码保留向后兼容） |
-| 配置字段 | `agent_config.rs:216` `tool_compression_enabled: Option<bool>` + `RuntimeConfigUpdate` 热重载 + `AgentCore::sync_platform_tools_to_registry` | 移除字段与热重载路径（或改名为 `context_retrieve_enabled` 仅控制 retrieve） |
-| 队列机制 | `AbandonQueue` / `RetrieveQueue`（loop_.rs:383-395） | `AbandonQueue` 删除；`RetrieveQueue` 保留 |
-| UI | agent setup "Enable tool compression" 选项 | 移除（P1 UI 改动） |
+| 工具注册门控 | `tool_compression_enabled`（默认 true）同时门控 `context_retrieve` + `context_abandon` | 拆开门控：`context_retrieve` 改为**不再注册**（ADR-052 v3 决定 deprecated）；`context_abandon` **不再注册**（v2 决定维持） |
+| 配置字段 | `agent_config.rs:216` `tool_compression_enabled: Option<bool>` + `RuntimeConfigUpdate` 热重载 | 移除字段与热重载路径 |
+| 队列机制 | `AbandonQueue` / `RetrieveQueue`（loop_.rs:383-395） | `AbandonQueue` 删除；`RetrieveQueue` 整体删除（无可用工具消费） |
+| **占位符替换路径** | 无（物理删除 tool 消息，破坏 schema） | **新增** `clear_round` / `abandon_tool_result`：原地 content 替换为占位符（见 §20 PR1） |
+| UI | agent setup "Enable tool compression" 选项 | 移除 |
 
-**保留的能力**：`context_retrieve` 工具保留——LLM 仍可显式召回被压缩的工具结果（走 ADR-060 Block B append-only 路径，不破坏 cache）。
+**v3 不再保留任何形式的工具召回通道**——`context_retrieve` 与 `context_abandon` 均不再注册。LLM 看到占位符时，唯一的选择是重新调用工具（这是诚实语义，也是 v2 决策的本意：cache 不变性优先于 LLM 抽取便利性）。
 
 ---
 
@@ -760,4 +806,216 @@ P0 清单已全部落地并随 `cargo test -p acowork-runtime --lib`（1111 pass
 | 19-4 | ✅ | 前端 `ContextOverflow` 文案（ChatPanel + 5 语言 i18n） |
 | 19-5 | ✅ | 级 8 豁免 / 超限落级 8 / marker 按 user 级保留测试 |
 | 19-6 | ✅ | 达标线参数化全链路（见 §19.3 表项）：默认 0.90，AgentSetup 面板设置项（50%–95% slider，i18n ×5），`plan_compression/apply_compression` 接收 `min_ratio` 参数，测试新增 `test_plan_default_ratio_skips_weak_levels` |
+
+---
+
+## 20. v3 重构：三原子化封装 + 5 级策略（2026-09-05）
+
+> 本节为 v3 修订的核心——基于生产环境事故（Lv4 压缩后 deepseek-v4-flash 工具调用 schema 破损）的根因分析，对 v2 的双维度独立决策架构做结构性重构。
+
+### 20.1 问题根因（事故复盘）
+
+**事故现象**：多次 session 在触发 ADR-061 Lv4 压缩后，下一轮 LLM 请求开始**所有 LLM 响应** `has_tool_calls=false tool_call_count=0`，但 assistant.content 包含完整的工具调用标记文本（`<｜｜DSML｜｜tool_calls>...`）。换模型后症状消失——**掩盖了根因**。
+
+**根因链**：
+
+```mermaid
+graph LR
+    A[history 178K 触发 Lv4 压缩] --> B[removed=301]
+    B --> C["assistant_threshold<br/>保留后 5 个 assistant<br/>tool_threshold=WithinLastAssistants 1<br/>保留最后 1 个 assistant 之间的 tool"]
+    C --> D["Lv4 后 4 个 assistant 留下<br/>但其 tool_calls 数组仍指向<br/>已被物理删除的 tool 消息"]
+    D --> E["schema 不一致:<br/>Assistant{tool_calls=[X,Y]}<br/>但 Tool(X)/Tool(Y) 不存在"]
+    E --> F["sanitize_messages 兜底<br/>删 orphan tool_calls<br/>留下空 assistant 消息"]
+    F --> G["deepseek-v4-flash 走文本 fallback<br/>把工具调用标记当字符串复读"]
+    
+    style D fill:#FF6B6B
+    style E fill:#FF6B6B
+    style G fill:#FF6B6B
+```
+
+**根因**：v2 的 `build_level_plan` 把 `assistant_keep` 和 `tool_keep` 当作**两个独立维度**决策（§6.2 表的"user/assistant 保留度"和"工具调用保留度"两列），但实际数据模型中 `assistant.tool_calls[*].id` 与 `tool[*].tool_call_id` 是**强耦合**的——删 tool 不删对应 assistant.tool_calls 数组项，会留下"幽灵调用"。`sanitize_messages` 是 defense-in-depth 兜底，但不能恢复 assistant.content 的悬挂引用。
+
+### 20.2 设计反思：v2 错在哪
+
+| 维度 | 评估 |
+|------|------|
+| 需求分解粒度 | ❌ 太粗——以"维度"为单位，没有识别 assistant 与 tool 的生命周期耦合 |
+| 抽象原子 | ❌ 错位——`build_level_plan` 应该决策"保留哪些 round"，而不是"保留多少 assistant + 多少 tool" |
+| 副作用范围 | ❌ 物理删除 → schema 破坏 → 兜底代码四处补 |
+| 决策表设计 | ❌ 8 级中 3 级从未触发 → YAGNI 违反 |
+| 占位符语义 | ❌ 假设 `context_retrieve` 可召回 → 实际 ADR-052 已废弃该工具 |
+
+**v3 设计原则**：**以 round（assistant 消息 + 紧随其后的 tool 消息集合）为原子决策单位**。要么整 round 保留（含 tool_calls 数组 + tool 消息），要么整 round 折叠（占位符替换，但 schema 完整）。
+
+### 20.3 三个原子操作契约
+
+#### 20.3.1 `clear_round(assistant_idx) -> ClearRoundReport`
+
+**用法**：把指定 round 的所有 tool 消息的 `content` 字段原地替换为占位符（§10.2 格式）。**不动** assistant 消息本身（保留 `content` 与 `tool_calls` 字段）。
+
+**前置条件**：
+- `assistant_idx` 必须是 `MessageRole::Assistant` 类型
+- 该 assistant 必须有 `tool_calls` 字段（否则 round 无 tool 可清，返回 no-op 报告）
+
+**不变量（执行前后均成立）**：
+- `messages.len()` 不变（消息数量不变）
+- `assistant.tool_calls[i].id` 全部仍能在历史中找到对应 `tool.tool_call_id`（schema 完整）
+- `tool.role`、`tool.tool_call_id`、`tool.name` 等元数据字段全部不变，仅 `content` 被替换
+- 至少 1 字节占位符 ≤ 原 `content`（除非原 content 已 ≤ 占位符长度，此时幂等返回）
+
+**副作用**：
+- 减少 `current_tokens`（按 `recalibrate_tokens` 重新计算）
+- 触发 `tracing::info!`（聚合报告，非逐条 warn——避免日志噪声）
+
+**返回值**：`ClearRoundReport { cleared_tool_ids: Vec<String>, bytes_reclaimed: usize }`
+
+**伪代码**：
+
+```rust
+fn clear_round(&mut self, assistant_idx: usize) -> ClearRoundReport {
+    let assistant = &self.messages[assistant_idx];
+    let tool_call_ids: Vec<String> = assistant
+        .tool_calls.as_ref()
+        .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
+        .unwrap_or_default();
+    
+    let mut cleared = Vec::new();
+    let mut bytes_reclaimed = 0usize;
+    
+    for msg in &mut self.messages {
+        if msg.role != MessageRole::Tool { continue; }
+        let Some(ref tcid) = msg.tool_call_id else { continue; };
+        if !tool_call_ids.contains(tcid) { continue; }
+        
+        // 幂等检测
+        if msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
+            continue;
+        }
+        
+        bytes_reclaimed += msg.content.len();
+        msg.content = make_compressed_placeholder(
+            msg.name.as_deref().unwrap_or("unknown")
+        );
+        cleared.push(tcid.clone());
+    }
+    
+    self.recalibrate_tokens();
+    self.recompute_messages_json_bytes();
+    
+    ClearRoundReport { cleared_tool_ids: cleared, bytes_reclaimed }
+}
+```
+
+#### 20.3.2 `recall_todo_round() -> RecallResult`
+
+**用法**：在 5 级压缩完成后，把历史中最后一对 (assistant{含 todo_write 调用}, tool{todo_write 结果}) 整体克隆，插入到 summary marker 之后，**保证压缩后 todo 状态对 LLM 仍可见**。
+
+**前置条件**：
+- `last_compaction_index()` 必须返回 `Some`（必须先有 marker）
+- 历史中必须存在 `todo_write` round（否则返回 `RecallResult::NoTodoRoundFound`）
+
+**不变量**：
+- 召回的 `assistant.tool_calls` 至少包含 1 个 `todo_write` 调用
+- 召回的 `tool.tool_call_id` 匹配 `assistant.tool_calls[*].id` 之一（schema 完整）
+- 插入位置 = `marker_idx + 1`（紧跟 marker，让 LLM 在 summary 之后立即看到 todo 状态）
+- **不重复插入**：通过 `last_injected_todo_call_id` 字段幂等（同 ID 不再插入）
+
+**副作用**：
+- `messages.len()` 加 2（assistant + tool 各一条）
+- `last_injected_todo_call_id` 更新为本次召回的 todo_write call_id
+
+**返回值**：`RecallResult { injected: bool, skipped_reason: Option<SkipReason> }`
+
+#### 20.3.3 `fix_round(assistant_idx) -> FixReport`
+
+**用法**：对单条 round 执行"清扫"——不仅 `clear_round`，还额外清理该 round 范围内可能存在的孤立 tool_call / tool_result。**这是 `clear_round` 的超集**，用于兜底 LLM 上游（流式中断、畸形响应）造成的 schema 破损。
+
+**前置条件**：
+- `assistant_idx` 必须是 `MessageRole::Assistant` 类型
+
+**不变量（执行后）**：
+- 该 round 的 `assistant.tool_calls[i].id` 全部能在该 round 范围内找到 `tool.tool_call_id`
+- 反之：该 round 范围内所有 `tool.tool_call_id` 都能在该 round 的 `assistant.tool_calls[*].id` 中找到
+- `clear_round` 的所有不变量
+
+**副作用**：
+- 删孤立 tool 消息（增加 `messages_removed` 计数）
+- 从 `assistant.tool_calls` 数组中移除孤立 ID（in-place mutate）
+- `clear_round` 的所有副作用
+- 触发 `tracing::info!` 聚合报告
+
+**返回值**：`FixReport { cleared_tool_ids: Vec<String>, removed_orphan_tool_messages: usize, removed_orphan_tool_call_ids: Vec<String>, bytes_reclaimed: usize }`
+
+### 20.4 三原子的关系图
+
+```mermaid
+graph TB
+    CR["clear_round<br/>核心原子<br/>折叠 tool 消息<br/>schema 完整"] --> FP["fix_round<br/>超集: clear_round<br/>+ 清孤立条目"]
+    
+    RR["recall_todo_round<br/>独立原子<br/>克隆 todo 轮<br/>插入 marker 之后"]
+    
+    BLP["build_level_plan<br/>5 级决策层<br/>(L1-L5)"] --> CR
+    BLP -.->|"L1-L4<br/>每级后调用"| RR
+    BLP -.->|"总是"| FP
+    
+    subgraph 调用关系
+        CR -->|"PR1 复活"| ABANDON["abandon_tool_result<br/>PR1 复用 ADR-052 残骸"]
+    end
+    
+    style CR fill:#90EE90
+    style RR fill:#90EE90
+    style FP fill:#90EE90
+```
+
+### 20.5 测试金字塔
+
+每个原子对应独立测试 + E2E 集成测试：
+
+| 原子 | 单测用例数（目标） | 关键覆盖 |
+|------|-------------------|---------|
+| `clear_round` | 5 | 幂等性 / schema 不变 / 空 round no-op / 多 tool 选择性 / bytes_reclaimed 准确 |
+| `recall_todo_round` | 4 | 无 marker no-op / 无 todo round / 已在 tail 跳过 / 重复 ID 幂等 |
+| `fix_round` | 4 | 孤立 tool_call 清扫 / 孤立 tool_result 清扫 / clear_round 不变量 / 聚合报告正确 |
+| `build_level_plan` E2E | 3 | 5 级触发各级、schema 始终完整、token 下降达标 |
+
+### 20.6 实施计划（PR1-PR3）
+
+| PR | 范围 | 风险 | 回滚 |
+|----|------|------|------|
+| **PR1**：复活占位符基础设施 | 删 `history.rs:29-37` RETIRED 注释；复活 `COMPRESSED_TOOL_PLACEHOLDER_PREFIX` 常量；复活 `abandon_tool_result` 方法（PR2 的 `clear_round` 复用）；新增 `make_compressed_placeholder`；新增 5 个单测 | **零行为变化**（仅复活 dead code + 测试） | 1 commit revert |
+| **PR2**：实现三原子 | 新增 `clear_round` / `recall_todo_round` / `fix_round` 三个 pub 方法；改写 `find_last_todo_write_round*` 为 `recall_todo_round` 内部辅助；新增 13 个单测 | 低（新增代码，旧路径保留） | 特性开关 `new_round_primitives_enabled` 默认 off |
+| **PR3**：5 级策略 + clear_round 接入 | `build_level_plan` 改为按 round 决策（调用 `clear_round`）；新增 5 级选择表（沿用原 L4-L8 阈值，重新编号）；删除原 Lv1-Lv3 实现；新增 3 个 E2E 测试 | 中（核心算法改写） | 灰度开关 + feature flag |
+
+> **PR3 实施状态（2026-09-05）**：✅ 算法已落地于 `history.rs` —— `build_level_plan` 重建为 5 级 round 原子语义（L1-L4 折叠 + L5 summary-only），物理删除 tool 消息与 dangling `tool_calls` sweep 已移除（幽灵 assistant 根因消除）；`plan_compression` / `apply_compression` 改为 5 级语义，level 对外重编号为 1-5。新增 `v3_*` 回归测试（level 表 / 单调投影 / 首达即停 / L5 豁免 / 折叠保留 schema / sanitize 零删除 / marker 契约），`history.rs` 61 项测试通过。待办：生产灰度 1 周观察 `sanitize_messages` 触发频次。
+
+### 20.7 与既有契约的兼容性
+
+| 既有契约 | v3 影响 |
+|---------|---------|
+| ADR-060 Block B 完整性 | ✅ 保持（占位符替换不增删消息） |
+| ADR-011 summary marker 契约 | ✅ 保持（仍是 User 角色 + name="compaction_summary"） |
+| ADR-057 triples 删除 | ✅ 不涉及 |
+| ADR-052 context_retrieve 废弃 | ✅ 一致（v3 占位符也不可召回） |
+| `sanitize_messages` 兜底 | ✅ 保留为 defense-in-depth，但 schema 破损概率从结构上消除 |
+| `last_injected_todo_call_id` 幂等字段 | ✅ 保留并由 `recall_todo_round` 使用 |
+| `last_compaction_index()` | ✅ 保留为 marker 锚点 |
+
+### 20.8 决策记录（v3 关键 trade-off）
+
+| 决策 | 选择 | 拒绝的备选 | 理由 |
+|------|------|----------|------|
+| 占位符可召回？ | **不可召回** | "修复 `context_retrieve` 让占位符可取回" | ADR-052 v3 已决定废弃 `context_retrieve`；修复它会引入新工具 + 新 queue + 新增 cache 路径，违反 YAGNI。诚实失败 > 假装可召回 |
+| 5 级还是保留 8 级？ | **5 级** | 保留 8 级但加注释说明 Lv1-Lv3 罕触发 | YAGNI：实测从未触发 = 死代码。但保留 8 级的数字编号会污染对外 API（用户可见 level 字段），重构为 5 级更干净 |
+| assistant.content 折叠？ | **不折叠** | Lv3-Lv4 把前几轮 assistant.content 也用 LLM 摘要替代 | 引入额外 LLM 调用 + 引入新抽象（assistant 摘要与 tool 占位符的对齐问题），复杂度过高。诚实策略：占位符已足够降 token；assistant.content 留给下次压缩处理 |
+| `clear_round` 失败如何？ | **panic with `unreachable!`** | 返回 Result 让上层决策 | assistant_idx 由内部调用，类型已保证；上层不可能传入越界 index。panic 让 bug 立即暴露而不是悄悄 no-op |
+| 多 round 并发折叠？ | **不支持** | 设计 `clear_rounds(Vec<usize>)` 批量接口 | 单 round 是最小原子，多 round 是循环调用；批量接口是过早抽象 |
+
+### 20.9 验证标准（v3 完成的定义）
+
+- [x] PR1 落地（占位符常量 + `abandon_tool_result` + 单测，2026-08-31/09-05）
+- [x] PR2 落地（`clear_round` / `recall_todo_round` / `fix_round` 三原子 + 13 个单测，2026-09-05）
+- [x] PR3 算法落地（5 级 round 原子折叠 + 删除 v2 dangling sweep + `v3_*` E2E 测试，2026-09-05；生产灰度 1 周观察待办）
+- [ ] `sanitize_messages` 在生产中触发孤立清扫的次数降为 0（或仅在流式异常路径出现）
+- [ ] ADR-052 §12 关键决策中"context_retrieve 保留"的描述同步修订为"context_retrieve 废弃"
+- [ ] `examples/` 6 个包的 `manifest.toml` 注释中若引用 `context_retrieve`，同步移除
 
