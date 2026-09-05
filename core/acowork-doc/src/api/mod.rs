@@ -19,6 +19,7 @@ use crate::state::DocState;
 pub mod dirs;
 pub mod docs;
 pub mod dto;
+pub mod requests;
 pub mod router;
 pub mod search;
 pub mod trash;

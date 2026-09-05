@@ -71,6 +71,7 @@ pub use path::{
 
 // Storage primitives
 pub use store::library::LibraryStore;
+pub use store::requests::RequestsStore;
 pub use store::trash::TrashStore;
 
 // Service
@@ -81,6 +82,7 @@ pub use state::DocState;
 
 // Service-layer traits / impls (re-exported for api/, tests)
 pub use service::{
-    CreateDirectoryInput, CreateDocumentInput, DirectoryService, DocumentService,
-    LibraryDirectoryService, LibraryDocumentService, UpdateDocumentInput,
+    ApproveOutcome, CreateDirectoryInput, CreateDocumentInput, DirectoryService,
+    DocumentService, LibraryDirectoryService, LibraryDocumentService, LibraryRequestService,
+    RequestService, SubmitRequestInput, UpdateDocumentInput,
 };

@@ -11,7 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{DirMeta, DocMeta, DocRead, TreeNode};
+use crate::types::{DirMeta, DocMeta, DocRead, TreeNode, UpdateRequest};
 
 // ── Request bodies ─────────────────────────────────────────────────────
 
@@ -65,6 +65,43 @@ pub struct RenameDirBody {
     pub new_name: String,
 }
 
+// ── Update-request bodies (design §5) ────────────────────────────────
+
+/// `POST /api/requests` — agent submits an update proposal.
+#[derive(Debug, Deserialize)]
+pub struct SubmitRequestBody {
+    /// Target document id.
+    pub doc_id: String,
+    /// Version the agent based its edit on (must match live version).
+    pub base_version: u64,
+    /// Proposed new full Markdown content.
+    pub content: String,
+    /// Submitter identity, e.g. `"agent:com.example.agent"`. The MCP
+    /// layer (D3) will overwrite this from the authenticated agent; the
+    /// REST shell accepts it for curl / integration tests.
+    #[serde(default = "default_submitted_by")]
+    pub submitted_by: String,
+}
+
+fn default_submitted_by() -> String {
+    "human:desktop".to_string()
+}
+
+/// `POST /api/requests/:id/approve` / `reject` — human review.
+#[derive(Debug, Deserialize, Default)]
+pub struct ReviewBody {
+    /// Reviewer identity (display name or `human:xxx`).
+    #[serde(default = "default_reviewed_by")]
+    pub reviewed_by: String,
+    /// Optional review note stored on the request (design §5.3).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn default_reviewed_by() -> String {
+    "human:desktop".to_string()
+}
+
 // ── Response bodies ────────────────────────────────────────────────────
 
 /// Document metadata only — no content.
@@ -103,6 +140,25 @@ impl From<TreeNode> for TreeNodeDto {
     fn from(t: TreeNode) -> Self {
         Self(t)
     }
+}
+
+/// Update request — full wire shape matches the on-disk model
+/// (design §5.3), no transformation needed.
+#[derive(Debug, Serialize)]
+pub struct UpdateRequestDto(pub UpdateRequest);
+
+impl From<UpdateRequest> for UpdateRequestDto {
+    fn from(r: UpdateRequest) -> Self {
+        Self(r)
+    }
+}
+
+/// Approve response — reviewed request + the merged document version so
+/// agents can refresh their cached copy immediately.
+#[derive(Debug, Serialize)]
+pub struct ApproveDto {
+    pub request: UpdateRequest,
+    pub doc_version: u64,
 }
 
 /// RFC 3339 timestamps are produced by serde's default DateTime

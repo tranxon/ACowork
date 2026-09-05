@@ -10,11 +10,14 @@
 //!   "filename is authoritative; reconcile on startup").
 //! - `trash.rs` — `.trash/` slot storage (content file + `.meta.json`
 //!   sidecar) for soft-deleted documents.
+//! - `requests.rs` — `.requests/` update-request storage (one JSON file
+//!   per request, design §5.3).
 //!
 //! Service-layer traits in `crate::service::*` are the only callers of
 //! this module — the HTTP layer must not import `store` directly.
 
 pub mod atomic;
 pub mod library;
+pub mod requests;
 pub mod trash;
 pub mod tree;

@@ -14,9 +14,10 @@ use crate::config::DocConfig;
 use crate::error::Result;
 use crate::service::{
     DocumentService, LibraryDirectoryService, LibraryDocumentService,
-    LibrarySearchService, LibraryTrashService, TrashService,
+    LibraryRequestService, LibrarySearchService, LibraryTrashService, TrashService,
 };
 use crate::store::library::LibraryStore;
+use crate::store::requests::RequestsStore;
 use crate::store::trash::TrashStore;
 
 /// Shared state handed to every axum handler / MCP tool via `State<T>`.
@@ -33,6 +34,8 @@ pub struct DocState {
     pub docs: Arc<LibraryDocumentService>,
     /// Directory CRUD + tree listing (design §4).
     pub dirs: Arc<LibraryDirectoryService>,
+    /// PR-style update review flow (design §5).
+    pub requests: Arc<LibraryRequestService>,
     /// Recycle bin (design §3.3 / §4 trash endpoints).
     pub trash: Arc<LibraryTrashService>,
     /// Cross-directory keyword search (design §4 `GET /api/search`).
@@ -49,11 +52,19 @@ impl DocState {
         store.ensure_root().await?;
         let docs = Arc::new(LibraryDocumentService::new(store.clone()));
         let dirs = Arc::new(LibraryDirectoryService::new(store.clone()));
+        let docs_dyn = docs.clone() as Arc<dyn DocumentService>;
+        // RequestService reviews by merging through the DocumentService
+        // (approve = update with base_version), TTL from config.
+        let requests = Arc::new(LibraryRequestService::new(
+            docs_dyn.clone(),
+            RequestsStore::new(store.root().to_path_buf()),
+            config.request_ttl_hours,
+        ));
         // TrashService re-creates documents through the DocumentService
         // trait on restore; retention comes from config; startup runs a
         // lazy purge (design §3.3 "30 天后清理" — no background task).
         let trash = Arc::new(LibraryTrashService::new(
-            docs.clone() as Arc<dyn DocumentService>,
+            docs_dyn,
             TrashStore::new(store.root().to_path_buf()),
             config.trash_retention_days,
         ));
@@ -64,6 +75,7 @@ impl DocState {
             actor: None,
             docs,
             dirs,
+            requests,
             trash,
             search,
         })

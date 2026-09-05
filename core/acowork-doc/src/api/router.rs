@@ -13,11 +13,17 @@
 //! - `POST   /docs/{id}/move`  move
 //! - `DELETE /docs/{id}`      soft-delete → .trash/
 //! - `GET    /docs/{id}/path`  on-disk relative path
+//! - `GET    /docs/{id}/requests` per-doc review history
 //! - `POST   /dirs`           create subdir
 //! - `GET    /dirs/{id}`      read dir meta
 //! - `PATCH  /dirs/{id}/name` rename
 //! - `DELETE /dirs/{id}`      cascade-delete
 //! - `GET    /tree?dir_id=…`  immediate children
+//! - `POST   /requests`       submit update proposal (agent)
+//! - `GET    /requests?status=` review queue
+//! - `GET    /requests/{id}`  request detail / status
+//! - `POST   /requests/{id}/approve` review-approve (merge)
+//! - `POST   /requests/{id}/reject`  review-reject (note)
 //! - `GET    /trash`          recycle-bin list
 //! - `POST   /trash/{id}/restore`
 //! - `DELETE /trash/{id}`     purge forever
@@ -28,6 +34,7 @@ use axum::Router;
 
 use crate::api::dirs as d;
 use crate::api::docs as c;
+use crate::api::requests as r;
 use crate::api::search as s;
 use crate::api::trash as t;
 use crate::state::DocState;
@@ -43,6 +50,7 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/docs/{doc_id}/title", patch(c::rename_doc))
         .route("/docs/{doc_id}/move", post(c::move_doc))
         .route("/docs/{doc_id}/path", get(c::doc_path))
+        .route("/docs/{doc_id}/requests", get(r::list_doc_requests))
         // ── dirs ────────────────────────────────────────────────────
         .route("/dirs", post(d::create_dir))
         .route("/dirs/{dir_id}", get(d::read_dir))
@@ -50,6 +58,12 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/dirs/{dir_id}/name", patch(d::rename_dir))
         // ── tree ────────────────────────────────────────────────────
         .route("/tree", get(d::list_tree))
+        // ── update requests (design §5) ─────────────────────────────
+        .route("/requests", post(r::submit_request))
+        .route("/requests", get(r::list_requests))
+        .route("/requests/{request_id}", get(r::get_request))
+        .route("/requests/{request_id}/approve", post(r::approve_request))
+        .route("/requests/{request_id}/reject", post(r::reject_request))
         // ── recycle bin ─────────────────────────────────────────────
         .route("/trash", get(t::list_trash))
         .route("/trash/{trash_id}/restore", post(t::restore_trash))

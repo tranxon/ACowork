@@ -8,6 +8,9 @@
 //!   and a clock (`Fn() -> DateTime<Utc>`) for testability.
 //! - `directory.rs` / `directory_impl.rs` — `DirectoryService` for
 //!   create / list / rename / delete on directory nodes.
+//! - `request.rs` / `request_impl.rs` — `RequestService` PR-style review
+//!   flow: submit (base_version check), list, approve (merge + version+1),
+//!   reject, TTL expiry (design §5).
 //! - `trash.rs` / `trash_impl.rs` — `TrashService` recycle-bin listing,
 //!   restore, and 30-day lazy purge.
 //! - `search.rs` / `search_impl.rs` — `SearchService` cross-directory
@@ -22,6 +25,8 @@ pub mod directory;
 pub mod directory_impl;
 pub mod document;
 pub mod document_impl;
+pub mod request;
+pub mod request_impl;
 pub mod search;
 pub mod search_impl;
 pub mod trash;
@@ -31,6 +36,8 @@ pub use directory::{CreateDirectoryInput, DirectoryService};
 pub use directory_impl::LibraryDirectoryService;
 pub use document::{CreateDocumentInput, DocumentService, UpdateDocumentInput};
 pub use document_impl::LibraryDocumentService;
+pub use request::{ApproveOutcome, RequestService, SubmitRequestInput};
+pub use request_impl::LibraryRequestService;
 pub use search::SearchService;
 pub use search_impl::LibrarySearchService;
 pub use trash::TrashService;
