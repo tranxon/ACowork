@@ -20,10 +20,15 @@ use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
 // ── Context compression thresholds ─────────────────────────────────────
-// All percentages are relative to the **effective usable input budget**
-// (`AgentCore::context_trim_budget`, the single denominator: the resolved
-// total context cap minus the model's output reserve — e.g. 250K cap + 32K
-// output = 218K input budget).
+// All *compression* percentages below are relative to the **effective
+// usable input budget** (`AgentCore::context_trim_budget`, the single
+// denominator: the resolved total context cap minus the model's output
+// reserve — e.g. 250K cap + 32K output = 218K input budget).
+//
+// This is deliberately SEPARATE from the UI-facing `usage_percent` pushed in
+// ContextUsageInfo, which the frontend reads as "used (input + output) /
+// window total" (250K). The two never move together — see
+// `compute_context_usage` in context.rs.
 //
 // ADR-011 tier scheme (revised 2026-09: FIFO/emergency trim deleted by
 // ADR-061, so the early tiers lost their original purpose):
@@ -116,8 +121,12 @@ impl AgentLoop {
                 self.effective_context_budget(&model_name)
             {
                 let total_tokens = self.session.history.token_count();
-                let percent = if effective_usable > 0 {
-                    ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                // UI percent denominator = window TOTAL (incl. output), not
+                // the input budget — see compute_context_usage doc. The
+                // compaction threshold lives on projected input vs
+                // effective_usable and is NOT shown here.
+                let percent = if effective_window > 0 {
+                    ((total_tokens as f64 / effective_window as f64) * 100.0).min(100.0) as u8
                 } else {
                     0
                 };
@@ -199,10 +208,11 @@ impl AgentLoop {
     /// `effective_window` is the user-facing **total context length** shown
     /// in the UI: the resolved cap (agent_config → manifest →
     /// DEFAULT_CONTEXT_WINDOW) clamped to the model window, so a 250K
-    /// setting stays 250K on screen (never 218K).
-    /// `effective_usable` is the SINGLE runtime input budget from
-    /// [`Self::context_trim_budget`] (resolved cap − output reserve), used
-    /// as the percentage denominator and by every trigger threshold.
+    /// setting stays 250K on screen (never 218K). It is also the display
+    /// percent denominator ("used incl. output / window total").
+    /// `effective_usable` is the runtime input budget from
+    /// [`Self::context_trim_budget`] (resolved cap − output reserve) — the
+    /// single denominator for the compaction thresholds only.
     pub(crate) fn effective_context_budget(
         &self,
         model_name: &str,
@@ -1148,8 +1158,10 @@ impl AgentLoop {
                 self.effective_context_budget(model_name)
             {
                 let total_tokens = self.session.history.token_count();
-                let usage_percent = if effective_usable > 0 {
-                    ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                // Same decoupling as compute_context_usage: display percent
+                // over window TOTAL; thresholds use effective_usable (input).
+                let usage_percent = if effective_window > 0 {
+                    ((total_tokens as f64 / effective_window as f64) * 100.0).min(100.0) as u8
                 } else {
                     0
                 };
@@ -1550,8 +1562,10 @@ impl AgentLoop {
                     let (caps, effective_window, effective_usable) = self
                         .effective_context_budget(current_model)
                         .expect("model_caps already verified Some above");
-                    let percent = if effective_usable > 0 {
-                        ((local_estimate as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                    // Display percent over window TOTAL (incl. output);
+                    // effective_usable stays the compaction denominator only.
+                    let percent = if effective_window > 0 {
+                        ((local_estimate as f64 / effective_window as f64) * 100.0).min(100.0) as u8
                     } else {
                         0
                     };

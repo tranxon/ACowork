@@ -1328,10 +1328,12 @@ mod tests {
         let info = compute_context_usage(&caps, &usage, 32_768, Some(100_000));
         // Display window stays the user-configured TOTAL (100K).
         assert_eq!(info.context_window, 100_000);
-        // Usable input = cap − output reserve (16_384 inside the cap) = 83_616.
+        // Usable input (compaction denominator only) = cap − output reserve
+        // inside the cap = 83_616.
         assert_eq!(info.usable_context, 83_616);
-        // percent = 65_000 / 83_616 * 100 ≈ 77.7 → 77
-        assert_eq!(info.usage_percent, 77);
+        // UI percent = total (input + output) / window TOTAL = 65 000/100 000 = 65.
+        // (Decoupled from usable_context — see compute_context_usage doc.)
+        assert_eq!(info.usage_percent, 65);
     }
 
     #[test]
@@ -1672,9 +1674,16 @@ pub fn compute_section_sizes(
 /// - `Some(n)` where `n > 0` — cap the effective window at `min(n, model_window)`.
 ///
 /// `context_window` in the output reflects the effective (capped) window for
-/// display; `usable_context` is the input budget used for the percentage, so
-/// the frontend status panel and context-usage popup agree with the runtime
-/// trim/compaction thresholds (single denominator).
+/// display and stays the **user-configured total** (e.g. 250K).
+/// `usable_context` is the runtime input budget (218K) used by compaction
+/// thresholds — NOT the UI denominator.
+///
+/// The UI-facing `usage_percent` is deliberately decoupled from the
+/// compaction threshold (2026-09-06 review): the frontend reads it as
+/// "used / total window" (including input AND output of the reported turn),
+/// while automatic compaction fires on PROJECTED input vs `usable_context`.
+/// So the denominator here is `context_window` (total), not the input
+/// budget — the two never move together.
 pub fn compute_context_usage(
     caps: &ModelCapabilitiesInfo,
     usage: &acowork_core::providers::traits::UsageInfo,
@@ -1689,8 +1698,11 @@ pub fn compute_context_usage(
     let effective_usable =
         caps.input_budget_with_cap(context_window_cap, max_output_tokens_limit);
     let total = usage.prompt_tokens + usage.completion_tokens;
-    let percent = if effective_usable > 0 {
-        ((total as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+    // UI percent = total (input + output) / window total. The compaction
+    // line lives on the PROJECTED input vs usable_context and is NOT the
+    // number displayed here.
+    let percent = if effective_window > 0 {
+        ((total as f64 / effective_window as f64) * 100.0).min(100.0) as u8
     } else {
         0
     };
