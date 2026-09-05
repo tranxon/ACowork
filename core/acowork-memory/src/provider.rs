@@ -171,11 +171,25 @@ pub trait MemoryProvider: Send + Sync {
 
     // ── Phase 1: memory_store tool entry ────────────────────────────────
 
-    /// Process a `memory_store` tool call: content -> conflict detection / dedup
-    /// -> node creation.
+    /// **Deprecated (ADR-068 §3.3):** the LLM-side `memory_store` tool no
+    /// longer calls this method. The tool is a thin episode writer
+    /// (`store_episode` + `knowledge_subtype`); promotion into the
+    /// sediment layer is the offline distiller's job.
     ///
-    /// Returns `None` if the content was skipped as a duplicate.
-    fn process_memory_store(&self, input: &MemoryStoreInput) -> Result<Option<MemoryStoreResult>>;
+    /// This trait method is preserved as a no-op stub so existing
+    /// test-only implementations keep compiling. New code must not call
+    /// it. See `EpisodicDistiller` (acowork-grafeo) for the replacement
+    /// write path.
+    #[deprecated(
+        since = "0.4.0",
+        note = "ADR-068: removed direct LLM→Knowledge/Procedural/Autobiographical write path; use store_episode + distiller"
+    )]
+    fn process_memory_store(
+        &self,
+        _input: &MemoryStoreInput,
+    ) -> Result<Option<MemoryStoreResult>> {
+        Ok(None)
+    }
 
     // ── Phase 1: Ambiguous conflict confirmation ────────────────────────
 
@@ -196,8 +210,18 @@ pub trait MemoryProvider: Send + Sync {
         config: &GeneralizationConfig,
     ) -> Result<GeneralizationResult>;
 
-    /// Compress old History nodes into summaries to reclaim space.
-    fn compress_history_nodes(&self, keep_recent: usize) -> Result<usize>;
+    /// **Deprecated (ADR-068):** old History-node compression is
+    /// superseded by episodic-side retention (`mark_consolidated` +
+    /// cleanup). The trait method is preserved as a no-op for binary
+    /// compatibility with test stubs; the production Grafeo
+    /// implementation in acowork-grafeo has been deleted (M6).
+    #[deprecated(
+        since = "0.4.0",
+        note = "ADR-068: history compression moved into episodic retention; this is a no-op stub"
+    )]
+    fn compress_history_nodes(&self, _keep_recent: usize) -> Result<usize> {
+        Ok(0)
+    }
 
     // ── Phase 1: Node CRUD ──────────────────────────────────────────────
 

@@ -979,16 +979,20 @@ impl MemoryManager {
         }
     }
 
-    /// Step 2: Compress old History autobiographical nodes.
+    /// Step 2 (deprecated, ADR-068): History-node compression is gone —
+    /// the trait method is a no-op stub. Episodic retention
+    /// (mark_consolidated + cleanup) is the replacement.
     fn run_history_compression(&self, provider: &dyn MemoryProvider) {
+        // Keep the call shape for logging parity, but skip the
+        // compression itself. The trait returns Ok(0).
+        #[allow(deprecated)]
         match provider.compress_history_nodes(10) {
+            Ok(0) => {
+                // No-op (ADR-068): history compression removed.
+                tracing::debug!("History compression disabled (ADR-068)");
+            }
             Ok(compressed) => {
-                if compressed > 0 {
-                    tracing::info!(
-                        compressed,
-                        "History compression: marked old History nodes as Dormant"
-                    );
-                }
+                tracing::debug!(compressed, "History compression produced work (unexpected post-ADR-068)");
             }
             Err(e) => {
                 tracing::debug!(error = %e, "History compression failed (non-fatal)");

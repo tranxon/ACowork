@@ -508,17 +508,12 @@ impl MemoryProvider for GrafeoStore {
         Ok(results.into_iter().map(|(id, score)| (id.0, score)).collect())
     }
 
-    // ── memory_store tool entry ──────────────────────────────────────────
-
-    fn process_memory_store(
-        &self,
-        input: &MemoryStoreInput,
-    ) -> AcoworkResult<Option<MemoryStoreResult>> {
-        // GrafeoStore::process_memory_store accepts the re-exported
-        // acowork_memory::MemoryStoreInput type (with u64 source_episode_id).
-        // Internal conversion to NodeId happens inside the method.
-        GrafeoStore::process_memory_store(self, input).map_err(err_to_acowork)
-    }
+    // ── memory_store tool entry (ADR-068 §3.3 removed) ──────────────────
+    //
+    // The default trait impl (deprecated no-op) is used. The LLM-side
+    // `memory_store` tool now goes through `store_episode` directly; the
+    // GrafeoStore::process_memory_store method itself has been deleted
+    // from this crate (M6). The distiller owns promotion.
 
     // ── Ambiguous conflict confirmation ──────────────────────────────────
 
@@ -547,8 +542,12 @@ impl MemoryProvider for GrafeoStore {
             .map_err(err_to_acowork)
     }
 
-    fn compress_history_nodes(&self, keep_recent: usize) -> AcoworkResult<usize> {
-        GrafeoStore::compress_history_nodes(self, keep_recent).map_err(err_to_acowork)
+    fn compress_history_nodes(&self, _keep_recent: usize) -> AcoworkResult<usize> {
+        // ADR-068: history compression is gone. The trait method is kept
+        // as a no-op stub for binary compatibility with downstream crates
+        // (test_support, eval, memory_recall). Episodic retention is the
+        // replacement mechanism (mark_consolidated + cleanup).
+        Ok(0)
     }
 
     // ── Node CRUD ────────────────────────────────────────────────────────

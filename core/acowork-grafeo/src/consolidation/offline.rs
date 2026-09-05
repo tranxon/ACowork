@@ -94,8 +94,11 @@ impl GrafeoStore {
             result.procedural_boosted = gen_result.nodes_boosted;
         }
 
-        // Step 5: Compress History nodes if there are too many (> 10).
-        result.history_compressed = self.compress_history_nodes(10)?;
+        // Step 5 (ADR-068 removed): History-node compression is gone.
+        // The trait method is a no-op; episodic retention (Step 7)
+        // handles space reclamation via mark_consolidated + cleanup.
+        let _ = self.compress_history_nodes(10);
+        result.history_compressed = 0;
 
         // Step 6: Auto-generate Relationship nodes for long-term users.
         // Per design §3.3: collaboration > 30 days → Relationship node.

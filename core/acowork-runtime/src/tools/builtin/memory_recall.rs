@@ -416,7 +416,7 @@ mod tests {
     // These tests prove the Runtime can work without GrafeoStore.
 
     use crate::test_support::InMemoryProvider;
-    use acowork_memory::{MemoryProvider, MemoryStoreInput};
+    use acowork_memory::MemoryProvider;
 
     /// Helper: create a MemoryRecallTool backed by InMemoryProvider.
     fn test_tool_inmemory() -> (MemoryRecallTool, Arc<InMemoryProvider>) {
@@ -442,41 +442,52 @@ mod tests {
         assert!(result.content.contains("No relevant memories found"));
     }
 
-    /// Full cycle: store a memory via InMemoryProvider, then recall it
-    /// through the memory_recall tool. Proves the retrieval pipeline
-    /// works end-to-end without GrafeoStore.
+    /// Full cycle: store an episode via InMemoryProvider, then exercise
+    /// the recall pipeline through the episodic-side search. ADR-068 —
+    /// the LLM-side write path is gone; we use `store_episode` directly.
+    ///
+    /// Note: the memory_recall tool's execute() path goes through
+    /// `MemoryManager::retrieve` which searches the **sediment** layer
+    /// (knowledge / procedural / autobiographical nodes), not the
+    /// episodic layer. So this test now verifies the write+search
+    /// round trip on the episodic layer directly. The cross-layer
+    /// promotion path is owned by the offline distiller (acowork-grafeo
+    /// tests).
     #[tokio::test]
     async fn test_memory_recall_store_and_recall_inmemory() {
-        let (tool, provider) = test_tool_inmemory();
+        let (_tool, provider) = test_tool_inmemory();
 
-        // Store a fact via the provider directly.
-        let input = MemoryStoreInput {
+        // Store an episode via the new ADR-068 write path.
+        let episode = acowork_memory::Episode {
+            session_id: "test-session".to_string(),
+            turn_index: 0,
+            role: "user".to_string(),
             content: "User lives in Shanghai".to_string(),
-            sub_type: acowork_memory::KnowledgeSubType::Fact,
-            subject: None,
-            predicate: None,
-            object: None,
-            confidence: Some(0.9),
-            source_episode_id: None,
             embedding: None,
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata: Default::default(),
+            importance: 0.5,
+            knowledge_subtype: Some(acowork_memory::KnowledgeSubType::Fact),
         };
-        let result = provider.process_memory_store(&input).unwrap();
-        assert!(result.is_some());
+        provider.store_episode(&episode).unwrap();
 
-        // Recall it through the tool.
-        let result = tool
-            .execute(serde_json::json!({ "query": "Shanghai" }), None)
-            .await
+        // Search via the episodic-side interface.
+        let results = provider
+            .search_episodes(&acowork_memory::MemoryQuery {
+                query_text: "Shanghai".to_string(),
+                filters: Default::default(),
+                limit: 5,
+                expand_hops: 0,
+                min_score: None,
+                abstention_enabled: false,
+                hint_type: Default::default(),
+                embedding: None,
+            })
             .unwrap();
-        assert!(result.ok);
         assert!(
-            result.content.contains("Shanghai"),
-            "Expected recall result to contain 'Shanghai', got: {}",
-            result.content
+            results.iter().any(|r| r.content.contains("Shanghai")),
+            "episodic search should find Shanghai episode, got: {results:?}"
         );
     }
 

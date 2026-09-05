@@ -22,7 +22,7 @@ use std::time::Duration;
 use acowork_core::error::Result;
 use acowork_core::rag::{AnnotatedRagResult, RagProvider, RagResultItem};
 use acowork_memory::consolidation::{
-    GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
+    GeneralizationConfig, GeneralizationResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
 };
 use acowork_memory::types::{
@@ -394,35 +394,13 @@ impl MemoryProvider for InMemoryProvider {
         Ok(results)
     }
 
-    // ── memory_store tool entry ─────────────────────────────────────────
+    // ── memory_store tool entry (ADR-068 §3.3 removed) ──────────────────
+    //
+    // The default trait impl (a deprecated no-op) is used. The
+    // InMemoryProvider no longer simulates a direct LLM→node write
+    // path; the memory_store tool writes episodes via `store_episode`
+    // instead (see memory_store.rs).
 
-    fn process_memory_store(&self, input: &MemoryStoreInput) -> Result<Option<MemoryStoreResult>> {
-        let id = self.alloc_id();
-        let content = input.content.clone();
-        let confidence = input.confidence.unwrap_or(0.7);
-        let status = if confidence >= 0.85 {
-            NodeStatus::Active
-        } else {
-            NodeStatus::Pending
-        };
-        self.nodes.write().unwrap().insert(
-            id,
-            InMemoryNode {
-                id,
-                label: "Knowledge".to_string(),
-                content,
-                embedding: input.embedding.clone(),
-                session_id: None,
-                confidence,
-                status,
-                created_at: Utc::now(),
-            },
-        );
-        Ok(Some(MemoryStoreResult {
-            node_id: id,
-            conflict_resolutions: Vec::new(),
-        }))
-    }
     // ── Ambiguous conflict confirmation ────────────────────────────────
 
     fn should_trigger_confirmation(&self) -> Result<bool> {
@@ -451,6 +429,9 @@ impl MemoryProvider for InMemoryProvider {
     }
 
     fn compress_history_nodes(&self, _keep_recent: usize) -> Result<usize> {
+        // ADR-068: history compression is gone; episodic retention owns
+        // space reclamation. The trait method is preserved as a no-op for
+        // binary compatibility.
         Ok(0)
     }
 
@@ -672,38 +653,44 @@ mod tests {
 
     #[test]
     fn test_inmemory_provider_store_and_retrieve() {
+        // ADR-068: the legacy `process_memory_store` path is gone.
+        // Verify the new episodic-side store_episode / search round trip.
         let provider = InMemoryProvider::new();
 
-        // Store a memory via process_memory_store.
-        let input = MemoryStoreInput {
+        let episode = Episode {
+            session_id: "test-session".to_string(),
+            turn_index: 0,
+            role: "user".to_string(),
             content: "User lives in Shanghai".to_string(),
-            sub_type: KnowledgeSubType::Fact,
-            subject: None,
-            predicate: None,
-            object: None,
-            confidence: Some(0.9),
-            source_episode_id: None,
             embedding: None,
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
+            timestamp: Utc::now(),
+            consolidated: false,
+            metadata: Default::default(),
+            importance: 0.5,
+            knowledge_subtype: Some(KnowledgeSubType::Fact),
         };
-        let result = provider.process_memory_store(&input).unwrap();
-        assert!(result.is_some());
-        let node_id = result.unwrap().node_id;
-        assert!(node_id > 0);
+        provider.store_episode(&episode).unwrap();
 
-        // Retrieve content by node_id.
-        let content = provider.get_node_content(node_id).unwrap();
-        assert_eq!(content.as_deref(), Some("User lives in Shanghai"));
+        let all = provider.all_episodes().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].content, "User lives in Shanghai");
+        assert_eq!(all[0].knowledge_subtype, Some(KnowledgeSubType::Fact));
 
-        // Text search should find it.
-        let search_results = provider
-            .text_search_with_filter("Knowledge", "content", "Shanghai", 10, None)
+        // Search the episodic layer.
+        let results = provider
+            .search_episodes(&acowork_memory::MemoryQuery {
+                query_text: "Shanghai".to_string(),
+                filters: Default::default(),
+                limit: 10,
+                expand_hops: 0,
+                min_score: None,
+                abstention_enabled: false,
+                hint_type: Default::default(),
+                embedding: None,
+            })
             .unwrap();
-        assert_eq!(search_results.len(), 1);
-        assert_eq!(search_results[0].0, node_id);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("Shanghai"));
     }
 
     #[test]
