@@ -146,7 +146,9 @@ impl Tool for GlobSearchTool {
             };
             content.push_str(&format!("\n\nTotal: {} files", results.len()));
 
-            let (content, _truncated) = output::truncate_output(&content);
+            // Semantic truncation: MAX_RESULT_COUNT caps the array.
+            // The byte-level 32 KB hard cap is enforced by the
+            // OutputBoundedTool wrapper around the whole tool stack.
             Ok(ToolResult {
                 ok: true,
                 content,

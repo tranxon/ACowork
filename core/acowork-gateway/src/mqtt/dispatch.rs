@@ -1589,7 +1589,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .create_token(std::time::Duration::from_secs(3600));
 
-        let port = 18977; // distinct from the broker smoke-test port
+        let port = 18979; // distinct from the broker smoke-test ports (18976/18977 in mqtt/client.rs, 18978 in global_resources_publisher.rs)
         let host = "127.0.0.1";
         let auth = crate::mqtt::broker::BrokerAuth {
             auth_enabled: true,

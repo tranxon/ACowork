@@ -23,7 +23,13 @@ pub struct SessionSummary {
 }
 
 /// Response for `list_sessions` — paginated session list with
-/// agent-level cumulative token totals (ADR-028).
+/// agent-level cumulative token totals (ADR-028 / ADR-066).
+///
+/// Cache fields are emitted unconditionally because the runtime
+/// always initialises the agent counters (Commit 2 sets both
+/// `agent_total_cache_read_tokens` and `agent_total_cache_write_tokens`
+/// to `0` on every construction site).  Desktop frontends that do
+/// not yet read these fields stay compatible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionsListResponse {
     pub sessions: Vec<SessionSummary>,
@@ -33,6 +39,10 @@ pub struct SessionsListResponse {
     pub size: u32,
     pub agent_total_input_tokens: u64,
     pub agent_total_output_tokens: u64,
+    /// ADR-066: cumulative cache-hit tokens (provider-billed as discounted read).
+    pub agent_total_cache_read_tokens: u64,
+    /// ADR-066: cumulative cache-write tokens (provider-billed as upfront write).
+    pub agent_total_cache_write_tokens: u64,
 }
 
 /// Detail view of a single session (panel-4 endpoint).

@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 use crate::error::Result;
 use crate::agent::session_state::TodoItem;
 use acowork_core::providers::traits::UsageInfo;
+use acowork_core::protocol::ContextUsageSection;
 
 /// Format version for the JSONL conversation file.
 ///
@@ -51,6 +52,18 @@ pub struct SessionTokens {
     pub last_output: u64,
     pub total_input: u64,
     pub total_output: u64,
+    // ── ADR-066: prompt cache tokens (Provider-reported) ───────────────
+    /// Last-turn prompt tokens served from cache (OpenAI `cached_tokens` /
+    /// Anthropic `cache_read_input_tokens`).  `0` for providers that do
+    /// not report cache hits.
+    pub last_cache_read: u64,
+    /// Last-turn prompt tokens written to cache (Anthropic
+    /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
+    pub last_cache_write: u64,
+    /// Cumulative cache read tokens across all session LLM calls.
+    pub total_cache_read: u64,
+    /// Cumulative cache write tokens across all session LLM calls.
+    pub total_cache_write: u64,
 }
 
 /// Entry kind discriminator for `ConversationEntry.kind`.
@@ -579,6 +592,14 @@ pub struct ConversationSession {
     last_status: std::sync::Mutex<String>,
     last_ratio: std::sync::Mutex<f64>,
     last_context_usage: std::sync::Mutex<String>,
+    /// ADR-067: per-section byte sizes from the most recent LLM call.
+    ///
+    /// Cached as the typed `Vec<ContextUsageSection>` directly — no JSON
+    /// round-trip — so [`Self::last_context_usage_sections`] can hand the
+    /// list straight to `emit_session_state` for merging into the
+    /// persisted-token-derived `ContextUsageInfo`. `None` until the first
+    /// LLM call populates it via [`Self::cache_context_usage_sections`].
+    last_context_usage_sections: std::sync::Mutex<Option<Vec<ContextUsageSection>>>,
     /// ADR-024: absolute byte offset of the most recent compaction marker
     /// in the JSONL. Shared with `ConversationWriter` (the writer updates
     /// it synchronously on every compaction write via
@@ -753,6 +774,36 @@ impl ConversationSession {
         }
     }
 
+    /// Cache per-section byte sizes from the most recent LLM call.
+    ///
+    /// ADR-067: called by `process_llm_response_usage` right after it
+    /// computes `sections`, so the sections survive into the retained
+    /// `session_state` snapshot. [`Self::update_runtime_state_cache`] is
+    /// called by `emit_session_state` with a persisted-token-derived
+    /// `ContextUsageInfo` that has no `ContextBuilder` and therefore no
+    /// `sections` — that path re-merges the sections cached here.
+    ///
+    /// Stores the typed `Vec<ContextUsageSection>` directly so callers can
+    /// recover the sections without paying the JSON serialize/deserialize
+    /// round-trip on every LLM call.
+    pub fn cache_context_usage_sections(&self, sections: Vec<ContextUsageSection>) {
+        if let Ok(mut c) = self.last_context_usage_sections.lock() {
+            *c = Some(sections);
+        }
+    }
+
+    /// Read the most recently cached per-section byte sizes.
+    ///
+    /// ADR-067: used by `emit_session_state` to merge sections into the
+    /// persisted-token-derived `ContextUsageInfo`. Returns `None` until
+    /// the first LLM call has populated the cache.
+    pub fn last_context_usage_sections(&self) -> Option<Vec<ContextUsageSection>> {
+        self.last_context_usage_sections
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+    }
+
     /// Notify the config relay of a config field change.
     ///
     /// Builds a `SessionConfig` snapshot and sends it through
@@ -892,6 +943,7 @@ impl ConversationSession {
             last_status: std::sync::Mutex::new(String::new()),
             last_ratio: std::sync::Mutex::new(0.0),
             last_context_usage: std::sync::Mutex::new(String::new()),
+            last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
         };
 
@@ -985,6 +1037,7 @@ impl ConversationSession {
                 last_status: std::sync::Mutex::new(String::new()),
                 last_ratio: std::sync::Mutex::new(0.0),
                 last_context_usage: std::sync::Mutex::new(String::new()),
+                last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
             },
             config_rx,
@@ -1476,6 +1529,14 @@ impl ConversationSession {
     /// every streaming event.
     pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
         if let Ok(mut guard) = self.tokens.lock() {
+            // ADR-027: zero-skip on the input side.  A Provider fallback
+            // returns `prompt_tokens == 0`; treating that as a real call
+            // would overwrite an established baseline.
+            //
+            // ADR-066: cache_read shares that zero-skip gate — when a
+            // Provider reports a reliable input count, the cache breakdown
+            // is also reliable; when input is 0 the cache fields are 0 too
+            // (don't let a half-reported usage pollute the running total).
             let total_input = if usage.prompt_tokens > 0 {
                 guard
                     .as_ref()
@@ -1485,16 +1546,38 @@ impl ConversationSession {
             } else {
                 guard.as_ref().map(|t| t.total_input).unwrap_or(0)
             };
+            let total_cache_read = if usage.prompt_tokens > 0 {
+                guard
+                    .as_ref()
+                    .map(|t| t.total_cache_read)
+                    .unwrap_or(0)
+                    .saturating_add(usage.cache_read_tokens)
+            } else {
+                guard.as_ref().map(|t| t.total_cache_read).unwrap_or(0)
+            };
             let total_output = guard
                 .as_ref()
                 .map(|t| t.total_output)
                 .unwrap_or(0)
                 .saturating_add(usage.completion_tokens);
+            // cache_write is part of the input cost (Anthropic charges
+            // 1.25× for `cache_creation_input_tokens`) but does NOT share
+            // the zero-skip gate: an Anthropic cache write with zero
+            // regular input tokens is still a real, billable event.
+            let total_cache_write = guard
+                .as_ref()
+                .map(|t| t.total_cache_write)
+                .unwrap_or(0)
+                .saturating_add(usage.cache_write_tokens);
             *guard = Some(SessionTokens {
                 last_input: usage.prompt_tokens,
                 last_output: usage.completion_tokens,
                 total_input,
                 total_output,
+                last_cache_read: usage.cache_read_tokens,
+                last_cache_write: usage.cache_write_tokens,
+                total_cache_read,
+                total_cache_write,
             });
         }
         self.write_meta();
@@ -1531,6 +1614,13 @@ impl ConversationSession {
         if let Ok(mut guard) = self.tokens.lock() {
             let prev_last_input = guard.as_ref().map(|t| t.last_input).unwrap_or(0);
             let prev_last_output = guard.as_ref().map(|t| t.last_output).unwrap_or(0);
+            // ADR-066: cache breakdown must NOT overwrite the per-turn
+            // `last_cache_*` snapshot — the compaction LLM call was given
+            // the full pre-compaction history as input, so its cache
+            // figures are unrepresentative of the post-compaction
+            // session state (same rationale as `last_input` preservation).
+            let prev_last_cache_read = guard.as_ref().map(|t| t.last_cache_read).unwrap_or(0);
+            let prev_last_cache_write = guard.as_ref().map(|t| t.last_cache_write).unwrap_or(0);
             let total_input = if usage.prompt_tokens > 0 {
                 guard
                     .as_ref()
@@ -1540,16 +1630,38 @@ impl ConversationSession {
             } else {
                 guard.as_ref().map(|t| t.total_input).unwrap_or(0)
             };
+            // ADR-066: cache_read follows the input zero-skip gate (see
+            // `accumulate_llm_usage` rationale).
+            let total_cache_read = if usage.prompt_tokens > 0 {
+                guard
+                    .as_ref()
+                    .map(|t| t.total_cache_read)
+                    .unwrap_or(0)
+                    .saturating_add(usage.cache_read_tokens)
+            } else {
+                guard.as_ref().map(|t| t.total_cache_read).unwrap_or(0)
+            };
             let total_output = guard
                 .as_ref()
                 .map(|t| t.total_output)
                 .unwrap_or(0)
                 .saturating_add(usage.completion_tokens);
+            // cache_write does NOT share the zero-skip gate (see
+            // `accumulate_llm_usage` rationale).
+            let total_cache_write = guard
+                .as_ref()
+                .map(|t| t.total_cache_write)
+                .unwrap_or(0)
+                .saturating_add(usage.cache_write_tokens);
             *guard = Some(SessionTokens {
                 last_input: prev_last_input,
                 last_output: prev_last_output,
                 total_input,
                 total_output,
+                last_cache_read: prev_last_cache_read,
+                last_cache_write: prev_last_cache_write,
+                total_cache_read,
+                total_cache_write,
             });
         }
         self.write_meta();
@@ -1584,15 +1696,35 @@ impl ConversationSession {
     /// `accumulate_compaction_usage`.
     pub fn set_history_anchor(&self, new_tokens: u64) {
         if let Ok(mut guard) = self.tokens.lock() {
-            let (total_input, total_output) = guard
+            // ADR-066: cache `total_*` fields are Provider-aggregated
+            // metrics that must survive the anchor rewrite — the
+            // post-compaction history size has no bearing on how many
+            // tokens the previous LLM calls hit from cache.
+            //
+            // `last_cache_*` are zeroed in lock-step with `last_output`
+            // = 0: there is no fresh per-turn cache breakdown until the
+            // next `accumulate_llm_usage` call, mirroring the rationale
+            // for `last_input` being overwritten by the anchor value.
+            let (total_input, total_output, total_cache_read, total_cache_write) = guard
                 .as_ref()
-                .map(|t| (t.total_input, t.total_output))
-                .unwrap_or((0, 0));
+                .map(|t| {
+                    (
+                        t.total_input,
+                        t.total_output,
+                        t.total_cache_read,
+                        t.total_cache_write,
+                    )
+                })
+                .unwrap_or((0, 0, 0, 0));
             *guard = Some(SessionTokens {
                 last_input: new_tokens,
                 last_output: 0,
                 total_input,
                 total_output,
+                last_cache_read: 0,
+                last_cache_write: 0,
+                total_cache_read,
+                total_cache_write,
             });
         }
         self.write_meta();
@@ -1660,6 +1792,12 @@ impl Clone for ConversationSession {
             last_context_usage: std::sync::Mutex::new(
                 self.last_context_usage.lock().ok().map(|s| s.clone()).unwrap_or_default(),
             ),
+            // ADR-067: the sections cache is owned per-session — each clone
+            // starts empty and receives its own writes. Sharing it (Arc)
+            // would require an Arc<Mutex<…>> for no benefit, since
+            // `cache_context_usage_sections` always overwrites with the
+            // latest value and the writer is single-threaded per session.
+            last_context_usage_sections: std::sync::Mutex::new(None),
             // ADR-024: share the same Arc with the original — clones observe
             // future compaction writes from the writer thread exactly like
             // the parent does. This matches the comment above that the
@@ -2032,41 +2170,68 @@ pub fn find_latest_session(conversations_dir: &Path) -> Option<String> {
 /// file is missing or corrupted.
 ///
 /// ADR-028: in addition to the page slice, the join handle now also
-/// returns `(agent_total_input, agent_total_output)` summed across every
-/// session on disk (full-scan totals, not just the current page). The
-/// caller uses these to bootstrap [`AgentCore`]'s in-process counters
-/// via atomic-max merge, and to forward them to the Desktop App as a
-/// fallback data source for the agent-total token display.
+/// returns `(agent_total_input, agent_total_output, agent_total_cache_read,
+/// agent_total_cache_write)` summed across every session on disk
+/// (full-scan totals, not just the current page). The caller uses these
+/// to bootstrap [`AgentCore`]'s in-process counters via atomic-max merge,
+/// and to forward them to the Desktop App as a fallback data source for
+/// the agent-total token display.
+///
+/// ADR-066: the third and fourth tuple elements carry prompt-cache
+/// aggregates (Provider-reported).  Old v3 meta files without cache
+/// fields contribute `0` to the running totals — same "宁可 miss 也不
+/// 估计" policy used elsewhere.
+// ADR-066: the four-element token tuple `(input, output, cache_read,
+// cache_write)` was widened from the two-element version originally
+// added in ADR-028.  Clippy's `type_complexity` lint still flags the
+// full return type of `scan_sessions_async` as borderline; the
+// intentional escape hatch below preserves the function signature so
+// callers can keep tuple-destructuring the result without a custom
+// struct.
+#[allow(clippy::type_complexity)]
 pub fn scan_sessions_async(
     conversations_dir: PathBuf,
     page: Option<u32>,
     size: Option<u32>,
-) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64))> {
+) -> tokio::task::JoinHandle<(
+    Vec<SessionInfo>,
+    usize,
+    (u64, u64, u64, u64),
+)> {
     tokio::task::spawn_blocking(move || {
         // ADR-024: scan per-session meta files instead of index.json.
         let sessions = scan_sessions_from_meta(&conversations_dir);
 
-        // ADR-028: full-scan aggregate. Walk every meta file (not just
-        // the current page) so a single scan can rebuild the baseline
-        // even when `size` is small (e.g. title-only fetches). `None`
-        // sessions and sessions with `prompt_tokens == 0` (Provider
-        // fallback) are skipped on the input side; the output side is
-        // always accumulated (matches `ConversationSession::accumulate_llm_usage`).
-        let (agent_total_input, agent_total_output) = sessions
-            .iter()
-            .fold((0u64, 0u64), |(acc_in, acc_out), (_, meta)| {
-                let meta_in = meta
-                    .tokens
-                    .as_ref()
-                    .map(|t| t.total_input)
-                    .unwrap_or(0);
-                let meta_out = meta
-                    .tokens
-                    .as_ref()
-                    .map(|t| t.total_output)
-                    .unwrap_or(0);
-                (acc_in.saturating_add(meta_in), acc_out.saturating_add(meta_out))
-            });
+        // ADR-028 / ADR-066: full-scan aggregate. Walk every meta file
+        // (not just the current page) so a single scan can rebuild the
+        // baseline even when `size` is small (e.g. title-only fetches).
+        // `None` sessions and sessions with `prompt_tokens == 0`
+        // (Provider fallback) are skipped on the input side; the output
+        // side is always accumulated (matches
+        // `ConversationSession::accumulate_llm_usage`).
+        //
+        // Cache totals sum directly — `accumulate_llm_usage` already
+        // maintains the invariant that `total_cache_read` is only
+        // incremented alongside `total_input`, so a session with
+        // `total_input == 0` cannot have `total_cache_read > 0`.  We
+        // do not need to re-check the zero-skip here.
+        //
+        // `total_cache_write` is always summed (Anthropic charges 1.25×
+        // for `cache_creation_input_tokens` regardless of the regular
+        // input count).
+        let (agent_total_input, agent_total_output, agent_total_cache_read, agent_total_cache_write) =
+            sessions.iter().fold(
+                (0u64, 0u64, 0u64, 0u64),
+                |(acc_in, acc_out, acc_cr, acc_cw), (_, meta)| {
+                    let t = meta.tokens.as_ref();
+                    (
+                        acc_in.saturating_add(t.map(|t| t.total_input).unwrap_or(0)),
+                        acc_out.saturating_add(t.map(|t| t.total_output).unwrap_or(0)),
+                        acc_cr.saturating_add(t.map(|t| t.total_cache_read).unwrap_or(0)),
+                        acc_cw.saturating_add(t.map(|t| t.total_cache_write).unwrap_or(0)),
+                    )
+                },
+            );
 
         let total = sessions.len();
         let page = page.unwrap_or(1).max(1) as usize;
@@ -2089,7 +2254,16 @@ pub fn scan_sessions_async(
             })
             .collect();
 
-        (infos, total, (agent_total_input, agent_total_output))
+        (
+            infos,
+            total,
+            (
+                agent_total_input,
+                agent_total_output,
+                agent_total_cache_read,
+                agent_total_cache_write,
+            ),
+        )
     })
 }
 
@@ -3081,10 +3255,39 @@ mod tests {
             last_output: 20,
             total_input: 500,
             total_output: 80,
+            // ADR-066: cache fields round-trip alongside the legacy 4.
+            last_cache_read: 40,
+            last_cache_write: 10,
+            total_cache_read: 200,
+            total_cache_write: 50,
         };
         let json = serde_json::to_string(&t).unwrap();
         let parsed: SessionTokens = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, t);
+    }
+
+    /// ADR-066: a v3 meta file written by an older Runtime has no cache
+    /// fields.  Deserializing it must succeed with all cache counters at
+    /// 0 (matches the "宁可 miss 也不估计" policy — the absence of cache
+    /// data is treated as "0 reported", not as a sentinel).
+    #[test]
+    fn test_session_tokens_serde_backward_compat_without_cache_fields() {
+        let legacy_json = r#"{
+            "last_input": 100,
+            "last_output": 20,
+            "total_input": 500,
+            "total_output": 80
+        }"#;
+        let parsed: SessionTokens = serde_json::from_str(legacy_json)
+            .expect("old v3 meta without cache fields must still parse");
+        assert_eq!(parsed.last_input, 100);
+        assert_eq!(parsed.last_output, 20);
+        assert_eq!(parsed.total_input, 500);
+        assert_eq!(parsed.total_output, 80);
+        assert_eq!(parsed.last_cache_read, 0);
+        assert_eq!(parsed.last_cache_write, 0);
+        assert_eq!(parsed.total_cache_read, 0);
+        assert_eq!(parsed.total_cache_write, 0);
     }
 
     #[test]
@@ -3094,6 +3297,12 @@ mod tests {
         assert_eq!(t.last_output, 0);
         assert_eq!(t.total_input, 0);
         assert_eq!(t.total_output, 0);
+        // ADR-066: cache fields are also 0 in a default-constructed
+        // SessionTokens (no LLM call recorded yet).
+        assert_eq!(t.last_cache_read, 0);
+        assert_eq!(t.last_cache_write, 0);
+        assert_eq!(t.total_cache_read, 0);
+        assert_eq!(t.total_cache_write, 0);
     }
 
     /// Regression: a compaction summary LLM call must NOT overwrite
@@ -3328,6 +3537,10 @@ mod tests {
                 last_output: 1_200,
                 total_input: 120_000,
                 total_output: 3_400,
+                last_cache_read: 8_000,
+                last_cache_write: 1_500,
+                total_cache_read: 22_000,
+                total_cache_write: 4_000,
             }),
             last_compaction_offset: None,
             corrupted: false,
@@ -3341,11 +3554,364 @@ mod tests {
                 last_output: 1_200,
                 total_input: 120_000,
                 total_output: 3_400,
+                last_cache_read: 8_000,
+                last_cache_write: 1_500,
+                total_cache_read: 22_000,
+                total_cache_write: 4_000,
             })
         );
         assert_eq!(parsed.last_compaction_offset, None);
         assert_eq!(parsed.version, CONVERSATION_FORMAT_VERSION);
         assert_eq!(parsed.model.as_deref(), Some("gpt-4"));
+    }
+
+    // ── ADR-066: SessionTokens cache accumulation tests ────────────
+
+    /// Two reliable calls accumulate cache_read + cache_write via
+    /// saturating_add.  Per-turn (`last_cache_*`) tracks the most
+    /// recent call's raw Provider values.
+    #[test]
+    fn test_accumulate_llm_usage_accumulates_cache_tokens() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_acc_cache_basic", cfg, 0, committed).unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1_000,
+                completion_tokens: 200,
+                cache_read_tokens: 400,    // Anthropic-style cache hit
+                cache_write_tokens: 200,   // Anthropic-style cache write
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 3_500,
+                completion_tokens: 450,
+                cache_read_tokens: 1_200,
+                cache_write_tokens: 0,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set after 2 calls");
+            // Per-turn: most recent raw Provider value.
+            assert_eq!(tokens.last_cache_read, 1_200);
+            assert_eq!(tokens.last_cache_write, 0);
+            // Cumulative: saturating_add.
+            assert_eq!(tokens.total_cache_read, 1_600);
+            assert_eq!(tokens.total_cache_write, 200);
+            // Sanity: in/out unchanged.
+            assert_eq!(tokens.total_input, 4_500);
+            assert_eq!(tokens.total_output, 650);
+        });
+    }
+
+    /// Provider-fallback semantics: a zero-input call must NOT add to
+    /// `total_cache_read` (the same zero-skip gate as `total_input`),
+    /// but `total_cache_write` IS always accumulated — Anthropic cache
+    /// writes are real, billable events independent of the regular
+    /// input count.
+    #[test]
+    fn test_accumulate_llm_usage_cache_zero_input_skip() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_acc_cache_zero", cfg, 0, committed).unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1_000,
+                completion_tokens: 100,
+                cache_read_tokens: 300,
+                cache_write_tokens: 50,
+                ..Default::default()
+            });
+            // Provider fallback: prompt=0, but a (bogus) cache_write
+            // is still recorded as-is.
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 0,
+                completion_tokens: 50,
+                cache_read_tokens: 999, // should be skipped
+                cache_write_tokens: 30, // should be added
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 2_000,
+                completion_tokens: 80,
+                cache_read_tokens: 800,
+                cache_write_tokens: 0,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set");
+            // cache_read: 300 + 800 = 1_100 (999 skipped due to zero-input gate)
+            assert_eq!(
+                tokens.total_cache_read, 1_100,
+                "cache_read follows the same zero-skip gate as total_input"
+            );
+            // cache_write: 50 + 30 + 0 = 80 (always accumulated)
+            assert_eq!(
+                tokens.total_cache_write, 80,
+                "cache_write is always accumulated regardless of input"
+            );
+        });
+    }
+
+    /// Saturating overflow on cache counters — mirror of the existing
+    /// overflow test for in/out.  Near-u64::MAX `cache_write_tokens`
+    /// must not panic.
+    #[test]
+    fn test_accumulate_llm_usage_cache_saturating_overflow() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(
+                    &dir,
+                    "tok_acc_cache_overflow",
+                    cfg,
+                    0,
+                    committed,
+                )
+                .unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1,
+                completion_tokens: 0,
+                cache_read_tokens: u64::MAX,
+                cache_write_tokens: u64::MAX,
+                ..Default::default()
+            });
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 1,
+                completion_tokens: 0,
+                cache_read_tokens: 5,
+                cache_write_tokens: 7,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set");
+            assert_eq!(
+                tokens.total_cache_read, u64::MAX,
+                "saturating_add caps total_cache_read at u64::MAX"
+            );
+            assert_eq!(
+                tokens.total_cache_write, u64::MAX,
+                "saturating_add caps total_cache_write at u64::MAX"
+            );
+        });
+    }
+
+    /// `accumulate_compaction_usage` must NOT pollute the per-turn
+    /// `last_cache_*` snapshot — the compaction LLM was given the
+    /// full pre-compaction history, so its cache figures are
+    /// unrepresentative of the post-compaction state.
+    ///
+    /// Cumulative `total_cache_*` are still accumulated for parity
+    /// with in/out (the tokens really were spent on a meta-call).
+    #[test]
+    fn test_accumulate_compaction_usage_preserves_last_cache_but_accumulates_total() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(
+                    &dir,
+                    "tok_acc_compaction_cache",
+                    cfg,
+                    0,
+                    committed,
+                )
+                .unwrap();
+
+            // Main-dialog LLM call establishes the per-turn baseline.
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 10_000,
+                completion_tokens: 500,
+                cache_read_tokens: 4_000,
+                cache_write_tokens: 800,
+                ..Default::default()
+            });
+
+            // Compaction LLM call: huge prompt, big cache hit — must NOT
+            // overwrite `last_cache_*` (otherwise the next push would
+            // show inflated cache numbers until the next main call).
+            session.accumulate_compaction_usage(&UsageInfo {
+                prompt_tokens: 144_000,
+                completion_tokens: 2_000,
+                cache_read_tokens: 100_000,
+                cache_write_tokens: 0,
+                ..Default::default()
+            });
+
+            let tokens = session.tokens().expect("tokens should be set");
+            // last_cache_* preserved from the pre-compaction call.
+            assert_eq!(tokens.last_cache_read, 4_000);
+            assert_eq!(tokens.last_cache_write, 800);
+            // total_cache_* accumulated.
+            assert_eq!(tokens.total_cache_read, 104_000);
+            assert_eq!(tokens.total_cache_write, 800);
+        });
+    }
+
+    /// `set_history_anchor` must NOT reset cumulative cache totals
+    /// (they are Provider-reported, not local history estimates), and
+    /// must zero `last_cache_*` in lock-step with `last_output = 0`
+    /// (there is no fresh per-turn cache breakdown until the next
+    /// `accumulate_llm_usage` call).
+    #[test]
+    fn test_set_history_anchor_preserves_total_cache_zeros_last_cache() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_anchor_cache", cfg, 0, committed).unwrap();
+
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 10_000,
+                completion_tokens: 500,
+                cache_read_tokens: 4_000,
+                cache_write_tokens: 800,
+                ..Default::default()
+            });
+
+            // Anchor to post-compaction history size.
+            session.set_history_anchor(3_500);
+
+            let tokens = session.tokens().expect("tokens should be set");
+            // total_cache_* preserved.
+            assert_eq!(tokens.total_cache_read, 4_000);
+            assert_eq!(tokens.total_cache_write, 800);
+            // last_cache_* zeroed — there is no "current call" snapshot.
+            assert_eq!(tokens.last_cache_read, 0);
+            assert_eq!(tokens.last_cache_write, 0);
+            // last_input still overwritten by the anchor (existing behavior).
+            assert_eq!(tokens.last_input, 3_500);
+            assert_eq!(tokens.last_output, 0);
+        });
+    }
+
+    /// `scan_sessions_async` returns 4-tuple agent totals.  Two sessions
+    /// with non-zero cache totals must aggregate correctly into the
+    /// `(input, output, cache_read, cache_write)` tuple.  Cache fields
+    /// default to 0 in legacy meta files (older Runtime), so old
+    /// sessions contribute 0 — not undefined.
+    #[test]
+    fn test_scan_sessions_async_aggregates_cache_totals() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let conv_dir = temp_dir.path().join("conversations");
+            std::fs::create_dir_all(&conv_dir).unwrap();
+            std::fs::create_dir_all(conv_dir.join("meta")).unwrap();
+
+            // Session A: full cache breakdown.
+            let meta_a = serde_json::json!({
+                "version": 3,
+                "session_id": "scan_cache_a",
+                "agent_id": "com.test",
+                "created_at": "2026-01-01T00:00:00Z",
+                "last_active_at": "2026-01-02T00:00:00Z",
+                "message_count": 5,
+                "corrupted": false,
+                "tokens": {
+                    "last_input": 1000,
+                    "last_output": 200,
+                    "total_input": 1000,
+                    "total_output": 200,
+                    "last_cache_read": 400,
+                    "last_cache_write": 100,
+                    "total_cache_read": 400,
+                    "total_cache_write": 100
+                }
+            });
+            std::fs::write(
+                conv_dir.join("meta").join("scan_cache_a.json"),
+                serde_json::to_string(&meta_a).unwrap(),
+            )
+            .unwrap();
+
+            // Session B: legacy meta (no cache fields).
+            let meta_b = serde_json::json!({
+                "version": 3,
+                "session_id": "scan_cache_b",
+                "agent_id": "com.test",
+                "created_at": "2026-01-03T00:00:00Z",
+                "last_active_at": "2026-01-04T00:00:00Z",
+                "message_count": 3,
+                "corrupted": false,
+                "tokens": {
+                    "last_input": 500,
+                    "last_output": 100,
+                    "total_input": 500,
+                    "total_output": 100
+                }
+            });
+            std::fs::write(
+                conv_dir.join("meta").join("scan_cache_b.json"),
+                serde_json::to_string(&meta_b).unwrap(),
+            )
+            .unwrap();
+
+            let join = scan_sessions_async(conv_dir, None, None);
+            let (sessions, _total, (agent_in, agent_out, agent_cr, agent_cw)) =
+                join.await.unwrap();
+
+            assert_eq!(sessions.len(), 2);
+            assert_eq!(
+                agent_in, 1500,
+                "total_input aggregated across both sessions"
+            );
+            assert_eq!(agent_out, 300, "total_output aggregated");
+            assert_eq!(
+                agent_cr, 400,
+                "total_cache_read aggregated; legacy session contributes 0"
+            );
+            assert_eq!(
+                agent_cw, 100,
+                "total_cache_write aggregated; legacy session contributes 0"
+            );
+        });
     }
 
     #[test]

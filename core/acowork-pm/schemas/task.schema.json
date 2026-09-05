@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acowork.dev/schemas/pm/task.schema.json",
+  "title": "PM Task",
+  "description": "任务元数据文件（{data}/acowork-pm/projects/{pid}/tasks/{tid}/task.json）的校验契约。\n\n与 Rust 类型 `acowork_pm::types::Task` 严格一一对应（serde deny_unknown_fields → additionalProperties: false）。\n\n物理存储约定（见 docs/design/zh/21-pm-project-management.md §3.3）：\n- **物理嵌套即权威**：父子关系由目录层级表达（子任务在父任务 children/ 下），task.json 不冗余 parent_id / subtask_ids；\n- **依赖显式存储**：depends_on 显式声明跨树/跨项目前置依赖；\n- **派生字段不入盘**：is_blocked / blocked_by 仅在 API 响应层计算，不写入本文件；\n- **二进制不入 JSON**：附件元数据存本文件 attachments[]，原始文件 + 缩略图放 attachments/{att_id}/。",
+  "type": "object",
+  "required": [
+    "id",
+    "project_id",
+    "title",
+    "description",
+    "type",
+    "status",
+    "review_status",
+    "priority",
+    "created_by",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/taskId"
+    },
+    "project_id": {
+      "$ref": "#/$defs/projectId",
+      "description": "所属项目 ID。任务目录位于 {pid}/tasks/ 之下，与物理位置必须一致。"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "任务标题。非空字符串。"
+    },
+    "description": {
+      "type": "string",
+      "default": "",
+      "description": "任务描述（支持 Markdown）。Rust 侧 #[serde(default)]，允许缺省。"
+    },
+    "type": {
+      "$ref": "#/$defs/taskType"
+    },
+    "status": {
+      "$ref": "#/$defs/taskStatus"
+    },
+    "review_status": {
+      "$ref": "#/$defs/reviewStatus"
+    },
+    "priority": {
+      "$ref": "#/$defs/priority"
+    },
+    "assignee": {
+      "type": ["string", "null"],
+      "description": "经办人：human 或 agent_id。未分配为 null。"
+    },
+    "due_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "截止时间（RFC 3339 UTC）。无截止为 null。"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependency"
+      },
+      "default": [],
+      "description": "前置依赖（Rust: Vec<Dependency>，#[serde(default)]）。可跨树、跨项目引用任意 TaskId。运行时据此计算 blocked 状态。"
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/attachmentMeta"
+      },
+      "default": [],
+      "description": "附件元数据列表（二进制不入 JSON）。物理文件在 {tid}/attachments/{att_id}/。"
+    },
+    "result": {
+      "anyOf": [
+        { "$ref": "#/$defs/taskResult" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "任务结果（提交审核/完成时写入）。未提交为 null。"
+    },
+    "created_by": {
+      "type": "string",
+      "description": "创建者标识：human 或 agent_id。"
+    },
+    "created_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/dateTime",
+      "description": "最近一次元数据变更时间。每次写入必须刷新。"
+    },
+    "claimed_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "认领时间（claim 操作时写入）。未认领为 null。"
+    },
+    "submitted_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "提交审核时间。未提交为 null。"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^t-[A-Za-z0-9-]{2,62}$",
+      "description": "强类型 ID（Rust: TaskId）。前缀 t-，总长 3-64，字符集 [A-Za-z0-9-]。"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^p-[A-Za-z0-9-]{2,62}$"
+    },
+    "attachmentId": {
+      "type": "string",
+      "pattern": "^att-[A-Za-z0-9-]{3,61}$",
+      "description": "强类型 ID（Rust: AttachmentId）。前缀 att-，总长 5-64。"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC 时间戳（Rust: chrono::DateTime<Utc>）。"
+    },
+    "taskType": {
+      "type": "string",
+      "enum": ["task", "bug", "feature", "chore", "checkpoint", "milestone"],
+      "description": "任务类型（Rust: TaskType）。checkpoint=人类检查点 / milestone=里程碑。"
+    },
+    "taskStatus": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"],
+      "description": "任务生命周期（Rust: TaskStatus）。pending → in_progress → submitted → done/rejected；cancelled 为终止态。"
+    },
+    "reviewStatus": {
+      "type": "string",
+      "enum": ["not_required", "pending", "approved", "rejected"],
+      "description": "审核状态（Rust: ReviewStatus）。not_required 表示无需人工审核（如纯机器任务）。"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "urgent"],
+      "description": "优先级（Rust: Priority）。默认 normal。"
+    },
+    "dependency": {
+      "type": "object",
+      "required": ["task_id", "kind"],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/taskId",
+          "description": "被依赖任务 ID（可跨项目）。"
+        },
+        "kind": {
+          "$ref": "#/$defs/dependencyKind"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dependencyKind": {
+      "type": "string",
+      "enum": ["blocks", "relates", "duplicates"],
+      "description": "依赖语义（Rust: DependencyKind）。blocks=前置阻塞（本任务需先完成）/ relates=关联 / duplicates=重复。"
+    },
+    "attachmentMeta": {
+      "type": "object",
+      "required": [
+        "id",
+        "filename",
+        "kind",
+        "content_type",
+        "size",
+        "sha256",
+        "storage_path",
+        "uploaded_by",
+        "uploaded_at"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/attachmentId"
+        },
+        "filename": {
+          "type": "string",
+          "description": "原始文件名（含扩展名）。"
+        },
+        "kind": {
+          "$ref": "#/$defs/attachmentKind"
+        },
+        "content_type": {
+          "type": "string",
+          "description": "MIME 类型（白名单校验，见设计文档 §5.3）。"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "字节大小。单文件 ≤ 10MB。"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "文件内容 SHA-256（小写十六进制），用于完整性校验。"
+        },
+        "storage_path": {
+          "type": "string",
+          "description": "相对路径（相对任务目录），如 attachments/att-xxx/original.png。"
+        },
+        "thumb_path": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "缩略图路径（图片附件自动生成 256x256）。仅 kind=image 时非 null。"
+        },
+        "width": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "default": null,
+          "description": "图片原始宽度（px）。仅 kind=image。"
+        },
+        "height": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "default": null,
+          "description": "图片原始高度（px）。仅 kind=image。"
+        },
+        "uploaded_by": {
+          "type": "string",
+          "description": "上传者标识：human 或 agent_id。"
+        },
+        "uploaded_at": {
+          "$ref": "#/$defs/dateTime"
+        }
+      },
+      "additionalProperties": false
+    },
+    "attachmentKind": {
+      "type": "string",
+      "enum": ["image", "file"],
+      "description": "附件类别（Rust: AttachmentKind）。image=图片（生成缩略图）/ file=普通文件。"
+    },
+    "taskResult": {
+      "type": "object",
+      "required": ["text", "submitted_by", "submitted_at"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "结果说明（支持 Markdown）。"
+        },
+        "attachment_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachmentId"
+          },
+          "default": [],
+          "description": "结果关联的附件（Rust: Vec<AttachmentId>，#[serde(default)]）。"
+        },
+        "submitted_by": {
+          "type": "string",
+          "description": "提交者标识：human 或 agent_id。"
+        },
+        "submitted_at": {
+          "$ref": "#/$defs/dateTime"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

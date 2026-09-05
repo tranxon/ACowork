@@ -73,6 +73,20 @@ if (Test-Path $NodeBin) {
     Write-Host "        acowork-node binary not found — node topology disabled" -ForegroundColor Yellow
 }
 
+# Bundle PM service binary (sibling of acowork-gateway.exe, ADR-064).
+# The Gateway supervisor locates it via `current_exe().parent().join("acowork-pm.exe")`;
+# without this copy the PM supervisor logs "acowork-pm binary not found" and
+# `/api/pm/*` returns 503 (project management unavailable).
+$PmBin = Join-Path $WorkspaceRoot "target\release\acowork-pm.exe"
+if (Test-Path $PmBin) {
+    Copy-Item -Path $PmBin -Destination (Join-Path $BinDir "acowork-pm.exe") -Force
+    Write-Host "Bundled PM service binary: $PmBin" -ForegroundColor Green
+} else {
+    Write-Host "WARN: acowork-pm.exe not found at $PmBin." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Without it, /api/pm/* returns 503 (PM unavailable)." -ForegroundColor Yellow
+}
+
 Push-Location $DesktopDir
 try {
     npm run tauri build

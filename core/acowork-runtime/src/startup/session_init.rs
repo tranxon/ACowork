@@ -277,7 +277,7 @@ pub(crate) async fn phase_b_init_session(
     let _session_scan_handle = tokio::spawn(async move {
         let handle = crate::conversation::scan_sessions_async(conversations_dir_clone, None, None);
         let (sessions, _, _agent_totals) =
-            handle.await.unwrap_or((Vec::new(), 0, (0, 0)));
+            handle.await.unwrap_or((Vec::new(), 0, (0, 0, 0, 0)));
         if let Some(s) = sessions.first() {
             *latest_session_scan_clone.write().unwrap() =
                 Some((s.session_id.clone(), s.title.clone()));
@@ -354,10 +354,6 @@ pub(crate) async fn phase_b_init_session(
         *c.search_prompt.write().unwrap() = ctx.search_prompt.clone();
         *c.compact_template.write().unwrap() = ctx.compact_template.clone();
         *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
-        *c.extraction_prompt.write().unwrap() = ctx.extraction_prompt.clone();
-        *c.conflict_classification_prompt.write().unwrap() =
-            ctx.conflict_classification_prompt.clone();
-        *c.generalization_prompt.write().unwrap() = ctx.generalization_prompt.clone();
         *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
 
         // Provider list is loaded from agent_provider.json (persisted by the
@@ -678,12 +674,6 @@ pub(crate) async fn phase_b_init_session(
             }
         }
 
-        // ADR-061 §10.2: inject the shared retrieve queue from the boot
-        // context into AgentCore — the same instance passed to the
-        // `context_retrieve` tool in agent_init.rs. The AgentLoop reads
-        // it from core and drains it each iteration.
-        c.retrieve_queue = ctx.retrieve_queue.clone();
-
         // ADR-046: Publish attachment blob store to the HTTP server's
         // late-bind slot. The same `Arc` instance is shared with
         // `AgentCore::attachment_service` (set above), so any upload
@@ -827,11 +817,17 @@ pub(crate) async fn phase_b_init_session(
 
     // ── Step 9 (cont.): Create initial session ───────────────────────
     let initial_session_id = if let Some(conv) = conversation_session {
-        // ADR-028: merge the resumed session's persisted token totals into
-        // the AgentCore counters so the live context_usage WebSocket push
-        // doesn't report agent_total < session_total after a process restart.
+        // ADR-028 / ADR-066: merge the resumed session's persisted token
+        // totals into the AgentCore counters so the live context_usage
+        // WebSocket push doesn't report agent_total < session_total
+        // after a process restart.
         if let Some(t) = conv.tokens() {
-            session_manager.core().merge_token_totals((Some(t.total_input), Some(t.total_output)));
+            session_manager.core().merge_token_totals((
+                Some(t.total_input),
+                Some(t.total_output),
+                Some(t.total_cache_read),
+                Some(t.total_cache_write),
+            ));
         }
         let sid = conv.session_id().to_string();
         session_manager

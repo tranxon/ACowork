@@ -201,24 +201,18 @@ pub struct AgentCore {
     /// `{user_message}` placeholders.
     pub(crate) title_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
-    /// Override for grafeo's `EXTRACTION_SYSTEM_PROMPT`
-    /// (`prompts/extraction.md`). Note: grafeo holds a process-level
-    /// singleton; L2 reload for this field is NOT in ADR-063 scope —
-    /// PUT writes to disk + updates this field, but the live grafeo
-    /// cache only refreshes after Runtime restart. See ADR-063 §6.1.
-    pub(crate) extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
-    /// Override for grafeo's `CONFLICT_CLASSIFICATION_PROMPT`
-    /// (`prompts/conflict-classification.md`). Same reload caveat as
-    /// `extraction_prompt`.
-    pub(crate) conflict_classification_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
-    /// Override for grafeo's `GENERALIZATION_PROMPT`
-    /// (`prompts/generalization.md`). Same reload caveat.
-    pub(crate) generalization_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
     /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
     /// (`prompts/abstention.md`). Same reload caveat.
+    ///
+    /// **ADR-068 note**: Three grafeo-specific override fields
+    /// (`extraction_prompt`, `conflict_classification_prompt`,
+    /// `generalization_prompt`) were removed in this revision because
+    /// ADR-068 rewrites the LLM→memory boundary — LLM writes only
+    /// Episode nodes via `memory_store`; grafeo's distillation is
+    /// driven by the offline `EpisodicDistiller` pipeline (which
+    /// owns its own internal prompts and constants). Grafeo-internal
+    /// prompt constants remain in `acowork-grafeo` for any future
+    /// intra-crate caller.
     pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -287,12 +281,15 @@ pub struct AgentCore {
     /// ADR-028: cumulative output tokens across every LLM call made by this
     /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
     pub(crate) agent_total_output_tokens: AtomicU64,
-
-    /// ADR-061 §10.2: Shared queue for the `context_retrieve` tool (the
-    /// manual recall channel after compaction). Created in agent_init
-    /// and passed to the tool at registration time.
-    pub(crate) retrieve_queue:
-        crate::agent::context_compression::RetrieveQueue,
+    /// ADR-066: cumulative prompt-cache read tokens across every LLM call
+    /// made by this agent process (OpenAI `cached_tokens` / Anthropic
+    /// `cache_read_input_tokens`).  Same persistence / restart semantics
+    /// as [`Self::agent_total_input_tokens`].
+    pub(crate) agent_total_cache_read_tokens: AtomicU64,
+    /// ADR-066: cumulative prompt-cache write tokens across every LLM
+    /// call made by this agent process (Anthropic
+    /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
+    pub(crate) agent_total_cache_write_tokens: AtomicU64,
 }
 
 impl AgentCore {
@@ -337,28 +334,6 @@ impl AgentCore {
     /// `episode_distill::compact_session_title_with_llm`). See ADR-063 §3.7.5.
     pub fn title_prompt(&self) -> Option<String> {
         self.title_prompt.read().unwrap().clone()
-    }
-
-    /// Override accessor — `prompts/extraction.md` (grafeo-level, **deferred
-    /// plumbing**, see ADR-063 §6.1). Loaded into the struct, PUT-writable
-    /// via HTTP, but the live grafeo singleton does not yet consult it.
-    pub fn extraction_prompt(&self) -> Option<String> {
-        self.extraction_prompt.read().unwrap().clone()
-    }
-
-    /// Override accessor — `prompts/conflict-classification.md` (grafeo,
-    /// deferred). See ADR-063 §6.1.
-    pub fn conflict_classification_prompt(&self) -> Option<String> {
-        self.conflict_classification_prompt
-            .read()
-            .unwrap()
-            .clone()
-    }
-
-    /// Override accessor — `prompts/generalization.md` (grafeo, deferred).
-    /// See ADR-063 §6.1.
-    pub fn generalization_prompt(&self) -> Option<String> {
-        self.generalization_prompt.read().unwrap().clone()
     }
 
     /// Override accessor — `prompts/abstention.md` (memory, deferred).
@@ -432,9 +407,6 @@ impl AgentCore {
             search_prompt: Arc::new(std::sync::RwLock::new(None)),
             compact_template: Arc::new(std::sync::RwLock::new(None)),
             title_prompt: Arc::new(std::sync::RwLock::new(None)),
-            extraction_prompt: Arc::new(std::sync::RwLock::new(None)),
-            conflict_classification_prompt: Arc::new(std::sync::RwLock::new(None)),
-            generalization_prompt: Arc::new(std::sync::RwLock::new(None)),
             abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
@@ -463,9 +435,10 @@ impl AgentCore {
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
             agent_total_output_tokens: AtomicU64::new(0),
-            retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
+
+            // ADR-066: cache counters follow the same lifecycle.
+            agent_total_cache_read_tokens: AtomicU64::new(0),
+            agent_total_cache_write_tokens: AtomicU64::new(0),
         }
     }
 
@@ -489,8 +462,8 @@ impl AgentCore {
     /// - Agent startup (after `builtin_tools` is initialized with flags)
     /// - MCP connect/disconnect
     /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
-    ///   (ADR-061 §10.2: `context_retrieve` is always registered, so
-    ///   there is no platform-tool hot-reload path anymore)
+    ///   (tool-result compression is retired, so there is no
+    ///   platform-tool hot-reload path anymore)
     pub(crate) fn rebuild_all_tools(&mut self) {
         let mut merged: Vec<Arc<dyn Tool>> = self
             .builtin_tools
@@ -514,12 +487,6 @@ impl AgentCore {
     /// [`crate::agent_config::apply_builtin_tools_patch`] with an empty
     /// patch, so the persistence layer and the in-memory layer can
     /// never diverge):
-    /// - Platform-protected names ([`PLATFORM_PROTECTED_TOOLS`]) are
-    ///   filtered out of the resolution - their enabled flag is
-    ///   platform-managed (registered unconditionally by
-    ///   [`crate::tools::builtin::all_builtin_tools`], ADR-061 §10.2),
-    ///   never user-toggleable. Their registered slots keep the current
-    ///   flag.
     /// - Names not currently registered are dropped (defensive against
     ///   drift between the persisted file and the code registry).
     /// - Only the `enabled` flag is rewritten; the wrapped `tool` impl
@@ -563,6 +530,11 @@ impl AgentCore {
     // - `agent_token_totals` snapshots both counters for the
     //   `ContextUsageInfo` push.
     //
+    // ADR-066: the four-tuple is `(input, output, cache_read,
+    // cache_write)` — the cache dimensions mirror the Provider-reported
+    // `UsageInfo` cache fields and the persisted `SessionTokens`
+    // totals.
+    //
     // Not persisted: a process restart zeroes the counters, and the
     // next `list_sessions` fetch rebuilds the baseline via scan + merge.
     // See ADR-028 §"Why no startup seed" for the rationale.
@@ -573,11 +545,23 @@ impl AgentCore {
     /// a zero-input call is still recorded (the LLM did happen), but its
     /// `prompt_tokens` contribution is skipped to avoid masking a reliable
     /// baseline with a Provider-fallback zero ("宁可 miss 也不估计").
+    ///
+    /// ADR-066: `cache_read_tokens` follows the same zero-skip gate as
+    /// `prompt_tokens` (a reliable `cache_read` requires a reliable
+    /// input).  `cache_write_tokens` is always accumulated — Anthropic
+    /// cache writes are real, billable events independent of the
+    /// regular input count.
     pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
         if usage.prompt_tokens > 0 {
             self.agent_total_input_tokens
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                     Some(cur.saturating_add(usage.prompt_tokens))
+                })
+                .ok();
+            // ADR-066: cache_read shares the zero-skip gate.
+            self.agent_total_cache_read_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.saturating_add(usage.cache_read_tokens))
                 })
                 .ok();
         }
@@ -586,20 +570,31 @@ impl AgentCore {
                 Some(cur.saturating_add(usage.completion_tokens))
             })
             .ok();
+        // ADR-066: cache_write always accumulates (no zero-skip gate).
+        self.agent_total_cache_write_tokens
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some(cur.saturating_add(usage.cache_write_tokens))
+            })
+            .ok();
     }
 
     /// Atomically merge a freshly-scanned total into the in-process counter
     /// using `max(counter, scanned)`.
     ///
-    /// Idempotent: calling with the same `(in, out)` value repeatedly is a
-    /// no-op once the counter has been raised. Race-safe with concurrent
-    /// `accumulate_llm_usage` calls — whichever side sees the larger value
-    /// wins, so a slow scan followed by a fresh LLM call won't accidentally
-    /// downgrade the counter to the (stale) scan result.
+    /// Idempotent: calling with the same `(in, out, cache_read,
+    /// cache_write)` tuple repeatedly is a no-op once the counters have
+    /// been raised. Race-safe with concurrent `accumulate_llm_usage`
+    /// calls — whichever side sees the larger value wins, so a slow
+    /// scan followed by a fresh LLM call won't accidentally downgrade
+    /// the counter to the (stale) scan result.
     ///
-    /// Pass `None` for either side if the scan yielded no data
-    /// (e.g. agents with no persisted sessions yet).
-    pub fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>)) {
+    /// Pass `None` for any dimension whose scan yielded no data
+    /// (e.g. agents with no persisted sessions yet, or legacy meta
+    /// files without cache fields).
+    pub fn merge_token_totals(
+        &self,
+        scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
+    ) {
         if let Some(inp) = scanned.0 {
             self.agent_total_input_tokens
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
@@ -614,18 +609,38 @@ impl AgentCore {
                 })
                 .ok();
         }
+        // ADR-066: cache_read + cache_write follow the same atomic-max
+        // merge pattern.
+        if let Some(cache_read) = scanned.2 {
+            self.agent_total_cache_read_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.max(cache_read))
+                })
+                .ok();
+        }
+        if let Some(cache_write) = scanned.3 {
+            self.agent_total_cache_write_tokens
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                    Some(cur.max(cache_write))
+                })
+                .ok();
+        }
     }
 
     /// Snapshot the current agent-scoped cumulative token totals.
     ///
-    /// Returns `(input_tokens, output_tokens)`. Always present (zero is a
-    /// valid baseline before the first LLM call). Callers embed these in
-    /// `ContextUsageInfo` so the frontend can show a "agent-total" line in
-    /// the Results Panel before any per-session cumulative figure exists.
-    pub fn agent_token_totals(&self) -> (u64, u64) {
+    /// ADR-066: returns `(input_tokens, output_tokens, cache_read_tokens,
+    /// cache_write_tokens)`. Always present (zero is a valid baseline
+    /// before the first LLM call). Callers embed these in
+    /// `ContextUsageInfo` so the frontend can show a "agent-total"
+    /// line in the Results Panel before any per-session cumulative
+    /// figure exists.
+    pub fn agent_token_totals(&self) -> (u64, u64, u64, u64) {
         (
             self.agent_total_input_tokens.load(Ordering::Acquire),
             self.agent_total_output_tokens.load(Ordering::Acquire),
+            self.agent_total_cache_read_tokens.load(Ordering::Acquire),
+            self.agent_total_cache_write_tokens.load(Ordering::Acquire),
         )
     }
 
@@ -804,10 +819,6 @@ impl AgentCore {
             );
             self.compression_ratio_threshold = Some(threshold);
         }
-
-        // ADR-061 §10.2: the `tool_compression_enabled` toggle and its
-        // platform-tools hot-reload are deleted; `context_retrieve` is
-        // always registered and `context_abandon` is never registered.
     }
 
     pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
@@ -1201,54 +1212,66 @@ impl AgentCore {
     pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
 
 
+    /// Resolve the user-configured **total context cap**:
+    /// `agent_config.json.context_window` (Layer 1) → `manifest.llm.context_window`
+    /// (Layer 2) → `DEFAULT_CONTEXT_WINDOW` (Layer 3, 200K).
+    ///
+    /// Returns `Some(0)` when the user explicitly chose "no limit"
+    /// (`context_window_override = Some(0)`); callers treat that the same
+    /// as `None` (use the model's full capacity).
+    pub(crate) fn resolved_context_cap(&self) -> Option<u64> {
+        Some(
+            self.context_window_override
+                .or(self.manifest_context_window)
+                .unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
+        )
+    }
+
     /// Resolve the effective context window budget for history trimming.
     ///
-    /// Resolution chain for the user-configured cap:
-    ///   1. agent_config.json.context_window (Layer 1)
-    ///   2. manifest.llm.context_window (Layer 2)
-    ///   3. DEFAULT_CONTEXT_WINDOW (Layer 3, 200K)
+    /// This is the single denominator for every context-usage percentage
+    /// (trigger thresholds, UI usage report, HistoryManager::max_tokens).
+    /// It treats the resolved cap as a **total** context window and subtracts
+    /// the model's output reserve *inside* the cap:
+    /// `input = min(provider_input, min(cap, window)) − output_reserve`
+    /// (see [`ModelCapabilitiesInfo::input_budget_with_cap`]).
     ///
-    /// The resolved cap is then clamped to the model's actual context window:
-    ///   effective = min(resolved_cap, model.effective_input_budget)
-    ///
-    /// When resolved_cap == 0, no cap is applied (use model's full capacity).
+    /// So a 250K cap + 32K output reserve yields a 218K input budget — not
+    /// 250K (the pre-fix behaviour, where the reserve was swallowed by the
+    /// cap). When `resolved_context_cap()` is `Some(0)`, the provider's own
+    /// input allowance (`max_input_tokens`, else `window − reserve`) is used.
     pub fn context_trim_budget(&self, model_name: &str) -> u64 {
         let max_output_limit = self.max_output_tokens_limit_for_model(model_name);
-        let resolved_cap = self
-            .context_window_override
-            .or(self.manifest_context_window)
-            .unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW);
+        let resolved_cap = self.resolved_context_cap();
 
         self.get_model_capabilities(model_name)
             .map(|caps| {
-                let model_budget = caps.effective_input_budget(max_output_limit);
-                let effective = if resolved_cap == 0 {
-                    // No user-imposed cap — use model's full capacity
-                    model_budget
-                } else {
-                    std::cmp::min(resolved_cap, model_budget)
-                };
+                let effective =
+                    caps.input_budget_with_cap(resolved_cap, max_output_limit);
                 tracing::debug!(
                     model = %model_name,
                     context_window = caps.context_window,
                     max_input_tokens = ?caps.max_input_tokens,
                     max_output_tokens_limit = max_output_limit,
-                    resolved_cap,
-                    model_budget,
+                    output_reserve = caps.output_reserve(max_output_limit),
+                    resolved_cap = resolved_cap.unwrap_or(0),
                     effective,
-                    "Computed usable context budget (capped by per-agent context_window)"
+                    "Computed usable input context budget (output reserve subtracted inside cap)"
                 );
                 effective
             })
             .unwrap_or_else(|| {
-                let fallback = if resolved_cap == 0 {
+                let fallback = if resolved_cap == Some(0) {
                     self.config.history_max_tokens
                 } else {
-                    std::cmp::min(resolved_cap, self.config.history_max_tokens)
+                    std::cmp::min(
+                        resolved_cap.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
+                        self.config.history_max_tokens,
+                    )
                 };
                 tracing::debug!(
                     model = %model_name,
-                    resolved_cap,
+                    resolved_cap = resolved_cap.unwrap_or(0),
                     fallback,
                     "No model capabilities for '{}', using capped history_max_tokens as fallback",
                     model_name
@@ -1292,11 +1315,6 @@ impl Clone for AgentCore {
             search_prompt: Arc::clone(&self.search_prompt),
             compact_template: Arc::clone(&self.compact_template),
             title_prompt: Arc::clone(&self.title_prompt),
-            extraction_prompt: Arc::clone(&self.extraction_prompt),
-            conflict_classification_prompt: Arc::clone(
-                &self.conflict_classification_prompt,
-            ),
-            generalization_prompt: Arc::clone(&self.generalization_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
@@ -1329,7 +1347,16 @@ impl Clone for AgentCore {
             agent_total_output_tokens: AtomicU64::new(
                 self.agent_total_output_tokens.load(Ordering::Acquire),
             ),
-            retrieve_queue: self.retrieve_queue.clone(),
+
+            // ADR-066: cache counters inherit the same "snapshot value,
+            // share updates across clones" semantics as the in/out
+            // counters above.
+            agent_total_cache_read_tokens: AtomicU64::new(
+                self.agent_total_cache_read_tokens.load(Ordering::Acquire),
+            ),
+            agent_total_cache_write_tokens: AtomicU64::new(
+                self.agent_total_cache_write_tokens.load(Ordering::Acquire),
+            ),
         }
     }
 }
@@ -1340,6 +1367,43 @@ mod tests {
     use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
     use acowork_core::providers::mock::MockProvider;
     use crate::config::RuntimeConfig;
+
+    /// Add a single dummy tool entry with the given name + initial
+    /// enabled flag. Used by tests that need at least one entry in
+    /// `builtin_tools` to exercise the enabled-rewrite path.
+    fn seed_one_tool(core: &mut AgentCore, name: &str, enabled: bool) {
+        struct DummyTool(String);
+        #[async_trait::async_trait]
+        impl acowork_core::tools::traits::Tool for DummyTool {
+            fn name(&self) -> String {
+                self.0.clone()
+            }
+            fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+                acowork_core::tools::traits::ToolSpec {
+                    name: self.0.clone(),
+                    description: "test".to_string(),
+                    input_schema: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+                Ok(acowork_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: String::new(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+        core.builtin_tools
+            .push(BuiltinToolEntry::with_resolved_enabled(
+                enabled,
+                Arc::new(DummyTool(name.to_string())),
+            ));
+    }
 
     /// Build a minimal AgentCore for testing context_trim_budget.
     fn make_core(
@@ -1415,25 +1479,23 @@ mod tests {
 
     #[test]
     fn test_resolution_chain_config_wins_over_manifest() {
-        // Layer 1: config=100K, Layer 2: manifest=64K → should use 100K
-        // Model: 200K, so min(100K, 200K-reserve) = 100K - 32768 = 67232
+        // Layer 1: config=100K (TOTAL window), Layer 2: manifest=64K → 100K wins.
+        // The cap is treated as a total context window: output reserve is
+        // subtracted INSIDE the cap → 100_000 − 16_384 = 83_616 input budget.
         let core = make_core(
             Some(100_000),
             Some(64_000),
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        // effective_input_budget: min(200K, 200K-16K=184K) given max_output_limit=32K
-        // Actually effective_input_budget = context_window - min(max_output_tokens, max_output_tokens_limit)
-        // = 200_000 - min(16_384, 32_768) = 200_000 - 16_384 = 183_616
-        // min(100_000, 183_616) = 100_000
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 100_000);
+        assert_eq!(budget, 83_616);
     }
 
     #[test]
     fn test_resolution_chain_manifest_over_default() {
-        // Layer 1: None, Layer 2: 64K → should use 64K
+        // Layer 1: None, Layer 2: 64K (TOTAL window) → reserve subtracted
+        // inside cap → 64_000 − 16_384 = 47_616 input budget.
         let core = make_core(
             None,
             Some(64_000),
@@ -1441,7 +1503,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 64_000);
+        assert_eq!(budget, 47_616);
     }
 
     #[test]
@@ -1462,7 +1524,8 @@ mod tests {
 
     #[test]
     fn test_resolution_chain_default_smaller_than_model() {
-        // Both None, model=1M → default 200K caps it
+        // Both None → default 200K TOTAL cap binds (model window 1M); reserve
+        // subtracted inside cap → 200_000 − 16_384 = 183_616.
         let core = make_core(
             None,
             None,
@@ -1470,8 +1533,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        // DEFAULT_CONTEXT_WINDOW=200K < model_budget=983_616 → min = 200_000
-        assert_eq!(budget, 200_000);
+        assert_eq!(budget, 183_616);
     }
 
     // ── Zero = no limit tests ───────────────────────────────────────
@@ -1508,7 +1570,8 @@ mod tests {
 
     #[test]
     fn test_user_cap_smaller_than_model() {
-        // User sets 50K, model has 200K → use 50K
+        // User sets 50K TOTAL, model has 200K → input budget = 50K cap −
+        // 16_384 output reserve = 33_616.
         let core = make_core(
             Some(50_000),
             None,
@@ -1516,7 +1579,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 50_000);
+        assert_eq!(budget, 33_616);
     }
 
     #[test]
@@ -1535,9 +1598,9 @@ mod tests {
 
     #[test]
     fn test_user_cap_exactly_equals_model_budget() {
-        // User sets 183_616 (200K-16K-384), model has 200K → min == user_cap
-        // but user_cap = 183_616 and model_budget = 200_000 - 16_384 = 183_616
-        // min(183_616, 183_616) = 183_616
+        // User sets 183_616 (the old "200K−16_384 model budget" number).
+        // With the cap now treated as a TOTAL window the output reserve is
+        // subtracted again inside the cap → 183_616 − 16_384 = 167_232.
         let core = make_core(
             Some(183_616),
             None,
@@ -1545,7 +1608,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 183_616);
+        assert_eq!(budget, 167_232);
     }
 
     // ── No model capabilities fallback tests ────────────────────────
@@ -1594,7 +1657,8 @@ mod tests {
 
     #[test]
     fn test_manifest_context_window_is_honored() {
-        // Config=None, Manifest=150K, Model=200K → min(150K, 183K) = 150K
+        // Config=None, Manifest=150K TOTAL, Model=200K → input budget =
+        // 150_000 − 16_384 = 133_616.
         let core = make_core(
             None,
             Some(150_000),
@@ -1602,7 +1666,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 150_000);
+        assert_eq!(budget, 133_616);
     }
 
     #[test]
@@ -1636,7 +1700,8 @@ mod tests {
 
     #[test]
     fn test_user_cap_of_one_token() {
-        // Extreme: user sets 1 token
+        // Extreme: user sets 1 token (TOTAL). Reserve (16_384) exceeds the
+        // capped window → saturating_sub floors the input budget at 0.
         let core = make_core(
             Some(1),
             None,
@@ -1644,7 +1709,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 1);
+        assert_eq!(budget, 0);
     }
 
     #[test]
@@ -1665,8 +1730,9 @@ mod tests {
 
     #[test]
     fn test_max_output_tokens_limit_affects_model_budget() {
-        // Model: 200K, max_output=16K, limit=8K → effective_input = 200K - min(16K, 8K) = 192K
-        // User cap=100K → min(100K, 192K) = 100K
+        // Model: 200K, max_output=16K, limit=8K → output reserve =
+        // min(16_384, 8_192) = 8_192. User cap=100K TOTAL →
+        // 100_000 − 8_192 = 91_808 input budget.
         let core = make_core(
             Some(100_000),
             None,
@@ -1683,9 +1749,7 @@ mod tests {
             }
         }
         let budget = core.context_trim_budget("test-model");
-        // model_budget = 200_000 - min(16_384, 8_192) = 200_000 - 8_192 = 191_808
-        // min(100_000, 191_808) = 100_000
-        assert_eq!(budget, 100_000);
+        assert_eq!(budget, 91_808);
     }
 
     // ── apply_builtin_enabled_entries (ADR-052 §3.5 shared policy) ────
@@ -1699,99 +1763,6 @@ mod tests {
 
     use crate::agent_config::AgentToolEntry;
 
-    /// Pre-populate `builtin_tools` with a small mixed set so the
-    /// enabled-rewrite path has both platform and non-platform entries
-    /// to work with. Mirrors a real boot where `context_retrieve` is
-    /// always registered (ADR-061 §10.2).
-    fn seed_with_mixed_builtins(core: &mut AgentCore) {
-        use crate::tools::builtin::build_platform_protected_tools;
-        // Add a non-platform tool for the rewrite to land on.
-        struct DummyTool;
-        #[async_trait::async_trait]
-        impl acowork_core::tools::traits::Tool for DummyTool {
-            fn name(&self) -> String {
-                "shell".to_string()
-            }
-            fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
-                acowork_core::tools::traits::ToolSpec {
-                    name: "shell".to_string(),
-                    description: "test".to_string(),
-                    input_schema: serde_json::json!({}),
-                }
-            }
-            async fn execute(
-                &self,
-                _params: serde_json::Value,
-                _work_dir: Option<&str>,
-            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
-                Ok(acowork_core::tools::traits::ToolResult {
-                    ok: true,
-                    content: String::new(),
-                    error: None,
-                    token_usage: None,
-                })
-            }
-        }
-        core.builtin_tools.push(BuiltinToolEntry::with_resolved_enabled(
-            true,
-            Arc::new(DummyTool),
-        ));
-        for tool in build_platform_protected_tools(
-            &core.config.work_dir,
-            core.retrieve_queue.clone(),
-        ) {
-            core.builtin_tools
-                .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
-        }
-        core.rebuild_all_tools();
-    }
-
-    #[test]
-    fn apply_builtin_enabled_entries_filters_platform_tools_out_of_resolution() {
-        // The shared policy MUST delegate to
-        // `agent_config::apply_builtin_tools_patch` with an empty patch,
-        // so platform-protected names are stripped from the resolution
-        // map regardless of what the incoming `entries` say. If this
-        // ever changes, the platform-protected UX invariant is broken.
-        let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_mixed_builtins(&mut core);
-
-        // Hostile patch tries to disable both platform tools.
-        core.apply_builtin_enabled_entries(&[
-            AgentToolEntry::new("shell", false),
-            AgentToolEntry::new("context_retrieve", false),
-            AgentToolEntry::new("context_abandon", false),
-        ]);
-
-        // Non-platform tool follows the patch verbatim.
-        let shell = core
-            .builtin_tools
-            .iter()
-            .find(|e| e.name() == "shell")
-            .expect("shell must still be registered");
-        assert!(
-            !shell.enabled,
-            "non-platform tool must follow the patch"
-        );
-
-        // Platform tools are filtered OUT of the resolution map, so
-        // their registered slots keep whatever enabled flag they had
-        // before the call (here, force-enabled by `with_resolved_enabled`
-        // -> true). Only names actually registered are checked:
-        // `context_abandon` is no longer registered at all (ADR-061
-        // §10.2), so it is simply absent rather than disabled.
-        for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let Some(entry) = core.builtin_tools.iter().find(|e| e.name() == *name)
-            else {
-                continue;
-            };
-            assert!(
-                entry.enabled,
-                "{name} must keep its prior enabled flag (platform tools are filter-out, not force-disable)"
-            );
-        }
-    }
-
     #[test]
     fn apply_builtin_enabled_entries_drops_unknown_names() {
         // Defensive: an `entries` payload that mentions a tool name not
@@ -1799,7 +1770,7 @@ mod tests {
         // panic and not auto-register it (that would let a hostile
         // `agent_tools.json` smuggle arbitrary tools into the registry).
         let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_mixed_builtins(&mut core);
+        seed_one_tool(&mut core, "shell", true);
         let before = core.builtin_tools.len();
 
         core.apply_builtin_enabled_entries(&[
@@ -1820,7 +1791,7 @@ mod tests {
         // wrapped `tool` impl (security decorators applied during
         // `ToolRegistry::activate`) must survive untouched.
         let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_mixed_builtins(&mut core);
+        seed_one_tool(&mut core, "shell", true);
 
         let shell_before: Arc<dyn acowork_core::tools::traits::Tool> = core
             .builtin_tools
@@ -2199,12 +2170,6 @@ mod tests {
         assert!(core.compaction_prompt().is_none(), "compaction_prompt must default to None");
         assert!(core.search_prompt().is_none(), "search_prompt must default to None");
         assert!(core.title_prompt().is_none(), "title_prompt must default to None");
-        assert!(core.extraction_prompt().is_none(), "extraction_prompt must default to None");
-        assert!(
-            core.conflict_classification_prompt().is_none(),
-            "conflict_classification_prompt must default to None"
-        );
-        assert!(core.generalization_prompt().is_none(), "generalization_prompt must default to None");
         assert!(core.abstention_prompt().is_none(), "abstention_prompt must default to None");
         assert!(core.compact_template().is_none(), "compact_template must default to None");
     }
@@ -2284,4 +2249,201 @@ mod tests {
              built-in fallback constant takes effect again"
         );
     }
+
+
+    // ── ADR-066: agent-level cache counter tests ─────────────────────
+
+    /// Helper: build an AgentCore with default test config and no
+    /// manifest, suitable for token-counter tests.
+    fn make_minimal_core() -> AgentCore {
+        let config = RuntimeConfig {
+            history_max_tokens: 8000,
+            ..RuntimeConfig::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.cache"
+            version = "1.0.0"
+            name = "Cache counter test"
+            description = "ADR-066 cache counter tests"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+        AgentCore::new(config, manifest, provider, vec![])
+    }
+
+    /// Basic cache accumulation: four counters all advance correctly
+    /// across two LLM calls (the Anthropic-style cache breakdown).
+    #[test]
+    fn test_accumulate_llm_usage_advances_cache_counters() {
+        let core = make_minimal_core();
+        assert_eq!(core.agent_token_totals(), (0, 0, 0, 0));
+
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+            cache_read_tokens: 400,
+            cache_write_tokens: 100,
+            ..Default::default()
+        });
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 3500,
+            completion_tokens: 450,
+            cache_read_tokens: 1200,
+            cache_write_tokens: 0,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            core.agent_token_totals(),
+            (4500, 650, 1600, 100),
+            "input/output/cache_read/cache_write all accumulate"
+        );
+    }
+
+    /// `cache_read` follows the same zero-skip gate as `prompt_tokens`
+    /// (Provider fallback).  `cache_write` always accumulates.
+    #[test]
+    fn test_accumulate_llm_usage_cache_zero_input_skip() {
+        let core = make_minimal_core();
+
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            cache_read_tokens: 300,
+            cache_write_tokens: 50,
+            ..Default::default()
+        });
+        // Provider fallback: prompt=0, bogus cache_read must NOT count.
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 0,
+            completion_tokens: 50,
+            cache_read_tokens: 999,
+            cache_write_tokens: 30,
+            ..Default::default()
+        });
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 2000,
+            completion_tokens: 80,
+            cache_read_tokens: 800,
+            cache_write_tokens: 0,
+            ..Default::default()
+        });
+
+        let (_, _, cr, cw) = core.agent_token_totals();
+        assert_eq!(cr, 1100, "cache_read: 300 + 800 (999 skipped)");
+        assert_eq!(cw, 80, "cache_write: 50 + 30 + 0 (always accumulated)");
+    }
+
+    /// Saturating overflow on cache counters — `u64::MAX` followed by a
+    /// non-zero add must cap at `u64::MAX` without panicking.
+    #[test]
+    fn test_accumulate_llm_usage_cache_saturating_overflow() {
+        let core = make_minimal_core();
+
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            cache_read_tokens: u64::MAX,
+            cache_write_tokens: u64::MAX,
+            ..Default::default()
+        });
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 1,
+            completion_tokens: 0,
+            cache_read_tokens: 5,
+            cache_write_tokens: 7,
+            ..Default::default()
+        });
+
+        let (_, _, cr, cw) = core.agent_token_totals();
+        assert_eq!(cr, u64::MAX, "saturating_add caps cache_read at u64::MAX");
+        assert_eq!(cw, u64::MAX, "saturating_add caps cache_write at u64::MAX");
+    }
+
+    /// `merge_token_totals` applies atomic-max across all four
+    /// dimensions, mirroring the ADR-028 in/out semantics.  Each
+    /// dimension is max'd independently — a larger scanned value
+    /// always wins; a larger live value is preserved; `None` per
+    /// dimension skips that dimension.
+    #[test]
+    fn test_merge_token_totals_cache_atomic_max() {
+        let core = make_minimal_core();
+
+        // Step 1: live counter has values.
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            cache_read_tokens: 50,
+            cache_write_tokens: 20,
+            ..Default::default()
+        });
+
+        // Step 2: scan reports smaller values across the board — every
+        // dimension's atomic-max preserves the live value.
+        core.merge_token_totals((
+            Some(50),  // < live 100
+            Some(5),   // < live 10
+            Some(10),  // < live 50
+            Some(5),   // < live 20
+        ));
+        assert_eq!(
+            core.agent_token_totals(),
+            (100, 10, 50, 20),
+            "per-dimension atomic max preserves live when scan is smaller"
+        );
+
+        // Step 3: scan reports larger values across the board — every
+        // dimension's atomic-max adopts the scanned value.
+        core.merge_token_totals((
+            Some(200),  // > live 100
+            Some(20),   // > live 10
+            Some(500),  // > live 50
+            Some(300),  // > live 20
+        ));
+        assert_eq!(
+            core.agent_token_totals(),
+            (200, 20, 500, 300),
+            "per-dimension atomic max adopts scan when it is larger"
+        );
+
+        // Step 4: passing `None` for any dimension leaves that
+        // dimension's counter unchanged — supports legacy meta files
+        // without cache fields.
+        core.merge_token_totals((None, None, Some(600), None));
+        assert_eq!(
+            core.agent_token_totals(),
+            (200, 20, 600, 300),
+            "None dimensions are skipped (legacy meta without cache fields)"
+        );
+
+        // Step 5: independent dimensions — input is smaller, output is
+        // larger.  Atomic max picks per-dimension, not as a tuple.
+        core.accumulate_llm_usage(&UsageInfo {
+            prompt_tokens: 50,
+            completion_tokens: 1000,
+            ..Default::default()
+        });
+        // Live now: input=200+50=250, output=20+1000=1020, cache_read=600,
+        // cache_write=300.
+        core.merge_token_totals((
+            Some(100),  // < live 250, ignored
+            Some(5000), // > live 1020, adopted
+            Some(100),  // < live 600, ignored
+            Some(1000), // > live 300, adopted
+        ));
+        assert_eq!(
+            core.agent_token_totals(),
+            (250, 5000, 600, 1000),
+            "each dimension is max'd independently"
+        );
+    }
+
 }

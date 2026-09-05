@@ -315,6 +315,18 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/mcp-servers",
             get(proxy_get_mcp_servers).put(proxy_put_mcp_servers),
         )
+        // ADR-069: per-MCP-server tool-level opt-in. `GET/PUT
+        // /api/agents/{id}/mcp-tools` is a pure reverse-proxy to the
+        // Runtime's `GET/PUT /agents/{id}/mcp-tools` (added in
+        // `acowork-runtime/src/http/server.rs`). Without this route the
+        // Gateway returned 404 and the Desktop Tools panel silently
+        // swallowed it, so the per-server tool list (e.g. `pm`'s 12
+        // tools) never rendered. Mirrors `/mcp-servers` / `/builtin-tools`
+        // exactly — all validation + persistence lives in the Runtime.
+        .route(
+            "/api/agents/{id}/mcp-tools",
+            get(proxy_get_mcp_tools).put(proxy_put_mcp_tools),
+        )
         .route(
             "/api/agents/{id}/search-config",
             get(proxy_get_search_config).put(proxy_put_search_config),
@@ -1299,6 +1311,53 @@ async fn proxy_put_mcp_servers(
     .await
 }
 
+// ── ADR-069: per-MCP-server tool-level opt-in proxy ────────────────────
+//
+// Symmetric to `proxy_get_mcp_servers` / `proxy_put_mcp_servers`: these
+// two handlers are transparent pipes to the Runtime's
+// `get_agent_mcp_tools` / `put_agent_mcp_tools` in
+// `acowork-runtime/src/http/server.rs`. The Runtime is the single source
+// of truth for the full per-tool list (reconciled against the live MCP
+// `tools/list` at connect time); the Gateway does no parsing or
+// second-guessing.
+
+/// Reverse-proxy `GET /api/agents/{id}/mcp-tools`
+/// to Runtime's `GET /agents/{id}/mcp-tools`.
+async fn proxy_get_mcp_tools(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/mcp-tools", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/mcp-tools`
+/// to Runtime's `PUT /agents/{id}/mcp-tools`.
+async fn proxy_put_mcp_tools(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/mcp-tools", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 /// Reverse-proxy `GET /api/agents/{id}/search-config`
 /// to Runtime's `GET /agents/{id}/search-config`.
 async fn proxy_get_search_config(
@@ -1483,7 +1542,7 @@ fn urlencoding(s: &str) -> String {
 /// because the proxy targets a different upstream host, and
 /// `content-length` is excluded because reqwest recalculates it from the
 /// actual body bytes.
-fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
+pub(crate) fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
     // HeaderName stores names in lowercase, so comparison is safe.
     matches!(
         name.as_str(),
@@ -2135,6 +2194,130 @@ mod tests {
             got[3].starts_with("POST /agents/com.test.prompts-proxy/prompts/reload body={}"),
             "L2 reload must reach the Runtime under the prompts namespace (ADR-063 §3.7.7); got: {}",
             got[3]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-069 regression: `GET/PUT /api/agents/{id}/mcp-tools` must be
+    /// reverse-proxied to the Runtime's `GET/PUT /agents/{id}/mcp-tools`.
+    ///
+    /// Without this route the Gateway returned 404 (never reaching the
+    /// Runtime), so `ToolsTab.tsx` silently swallowed the error and the
+    /// per-server tool list (e.g. `pm`'s 12 tools) never rendered — the
+    /// "点击 mcp server 里的 pm，工具列表不刷新" bug. We stand up a mock
+    /// Runtime that echoes method/path/body and assert both the GET and
+    /// PUT forms arrive at the Runtime under the `/agents/{id}/mcp-tools`
+    /// path (method and body preserved verbatim).
+    #[tokio::test]
+    async fn mcp_tools_proxy_reaches_runtime() {
+        use tower::util::ServiceExt;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // ── Mock Runtime: echoes method/path/body back as JSON ──
+        let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let received_for_server = received.clone();
+        let runtime_app = axum::Router::new().fallback(
+            axum::routing::any(move |req: axum::extract::Request| async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                received_for_server
+                    .lock()
+                    .unwrap()
+                    .push(format!(
+                        "{} {} body={}",
+                        method,
+                        uri,
+                        String::from_utf8_lossy(&body)
+                    ));
+                axum::Json(serde_json::json!({
+                    "agent_id": "com.test.mcp-tools",
+                    "servers": {
+                        "pm": [{ "name": "pm_claim_task", "enabled": true }]
+                    }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, runtime_app).await.unwrap();
+        });
+
+        // ── Gateway state with the mock Runtime registered ──
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-mcp-tools-proxy-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry.write().await.register(
+            "com.test.mcp-tools",
+            &format!("http://127.0.0.1:{}", port),
+        );
+        state.runtime_http_registry = Some(registry);
+
+        let app = super::proxy_routes().with_state(state);
+
+        // ── 1. GET /api/agents/{id}/mcp-tools → mock GET /agents/{id}/mcp-tools ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/com.test.mcp-tools/mcp-tools")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── 2. PUT /api/agents/{id}/mcp-tools with JSON body ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/agents/com.test.mcp-tools/mcp-tools")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"servers":{"pm":[{"name":"pm_submit_task","enabled":false}]}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── 3. Assert the Runtime actually received both calls with the
+        //    correct method / path / body ──
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 2, "both GET and PUT must reach the Runtime; got: {got:?}");
+        assert!(
+            got[0].starts_with("GET /agents/com.test.mcp-tools/mcp-tools"),
+            "GET must be forwarded to Runtime /agents/{{id}}/mcp-tools; got: {}",
+            got[0]
+        );
+        assert!(
+            got[1].starts_with("PUT /agents/com.test.mcp-tools/mcp-tools"),
+            "PUT must be forwarded to Runtime /agents/{{id}}/mcp-tools; got: {}",
+            got[1]
+        );
+        assert!(
+            got[1].contains("pm_submit_task"),
+            "PUT body must be forwarded verbatim; got: {}",
+            got[1]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

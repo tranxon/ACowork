@@ -47,7 +47,13 @@ pub struct AdminNodeRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_type: Option<String>,
     pub content: String,
+    /// Raw `confidence` property on the node (0.0 when the node type has no
+    /// such property — e.g. Episodic). Passed through verbatim, never derived.
     pub confidence: f64,
+    /// Raw `importance` property on the node (0.0 when the node type has no
+    /// such property — e.g. Procedural/Autobiographical). Passed through
+    /// verbatim, never derived.
+    pub importance: f64,
     pub decay_score: f64,
     pub created_at: i64,
     pub last_accessed_at: i64,
@@ -110,7 +116,13 @@ pub struct AdminNodeDetail {
     /// Secondary classification (see [`AdminNodeRecord::sub_type`]).
     pub sub_type: Option<String>,
     pub content: String,
+    /// Raw `confidence` property on the node (0.0 when the node type has no
+    /// such property — e.g. Episodic). Passed through verbatim, never derived.
     pub confidence: f64,
+    /// Raw `importance` property on the node (0.0 when the node type has no
+    /// such property — e.g. Procedural/Autobiographical). Passed through
+    /// verbatim, never derived.
+    pub importance: f64,
     pub decay_score: f64,
     pub created_at: i64,
     pub last_accessed_at: i64,

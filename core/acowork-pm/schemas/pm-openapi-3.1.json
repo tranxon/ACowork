@@ -1,0 +1,468 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "acowork-pm REST API",
+    "version": "0.1.0",
+    "description": "项目 / 任务 / 附件管理服务 REST 契约。\n\n- **Base URL**：生产经 Gateway 反向代理 `{gw}/api/pm/...` → 剥 `/api/pm` 前缀转发到 pm 服务内部路径（不带 `/api` 前缀）；开发独立 serve 时路径不带 `/api` 前缀。\n- **鉴权**：复用 Gateway Desktop 会话鉴权（Bearer Token，见 `docs/protocols/zh/http.md` §1）。\n- **Actor 标识**：写操作与 claim/submit/review 依赖 HTTP header `X-Actor`（Gateway 注入当前用户/Agent ID）。\n- **错误格式**：统一 `{\"error\": {\"code\": \"...\", \"message\": \"...\"}}`，错误码表见 `schemas/README.md` §3 与 `src/error.rs`。\n- **契约权威**：本文件与 `src/api/routes.rs` 路由注册、`src/types.rs` 类型定义一一对应；设计与本契约冲突时以本契约为准（实现态）。"
+  },
+  "paths": {
+    "/api/pm/projects": {
+      "get": {
+        "summary": "项目列表",
+        "operationId": "listProjects",
+        "responses": {
+          "200": {
+            "description": "项目列表",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } } }
+          }
+        }
+      },
+      "post": {
+        "summary": "新建项目",
+        "operationId": "createProject",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateProject" } } }
+        },
+        "responses": {
+          "200": { "description": "创建成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } }
+        }
+      }
+    },
+    "/api/pm/projects/{pid}": {
+      "parameters": [{ "$ref": "#/components/parameters/Pid" }],
+      "get": {
+        "summary": "项目详情",
+        "operationId": "getProject",
+        "responses": {
+          "200": { "description": "项目详情", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "summary": "更新项目",
+        "operationId": "updateProject",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateProject" } } }
+        },
+        "responses": {
+          "200": { "description": "更新成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "summary": "删除项目（级联任务，需二次确认）",
+        "operationId": "deleteProject",
+        "parameters": [
+          { "name": "cascade", "in": "query", "required": false, "description": "强制级联删除所有任务（默认 false，仍有任务时返回 409）", "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": {
+          "204": { "description": "删除成功" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/pm/projects/{pid}/tasks": {
+      "parameters": [{ "$ref": "#/components/parameters/Pid" }],
+      "get": {
+        "summary": "项目内任务列表/检索",
+        "operationId": "listTasks",
+        "parameters": [
+          { "$ref": "#/components/parameters/TaskStatusQuery" },
+          { "$ref": "#/components/parameters/AssigneeQuery" },
+          { "$ref": "#/components/parameters/OnlyBlockedQuery" },
+          { "$ref": "#/components/parameters/SortQuery" }
+        ],
+        "responses": {
+          "200": { "description": "任务列表", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } } } }
+        }
+      },
+      "post": {
+        "summary": "新建任务（created_by=human 直接生效；Agent 创建待审核）",
+        "operationId": "createTask",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateTask" } } }
+        },
+        "responses": {
+          "200": { "description": "创建成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "get": {
+        "summary": "任务详情（响应含派生字段 is_blocked / blocked_by / depth）",
+        "operationId": "getTask",
+        "responses": {
+          "200": { "description": "任务详情", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskResponse" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "summary": "更新任务（所有字段可选，未提供则不修改）",
+        "operationId": "updateTask",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UpdateTask" } } }
+        },
+        "responses": {
+          "200": { "description": "更新成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      },
+      "delete": {
+        "summary": "删除任务（子树级联）",
+        "operationId": "deleteTask",
+        "parameters": [
+          { "name": "cascade", "in": "query", "required": false, "description": "强制级联删除子树（默认 false）", "schema": { "type": "boolean", "default": false } },
+          { "name": "promote_children", "in": "query", "required": false, "description": "子任务提升为项目顶层（默认 false；cascade 时忽略）", "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": {
+          "204": { "description": "删除成功" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}/parent": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "patch": {
+        "summary": "移动任务到新父下（parent_id=null 提升为根任务；DFS 防环 + 深度限制）",
+        "operationId": "reparentTask",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReparentTask" } } }
+        },
+        "responses": {
+          "204": { "description": "移动成功" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}/claim": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "post": {
+        "summary": "Agent 认领任务（pending → in_progress；依赖未满足返回 409）",
+        "operationId": "claimTask",
+        "responses": {
+          "200": { "description": "认领成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}/submit": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "post": {
+        "summary": "Agent 提交结果（in_progress → submitted）",
+        "operationId": "submitTask",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubmitTaskRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "提交成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}/review": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "post": {
+        "summary": "人类审核（approved=true → done；false → rejected）",
+        "operationId": "reviewTask",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReviewTaskRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "审核成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}/children": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "get": {
+        "summary": "列出任务的直接子任务（按物理 children/ 目录）",
+        "operationId": "listChildren",
+        "responses": {
+          "200": { "description": "直接子任务列表", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/pm/tasks/{tid}/attachments": {
+      "parameters": [{ "$ref": "#/components/parameters/Tid" }],
+      "get": {
+        "summary": "列出任务附件元数据",
+        "operationId": "listAttachments",
+        "responses": {
+          "200": { "description": "附件元数据列表", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentMeta" } } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "summary": "上传附件（multipart/form-data，单文件 ≤ 10MB）",
+        "operationId": "uploadAttachment",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary", "description": "文件二进制" },
+                  "kind": { "type": "string", "enum": ["image", "file"], "description": "可选；自动从 MIME 推断" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "上传成功", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AttachmentMeta" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/pm/attachments/{aid}": {
+      "parameters": [{ "$ref": "#/components/parameters/Aid" }],
+      "get": {
+        "summary": "下载附件（?download=1 强制 attachment；?thumb=1 返回缩略图）",
+        "operationId": "downloadAttachment",
+        "parameters": [
+          { "name": "download", "in": "query", "required": false, "schema": { "type": "boolean", "default": false } },
+          { "name": "thumb", "in": "query", "required": false, "schema": { "type": "boolean", "default": false } }
+        ],
+        "responses": {
+          "200": { "description": "文件字节流", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "summary": "删除附件",
+        "operationId": "deleteAttachment",
+        "responses": {
+          "204": { "description": "删除成功" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Pid": { "name": "pid", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/ProjectId" } },
+      "Tid": { "name": "tid", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/TaskId" } },
+      "Aid": { "name": "aid", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/AttachmentId" } },
+      "TaskStatusQuery": { "name": "status", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/TaskStatus" } },
+      "AssigneeQuery": { "name": "assignee", "in": "query", "required": false, "schema": { "type": "string" } },
+      "OnlyBlockedQuery": { "name": "only_blocked", "in": "query", "required": false, "schema": { "type": "boolean", "default": false } },
+      "SortQuery": { "name": "sort", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/TaskSort" } }
+    },
+    "responses": {
+      "BadRequest": { "description": "输入校验失败 / 非法状态流转", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } } },
+      "NotFound": { "description": "资源不存在", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } } },
+      "Conflict": { "description": "结构冲突（环 / 依赖未满足 / 删除前仍有子项）", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } } } }
+    },
+    "schemas": {
+      "ProjectId": { "type": "string", "pattern": "^p-[a-zA-Z0-9-]+$", "minLength": 3, "maxLength": 64, "example": "p-3f2a9c1e" },
+      "TaskId": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]+$", "minLength": 3, "maxLength": 64, "example": "t-8b7d5e2f" },
+      "AttachmentId": { "type": "string", "pattern": "^att-[a-zA-Z0-9-]+$", "minLength": 3, "maxLength": 64, "example": "att-1c2d3e4f" },
+      "DateTimeUtc": { "type": "string", "format": "date-time", "example": "2025-03-01T08:00:00Z" },
+      "ProjectStatus": { "type": "string", "enum": ["active", "archived", "completed"] },
+      "TaskStatus": { "type": "string", "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"] },
+      "TaskType": { "type": "string", "enum": ["task", "bug", "feature", "chore", "checkpoint", "milestone"] },
+      "ReviewStatus": { "type": "string", "enum": ["not_required", "pending", "approved", "rejected"] },
+      "AttachmentKind": { "type": "string", "enum": ["image", "file"] },
+      "DependencyKind": { "type": "string", "enum": ["blocks", "relates", "duplicates"] },
+      "Priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
+      "TaskSort": { "type": "string", "enum": ["created_at", "updated_at", "due_at", "priority"] },
+      "Project": {
+        "type": "object",
+        "required": ["id", "title", "status", "created_by", "created_at", "updated_at"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/ProjectId" },
+          "title": { "type": "string" },
+          "description": { "type": "string", "default": "" },
+          "status": { "$ref": "#/components/schemas/ProjectStatus" },
+          "created_by": { "type": "string" },
+          "created_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "updated_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "metadata": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "CreateProject": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string", "default": "" },
+          "metadata": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": false
+      },
+      "UpdateProject": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/ProjectStatus" },
+          "metadata": { "type": "object", "additionalProperties": true }
+        },
+        "additionalProperties": false
+      },
+      "Dependency": {
+        "type": "object",
+        "required": ["task_id", "kind"],
+        "properties": {
+          "task_id": { "$ref": "#/components/schemas/TaskId" },
+          "kind": { "$ref": "#/components/schemas/DependencyKind" }
+        }
+      },
+      "TaskResult": {
+        "type": "object",
+        "required": ["text", "submitted_by", "submitted_at"],
+        "properties": {
+          "text": { "type": "string" },
+          "attachment_ids": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentId" } },
+          "submitted_by": { "type": "string" },
+          "submitted_at": { "$ref": "#/components/schemas/DateTimeUtc" }
+        }
+      },
+      "AttachmentMeta": {
+        "type": "object",
+        "required": ["id", "filename", "kind", "content_type", "size", "sha256", "storage_path", "uploaded_by", "uploaded_at"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/AttachmentId" },
+          "filename": { "type": "string" },
+          "kind": { "$ref": "#/components/schemas/AttachmentKind" },
+          "content_type": { "type": "string" },
+          "size": { "type": "integer", "format": "int64", "minimum": 0 },
+          "sha256": { "type": "string" },
+          "storage_path": { "type": "string", "description": "相对 task.json 所在目录的路径" },
+          "thumb_path": { "type": "string", "nullable": true },
+          "width": { "type": "integer", "nullable": true },
+          "height": { "type": "integer", "nullable": true },
+          "uploaded_by": { "type": "string" },
+          "uploaded_at": { "$ref": "#/components/schemas/DateTimeUtc" }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "required": ["id", "project_id", "title", "type", "status", "created_by", "created_at", "updated_at"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/TaskId" },
+          "project_id": { "$ref": "#/components/schemas/ProjectId" },
+          "title": { "type": "string" },
+          "description": { "type": "string", "default": "" },
+          "type": { "$ref": "#/components/schemas/TaskType" },
+          "status": { "$ref": "#/components/schemas/TaskStatus" },
+          "review_status": { "$ref": "#/components/schemas/ReviewStatus" },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "assignee": { "type": "string", "nullable": true },
+          "due_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "depends_on": { "type": "array", "items": { "$ref": "#/components/schemas/Dependency" } },
+          "attachments": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentMeta" } },
+          "result": { "$ref": "#/components/schemas/TaskResult" },
+          "created_by": { "type": "string" },
+          "created_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "updated_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "claimed_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "submitted_at": { "$ref": "#/components/schemas/DateTimeUtc" }
+        },
+        "additionalProperties": false
+      },
+      "CreateTask": {
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string", "default": "" },
+          "type": { "$ref": "#/components/schemas/TaskType" },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "parent_task_id": { "$ref": "#/components/schemas/TaskId", "description": "父任务 ID；缺省为项目根任务" },
+          "depends_on": { "type": "array", "items": { "$ref": "#/components/schemas/Dependency" } },
+          "attachment_ids": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentId" } }
+        },
+        "additionalProperties": false
+      },
+      "UpdateTask": {
+        "type": "object",
+        "description": "所有字段可选；未提供则不修改。assignee / due_at 传 null 表示清空。",
+        "properties": {
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/TaskType" },
+          "status": { "$ref": "#/components/schemas/TaskStatus" },
+          "priority": { "$ref": "#/components/schemas/Priority" },
+          "assignee": { "type": "string", "nullable": true },
+          "due_at": { "$ref": "#/components/schemas/DateTimeUtc" },
+          "depends_on": { "type": "array", "items": { "$ref": "#/components/schemas/Dependency" } }
+        },
+        "additionalProperties": false
+      },
+      "ReparentTask": {
+        "type": "object",
+        "required": ["new_parent"],
+        "properties": {
+          "new_parent": { "$ref": "#/components/schemas/TaskId", "nullable": true, "description": "null = 提升为项目根任务" }
+        },
+        "additionalProperties": false
+      },
+      "SubmitTaskRequest": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": { "type": "string" },
+          "attachment_ids": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentId" } }
+        },
+        "additionalProperties": false
+      },
+      "ReviewTaskRequest": {
+        "type": "object",
+        "required": ["approved"],
+        "properties": {
+          "approved": { "type": "boolean" },
+          "_comment": { "type": "string", "description": "保留字段" }
+        },
+        "additionalProperties": false
+      },
+      "TaskResponse": {
+        "type": "object",
+        "description": "任务完整响应 = Task 展开 + 派生字段（不持久化）。",
+        "allOf": [{ "$ref": "#/components/schemas/Task" }],
+        "properties": {
+          "is_blocked": { "type": "boolean", "default": false },
+          "blocked_by": { "type": "array", "items": { "$ref": "#/components/schemas/TaskId" } },
+          "depth": { "type": "integer", "format": "int32", "minimum": 0, "description": "物理深度（根=0）" }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string", "description": "机器可读错误码（snake_case），见 schemas/README.md §3" },
+              "message": { "type": "string", "description": "人类可读错误信息" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

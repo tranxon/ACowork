@@ -226,6 +226,14 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // `mqtt_client_slot` the HTTP server holds.
     let mut workspace_watcher_set: Option<crate::workspace::SharedWorkspaceWatcherSet> = None;
 
+    // ADR-069 follow-up: shared MCP config notifier. When the HTTP
+    // server starts it creates the notifier (and exposes it on the
+    // handle); we clone it out above. Otherwise (no `--http-port`,
+    // standalone) we create a fresh one below the `if let` — either way
+    // the builtin MCP tools and the gateway loop subscribe to one Arc.
+    let mut mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier> =
+        Arc::new(crate::mcp_notify::McpConfigNotifier::default());
+
     if let Some(bind_port) = config.http_port {
         // ADR-055 §6.4: bind the Node-allocated loopback port so the
         // Node reverse proxy has a stable `{agent_id} → port` mapping.
@@ -270,6 +278,16 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             Ok(server) => {
                 runtime_http_port = Some(server.port);
                 workspace_watcher_set = Some(server.workspace_watchers.clone());
+                // ADR-069 follow-up: the HTTP server created the shared
+                // MCP config notifier (same Arc on HttpState). Clone it
+                // out now — the handle is `mem::forget`-ed below, and the
+                // notifier must be shared with the builtin MCP tools +
+                // gateway loop so `PUT /mcp-servers` / `PUT /mcp-tools`
+                // (which fire it via HttpState) actually trigger a
+                // reconnect.
+                if let Some(n) = server.mcp_notifier.clone() {
+                    mcp_notifier = n;
+                }
                 tracing::info!(port = server.port, "Runtime HTTP server started");
                 std::mem::forget(server);
             }
@@ -521,11 +539,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let search_prompt = load_or_trace("search.md", "SEARCH_SYSTEM_PROMPT");
     let compact_template = load_or_trace("compact-template.md", "COMPACT_PROMPT");
     let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
-    let extraction_prompt = load_or_trace("extraction.md", "EXTRACTION_SYSTEM_PROMPT (grafeo)");
-    let conflict_classification_prompt =
-        load_or_trace("conflict-classification.md", "CONFLICT_CLASSIFICATION_PROMPT (grafeo)");
-    let generalization_prompt =
-        load_or_trace("generalization.md", "GENERALIZATION_PROMPT (grafeo)");
     let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
@@ -799,11 +812,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
         emb_provider.clone(),
     ));
-    let mcp_notifier = Arc::new(crate::mcp_notify::McpConfigNotifier::default());
-
-    // ADR-061 §10.2: only the retrieve queue survives — `context_retrieve`
-    // is always registered, `context_abandon` (and its queue) is deleted.
-    let retrieve_queue = crate::agent::context_compression::new_retrieve_queue();
 
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(
@@ -817,7 +825,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         config.work_dir.clone(),
         lsp_relay_endpoint,
         mqtt_client_slot.clone(),
-        retrieve_queue.clone(),
     ) {
         registry.register(tool);
     }
@@ -1145,16 +1152,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_tool_specs,
         system_prompt,
         compaction_prompt,
-        // ADR-063: 7 additional package-level overrides (Phase A loaded
+        // ADR-063: 4 additional package-level overrides (Phase A loaded
         // each from `prompts/<file>.md`; see load_or_trace above). Wired
         // through `AgentBootContext` so Phase B's session_init.rs can
         // inject them into `AgentCore` as `Arc<RwLock<Option<String>>>`.
+        //
+        // ADR-068: 3 grafeo-specific overrides (extraction /
+        // conflict-classification / generalization) removed — see the
+        // matching comment in `agent_core.rs` for rationale.
         search_prompt,
         compact_template,
         title_prompt,
-        extraction_prompt,
-        conflict_classification_prompt,
-        generalization_prompt,
         abstention_prompt,
         memory_session,
         mcp_notifier,
@@ -1199,7 +1207,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         search_key_vault,
         search_provider_list,
         session_configs,
-        retrieve_queue,
     })
 }
 

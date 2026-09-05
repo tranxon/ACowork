@@ -98,6 +98,9 @@ async fn accumulate_then_resume_round_trip_preserves_session_tokens() {
             last_output: 1_500,
             total_input: 25_000,   // skipped the prompt=0 call (10k + 15k)
             total_output: 2_500,   // all 3 calls counted (800 + 200 + 1500)
+            // ADR-066: cache fields are 0 in this test because the
+            // `usage()` helper does not populate them (zero-cache path).
+            ..Default::default()
         }
     );
 
@@ -354,6 +357,8 @@ async fn clone_after_parent_close_still_persists_meta() {
             last_output: 7_000,
             total_input: 42_000,
             total_output: 7_000,
+            // ADR-066: cache fields default to 0 (zero-cache path).
+            ..Default::default()
         })
     );
 }
@@ -455,12 +460,24 @@ fn session_tokens_wire_format_is_stable() {
         last_output: 50,
         total_input: 250,
         total_output: 75,
+        // ADR-066: cache fields are persisted alongside the legacy
+        // 4 (no schema break — they ride on the same v3 envelope).
+        last_cache_read: 25,
+        last_cache_write: 10,
+        total_cache_read: 60,
+        total_cache_write: 20,
     };
     let json = serde_json::to_string(&t).unwrap();
     assert!(json.contains("\"last_input\":100"));
     assert!(json.contains("\"last_output\":50"));
     assert!(json.contains("\"total_input\":250"));
     assert!(json.contains("\"total_output\":75"));
+    // ADR-066: cache keys ship alongside the legacy 4 (same v3
+    // envelope, no schema break — old readers ignore them).
+    assert!(json.contains("\"last_cache_read\":25"));
+    assert!(json.contains("\"last_cache_write\":10"));
+    assert!(json.contains("\"total_cache_read\":60"));
+    assert!(json.contains("\"total_cache_write\":20"));
 
     // Reverse round-trip.
     let back: SessionTokens = serde_json::from_str(&json).unwrap();
@@ -470,7 +487,7 @@ fn session_tokens_wire_format_is_stable() {
     let default_json = serde_json::to_string(&SessionTokens::default()).unwrap();
     assert_eq!(
         default_json,
-        "{\"last_input\":0,\"last_output\":0,\"total_input\":0,\"total_output\":0}"
+        "{\"last_input\":0,\"last_output\":0,\"total_input\":0,\"total_output\":0,\"last_cache_read\":0,\"last_cache_write\":0,\"total_cache_read\":0,\"total_cache_write\":0}"
     );
 }
 

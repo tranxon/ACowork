@@ -61,6 +61,7 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
                 sub_type: n.sub_type,
                 content: n.content,
                 confidence: n.confidence,
+                importance: n.importance,
                 decay_score: n.decay_score,
                 created_at: n.created_at,
                 last_accessed_at: n.last_accessed_at,
@@ -250,5 +251,81 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             errors: stats.errors,
             message,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::RwLock;
+
+    use acowork_grafeo::grafeo::GrafeoStore;
+    use acowork_grafeo::types::labels;
+    use grafeo_common::types::Value;
+    use acowork_memory::admin::MemoryAdminService;
+
+    use super::*;
+
+    /// Build an adapter backed by an in-memory GrafeoStore seeded with one
+    /// Episodic node (importance only) and one Knowledge node (both fields).
+    fn seeded_adapter() -> GrafeoMemoryAdapter {
+        let store = GrafeoStore::new_in_memory().expect("in-memory store");
+        store
+            .store_node(
+                labels::EPISODIC,
+                [
+                    ("role", Value::from("user")),
+                    ("content", Value::from("episodic event")),
+                    ("importance", Value::from(0.7f64)),
+                ],
+            )
+            .unwrap();
+        store
+            .store_node(
+                labels::KNOWLEDGE,
+                [
+                    ("subject", Value::from("Rust")),
+                    ("content", Value::from("Rust is a systems language")),
+                    ("confidence", Value::from(0.7f64)),
+                    ("importance", Value::from(0.5f64)),
+                ],
+            )
+            .unwrap();
+
+        let admin: Arc<dyn MemoryAdminService> = Arc::new(store);
+        let memory_store: SharedMemoryStore = Arc::new(RwLock::new(Some(admin)));
+        let embed_dim: SharedEmbedDimension = Arc::new(RwLock::new(0));
+        GrafeoMemoryAdapter::new(memory_store, embed_dim)
+    }
+
+    #[tokio::test]
+    async fn list_nodes_passes_importance_through_verbatim() {
+        let adapter = seeded_adapter();
+        let resp = adapter
+            .list_nodes(&MemoryNodeQuery {
+                page: 1,
+                size: 20,
+                node_type: String::new(),
+                sub_type: String::new(),
+                keyword: String::new(),
+                time_range: String::new(),
+            })
+            .await
+            .expect("list should succeed");
+
+        let by_type: std::collections::HashMap<&str, &MemoryNode> = resp
+            .nodes
+            .iter()
+            .map(|n| (n.node_type.as_str(), n))
+            .collect();
+
+        // Episodic: importance present, confidence absent → 0.0 is the truth.
+        let ep = by_type.get("Episodic").expect("episodic node");
+        assert_eq!(ep.importance, 0.7, "Episodic importance must pass through");
+        assert_eq!(ep.confidence, 0.0, "Episodic has no confidence property");
+
+        // Knowledge: both fields present.
+        let kn = by_type.get("Knowledge").expect("knowledge node");
+        assert_eq!(kn.confidence, 0.7);
+        assert_eq!(kn.importance, 0.5);
     }
 }

@@ -1282,6 +1282,9 @@ mod tests {
             last_output: 1_200,
             total_input: 250_000,
             total_output: 7_500,
+            // ADR-066: cache fields default to 0 (this test focuses
+            // on the in/out cumulative code path).
+            ..Default::default()
         };
 
         let info = build_context_usage_from_persisted(
@@ -1314,7 +1317,7 @@ mod tests {
 
     #[test]
     fn test_context_usage_with_override_caps_window() {
-        // Model has 200K window. User overrides to 100K.
+        // Model has 200K window. User overrides to 100K TOTAL.
         let caps = test_caps(200_000, 16_384);
         let usage = acowork_core::providers::traits::UsageInfo {
             prompt_tokens: 60_000,
@@ -1323,13 +1326,13 @@ mod tests {
             ..Default::default()
         };
         let info = compute_context_usage(&caps, &usage, 32_768, Some(100_000));
-        // effective_window = min(100_000, 200_000) = 100_000
+        // Display window stays the user-configured TOTAL (100K).
         assert_eq!(info.context_window, 100_000);
-        // effective_usable = min(usable, effective_window)
-        // usable = 200_000 - 16_384 = 183_616 (no max_input_tokens)
-        // effective_usable = min(183_616, 100_000) = 100_000
-        assert_eq!(info.usable_context, 100_000);
-        // percent = 65_000 / 100_000 * 100 = 65%
+        // Usable input (compaction denominator only) = cap − output reserve
+        // inside the cap = 83_616.
+        assert_eq!(info.usable_context, 83_616);
+        // UI percent = total (input + output) / window TOTAL = 65 000/100 000 = 65.
+        // (Decoupled from usable_context — see compute_context_usage doc.)
         assert_eq!(info.usage_percent, 65);
     }
 
@@ -1358,6 +1361,110 @@ mod tests {
         };
         let info = compute_context_usage(&caps, &usage, 32_768, None);
         assert_eq!(info.context_window, 128_000);
+    }
+
+    // ── compute_section_sizes (ADR-067) ────────────────────────────────
+    //
+    // The input-box context-usage popup aggregates byte sizes from these
+    // sections to render the 5-category percentage breakdown (system /
+    // tools / messages / connectors / skills).  These tests pin the
+    // section ordering and sizes so the always-on observability path
+    // matches what `DebugObserverImpl::on_context_built` used to emit
+    // when DevMode was enabled.
+
+    fn lookup(sections: &[acowork_core::protocol::ContextUsageSection], key: &str) -> u64 {
+        sections
+            .iter()
+            .find(|s| s.key == key)
+            .map(|s| s.size_bytes)
+            .unwrap_or_else(|| panic!("section {key} missing; got: {:?}", sections))
+    }
+
+    #[test]
+    fn compute_section_sizes_emits_mandatory_sections_on_empty_builder() {
+        let history = HistoryManager::new(10_000);
+        let builder = ContextBuilder::new("Base prompt".to_string());
+        let mcp_tools: Vec<serde_json::Value> = vec![];
+
+        let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
+
+        assert_eq!(lookup(&sections, "system_prompt"), "Base prompt".len() as u64);
+        assert!(
+            sections.iter().any(|s| s.key == "environment"),
+            "environment section must always be present"
+        );
+        assert!(lookup(&sections, "messages") >= 2);
+        for optional in [
+            "identity_context",
+            "workspace_context",
+            "retrieved_memory",
+            "ambiguous_confirmation_hint",
+            "abstention_prompt",
+            "skill_instructions",
+            "workspace_prompt_file",
+            "tool_definitions",
+        ] {
+            assert!(
+                !sections.iter().any(|s| s.key == optional),
+                "{optional} must not appear when its field is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_section_sizes_aggregates_optional_sections_and_mcp_tools() {
+        let mut history = HistoryManager::new(10_000);
+        history.append(ChatMessage::user("hi"));
+
+        let identity = "Name: Alice";
+        let workspace = "Working dir: /tmp";
+        let retrieved = "Memory: previous chat about X";
+        let skills = "Skill: do_thing — read README first";
+        let hint = "Confirm ambiguous file path";
+        let abstention = "Refuse if blocked";
+        let prompt_file = "# AGENTS.md\nbe terse";
+
+        let builtin_tool = serde_json::json!({
+            "type": "function",
+            "function": { "name": "read_file" }
+        });
+        let mcp_tool = serde_json::json!({
+            "type": "function",
+            "function": { "name": "mcp_github_list_issues" }
+        });
+
+        let mut builder = ContextBuilder::new("Base prompt".to_string())
+            .with_identity(Some(identity.into()))
+            .with_workspace_context(Some(workspace.into()))
+            .with_workspace_prompt_file(Some(prompt_file.into()))
+            .with_tools(vec![builtin_tool.clone()]);
+        builder.set_retrieved_memory(retrieved.into());
+        builder.set_skill_instructions(skills.into());
+        builder.set_ambiguous_confirmation_hint(hint.into());
+        builder.set_abstention_prompt(abstention.into());
+
+        let mcp_tools = vec![mcp_tool.clone()];
+        let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
+
+        assert_eq!(lookup(&sections, "system_prompt"), "Base prompt".len() as u64);
+        assert_eq!(lookup(&sections, "identity_context"), identity.len() as u64);
+        assert_eq!(lookup(&sections, "workspace_context"), workspace.len() as u64);
+        assert_eq!(lookup(&sections, "retrieved_memory"), retrieved.len() as u64);
+        assert_eq!(lookup(&sections, "ambiguous_confirmation_hint"), hint.len() as u64);
+        assert_eq!(lookup(&sections, "abstention_prompt"), abstention.len() as u64);
+        assert_eq!(lookup(&sections, "skill_instructions"), skills.len() as u64);
+        assert_eq!(lookup(&sections, "workspace_prompt_file"), prompt_file.len() as u64);
+
+        let tool_defs_size = lookup(&sections, "tool_definitions");
+        let only_builtin = serde_json::to_string(&vec![builtin_tool.clone()])
+            .unwrap()
+            .len() as u64;
+        assert!(
+            tool_defs_size > only_builtin,
+            "tool_definitions must include MCP tools; only_builtin={only_builtin}, total={tool_defs_size}"
+        );
+
+        assert!(lookup(&sections, "messages") > 0);
     }
 }
 
@@ -1406,20 +1513,177 @@ pub fn count_chat_request_chars(request: &ChatRequest) -> usize {
     msg_chars + tool_chars
 }
 
+// ── compute_section_sizes (ADR-067) ──────────────────────────────────
+//
+// This helper is the single source of truth for the "section byte sizes"
+// payload that drives the input-box context-usage popup (5-category
+// percentage breakdown: system / tools / messages / connectors / skills).
+//
+// ADR-067 separated it from the DevMode-only debug snapshot path so the
+// frontend always has a populated breakdown regardless of whether the
+// Debug Panel is open. Both consumers — the always-on
+// `process_llm_response_usage` push and the DevMode
+// `DebugObserverImpl::on_context_built` snapshot — must call
+// `compute_section_sizes` rather than rolling their own ordering. The
+// helper returns `Vec<ContextUsageSection>` (one entry per populated
+// section) — see `acowork_core::protocol::ContextUsageSection` for the
+// wire contract (the frontend `contextUsageBreakdown.ts` groups by
+// `.key`).
+//
+// The `messages` byte size is read from `HistoryManager::messages_json_bytes()`
+// (O(1) incremental counter) — the always-on path deliberately avoids
+// re-serializing the full history on every LLM call.
+
+/// Build the section-byte-sizes list for the current context.
+///
+/// Returns an empty `Vec` when the builder has no fields set — the
+/// frontend treats empty as "no composition data yet" and falls back
+/// to the 5 zero-percent rows.
+pub fn compute_section_sizes(
+    builder: &ContextBuilder,
+    history: &HistoryManager,
+    mcp_tools: &[serde_json::Value],
+    _model: &str,
+) -> Vec<acowork_core::protocol::ContextUsageSection> {
+    use acowork_core::protocol::ContextUsageSection;
+
+    let mut out: Vec<ContextUsageSection> = Vec::with_capacity(11);
+
+    // 1. Base system prompt — always present (required by `ContextBuilder::new`).
+    out.push(ContextUsageSection {
+        key: "system_prompt".to_string(),
+        size_bytes: builder.system_prompt().len() as u64,
+    });
+
+    // 2. Identity context
+    if let Some(identity) = builder.identity_context() {
+        out.push(ContextUsageSection {
+            key: "identity_context".to_string(),
+            size_bytes: identity.len() as u64,
+        });
+    }
+
+    // 2.2 Workspace context
+    if let Some(ws) = builder.workspace_context() {
+        out.push(ContextUsageSection {
+            key: "workspace_context".to_string(),
+            size_bytes: ws.len() as u64,
+        });
+    }
+
+    // 2.5 Retrieved memory
+    if let Some(mem) = builder.retrieved_memory() {
+        out.push(ContextUsageSection {
+            key: "retrieved_memory".to_string(),
+            size_bytes: mem.len() as u64,
+        });
+    }
+
+    // 2.5b Ambiguous-confirmation hint (P3-4)
+    if let Some(hint) = builder.ambiguous_confirmation_hint() {
+        out.push(ContextUsageSection {
+            key: "ambiguous_confirmation_hint".to_string(),
+            size_bytes: hint.len() as u64,
+        });
+    }
+
+    // 2.5c Abstention guidance (G9)
+    if let Some(prompt) = builder.abstention_prompt() {
+        out.push(ContextUsageSection {
+            key: "abstention_prompt".to_string(),
+            size_bytes: prompt.len() as u64,
+        });
+    }
+
+    // 2.6 Skill instructions
+    if let Some(skills) = builder.skill_instructions() {
+        out.push(ContextUsageSection {
+            key: "skill_instructions".to_string(),
+            size_bytes: skills.len() as u64,
+        });
+    }
+
+    // 3. Environment (override wins, else auto-detect). Memoized
+    // string in detect_environment_text so the `.len()` is O(1).
+    let env_size = builder
+        .environment_override()
+        .map(|s| s.len() as u64)
+        .unwrap_or_else(|| detect_environment_text().len() as u64);
+    out.push(ContextUsageSection {
+        key: "environment".to_string(),
+        size_bytes: env_size,
+    });
+
+    // 3.2 Workspace prompt file (CLAUDE.md / AGENTS.md)
+    if let Some(prompt_file) = builder.workspace_prompt_file() {
+        out.push(ContextUsageSection {
+            key: "workspace_prompt_file".to_string(),
+            size_bytes: prompt_file.len() as u64,
+        });
+    }
+
+    // 3.5 Tool definitions (passed separately in ChatRequest.tools)
+    //
+    // Merge built-in tools (held on ContextBuilder) with MCP tools (held
+    // on AgentCore, plumbed through by the caller). MCP tools are
+    // typically a few KB — undercounting them would skew the `tools`
+    // category percentage in the input-box popup, so we serialize the
+    // union and account for both.
+    let mut all_defs: Vec<serde_json::Value> = builder
+        .tool_definitions()
+        .map(|defs| defs.to_vec())
+        .unwrap_or_default();
+    if !mcp_tools.is_empty() {
+        all_defs.extend(mcp_tools.iter().cloned());
+    }
+    if !all_defs.is_empty() {
+        let size = serde_json::to_string(&all_defs)
+            .map(|s| s.len())
+            .unwrap_or(0) as u64;
+        out.push(ContextUsageSection {
+            key: "tool_definitions".to_string(),
+            size_bytes: size,
+        });
+    }
+
+    // 3.6 Messages — ADR-054 step 4.
+    //
+    // ADR-067: byte size comes from `HistoryManager::messages_json_bytes()`
+    // — an O(1) incrementally-maintained counter — instead of re-serializing
+    // the whole history on every LLM call. The value is exactly
+    // `serde_json::to_string(&history.messages()).len()`.
+    out.push(ContextUsageSection {
+        key: "messages".to_string(),
+        size_bytes: history.messages_json_bytes() as u64,
+    });
+
+    out
+}
+
 /// Compute context usage info from model capabilities and API usage response.
 ///
-/// Usable context is derived from [`ModelCapabilitiesInfo::effective_input_budget`],
-/// which uses `max_input_tokens` when available, or reserves output space capped
-/// by `max_output_tokens_limit` (default 32K) otherwise.
+/// Usable input context is derived from
+/// [`ModelCapabilitiesInfo::input_budget_with_cap`]: when a cap is set it is
+/// treated as a **total** window and the output reserve is subtracted inside
+/// it (250K cap + 32K reserve → 218K input); without a cap the provider's own
+/// `max_input_tokens` is authoritative, else `window − reserve`.
 ///
 /// `context_window_cap` is the per-agent context window override (ADR-026):
 /// - `None` — not set, use model's full `context_window`.
 /// - `Some(0)` — "no limit" (user explicitly chose unlimited), use model's full.
 /// - `Some(n)` where `n > 0` — cap the effective window at `min(n, model_window)`.
 ///
-/// Both `context_window` and `usable_context` in the output reflect the
-/// effective (capped) values, so the frontend status panel and context-usage
-/// popup show numbers consistent with the user's per-agent setting.
+/// `context_window` in the output reflects the effective (capped) window for
+/// display and stays the **user-configured total** (e.g. 250K).
+/// `usable_context` is the runtime input budget (218K) used by compaction
+/// thresholds — NOT the UI denominator.
+///
+/// The UI-facing `usage_percent` is deliberately decoupled from the
+/// compaction threshold (2026-09-06 review): the frontend reads it as
+/// "used / total window" (including input AND output of the reported turn),
+/// while automatic compaction fires on PROJECTED input vs `usable_context`.
+/// So the denominator here is `context_window` (total), not the input
+/// budget — the two never move together.
 pub fn compute_context_usage(
     caps: &ModelCapabilitiesInfo,
     usage: &acowork_core::providers::traits::UsageInfo,
@@ -1431,11 +1695,14 @@ pub fn compute_context_usage(
         Some(0) | None => model_window,
         Some(cap) => cap.min(model_window),
     };
-    let usable = caps.effective_input_budget(max_output_tokens_limit);
-    let effective_usable = usable.min(effective_window);
+    let effective_usable =
+        caps.input_budget_with_cap(context_window_cap, max_output_tokens_limit);
     let total = usage.prompt_tokens + usage.completion_tokens;
-    let percent = if effective_usable > 0 {
-        ((total as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+    // UI percent = total (input + output) / window total. The compaction
+    // line lives on the PROJECTED input vs usable_context and is NOT the
+    // number displayed here.
+    let percent = if effective_window > 0 {
+        ((total as f64 / effective_window as f64) * 100.0).min(100.0) as u8
     } else {
         0
     };
@@ -1458,6 +1725,18 @@ pub fn compute_context_usage(
         // ADR-028: agent-scoped cumulative tokens (patched by caller).
         agent_total_input_tokens: None,
         agent_total_output_tokens: None,
+        // ADR-066: per-turn cache breakdown — set here so callers
+        // computing from a fresh `UsageInfo` see the right numbers.
+        // Cumulative session / agent cache totals remain `None`
+        // (patched by the caller, mirroring the in/out policy above).
+        cache_read_tokens: Some(usage.cache_read_tokens),
+        cache_write_tokens: Some(usage.cache_write_tokens),
+        total_cache_read_tokens: None,
+        total_cache_write_tokens: None,
+        agent_total_cache_read_tokens: None,
+        agent_total_cache_write_tokens: None,
+        // ADR-067: see compute_section_sizes; populated by callers with a ContextBuilder
+        sections: None,
     }
 }
 
@@ -1465,7 +1744,10 @@ pub fn compute_context_usage(
 ///
 /// This produces the same structure as [`compute_context_usage`] but from
 /// the raw `last_input_tokens` / `last_output_tokens` values stored in
-/// JSONL metadata, filling zero for cache/reasoning breakdown fields.
+/// JSONL metadata.  Per-turn cache/reasoning breakdown fields are sourced
+/// from the `last_*` halves of `SessionTokens` (the last LLM call's
+/// provider-reported figures), and cumulative fields from the `total_*`
+/// halves — see [`patch_session_totals`] for the centralised patcher.
 ///
 /// Callers must supply the *current* [`ModelCapabilitiesInfo`] because
 /// window-derived fields (`context_window`, `usable_context`, `usage_percent`)
@@ -1475,7 +1757,8 @@ pub fn compute_context_usage(
 /// `context_window_cap` mirrors the same parameter on [`compute_context_usage`].
 ///
 /// `cumulative_tokens` optionally carries the full [`crate::conversation::SessionTokens`]
-/// so the cumulative `total_input_tokens` / `total_output_tokens` fields can be
+/// so the cumulative `total_input_tokens` / `total_output_tokens` /
+/// `total_cache_read_tokens` / `total_cache_write_tokens` fields can be
 /// populated on the resulting [`ContextUsageInfo`]. Pass `None` when only the
 /// last-turn snapshot is available (e.g. unit tests exercising the legacy
 /// scalar path).
@@ -1497,8 +1780,43 @@ pub fn build_context_usage_from_persisted(
         compute_context_usage(caps, &usage, max_output_tokens_limit, context_window_cap)
     };
     if let Some(t) = cumulative_tokens {
-        info.total_input_tokens = Some(t.total_input);
-        info.total_output_tokens = Some(t.total_output);
+        // ADR-066: patch from the persisted SessionTokens snapshot —
+        // both per-turn (last) and cumulative (total) views.  Per-turn
+        // cache is included even though the resume path doesn't have
+        // a fresh UsageInfo, because the last LLM call's cache figures
+        // were already recorded into `last_cache_read` /
+        // `last_cache_write` and are a meaningful per-turn indicator
+        // after a restart.
+        info.cache_read_tokens = Some(t.last_cache_read);
+        info.cache_write_tokens = Some(t.last_cache_write);
+        patch_session_totals(&mut info, t);
     }
     info
+}
+
+/// Patch session-level cumulative fields on a [`ContextUsageInfo`].
+///
+/// ADR-066 §2 commits to a strict split between per-turn (filled by
+/// [`compute_context_usage`] from a fresh `UsageInfo`) and cumulative
+/// (filled here from a [`SessionTokens`] snapshot).  All three call
+/// sites that build a `ContextUsageInfo` for push delivery now go
+/// through this helper, which guarantees:
+///
+///   - `total_input_tokens` / `total_output_tokens` come from
+///     `tokens.total_input` / `tokens.total_output` (saturating sums).
+///   - `total_cache_read_tokens` / `total_cache_write_tokens` come
+///     from the matching cumulative cache fields.
+///
+/// Centralising the patch prevents the original ADR-066 P0 bug
+/// (`total_cache_read_tokens` left at `None` because the caller
+/// forgot to copy it from `SessionTokens` after `accumulate_llm_usage`)
+/// from recurring in any of the three push sites in `loop_context.rs`.
+pub fn patch_session_totals(
+    info: &mut acowork_core::protocol::ContextUsageInfo,
+    tokens: &crate::conversation::SessionTokens,
+) {
+    info.total_input_tokens = Some(tokens.total_input);
+    info.total_output_tokens = Some(tokens.total_output);
+    info.total_cache_read_tokens = Some(tokens.total_cache_read);
+    info.total_cache_write_tokens = Some(tokens.total_cache_write);
 }

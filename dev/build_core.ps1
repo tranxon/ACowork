@@ -51,10 +51,10 @@ if ($Profile -eq "debug") {
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
 # Step count:
-#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, Copy resources, Start (8)
-#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, Copy resources      (7)
-#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, Copy resources (6)
-$totalSteps = if ($Start) { 8 } elseif ($Stop) { 7 } else { 6 }
+#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Copy resources, Start (9)
+#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Copy resources      (8)
+#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Copy resources (7)
+$totalSteps = if ($Start) { 9 } elseif ($Stop) { 8 } else { 7 }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "ACowork Core Build Script" -ForegroundColor Cyan
@@ -128,6 +128,19 @@ if ($Start -or $Stop) {
         Write-Host "  No Node Agent process running." -ForegroundColor Gray
     }
 
+    # The PM service is a standalone process (ADR-064) spawned by the Gateway
+    # supervisor. It self-exits via the ADR-018 watchdog when the Gateway dies,
+    # but on Windows the watchdog poll can lag — kill it explicitly so the stop
+    # step is idempotent and port 18082 is released before the next start.
+    $pmProcs = Get-Process -Name "acowork-pm" -ErrorAction SilentlyContinue
+    if ($pmProcs) {
+        Write-Host "  Found PM processes: $($pmProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-pm" -Force -ErrorAction SilentlyContinue
+        Write-Host "  PM stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No PM process running." -ForegroundColor Gray
+    }
+
     # Ensure embed port 18080 is released before starting a new gateway.
     # Stop-Process may not have released the port yet; the new gateway
     # spawns its own embed immediately and if the old one is still
@@ -171,6 +184,28 @@ if ($Start -or $Stop) {
     }
     if ($lspPortWaited -ge 6) {
         Write-Host "  WARNING: Port 19878 still in use after 3s" -ForegroundColor Red
+    }
+
+    # Ensure PM port 18082 is released (ADR-064 standalone process). The PM
+    # supervisor auto-increments on conflict, but a stale process from a killed
+    # Gateway would otherwise hold the default port and shift PM to 18083+.
+    $pmPortLine = netstat -ano 2>$null | Select-String ":18082\s" | Select-Object -First 1
+    if ($pmPortLine) {
+        $pidFromPort = ($pmPortLine.Line -split '\s+')[-1]
+        if ($pidFromPort -match '^\d+$') {
+            Write-Host "  Port 18082 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $pmPortWaited = 0
+    while ($pmPortWaited -lt 6) {
+        $stillUp = netstat -ano 2>$null | Select-String ":18082\s"
+        if (-not $stillUp) { break }
+        Start-Sleep -Milliseconds 500
+        $pmPortWaited++
+    }
+    if ($pmPortWaited -ge 6) {
+        Write-Host "  WARNING: Port 18082 still in use after 3s" -ForegroundColor Red
     }
 
     Write-Host ""
@@ -324,6 +359,34 @@ try {
     Write-Host "  Node Agent build completed." -ForegroundColor Green
 } catch {
     Write-Host "  Node Agent build failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+
+# Step: Build PM service (standalone binary, sibling of acowork-gateway.exe)
+#
+# ADR-064: the PM service is a standalone process (`acowork-pm`), located via
+# `current_exe().parent().join("acowork-pm.exe")` — so the binary MUST sit next
+# to acowork-gateway.exe. Without it the Gateway supervisor logs
+# "acowork-pm binary not found" and `/api/pm/*` returns 503.
+$step++
+Write-Host "[$step/$totalSteps] Building PM service ($Profile mode)..." -ForegroundColor Yellow
+try {
+    $cargoArgs = @("build")
+    if ($Profile -eq "release") { $cargoArgs += "--release" }
+    $cargoArgs += @("-p", "acowork-pm")
+    & cargo @cargoArgs 2>&1 | ForEach-Object {
+        if ($_ -match "error" -or $_ -match "Compiling") {
+            Write-Host "  $_" -ForegroundColor Gray
+        }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "  PM service build completed." -ForegroundColor Green
+} catch {
+    Write-Host "  PM service build failed: $_" -ForegroundColor Red
     exit 1
 }
 

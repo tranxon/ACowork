@@ -555,12 +555,11 @@ impl SessionTask {
 
         // Build ContextBuilder with identity. Tool definitions are NOT
         // seeded from a pre-baked snapshot — we derive them live from
-        // `core.builtin_tools` so hot-reloads (e.g.
-        // `tool_compression_enabled` toggles) propagate to NEW sessions
-        // the same way they propagate to live sessions. Pre-baked
-        // snapshots were the root cause of the bug where the LLM still
-        // saw `context_retrieve` / `context_abandon` after the
-        // compression switch was turned off (see commit history and
+        // `core.builtin_tools` so hot-reloads (e.g. MCP install/uninstall
+        // toggles) propagate to NEW sessions the same way they propagate
+        // to live sessions. Pre-baked snapshots were the root cause of
+        // the bug where the LLM still saw stale tool definitions after a
+        // runtime config change (see commit history and
         // `rebuild_context_tool_definitions`).
         let mut context_builder =
             ContextBuilder::new(system_prompt.clone()).with_identity(identity_context.clone());
@@ -585,12 +584,11 @@ impl SessionTask {
 
         // Seed ContextBuilder.tool_definitions from the freshly built
         // per-session `core.builtin_tools`. Done here so the very first
-        // `build_chat_request` reflects the current
-        // `tool_compression_enabled` value (already applied during
-        // `SessionTask::new` via `core_mut.apply_runtime_config`).
-        // Mirror of the hot-reload path inside the
-        // `UpdateRuntimeConfig` handler — single derivation logic,
-        // single source of truth (`core.builtin_tools`).
+        // `build_chat_request` reflects the current runtime config
+        // (already applied during `SessionTask::new` via
+        // `core_mut.apply_runtime_config`). Mirror of the hot-reload
+        // path inside the `UpdateRuntimeConfig` handler — single
+        // derivation logic, single source of truth (`core.builtin_tools`).
         rebuild_context_tool_definitions(&agent_loop.core.builtin_tools, &mut context_builder);
 
         // Emit initial session state so the snapshot is populated
@@ -1129,11 +1127,9 @@ impl SessionTask {
                         context_window = ?overrides.context_window,
                         "SessionTask: applying runtime config overrides"
                     );
-                    // ADR-061 §10.2: the `tool_compression_enabled`
-                    // branch (platform-tools sync + ContextBuilder
-                    // rebuild) is deleted — `context_retrieve` is
-                    // always registered, so no tool_definitions change
-                    // can originate from runtime-config pushes anymore.
+                    // No tool_definitions change originates from
+                    // runtime-config pushes anymore — the tool
+                    // compression surface was retired.
                     agent_loop.apply_runtime_config(&overrides);
 
                     // Push updated state to frontend immediately so the
@@ -1167,10 +1163,9 @@ impl SessionTask {
                         "SessionTask: updating builtin tools on AgentCore"
                     );
                     // Atomic mutation: rebuild agent_tools dispatch list + LLM
-                    // tool_definitions in one shot. Platform-protected tools
-                    // (`context_retrieve`, `context_abandon`) are force-enabled
-                    // by `apply_builtin_tools_update` itself — no manual
-                    // override needed here.
+                    // tool_definitions in one shot. `apply_builtin_tools_update`
+                    // re-resolves through the shared policy, so no manual
+                    // override is needed here.
                     apply_builtin_tools_update(
                         &mut agent_loop.core,
                         &mut context_builder,
@@ -1332,9 +1327,34 @@ impl SessionTask {
                         "SessionTask: manual compact_context triggered"
                     );
                     let model_name = agent_loop.session.model().unwrap_or("default").to_string();
-                    agent_loop
+                    if let Err(e) = agent_loop
                         .compact_history_if_needed(&model_name, true)
-                        .await;
+                        .await
+                    {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Manual compact_context failed"
+                        );
+                        if let Some(ref tx) = chunk_tx {
+                            let (user_message, detail, error_type) = e.error_info();
+                            let event = SessionChunkEvent {
+                                session_id: session_id.clone(),
+                                event: ChunkEvent::Error {
+                                    user_message,
+                                    detail,
+                                    error_type,
+                                    message_id: String::new(),
+                                },
+                            };
+                            if tx.send(event).await.is_err() {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    "Failed to send Error chunk event (manual compaction)"
+                                );
+                            }
+                        }
+                    }
                 }
                 Some(SessionMessage::CompressAction(action)) => {
                     tracing::info!(
@@ -1345,9 +1365,34 @@ impl SessionTask {
                     match action {
                         crate::agent::loop_::CompressionAction::CompressSummary => {
                             let model_name = agent_loop.session.model().unwrap_or("default").to_string();
-                            agent_loop
+                            if let Err(e) = agent_loop
                                 .compact_history_if_needed(&model_name, true)
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    session_id = %session_id,
+                                    error = %e,
+                                    "Manual compress action failed"
+                                );
+                                if let Some(ref tx) = chunk_tx {
+                                    let (user_message, detail, error_type) = e.error_info();
+                                    let event = SessionChunkEvent {
+                                        session_id: session_id.clone(),
+                                        event: ChunkEvent::Error {
+                                            user_message,
+                                            detail,
+                                    error_type,
+                                    message_id: String::new(),
+                                },
+                            };
+                            if tx.send(event).await.is_err() {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    "Failed to send Error chunk event (manual compress action)"
+                                );
+                            }
+                                }
+                            }
                         }
                     }
                 }
@@ -1604,10 +1649,10 @@ fn apply_builtin_tools_update(
     context_builder: &mut ContextBuilder,
     entries: Vec<crate::agent_config::AgentToolEntry>,
 ) {
-    // Re-resolve through the shared policy (the empty patch is what
-    // strips platform-protected names and unregistered slots, so this
-    // stays correct even if the incoming `entries` came from a write
-    // path that didn't itself consult `PLATFORM_PROTECTED_TOOLS`).
+    // Re-resolve through the shared policy (the empty patch drops
+    // unregistered slots, so this stays correct even if the incoming
+    // `entries` came from a write path that didn't itself consult the
+    // same policy).
     core.apply_builtin_enabled_entries(&entries);
 
     // Refresh both dependents in lock-step - the dispatch list for

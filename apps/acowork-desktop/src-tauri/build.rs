@@ -13,7 +13,12 @@
 use std::path::PathBuf;
 
 /// Binaries to copy from the workspace target directory.
-const BINARIES: &[&str] = &["acowork-gateway", "acowork-runtime", "acowork-embed"];
+const BINARIES: &[&str] = &[
+    "acowork-gateway",
+    "acowork-runtime",
+    "acowork-embed",
+    "acowork-pm",
+];
 
 fn main() {
     // 1. Determine build profile and locate workspace target directory.

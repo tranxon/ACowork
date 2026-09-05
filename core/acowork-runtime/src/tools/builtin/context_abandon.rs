@@ -1,3 +1,15 @@
+//! Tool compression (ADR-052) was retired. The `context_retrieve` /
+//! `context_abandon` tools are no longer registered with the LLM;
+//! their source files survive in this module as dead code for future
+//! reference. See `context_compression.rs` for the contract that used
+//! to bind the two sides.
+//!
+//! `context_abandon` (originally an LLM-initiated "compress tool
+//! result" tool) is kept here so the design history is preserved and
+//! the in-place replacement mechanics can be revisited if a future
+//! ADR re-introduces automated tool-result compression.
+#![allow(dead_code)]
+
 //! ADR-052 context_abandon tool - replace a tool result with a placeholder.
 //!
 //! **DEPRECATED (ADR-061 §10.2)**: this tool is no longer registered.

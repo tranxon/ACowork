@@ -103,8 +103,8 @@ fi
 TARGET_DIR="$WORKSPACE_ROOT/target/$PROFILE"
 
 # ── Total step count ──────────────────────────────────────────────────────────
-#   --start : 8  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, Copy, Start)
-#   else    : 7  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, Copy)
+#   --start : 8  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Copy, Start)
+#   else    : 7  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Copy)
 TOTAL_STEPS=7
 if [ "$START_GATEWAY" = "true" ]; then
     TOTAL_STEPS=8
@@ -203,8 +203,10 @@ echo -e "${YELLOW}[1/$TOTAL_STEPS] Stopping old processes...${NC}"
 # explicitly to avoid leaving an orphan binding port 19878, which would
 # otherwise be attached by the new gateway via attach_existing_lsp_relay()
 # but owned by a now-dead parent. Node Agent is included too (ADR-055 §6.11):
-# it is spawned by the Gateway, so a killed Gateway can orphan it.
-for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node; do
+# it is spawned by the Gateway, so a killed Gateway can orphan it. PM is a
+# standalone process (ADR-064) spawned by the Gateway supervisor; it self-exits
+# via the ADR-018 watchdog but the poll can lag, so kill it explicitly.
+for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         pkill -f "$proc" 2>/dev/null || true
@@ -218,6 +220,10 @@ fi
 # Free LSP Relay port 19878 (see process_group note above).
 if command -v fuser &>/dev/null; then
     fuser -k 19878/tcp 2>/dev/null || true
+fi
+# Free PM port 18082 (ADR-064 standalone process).
+if command -v fuser &>/dev/null; then
+    fuser -k 18082/tcp 2>/dev/null || true
 fi
 sleep 1
 echo -e "${GREEN}  ✓ Process cleanup complete${NC}"
@@ -355,6 +361,26 @@ else
 fi
 echo ""
 
+# ── Step 4.7: Build PM service ───────────────────────────────────────────────
+#
+# ADR-064: the PM service is a standalone process (`acowork-pm`), located via
+# `current_exe().parent().join("acowork-pm")` — so the binary MUST sit next to
+# acowork-gateway. Without it the Gateway supervisor logs "acowork-pm binary
+# not found" and `/api/pm/*` returns 503 (project management unavailable).
+echo -e "${YELLOW}[4.7/$TOTAL_STEPS] Building PM service ($PROFILE)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-pm)
+else
+    cargo_args=(cargo build -p acowork-pm)
+fi
+if "${cargo_args[@]}" 2>&1 | tail -20; then
+    echo -e "${GREEN}  ✓ PM service compiled successfully${NC}"
+else
+    echo -e "${RED}  ✗ PM service compile failed${NC}"
+    exit 1
+fi
+echo ""
+
 # ── Step 5: Copy resource files ─────────────────────────────────────────────
 #
 # The gateway (and embed) read these from `{exe_dir}/`. We only stage into the
@@ -414,7 +440,7 @@ fi
 echo -e "${YELLOW}[$TOTAL_STEPS/$TOTAL_STEPS] Done!${NC}"
 echo ""
 echo -e "${CYAN}Build artifacts:${NC}"
-ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
 if [ "$START_GATEWAY" = "true" ]; then

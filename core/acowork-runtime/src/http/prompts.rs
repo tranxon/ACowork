@@ -1,9 +1,19 @@
 //! ADR-063 — Package-level LLM prompt override HTTP routes.
 //!
-//! Four handlers expose the 8 overridable prompts (see
+//! Four handlers expose the 5 overridable prompts (see
 //! [`crate::package::prompt_builder::OVERRIDABLE_PROMPTS`]) plus the
 //! required `system.md` dialog section to the Debug panel and any
 //! external tooling:
+//!
+//! **ADR-068 note**: The three grafeo-specific overrides
+//! (`extraction`, `conflict-classification`, `generalization`) were
+//! removed in this revision because ADR-068 rewrites the LLM→memory
+//! boundary (LLM writes only Episode nodes via `memory_store`; the
+//! grafeo distillation path is owned by the offline `EpisodicDistiller`
+//! pipeline). Grafeo-internal constants (`EXTRACTION_SYSTEM_PROMPT` /
+//! `CONFLICT_CLASSIFICATION_PROMPT` / `GENERALIZATION_PROMPT`) are
+//! retained inside `acowork-grafeo` for any future intra-crate caller,
+//! but they are no longer exposed via the package `prompts/` overlay.
 //!
 //! | Method | Path                                | Handler         |
 //! |--------|-------------------------------------|-----------------|
@@ -193,33 +203,6 @@ const PROMPT_ENTRIES: &[PromptEntry] = &[
         file: "title.md",
         purpose: "Generate a session title (max 60 chars) from the first user message.",
         fallback_constant: crate::prompt::TITLE_PROMPT,
-        required: false,
-    },
-    PromptEntry {
-        name: "extraction",
-        file: "extraction.md",
-        purpose: "Extract factual triples from conversation content for long-term memory (grafeo).",
-        // Kept verbatim rather than re-exported from `acowork-grafeo` to
-        // avoid coupling this HTTP layer to the grafeo crate behind the
-        // `grafeo-backend` feature. Keep in sync with
-        // `acowork-grafeo::consolidation::triple_extraction::EXTRACTION_SYSTEM_PROMPT`.
-        fallback_constant: "You are a knowledge extraction assistant. Your task is to extract factual triples from conversation content.\n\nRules:\n1. Extract only explicit or strongly implied facts.\n2. Each triple must have (subject, predicate, object).\n3. Use consistent predicates (e.g., \"likes\" not \"is fond of\").\n4. Assign a confidence score (0.0-1.0).\n5. Classify each triple as one of: fact, preference, relation.\n6. Do NOT extract vague or uncertain information.\n7. Return valid JSON only.",
-        required: false,
-    },
-    PromptEntry {
-        name: "conflict-classification",
-        file: "conflict-classification.md",
-        purpose: "Classify and resolve conflicting memory entries (grafeo).",
-        // Mirrors `acowork-grafeo::consolidation::conflict_llm::CONFLICT_CLASSIFICATION_PROMPT`.
-        fallback_constant: "You are a knowledge conflict resolver. Given two conflicting memory entries, classify the conflict and suggest an action.\n\nRules:\n1. **Evolution**: The old value was correct at the time but is now outdated (e.g., \"user lives in Beijing\" → \"user lives in Shanghai\" because they moved).\n2. **Correction**: The old value was wrong from the start (e.g., \"user birthday is March\" → \"user birthday is May\" because they corrected it).\n3. **Ambiguous**: Both values could be true simultaneously (e.g., \"user likes Chinese food\" vs \"user likes Western food\" — they could like both).\n\nConsider the evidence context provided. Return valid JSON only.\n\nOutput format:\n{\n  \"classification\": \"evolution\" | \"correction\" | \"ambiguous\",\n  \"action\": \"keep_new\" | \"keep_old\" | \"keep_both\",\n  \"confidence\": 0.0..1.0,\n  \"reasoning\": \"...\"\n}",
-        required: false,
-    },
-    PromptEntry {
-        name: "generalization",
-        file: "generalization.md",
-        purpose: "Discover recurring behavior patterns across tool calls (grafeo).",
-        // Mirrors `acowork-grafeo::consolidation::generalization::GENERALIZATION_PROMPT`.
-        fallback_constant: "You are a behavior pattern discovery assistant. Given a list of observed actions and their tool calls, identify recurring patterns.\n\nRules:\n1. Look for actions that share similar trigger conditions.\n2. Identify common tool call sequences.\n3. Abstract into general patterns.\n4. Assign a confidence score (0.0-1.0) based on how consistently the pattern appears.\n5. Classify each pattern into one of these categories:\n   - \"ToolUsage\": Simple tool usage pattern (e.g., \"use http_request for weather\")\n   - \"UserPreference\": User preference pattern (e.g., \"user prefers concise output\")\n   - \"Workflow\": Multi-step workflow pattern (e.g., \"gather data then format report\")\n\nReturn valid JSON only.",
         required: false,
     },
     PromptEntry {

@@ -43,6 +43,10 @@ pub struct MemoryNode {
     pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
+    /// Raw `importance` property on the node (0.0 when the node type has no
+    /// such property — e.g. Procedural/Autobiographical). Passed through
+    /// verbatim, never derived.
+    pub importance: f64,
     pub decay_score: f64,
     pub created_at: i64,
     pub last_accessed_at: i64,

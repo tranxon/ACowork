@@ -623,7 +623,6 @@ pub fn model_cost_score(model: &ModelCapabilitiesInfo) -> f64 {
     }
 }
 
-use crate::agent::history::COMPRESSED_TOOL_PLACEHOLDER_PREFIX;
 use crate::agent::history::COMPACTION_SUMMARY_NAME;
 
 /// Format a slice of `ChatMessage` into a human-readable text block for LLM-based
@@ -637,13 +636,12 @@ use crate::agent::history::COMPACTION_SUMMARY_NAME;
 /// | any                | `name == Some("compaction_summary")`                        | `[CompactionSummary]`                           |
 /// | `User`             | —                                                           | `[User]`                                        |
 /// | `Assistant`        | —                                                           | `[Assistant]`                                   |
-/// | `Tool`             | content starts with `COMPRESSED_TOOL_PLACEHOLDER_PREFIX`    | `[Tool(name={name}, id={tool_call_id})]`        |
-/// | `Tool`             | otherwise                                                   | `[Tool]` (or `[Tool(name={name})]` when name set)|
+/// | `Tool`             | name set                                                    | `[Tool(name={name}, id={tool_call_id})]`        |
+/// | `Tool`             | otherwise                                                   | `[Tool]`                                        |
 ///
 /// Enhanced Tool labels give the compaction LLM enough visibility to write
-/// a meaningful summary even when the tool output has been compressed to a
-/// ~120-char placeholder (ADR-032). The `tool_call_id` duplicate in both
-/// the role label and placeholder body is intentional redundancy.
+/// a meaningful summary (ADR-032). Tool-result compression is retired, so
+/// every Tool label carries name + id when available.
 pub(crate) fn format_messages(messages: &[ChatMessage]) -> String {
     messages
         .iter()
@@ -660,27 +658,13 @@ pub(crate) fn format_messages(messages: &[ChatMessage]) -> String {
                 MessageRole::System => "System".to_string(),
                 MessageRole::User => "User".to_string(),
                 MessageRole::Assistant => "Assistant".to_string(),
-                MessageRole::Tool => {
-                    // Detect compressed tool results (placeholder content)
-                    // and emit structured metadata in the role label so
-                    // the compaction LLM can write a name-aware summary.
-                    let is_compressed = msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX);
-                    match (is_compressed, msg.name.as_deref()) {
-                        (true, Some(name)) => {
-                            let tc_id = msg.tool_call_id.as_deref().unwrap_or("?");
-                            format!("Tool(name={}, id={})", name, tc_id)
-                        }
-                        (true, None) => {
-                            // Compressed but no name: attach id only when known.
-                            match msg.tool_call_id.as_deref() {
-                                Some(tc_id) => format!("Tool(id={})", tc_id),
-                                None => "Tool".to_string(),
-                            }
-                        }
-                        (false, Some(name)) => format!("Tool({})", name),
-                        (false, None) => "Tool".to_string(),
+                MessageRole::Tool => match msg.name.as_deref() {
+                    Some(name) => {
+                        let tc_id = msg.tool_call_id.as_deref().unwrap_or("?");
+                        format!("Tool(name={name}, id={tc_id})")
                     }
-                }
+                    None => "Tool".to_string(),
+                },
             };
             format!("[{}]: {}", role_label, msg.content)
         })
@@ -1146,21 +1130,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_messages_compressed_tool_no_name() {
-        // A Tool message with compressed placeholder but NO name/ID
-        // should still label as "Tool".
+    fn test_format_messages_tool_without_name_uses_bare_label() {
+        // A Tool message without a `name` field should still label as
+        // "[Tool]" (regardless of content).
         let msg = ChatMessage {
             role: MessageRole::Tool,
-            content: "[Tool result compressed. Call context_retrieve(id=\"toolu_abc\") to retrieve the full content.]".into(),
+            content: "any tool output".into(),
             name: None,
-            tool_call_id: None,
+            tool_call_id: Some("call_abc".to_string()),
             ..Default::default()
         };
         let messages = vec![msg];
         let text = format_messages(&messages);
         assert!(
             text.contains("[Tool]:"),
-            "Tool without name/id should label as bare [Tool]:\n{}",
+            "Tool without name should label as bare [Tool]:\n{}",
             text
         );
     }
@@ -1199,8 +1183,8 @@ mod tests {
         let messages = vec![msg];
         let text = format_messages(&messages);
         assert!(
-            text.contains("[Tool(shell_exec)]"),
-            "plain Tool with name should label as Tool(name=), got:\n{}",
+            text.contains("[Tool(name=shell_exec, id=call_abc)]"),
+            "plain Tool with name should label with name + id, got:\n{}",
             text
         );
         assert!(

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
+import { redistributeTokensByBytes } from "../../lib/contextUsageBreakdown";
 import {
   ChevronDown,
   ChevronRight,
@@ -259,6 +260,17 @@ export function SnapshotNode({
   onEditChange,
   onRewind,
   getSection,
+  /**
+   * Real billed tokens for this iteration (`prompt_tokens + completion_tokens`
+   * from the LLM's `UsageInfo`). When provided, per-section token counts
+   * are redistributed in proportion to `size_bytes` so they sum exactly
+   * to this number — instead of summing to the heuristic
+   * `total_token_estimate` (which drifts because `token_estimate` is
+   * computed independently per section via `count_text`).
+   *
+   * Pass `undefined` to keep the legacy heuristic display.
+   */
+  realTotalTokens,
 }: {
   snapshot: {
     iteration: number;
@@ -286,10 +298,26 @@ export function SnapshotNode({
   onEditChange: (content: string) => void;
   onRewind: (iteration: number) => void;
   getSection: (iteration: number, section: string) => Promise<SectionContentType | null>;
+  realTotalTokens?: number;
 }) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(true);
   const [copied, setCopied] = useState(false);
+
+  // ADR: when the caller hands us a real, billed token total for this
+  // iteration, redistribute it across sections by `size_bytes` byte share.
+  // The result sums exactly to `realTotalTokens` and replaces the
+  // per-section `token_estimate` heuristics that the backend produces
+  // independently via `count_text` (which drift and compound).
+  //
+  // Falls back to an empty map when the caller didn't supply an anchor or
+  // when the snapshot has no byte data -- in those cases the per-row
+  // display falls back to `section.token_estimate` (legacy behaviour).
+  const realTokenBySection = realTotalTokens !== undefined && realTotalTokens > 0
+    ? redistributeTokensByBytes(realTotalTokens, snapshot.sections)
+    : {};
+  const displayTotalTokens = realTotalTokens ?? snapshot.total_token_estimate;
+  const usingRealAnchor = Object.keys(realTokenBySection).length > 0;
 
   const handleCopy = useCallback(async (text: string) => {
     try {
@@ -330,7 +358,7 @@ export function SnapshotNode({
           Iteration #{snapshot.iteration}
         </span>
         <span className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500">
-          ~{snapshot.total_token_estimate} tok
+          ~{displayTotalTokens.toLocaleString()} tok
         </span>
         <Tooltip content={t("debugPanel.rewindToIteration", { iteration: snapshot.iteration })} variant="plain">
           <button
@@ -403,7 +431,7 @@ export function SnapshotNode({
                       {SECTION_LABELS[sectionKey] ?? sectionKey}
                     </span>
                     <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">
-                      {formatBytes(section.size_bytes)} / ~{section.token_estimate} tok
+                      {formatBytes(section.size_bytes)} / ~{(usingRealAnchor ? (realTokenBySection[section.key] ?? section.token_estimate) : section.token_estimate).toLocaleString()} tok
                     </span>
                   </button>
                   {/* Edit button — opens inline editor with the section's full content.

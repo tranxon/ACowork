@@ -122,28 +122,16 @@ pub struct ModelCapabilitiesInfo {
 }
 
 impl ModelCapabilitiesInfo {
-    /// Effective input token budget.
+    /// Output-space reserve derived from this model's caps and the user's
+    /// `max_output_tokens_limit`.
     ///
-    /// Derivation:
-    /// 1. `max_input_tokens` provided — authoritative, use directly.
-    /// 2. `max_input_tokens` missing — reserve output space capped by
-    ///    `max_output_tokens_limit`, then `context_window - output_reserve`.
-    ///
-    /// `max_output_tokens_limit` is the global cap (default 32K, configurable
-    /// by user). Set to 0 to disable capping models.dev values — but when
-    /// models.dev also provides nothing, the system default (32K) is used
-    /// as a safety floor so the model always has output space.
-    pub fn effective_input_budget(&self, max_output_tokens_limit: u64) -> u64 {
-        if let Some(max_input) = self.max_input_tokens {
-            return max_input;
-        }
-
-        // output_reserve derivation:
-        // - models.dev provides output → cap it by limit (if limit > 0),
-        //   otherwise use raw value (user disabled the cap).
-        // - models.dev missing, limit > 0 → use limit as default reserve.
-        // - both missing/0 → fall back to system default (32K).
-        let output_reserve = if self.max_output_tokens > 0 {
+    /// - models.dev provides output → cap it by limit (if limit > 0),
+    ///   otherwise use raw value (user disabled the cap).
+    /// - models.dev missing, limit > 0 → use limit as default reserve.
+    /// - both missing/0 → fall back to the system default (32K) so the
+    ///   model always has output space.
+    pub fn output_reserve(&self, max_output_tokens_limit: u64) -> u64 {
+        if self.max_output_tokens > 0 {
             if max_output_tokens_limit > 0 {
                 self.max_output_tokens.min(max_output_tokens_limit)
             } else {
@@ -153,9 +141,60 @@ impl ModelCapabilitiesInfo {
             max_output_tokens_limit
         } else {
             default_max_output_tokens_limit()
-        };
+        }
+    }
 
-        self.context_window.saturating_sub(output_reserve)
+    /// Effective input token budget when **no** user-imposed context cap is
+    /// in effect.
+    ///
+    /// Derivation:
+    /// 1. `max_input_tokens` provided — authoritative, use directly.
+    /// 2. `max_input_tokens` missing — `context_window - output_reserve`.
+    ///
+    /// `max_output_tokens_limit` is the global cap (default 32K, configurable
+    /// by user). Set to 0 to disable capping models.dev values — but when
+    /// models.dev also provides nothing, the system default (32K) is used
+    /// as a safety floor so the model always has output space.
+    pub fn effective_input_budget(&self, max_output_tokens_limit: u64) -> u64 {
+        if let Some(max_input) = self.max_input_tokens {
+            return max_input;
+        }
+        self.context_window
+            .saturating_sub(self.output_reserve(max_output_tokens_limit))
+    }
+
+    /// Input budget when the user imposes a **total context cap**
+    /// (`Some(cap)`, `Some(0)`/`None` = no cap).
+    ///
+    /// The cap bounds the model window first, then the output reserve is
+    /// subtracted **inside** the cap. Without this ordering a cap below
+    /// `window − reserve` silently swallowed the output reservation and the
+    /// input side could consume the whole cap (a 250K cap + 32K output
+    /// reserve behaved like a 250K *input* budget instead of 218K — the
+    /// mismatch reported in the 2026-09-06 compaction-threshold review).
+    ///
+    /// A provider-declared `max_input_tokens` still binds when it is smaller
+    /// than the capped window (it is an input-only allowance and is NOT
+    /// double-subtracted against the output reserve).
+    pub fn input_budget_with_cap(
+        &self,
+        context_cap: Option<u64>,
+        max_output_tokens_limit: u64,
+    ) -> u64 {
+        match context_cap {
+            Some(0) | None => self.effective_input_budget(max_output_tokens_limit),
+            Some(cap) => {
+                let window = self.context_window;
+                let total = window.min(cap);
+                let provider_input = self
+                    .max_input_tokens
+                    .map(|mi| mi.min(window))
+                    .unwrap_or(window);
+                provider_input
+                    .min(total)
+                    .saturating_sub(self.output_reserve(max_output_tokens_limit))
+            }
+        }
     }
 }
 
@@ -769,6 +808,85 @@ pub struct ContextUsageInfo {
     /// for semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_total_output_tokens: Option<u64>,
+    // ── ADR-066: prompt cache tokens (Provider-reported) ──────────────
+    /// Prompt tokens served from cache on the most recent LLM call
+    /// (OpenAI `cached_tokens` / Anthropic `cache_read_input_tokens`).
+    /// `None` if the Provider does not report cache hits, or the call
+    /// is too old to be relevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt tokens written to cache on the most recent LLM call
+    /// (Anthropic `cache_creation_input_tokens`; OpenAI has no concept
+    /// → always `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Cumulative cache read tokens across all session LLM calls.
+    /// `None` until the first LLM call has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cache_read_tokens: Option<u64>,
+    /// Cumulative cache write tokens across all session LLM calls.
+    /// `None` until the first LLM call has been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cache_write_tokens: Option<u64>,
+    /// ADR-066: cumulative cache read tokens across every LLM call
+    /// made by this Runtime process for this agent (live data source
+    /// from `AgentCore`).  Mirrors [`Self::agent_total_input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_total_cache_read_tokens: Option<u64>,
+    /// ADR-066: cumulative cache write tokens across every LLM call
+    /// made by this Runtime process for this agent.  Mirrors
+    /// [`Self::agent_total_cache_read_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_total_cache_write_tokens: Option<u64>,
+    /// ADR-067: per-section byte sizes of the most recent `ChatRequest`
+    /// assembled by `ContextBuilder::build()`. Empty/`None` until the
+    /// first LLM call after enabling this ADR's wiring in
+    /// `process_llm_response_usage`. Powers the input-box context-usage
+    /// popup's 5-category breakdown (system / tools / messages /
+    /// connectors / skills) **without** requiring DevMode to be on —
+    /// `DebugObserverSlot::Production` makes `on_context_built` a no-op,
+    /// but the per-section byte sizes are now computed in a separate,
+    /// cheap path that runs unconditionally.
+    ///
+    /// Only `key` + `size_bytes` are exposed here; full per-section
+    /// metadata (token estimate, SHA-256 hash, request params, lazy
+    /// content) stays on the DevMode-only `DebugContextBuiltEvent`
+    /// path. `skip_serializing_if = "Option::is_none"` keeps the wire
+    /// shape compatible with pre-ADR-067 Runtimes that never populate
+    /// the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<ContextUsageSection>>,
+}
+
+/// One entry in [`ContextUsageInfo::sections`].
+///
+/// Mirrors the key + size_bytes pair of [`crate::mqtt_proto::SectionMeta`]
+/// (proto `mqtt_payload.proto:1168`) but trimmed to the two fields the
+/// runtime observability path actually needs. The Debug Panel reads the
+/// full [`crate::mqtt_proto::SectionMeta`] from `DebugContextBuiltEvent`
+/// separately; this struct intentionally does not re-export
+/// `token_estimate` or `hash` to keep the always-on emission path light
+/// (no SHA-256, no per-section token counting).
+///
+/// Section keys (`system_prompt`, `identity_context`, `workspace_context`,
+/// `retrieved_memory`, `skill_instructions`, `environment`,
+/// `workspace_prompt_file`, `tool_definitions`, `messages`,
+/// `ambiguous_confirmation_hint`, `abstention_prompt`)
+/// match the keys surfaced by `compute_section_sizes` in
+/// `acowork-runtime/src/agent/context.rs` (ADR-067). Note: `todo_context`
+/// is intentionally absent — ADR-060 v2 removed the standalone todo block
+/// from the system prompt, so todo state lives only inside the `messages`
+/// tool results and is counted there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsageSection {
+    /// Section key, e.g. `"system_prompt"`, `"messages"`. Stable across
+    /// Runtime versions; the frontend (`contextUsageBreakdown.ts`)
+    /// groups by this string into the 5 popup categories.
+    pub key: String,
+    /// Byte size of the assembled section content — exact (UTF-8
+    /// `.len()`), not a heuristic. The frontend scales this by the
+    /// billed `usage_percent` to compute per-row percentages.
+    pub size_bytes: u64,
 }
 
 /// LLM API protocol type, derived from models.dev npm field.
@@ -2150,5 +2268,113 @@ mod tests {
             }
             _ => panic!("Expected Paused variant"),
         }
+    }
+
+    // ── ADR-066: ContextUsageInfo cache token fields ─────────────────────
+
+    /// All six cache-token fields round-trip cleanly through JSON.
+    /// This is the wire-format contract between Runtime push (ContextUpdate)
+    /// and Desktop ResultsPanel.
+    #[test]
+    fn test_context_usage_info_cache_roundtrip_all_fields() {
+        let info = ContextUsageInfo {
+            context_window: 200_000,
+            input_tokens: 1000,
+            output_tokens: 200,
+            total_tokens: 1200,
+            max_input_tokens: Some(183_616),
+            usable_context: 183_616,
+            usage_percent: 1,
+            total_input_tokens: Some(4500),
+            total_output_tokens: Some(650),
+            agent_total_input_tokens: Some(4500),
+            agent_total_output_tokens: Some(650),
+            cache_read_tokens: Some(1600),
+            cache_write_tokens: Some(100),
+            total_cache_read_tokens: Some(1600),
+            total_cache_write_tokens: Some(100),
+            agent_total_cache_read_tokens: Some(1600),
+            agent_total_cache_write_tokens: Some(100),
+            sections: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: ContextUsageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.cache_read_tokens, Some(1600));
+        assert_eq!(parsed.cache_write_tokens, Some(100));
+        assert_eq!(parsed.total_cache_read_tokens, Some(1600));
+        assert_eq!(parsed.total_cache_write_tokens, Some(100));
+        assert_eq!(parsed.agent_total_cache_read_tokens, Some(1600));
+        assert_eq!(parsed.agent_total_cache_write_tokens, Some(100));
+        // Non-cache fields also preserved.
+        assert_eq!(parsed.input_tokens, 1000);
+        assert_eq!(parsed.usage_percent, 1);
+    }
+
+    /// Cache fields are `skip_serializing_if = "Option::is_none"`. When
+    /// every cache field is `None` (e.g. the Provider does not report
+    /// cache, or the call is too old to be relevant), they MUST be
+    /// omitted from the JSON — this is what the panel uses to render "—".
+    #[test]
+    fn test_context_usage_info_cache_none_omitted_from_json() {
+        let info = ContextUsageInfo {
+            context_window: 128_000,
+            input_tokens: 500,
+            output_tokens: 50,
+            total_tokens: 550,
+            max_input_tokens: None,
+            usable_context: 111_616,
+            usage_percent: 0,
+            total_input_tokens: Some(500),
+            total_output_tokens: Some(50),
+            agent_total_input_tokens: Some(500),
+            agent_total_output_tokens: Some(50),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_cache_read_tokens: None,
+            total_cache_write_tokens: None,
+            agent_total_cache_read_tokens: None,
+            agent_total_cache_write_tokens: None,
+            sections: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        // Cache fields absent → no `"cache_..."` substring in the JSON.
+        assert!(!json.contains("cache_read_tokens"), "field omitted");
+        assert!(!json.contains("cache_write_tokens"), "field omitted");
+        assert!(!json.contains("total_cache_read_tokens"), "field omitted");
+        assert!(!json.contains("total_cache_write_tokens"), "field omitted");
+        assert!(!json.contains("agent_total_cache_read_tokens"), "field omitted");
+        assert!(!json.contains("agent_total_cache_write_tokens"), "field omitted");
+    }
+
+    /// Backward compatibility: an older Runtime (ADR-066 not yet
+    /// implemented) sends a JSON without the six cache fields. The
+    /// frontend MUST still parse the payload and treat the cache fields
+    /// as `None` — this is what prevents the "—" / "0% cached" UI states
+    /// from being silently wiped by a downgrade.
+    #[test]
+    fn test_context_usage_info_cache_backward_compatible_legacy_payload() {
+        // Pre-ADR-066 wire format: only input/output fields, no cache_*
+        let legacy_json = r#"{
+            "context_window": 200000,
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+            "usable_context": 183616,
+            "usage_percent": 1,
+            "total_input_tokens": 4500,
+            "total_output_tokens": 650,
+            "agent_total_input_tokens": 4500,
+            "agent_total_output_tokens": 650
+        }"#;
+        let parsed: ContextUsageInfo = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.cache_read_tokens, None);
+        assert_eq!(parsed.cache_write_tokens, None);
+        assert_eq!(parsed.total_cache_read_tokens, None);
+        assert_eq!(parsed.total_cache_write_tokens, None);
+        assert_eq!(parsed.agent_total_cache_read_tokens, None);
+        assert_eq!(parsed.agent_total_cache_write_tokens, None);
+        // Non-cache fields are intact.
+        assert_eq!(parsed.context_window, 200_000);
+        assert_eq!(parsed.total_input_tokens, Some(4500));
     }
 }

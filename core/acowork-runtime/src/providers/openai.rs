@@ -612,9 +612,9 @@ fn profile_from_request(
 
 impl OpenAIProvider {
     /// Attempt one fallback request.  Returns `Some(response)` on success
-    /// (after recording into the cache).  Returns `Ok(None)` on a 400/422
-    /// failure (caller should continue the chain).  Returns `Err(_)` on
-    /// network error or non-400 status.
+    /// (after recording the evidence under `class`).  Returns `Ok(None)` on a
+    /// 400/422 failure (caller should continue the chain).  Returns `Err(_)`
+    /// on network error or non-400 status.
     async fn try_send_and_record(
         &self,
         url: &str,
@@ -622,12 +622,13 @@ impl OpenAIProvider {
         original: &NativeChatRequest,
         fallback_generation: u32,
         cache_key: &str,
+        class: crate::providers::compat::ErrorClass,
     ) -> acowork_core::error::Result<Option<reqwest::Response>> {
         let resp = self.send_streaming_request(url, attempt).await?;
         if resp.status().is_success() {
             if let Some(cache) = self.compat_cache.as_ref() {
                 let profile = profile_from_request(attempt, original, fallback_generation);
-                cache.record_success(cache_key.to_string(), profile);
+                cache.record_fallback_success(cache_key, profile, class);
             }
             return Ok(Some(resp));
         }
@@ -666,24 +667,40 @@ impl OpenAIProvider {
             apply_profile(&mut req, &profile);
             match self.send_streaming_request(url, &req).await {
                 Ok(resp) if resp.status().is_success() => {
-                    tracing::debug!(
-                        key = %cache_key,
-                        fallback_generation = profile.fallback_generation,
-                        "CompatCache hit - fast path",
-                    );
+                    // Renew lease diagnostics. The TTL itself is anchored on
+                    // promotion time, so the provider is still re-probed later.
+                    cache.touch(cache_key);
+                    if profile.strip_tools {
+                        // Keep degradation visible (D5): durable strip_tools
+                        // disables function calling — never a quiet detail.
+                        tracing::warn!(
+                            key = %cache_key,
+                            fallback_generation = profile.fallback_generation,
+                            "CompatCache fast path applied with tools STRIPPED - function calling is disabled for this provider/model",
+                        );
+                    } else {
+                        tracing::debug!(
+                            key = %cache_key,
+                            fallback_generation = profile.fallback_generation,
+                            "CompatCache hit - fast path",
+                        );
+                    }
                     return Ok(resp);
                 }
                 Ok(resp) => {
                     let s = resp.status();
                     let b = resp.text().await.unwrap_or_default();
+                    let class = crate::providers::compat::ErrorClass::classify(&b);
                     tracing::warn!(
                         key = %cache_key,
                         status = %s,
+                        class = class.as_str(),
                         error_body = %b,
                         "CompatCache profile no longer valid - invalidating and re-probing",
                     );
-                    cache.invalidate(cache_key);
-                    // Fall through to fallback chain below.
+                    cache.invalidate(cache_key, "fast-path request failed after applying cached profile");
+                    // Fall through to the cold path below: re-probe the
+                    // original request. Content-shaped failures surface there.
                 }
                 Err(e) => {
                     // Network error - keep cache (might be transient).
@@ -692,9 +709,14 @@ impl OpenAIProvider {
             }
         }
 
-        // ── Initial attempt ────────────────────────────────────────────
+        // ── Initial attempt (cold path / re-probe) ─────────────────────
         let response = self.send_streaming_request(url, native_request).await?;
         if response.status().is_success() {
+            // Plain (unmodified) success: cancels pending candidate evidence
+            // and, after a TTL re-probe, retires the expired durable profile.
+            if let Some(cache) = self.compat_cache.as_ref() {
+                cache.record_plain_success(cache_key);
+            }
             return Ok(response);
         }
 
@@ -712,11 +734,33 @@ impl OpenAIProvider {
             return Err(acowork_core::AcoworkError::Provider(err));
         }
 
+        // Classify the rejection. Only schema-shaped 400s may enter the
+        // fallback chain. Content-integrity / unclassifiable errors are
+        // surfaced to the caller: masking them (e.g. via strip_tools) is what
+        // caused the 2026-09-05 incident where function calling silently broke.
+        let class = crate::providers::compat::ErrorClass::classify(&body);
+        if !class.is_learnable() {
+            tracing::error!(
+                key = %cache_key,
+                class = class.as_str(),
+                status = %status,
+                error_body = %body,
+                "Provider rejected the request with a non-schema error - refusing to mask it via field/tool stripping; surfacing to caller",
+            );
+            let err = crate::providers::from_http_parts(
+                status.as_u16(),
+                format!("OpenAI API error: {status} - {body}"),
+                &headers,
+            );
+            return Err(acowork_core::AcoworkError::Provider(err));
+        }
+
         // ── Progressive fallback chain ────────────────────────────────
         let request_json = serde_json::to_string(native_request)
             .unwrap_or_else(|_| "<serialization failed>".to_string());
         tracing::warn!(
             status = %status,
+            class = class.as_str(),
             error_body = %body,
             request_json = %request_json,
             "Initial 400/422 - starting progressive fallback"
@@ -732,7 +776,7 @@ impl OpenAIProvider {
             ..native_request.clone()
         };
         if let Some(resp) = self
-            .try_send_and_record(url, &fb1, native_request, 1, cache_key)
+            .try_send_and_record(url, &fb1, native_request, 1, cache_key, class)
             .await?
         {
             return Ok(resp);
@@ -751,7 +795,7 @@ impl OpenAIProvider {
             ..native_request.clone()
         };
         if let Some(resp) = self
-            .try_send_and_record(url, &fb2, native_request, 2, cache_key)
+            .try_send_and_record(url, &fb2, native_request, 2, cache_key, class)
             .await?
         {
             return Ok(resp);
@@ -769,37 +813,45 @@ impl OpenAIProvider {
             ..native_request.clone()
         };
         if let Some(resp) = self
-            .try_send_and_record(url, &fb3, native_request, 3, cache_key)
+            .try_send_and_record(url, &fb3, native_request, 3, cache_key, class)
             .await?
         {
             return Ok(resp);
         }
 
-        // Fallback 4: also strip tools (last resort)
-        tracing::warn!("Fallback 4/4: also stripping tools (last resort)");
-        let fb4 = NativeChatRequest {
-            temperature: None,
-            max_tokens: Some(FB_MAX_TOKENS_CAP),
-            tools: None,
-            stream: stream_val,
-            stream_options: None,
-            reasoning_effort: None,
-            thinking: None,
-            ..native_request.clone()
-        };
-        if let Some(resp) = self
-            .try_send_and_record(url, &fb4, native_request, 4, cache_key)
-            .await?
-        {
-            tracing::warn!(
-                "Fallback 4 succeeded - the 400 was caused by tool definitions. \
-                 Tools have been stripped for this request."
-            );
-            return Ok(resp);
+        // Fallback 4: also strip tools (last resort). Only attempted when the
+        // rejection is classified as tools_schema — never for content or
+        // unclassifiable errors, so a content bug cannot be masked by silently
+        // disabling function calling (2026-09-05 incident).
+        if class.may_strip_tools() {
+            tracing::warn!("Fallback 4/4: also stripping tools (last resort)");
+            let fb4 = NativeChatRequest {
+                temperature: None,
+                max_tokens: Some(FB_MAX_TOKENS_CAP),
+                tools: None,
+                stream: stream_val,
+                stream_options: None,
+                reasoning_effort: None,
+                thinking: None,
+                ..native_request.clone()
+            };
+            if let Some(resp) = self
+                .try_send_and_record(url, &fb4, native_request, 4, cache_key, class)
+                .await?
+            {
+                tracing::warn!(
+                    key = %cache_key,
+                    class = class.as_str(),
+                    "Fallback 4 succeeded after stripping tools - request completed WITHOUT function calling",
+                );
+                return Ok(resp);
+            }
         }
 
         // All fallbacks failed - log comprehensive diagnostics
         tracing::error!(
+            key = %cache_key,
+            class = class.as_str(),
             model = %native_request.model,
             tools_count = native_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
             messages_count = native_request.messages.len(),

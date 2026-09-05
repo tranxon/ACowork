@@ -114,7 +114,10 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
     response
 }
 
-/// Build the HTTP router with all routes
+/// Build the HTTP router with all routes.
+///
+/// ADR-064: PM 不再内嵌（`nest_service` 已删除），`/api/pm/*` 由
+/// [`crate::http::pm_proxy::pm_proxy_routes`] 反向代理到独立进程。
 pub fn build_router(state: AppState) -> Router {
     // CORS — permissive for all deployments.
     //
@@ -170,6 +173,12 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::fs_browse::fs_routes())
         .merge(crate::http::global_resources_api::global_resources_routes())
         .merge(crate::http::proxy::proxy_routes())
+        // ADR-064: PM 独立进程反向代理（`/api/pm/*` → `127.0.0.1:{pm_port}/*`）。
+        // PM 未就绪时返回 503（带 Retry-After），Desktop `with503Retry` 退避重试。
+        .merge(crate::http::pm_proxy::pm_proxy_routes())
+        // acowork-doc 独立进程反向代理（`/api/doc/*` → `127.0.0.1:{doc_port}/*`）。
+        // 未就绪时返回 503（带 Retry-After），与 PM 同一契约。
+        .merge(crate::http::doc_proxy::doc_proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
         .with_state(state)

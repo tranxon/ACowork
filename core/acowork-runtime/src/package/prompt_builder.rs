@@ -8,14 +8,14 @@
 //!
 //! # Package-level prompt overrides (ADR-063)
 //!
-//! The 9 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
+//! The 6 files listed in [`OVERRIDABLE_PROMPTS`] are the canonical
 //! "package-declared overrides" for the hardcoded LLM prompt constants in
 //! [`crate::prompt`] and the downstream grafeo/memory modules. When a
 //! `.agent` package provides one of these files in `prompts/`, it
 //! replaces the built-in default at runtime via the
 //! `AgentCore.<field>` resolution chain (see ADR-063 §3.2).
 //!
-//! These 9 files are also **deliberately excluded** from the main dialog
+//! These 6 files are also **deliberately excluded** from the main dialog
 //! system prompt assembled here — they are task-specific directives (a
 //! summarization rule, a search directive, a title-style preference, …)
 //! that would pollute every LLM call if folded into the dialog identity
@@ -23,7 +23,12 @@
 //! filename match** so the two views never disagree.
 //!
 //! [`COMPACTION_PROMPT_FILE`] (`prompts/summary.md`) is the original entry
-//! in this list (ADR-053). The remaining 8 were added by ADR-063.
+//! in this list (ADR-053). ADR-063 originally added 8 more (total 9); the
+//! 3 grafeo-specific overrides (`extraction.md`,
+//! `conflict-classification.md`, `generalization.md`) were removed by
+//! ADR-068 because LLM→memory is now exclusively mediated by the
+//! Episode-only `memory_store` path — grafeo's offline
+//! `EpisodicDistiller` owns its own internal prompts.
 
 use std::collections::HashSet;
 use std::fs;
@@ -66,19 +71,16 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     ("search.md", "SEARCH_SYSTEM_PROMPT"),
     ("compact-template.md", "COMPACT_PROMPT (must keep {messages_text} placeholder)"),
     ("title.md", "TITLE_PROMPT"),
-    // ADR-063 — grafeo / memory constants (4)
-    ("extraction.md", "EXTRACTION_SYSTEM_PROMPT (grafeo)"),
-    (
-        "conflict-classification.md",
-        "CONFLICT_CLASSIFICATION_PROMPT (grafeo)",
-    ),
-    ("generalization.md", "GENERALIZATION_PROMPT (grafeo)"),
+    // ADR-068 — only the memory-side abstention override remains of
+    // the original ADR-063 grafeo/memory set. The other three grafeo
+    // overrides (`extraction.md`, `conflict-classification.md`,
+    // `generalization.md`) were removed: see module-level docs.
     ("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)"),
 ];
 
 /// O(1) lookup set of overridable filenames. Built lazily on first access
 /// via [`overridable_filenames`] so the cold-start cost is one allocation
-/// of nine `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
+/// of five `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
 /// file in `prompts/`.
 fn overridable_filenames() -> &'static HashSet<&'static str> {
     use std::sync::OnceLock;
@@ -206,15 +208,6 @@ pub fn reload_prompts_into_core(
             }
             "title.md" => {
                 *core.title_prompt.write().unwrap() = loaded;
-            }
-            "extraction.md" => {
-                *core.extraction_prompt.write().unwrap() = loaded;
-            }
-            "conflict-classification.md" => {
-                *core.conflict_classification_prompt.write().unwrap() = loaded;
-            }
-            "generalization.md" => {
-                *core.generalization_prompt.write().unwrap() = loaded;
             }
             "abstention.md" => {
                 *core.abstention_prompt.write().unwrap() = loaded;
@@ -471,7 +464,7 @@ Be friendly and welcoming.
     // the empty/partial/full override semantics.
 
     #[test]
-    fn test_reload_prompts_into_core_with_empty_package_dir_writes_none_to_all_8_fields() {
+    fn test_reload_prompts_into_core_with_empty_package_dir_writes_none_to_all_5_fields() {
         let core = make_test_agent_core();
         let empty_dir = std::env::temp_dir().join(format!(
             "acowork-test-reload-prompts-empty-{}",
@@ -487,12 +480,6 @@ Be friendly and welcoming.
         *core.search_prompt.write().unwrap() = Some("SENTINEL".into());
         *core.compact_template.write().unwrap() = Some("SENTINEL".into());
         *core.title_prompt.write().unwrap() = Some("SENTINEL".into());
-        *core.extraction_prompt.write().unwrap() = Some("SENTINEL".into());
-        *core
-            .conflict_classification_prompt
-            .write()
-            .unwrap() = Some("SENTINEL".into());
-        *core.generalization_prompt.write().unwrap() = Some("SENTINEL".into());
         *core.abstention_prompt.write().unwrap() = Some("SENTINEL".into());
 
         reload_prompts_into_core(&empty_dir, &core).expect("empty-dir reload must succeed");
@@ -504,21 +491,16 @@ Be friendly and welcoming.
         assert!(core.search_prompt.read().unwrap().is_none());
         assert!(core.compact_template.read().unwrap().is_none());
         assert!(core.title_prompt.read().unwrap().is_none());
-        assert!(core.extraction_prompt.read().unwrap().is_none());
-        assert!(
-            core.conflict_classification_prompt.read().unwrap().is_none()
-        );
-        assert!(core.generalization_prompt.read().unwrap().is_none());
         assert!(core.abstention_prompt.read().unwrap().is_none());
 
         let _ = fs::remove_dir_all(&empty_dir);
     }
 
     #[test]
-    fn test_reload_prompts_into_core_with_all_8_overrides_writes_each_field() {
+    fn test_reload_prompts_into_core_with_all_5_overrides_writes_each_field() {
         let core = make_test_agent_core();
         let dir = std::env::temp_dir().join(format!(
-            "acowork-test-reload-prompts-all8-{}",
+            "acowork-test-reload-prompts-all5-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -526,21 +508,19 @@ Be friendly and welcoming.
 
         // One per `OVERRIDABLE_PROMPTS` entry, in the canonical order
         // (matches the table at the top of this module).
+        // ADR-068: 3 grafeo overrides removed — see module docs.
         let fixtures: &[(&str, &str)] = &[
             ("summary.md", "summary-from-disk"),
             ("search.md", "search-from-disk"),
             ("compact-template.md", "compact-template-from-disk"),
             ("title.md", "title-from-disk"),
-            ("extraction.md", "extraction-from-disk"),
-            ("conflict-classification.md", "conflict-from-disk"),
-            ("generalization.md", "generalization-from-disk"),
             ("abstention.md", "abstention-from-disk"),
         ];
         for (file, content) in fixtures {
             fs::write(dir.join("prompts").join(file), content).unwrap();
         }
 
-        reload_prompts_into_core(&dir, &core).expect("all-8 reload must succeed");
+        reload_prompts_into_core(&dir, &core).expect("all-5 reload must succeed");
 
         // Every field must equal the disk content — proves the
         // dispatch table wires each filename to the correct
@@ -562,18 +542,6 @@ Be friendly and welcoming.
             Some("title-from-disk")
         );
         assert_eq!(
-            core.extraction_prompt.read().unwrap().as_deref(),
-            Some("extraction-from-disk")
-        );
-        assert_eq!(
-            core.conflict_classification_prompt.read().unwrap().as_deref(),
-            Some("conflict-from-disk")
-        );
-        assert_eq!(
-            core.generalization_prompt.read().unwrap().as_deref(),
-            Some("generalization-from-disk")
-        );
-        assert_eq!(
             core.abstention_prompt.read().unwrap().as_deref(),
             Some("abstention-from-disk")
         );
@@ -591,7 +559,8 @@ Be friendly and welcoming.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
 
-        // Only seed 3 of the 8. The remaining 5 must come back as `None`.
+        // Only seed 3 of the 5. The remaining 2 must come back as `None`.
+        // ADR-068: total was 8 before removing 3 grafeo overrides.
         fs::write(dir.join("prompts").join("summary.md"), "summary-only").unwrap();
         fs::write(dir.join("prompts").join("title.md"), "title-only").unwrap();
         fs::write(
@@ -612,11 +581,6 @@ Be friendly and welcoming.
             core.title_prompt.read().unwrap().as_deref(),
             Some("title-only")
         );
-        assert!(core.extraction_prompt.read().unwrap().is_none());
-        assert!(
-            core.conflict_classification_prompt.read().unwrap().is_none()
-        );
-        assert!(core.generalization_prompt.read().unwrap().is_none());
         assert_eq!(
             core.abstention_prompt.read().unwrap().as_deref(),
             Some("abstention-only")
@@ -626,20 +590,24 @@ Be friendly and welcoming.
     }
 
     #[test]
-    fn test_overridable_prompts_stays_at_8_entries() {
+    fn test_overridable_prompts_stays_at_5_entries() {
         // Sanity check: the closed-set invariant holds. A future
         // maintainer who adds an entry to `OVERRIDABLE_PROMPTS` without
         // teaching `reload_prompts_into_core` about the matching field
         // gets a compile-time reminder — the match arm is exhaustive
-        // against the 8 canonical filenames and any new entry triggers
+        // against the 5 canonical filenames and any new entry triggers
         // an "unknown overridable filename" `Err` at runtime (the
         // match has no `_` arm). Pinning the canonical count here
-        // makes a silent drift (e.g. someone shrinks the list to 7)
+        // makes a silent drift (e.g. someone shrinks the list to 4)
         // immediately visible.
+        //
+        // ADR-068: count went from 8 → 5 after removing the 3 grafeo
+        // overrides (extraction / conflict-classification /
+        // generalization).
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            8,
-            "OVERRIDABLE_PROMPTS must stay at 8 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
+            5,
+            "OVERRIDABLE_PROMPTS must stay at 5 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
         );
     }
 
@@ -794,12 +762,15 @@ Be friendly and welcoming.
     /// Debug panel list, the main-prompt exclusion set, and the LLM-call
     /// resolution chain all need to be updated together — a silent drift
     /// is the most expensive failure mode, so make it loud.
+    ///
+    /// ADR-068: count is now 5 (was 8 before removing the 3 grafeo
+    /// overrides).
     #[test]
-    fn test_overridable_prompts_count_is_8() {
+    fn test_overridable_prompts_count_is_5() {
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            8,
-            "OVERRIDABLE_PROMPTS must have 8 entries: 1 compaction (ADR-053) + 3 prompt.rs + 4 grafeo/memory. Update AgentCore fields, LLM call sites, and Debug panel list together."
+            5,
+            "OVERRIDABLE_PROMPTS must have 5 entries: 1 compaction (ADR-053) + 3 prompt.rs + 1 memory abstention. Update AgentCore fields, LLM call sites, and Debug panel list together. See ADR-068 for the 8→5 reduction."
         );
     }
 

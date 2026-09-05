@@ -29,6 +29,30 @@ run_node_redline() {
     echo "acowork-node dependency red line: OK"
 }
 
+# ADR-065 §7 #1 red line: ErrorKind::MqttState MUST NOT appear outside
+# acowork-mqtt-session. Reintroducing this literal in any consumer
+# crate (Node / Gateway / Desktop / Runtime) recreates the original
+# wake-60s bug — the local adapter fails to unwrap the inner
+# StateError::Io and re-classifies ECONNRESET as fatal E4 ConfigError.
+run_mqtt_redline() {
+    echo "Checking MQTT ErrorKind::MqttState red line (ADR-065 §7 #1)..."
+    # Scan only Rust source. Skip the shared crate (single source of truth)
+    # and the mqtt-session Cargo target directory if present.
+    local offenders
+    offenders=$(cd "$SCRIPT_DIR/.." && grep -rnE 'ErrorKind::MqttState' \
+        --include='*.rs' \
+        apps/ core/ \
+        | grep -vE '^(apps|core)/acowork-mqtt-session/' \
+        | grep -vE '/target/' \
+        || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: ErrorKind::MqttState literal found outside acowork-mqtt-session (ADR-065 §7 #1):"
+        echo "$offenders"
+        exit 1
+    fi
+    echo "MQTT ErrorKind red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -94,6 +118,7 @@ case "$MODE" in
         ;;
     all)
         run_node_redline
+        run_mqtt_redline
         run_check
         run_clippy
         run_test

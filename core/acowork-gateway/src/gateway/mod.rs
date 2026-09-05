@@ -581,6 +581,140 @@ impl Gateway {
         let http_config = self.config.http.clone();
         let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
 
+        // ADR-064: PM 已从 Gateway 解耦为独立进程 `acowork-pm`。
+        //
+        // Gateway 不再内嵌 PM（删除 `acowork-pm` 依赖），改为：
+        //   1. `pm_supervisor` spawn 独立进程并轮询 `/health`（失败指数退避重启）；
+        //   2. `/api/pm/*` 由 `http::pm_proxy` 反向代理到 `127.0.0.1:{pm_port}`。
+        //
+        // 失败**非致命**：PM 无法启动时 Gateway 继续运行，`/api/pm/*` 返回 503。
+        // PM 数据目录独立为 `$HOME/.acowork/acowork-pm/`（与 gateway/node 平级）。
+        if self.config.pm.enabled {
+            let pm_bin = std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    exe.parent().map(|p| {
+                        let bin_name = if cfg!(windows) {
+                            "acowork-pm.exe"
+                        } else {
+                            "acowork-pm"
+                        };
+                        p.join(bin_name)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let bin_name = if cfg!(windows) {
+                        "acowork-pm.exe"
+                    } else {
+                        "acowork-pm"
+                    };
+                    std::path::PathBuf::from(bin_name)
+                });
+            let supervisor_cfg = crate::lifecycle::pm_supervisor::PmSupervisorConfig {
+                pm_bin,
+                port: self.config.pm.port,
+                port_file: data_dir_path.join("pm.port"),
+                log_dir: data_dir_path.join("logs"),
+                gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
+                // ADR-064 Phase 3: PM 经 Gateway HTTP 查询 `/api/agents`（AgentDirectory）。
+                gateway_url: Some(format!("http://127.0.0.1:{}", http_config.port)),
+            };
+            crate::lifecycle::pm_supervisor::start_pm_supervisor(
+                supervisor_cfg,
+                shared_state.clone(),
+            );
+            tracing::info!(
+                port = self.config.pm.port,
+                enabled = true,
+                "PM supervisor started (ADR-064)"
+            );
+        } else {
+            tracing::info!("PM supervisor disabled (pm.enabled=false)");
+        }
+
+        // pm_mcp_url: MCP 端点经 Gateway 反代暴露（Desktop 走 /api/pm/mcp）。
+        {
+            let mut gw = shared_state.write().await;
+            gw.pm_mcp_url = if self.config.pm.auto_inject_mcp {
+                Some(format!(
+                    "http://{}:{}{}",
+                    gw.advertise_host.clone(),
+                    http_config.port,
+                    self.config.pm.mcp_http_path
+                ))
+            } else {
+                None
+            };
+        }
+
+        // acowork-doc: standalone process `acowork-doc`, lifecycle managed by
+        // the Gateway supervisor (spawn + /health poll + exponential-backoff
+        // restart); `/api/doc/*` is reverse-proxied by `http::doc_proxy` to
+        // `127.0.0.1:{doc_port}`.
+        //
+        // Failure is **non-fatal**: when doc cannot start the Gateway keeps
+        // running and `/api/doc/*` returns 503. The data directory defaults
+        // to `$HOME/.acowork/acowork-doc/`; `[doc].data_dir` and
+        // `[doc].request_ttl_hours` are optional overrides forwarded via CLI.
+        if self.config.doc.enabled {
+            let doc_bin = std::env::current_exe()
+                .ok()
+                .and_then(|exe| {
+                    exe.parent().map(|p| {
+                        let bin_name = if cfg!(windows) {
+                            "acowork-doc.exe"
+                        } else {
+                            "acowork-doc"
+                        };
+                        p.join(bin_name)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let bin_name = if cfg!(windows) {
+                        "acowork-doc.exe"
+                    } else {
+                        "acowork-doc"
+                    };
+                    std::path::PathBuf::from(bin_name)
+                });
+            let supervisor_cfg = crate::lifecycle::doc_supervisor::DocSupervisorConfig {
+                doc_bin,
+                port: self.config.doc.port,
+                port_file: data_dir_path.join("doc.port"),
+                log_dir: data_dir_path.join("logs"),
+                gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
+                data_dir: self.config.doc.data_dir.clone(),
+                request_ttl_hours: self.config.doc.request_ttl_hours,
+            };
+            crate::lifecycle::doc_supervisor::start_doc_supervisor(
+                supervisor_cfg,
+                shared_state.clone(),
+            );
+            tracing::info!(
+                port = self.config.doc.port,
+                enabled = true,
+                "doc supervisor started"
+            );
+        } else {
+            tracing::info!("doc supervisor disabled (doc.enabled=false)");
+        }
+
+        // doc_mcp_url: MCP endpoint exposed via the Gateway reverse proxy
+        // (Desktop goes through /api/doc/mcp).
+        {
+            let mut gw = shared_state.write().await;
+            gw.doc_mcp_url = if self.config.doc.auto_inject_mcp {
+                Some(format!(
+                    "http://{}:{}{}",
+                    gw.advertise_host.clone(),
+                    http_config.port,
+                    self.config.doc.mcp_http_path
+                ))
+            } else {
+                None
+            };
+        }
+
         // Rebuild resource cache from MCP catalog at startup.
         // provider_list.json is loaded by load_resource_cache() above;
         // it is the source of truth for provider config. No rebuild needed.
@@ -1339,6 +1473,8 @@ mod tests {
             advertise_host: None,
             node_proxy_port: None,
             node_lsp_relay_port: None,
+            pm: crate::config::PmConfig::default(),
+            doc: crate::config::DocConfig::default(),
         }
     }
 

@@ -1,6 +1,7 @@
 import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { Loader2, ChevronLeft, ChevronRight } from "lucide-react";
+import { useTranslation } from "../../i18n/useTranslation";
 import { useNodeTypeLabel, useSubTypeLabel } from "./nodeTypeI18n";
 
 interface MemoryNodeListProps {
@@ -48,6 +49,7 @@ export function MemoryNodeList({
   const end = Math.min(page * pageSize, total);
   const labelOf = useNodeTypeLabel();
   const subLabelOf = useSubTypeLabel();
+  const { t } = useTranslation();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -130,9 +132,23 @@ export function MemoryNodeList({
                   {truncateContent(node.content)}
                 </p>
 
-                {/* Bottom row: confidence + decay + date */}
+                {/* Bottom row: score + decay + date.
+                    Episodic nodes carry `importance` (重要程度) but no
+                    `confidence`; the other three types carry `confidence`
+                    (置信度) but no `importance`. Each is shown verbatim —
+                    the backend never derives one from the other. */}
                 <div className="flex items-center gap-2 text-[11px] text-zinc-400 dark:text-zinc-500">
-                  <span>Confidence: {(node.confidence * 100).toFixed(0)}%</span>
+                  {node.node_type === "Episodic" ? (
+                    <span>
+                      {t("memoryNodeDetail.labelImportance")}:{" "}
+                      {(node.importance * 100).toFixed(0)}%
+                    </span>
+                  ) : (
+                    <span>
+                      {t("memoryNodeDetail.labelConfidence")}:{" "}
+                      {(node.confidence * 100).toFixed(0)}%
+                    </span>
+                  )}
 
                   <span>Decay: {node.decay_score.toFixed(2)}</span>
 

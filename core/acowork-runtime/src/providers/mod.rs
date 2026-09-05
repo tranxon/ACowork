@@ -8,6 +8,9 @@ pub mod registry;
 pub mod reliable;
 pub mod router;
 
+#[cfg(test)]
+mod compat_e2e;
+
 /// ADR-056: Whether a provider `base_url` points at a local machine —
 /// i.e. the provider is self-hosted and callable **without** an API key.
 ///

@@ -1,34 +1,16 @@
-//! ADR-052 context compression - shared queue contracts.
+//! Tool compression was retired from the runtime.
 //!
-//! These queue types are the **data contract** between the two sides of
-//! the context-compression feature:
+//! The two builtin tools (`context_retrieve`, `context_abandon`) that
+//! used to live on this contract are no longer registered with the LLM;
+//! their source files survive in `crate::tools::builtin` as dead code
+//! for future reference.
 //!
-//! - **Producer** - the `context_retrieve` builtin tool
-//!   (`crate::tools::builtin::context_retrieve`). Tools have no access to
-//!   `HistoryManager`; they only push intent (a `(tool_call_id,
-//!   original_content)` pair) onto the queue.
-//! - **Consumer** - `AgentLoop` drains the queue at the start of each
-//!   iteration (`drain_retrieve_queue`) and performs the actual in-place
-//!   history mutation via `HistoryManager::retrieve_tool_result()`.
-//! - **Owner** - `AgentCore` creates the queue at init and hands `Arc`
-//!   clones to the tool and to every `AgentLoop`.
-//!
-//! ADR-061 §10.2: the `AbandonQueue` contract is **deleted** —
-//! LLM-autonomous tool compression is closed (`context_abandon` is no
-//! longer registered; the deprecated tool keeps an internal queue that
-//! nothing drains). `context_retrieve` remains the manual recall channel.
+//! The `RetrieveQueue` type alias is kept solely so the surviving tool
+//! source files continue to compile. Nothing constructs or drains this
+//! queue at runtime.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// Shared queue for `context_retrieve` requests.
-///
-/// The tool writes `(tool_call_id, original_content)` pairs here; the
-/// agent loop drains them and restores the original content in-place
-/// (replacing the placeholder).
+#[allow(dead_code)]
 pub type RetrieveQueue = Arc<Mutex<VecDeque<(String, String)>>>;
-
-/// Create a fresh empty retrieve queue (used at `AgentCore` init).
-pub fn new_retrieve_queue() -> RetrieveQueue {
-    Arc::new(Mutex::new(VecDeque::new()))
-}

@@ -678,7 +678,7 @@ async fn compression_injects_removed_todo_round_after_marker() {
     // strips the middle of the history, the most recent `todo_write` round
     // is spliced after the summary marker so the next LLM call still sees
     // the canonical todo state. With min_ratio=0.90 (default) and a small
-    // test history, plan_compression falls through to level 8 (ratio
+    // test history, plan_compression falls through to level 5 (ratio
     // exempt) — which keeps only `[system, last_user]`. The todo round is
     // REMOVED and our inject path must restore it.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -741,7 +741,7 @@ async fn compression_idempotent_across_multiple_compacts() {
     // ADR-060 v2 §5.4 idempotency: when compression fires twice in a row,
     // the inject path must NOT duplicate the todo round. The injector
     // checks for a tool_call_id collision (retained-tail case) before
-    // splicing — but here level 8 also strips the round on the second pass,
+    // splicing — but here level 5 also strips the round on the second pass,
     // so the injector would naively splice again. The snapshot+idempotency
     // logic in loop_context.rs guards against that.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -776,7 +776,7 @@ async fn compression_idempotent_across_multiple_compacts() {
     let msgs = &captured.last().unwrap().messages;
     assert_block_v2_layout(msgs, "Fourth turn");
     // ADR-060 v2 §5.4 idempotency trade-off: after the SECOND compression
-    // (level 8 strips both the prior marker AND our prior splice), the
+    // (level 5 strips both the prior marker AND our prior splice), the
     // `last_injected_todo_call_id` gate refuses re-injecting the same
     // round. Block B therefore does NOT carry a todo_write tool result on
     // this turn — the JSONL still holds the synthetic row from the FIRST
@@ -791,11 +791,11 @@ async fn compression_idempotent_across_multiple_compacts() {
          canonical state lives in JSONL until the next chat turn refreshes it"
     );
 
-    // Exactly 1 compaction marker — level 8 strips previous ones.
+    // Exactly 1 compaction marker — level 5 strips previous ones.
     assert_eq!(
         count_compaction_markers(msgs),
         1,
-        "level 8 falls through and replaces the previous marker — only the \
+        "level 5 falls through and replaces the previous marker — only the \
          most recent survives. This is expected; the todo round is the \
          canonical state we preserve across compactions."
     );
@@ -823,15 +823,15 @@ async fn compression_idempotent_across_multiple_compacts() {
     );
 
     // Note: with default min_ratio=0.90 the second compaction falls through
-    // to level 8 (ratio exempt), which strips the previous marker along with
+    // to level 5 (ratio exempt), which strips the previous marker along with
     // the rest of the middle. Only the most recent marker survives. This is
-    // intentional (level 8 trades cache history for budget); the invariant
+    // intentional (level 5 trades cache history for budget); the invariant
     // we care about is the todo round, which DID survive (see
     // `count_tool_call_id` assertion above).
     assert_eq!(
         count_compaction_markers(msgs),
         1,
-        "level 8 falls through and replaces the previous marker — only the \
+        "level 5 falls through and replaces the previous marker — only the \
          most recent survives. This is expected; the todo round is the \
          canonical state we preserve across compactions."
     );
@@ -1216,7 +1216,7 @@ async fn multiple_compressions_write_exactly_one_synthesized_round_to_jsonl() {
     // Position invariant: at least one synthesized pair must appear AFTER
     // SOME compaction marker in the file (so the restorer can pick it up
     // on resume). We accept any marker — the LAST marker is not required,
-    // because level 8 strips earlier inject rounds from in-memory history
+    // because level 5 strips earlier inject rounds from in-memory history
     // on each pass and the idempotency gate then refuses to re-inject, so
     // only the FIRST synthetic pair sits in the file (after marker #1).
     // The next chat turn (Turn 4 if any) or a process restart would
@@ -1246,4 +1246,176 @@ async fn multiple_compressions_write_exactly_one_synthesized_round_to_jsonl() {
          compaction marker in the JSONL so the restorer picks it up on resume; \
          got entries={entries:?}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-061 v3 structural invariants — full-chain regression
+// ═══════════════════════════════════════════════════════════════════════
+//
+// v3 replaced "delete Tool message + schema sweep" with round-atomic
+// folding (tool result → placeholder). The properties below are the v3
+// contract, asserted on EVERY real outbound request across:
+//   tool rounds → compaction → post-compact tool round → process restart.
+// A v2-style regression (ghost assistant / dangling tool_calls) would show
+// up here as an adjacent-assistant or an uncovered tool_call.
+
+/// A todo_write scripted step with an explicit tool_call id (multiple rounds
+/// in one session need distinct ids so the loop's tool_result matching is
+/// unambiguous).
+fn todo_write_step_id(id: &str, items: &[(&str, &str)]) -> ScriptedStep {
+    let todos: Vec<serde_json::Value> = items
+        .iter()
+        .map(|(i, content)| {
+            serde_json::json!({
+                "id": i,
+                "content": content,
+                "status": "pending",
+            })
+        })
+        .collect();
+    ScriptedStep {
+        content: String::new(),
+        tool_calls: Some(vec![ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "todo_write".to_string(),
+                arguments: serde_json::json!({ "todos": todos }).to_string(),
+            },
+        }]),
+    }
+}
+
+/// ADR-061 v3 round-integrity invariants for one outbound request.
+///
+/// 1. No two `Assistant` messages are adjacent (the "ghost assistant" bug).
+/// 2. Every `Assistant` carrying `tool_calls` is immediately followed by
+///    `Tool` messages covering every call id (verbatim result or the
+///    "result reclaimed" placeholder — never deleted).
+/// 3. No orphan `Tool` message: every tool result maps to the nearest
+///    preceding assistant's tool_calls.
+fn assert_round_schema_intact(msgs: &[ChatMessage], label: &str) {
+    for (i, m) in msgs.iter().enumerate() {
+        if m.role == MessageRole::Assistant
+            && i + 1 < msgs.len()
+            && msgs[i + 1].role == MessageRole::Assistant
+        {
+            panic!("{label}: assistant-assistant adjacency at index {i}");
+        }
+        let Some(calls) = &m.tool_calls else { continue };
+        if calls.is_empty() {
+            continue;
+        }
+        let mut missing: Vec<&str> = calls.iter().map(|c| c.id.as_str()).collect();
+        let mut j = i + 1;
+        while j < msgs.len() && msgs[j].role == MessageRole::Tool {
+            if let Some(id) = msgs[j].tool_call_id.as_deref() {
+                if let Some(pos) = missing.iter().position(|w| *w == id) {
+                    missing.remove(pos);
+                }
+            }
+            j += 1;
+        }
+        assert!(
+            missing.is_empty() && j > i + 1,
+            "{label}: assistant tool_calls at index {i} not fully covered by \
+             following Tool messages; missing={missing:?}",
+        );
+    }
+    for (i, m) in msgs.iter().enumerate() {
+        if m.role != MessageRole::Tool {
+            continue;
+        }
+        let id = m.tool_call_id.clone().unwrap_or_default();
+        let prev_assistant = msgs[..i].iter().rev().find(|x| x.role == MessageRole::Assistant);
+        let covered = prev_assistant
+            .and_then(|a| a.tool_calls.as_ref())
+            .is_some_and(|cs| cs.iter().any(|c| c.id == id));
+        assert!(
+            covered,
+            "{label}: orphan Tool message (tool_call_id={id:?}) at index {i} \
+             has no matching assistant tool_calls before it",
+        );
+    }
+}
+
+#[tokio::test]
+async fn v3_full_chain_keeps_tool_rounds_valid_across_compact_and_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let work_dir = dir.path();
+
+    // ── Generation 1 ────────────────────────────────────────────────────
+    // Script (main): t1 text → t2 tool(toolu_01) → post-tool text →
+    // t3 tool(toolu_02) → post-tool text → compaction summary →
+    // t4 tool(toolu_03, AFTER compaction — proves tools still work) →
+    // final text.
+    let provider = Arc::new(ScriptedProvider::new(
+        vec![
+            text_step("First turn done"),
+            todo_write_step_id("toolu_01", &[("t1", "Alpha")]),
+            text_step("Alpha saved"),
+            todo_write_step_id("toolu_02", &[("t2", "Beta")]),
+            text_step("Beta saved"),
+            summary_step(),
+            todo_write_step_id("toolu_03", &[("t3", "Gamma after compact")]),
+            text_step("Gamma saved"),
+        ],
+        vec![text_step("v3 invariant session")],
+    ));
+    let mut h1 = spawn_harness(work_dir, provider.clone(), None).await;
+    let sid = h1.sid.clone();
+
+    h1.send("First", "m1").await;
+    h1.send("Second (tool)", "m2").await;
+    h1.send("Third (tool)", "m3").await;
+    h1.compact().await;
+    h1.send("Fourth after compact (tool)", "m4").await;
+
+    let captured = provider.captured();
+    assert_eq!(
+        captured.len(),
+        8,
+        "6 calls across 3 turns + 1 compaction + 2 calls for the post-compact \
+         tool turn",
+    );
+    for (idx, req) in captured.iter().enumerate() {
+        assert_round_schema_intact(&req.messages, &format!("gen1 request #{idx}"));
+    }
+
+    // The post-compact turn really used a tool: request #7 is the tool
+    // iteration (its last message is the toolu_03 result) and #8 closes the
+    // turn with the follow-up text.
+    let post_tool_req = captured.last().unwrap();
+    assert!(
+        post_tool_req
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("toolu_03")),
+        "tool call issued AFTER compaction must have executed (toolu_03 result present)"
+    );
+
+    // ── Generation 2: process restart, resume from disk ────────────────
+    let provider2 = Arc::new(ScriptedProvider::new(
+        vec![text_step("Post-restart response")],
+        vec![text_step("v3 invariant restart")],
+    ));
+    let mut h2 = spawn_harness(work_dir, provider2.clone(), Some(&sid)).await;
+    h2.send("Fifth after restart", "m5").await;
+
+    let captured2 = provider2.captured();
+    assert!(
+        !captured2.is_empty(),
+        "restarted session must make at least one LLM call"
+    );
+    for (idx, req) in captured2.iter().enumerate() {
+        assert_round_schema_intact(&req.messages, &format!("gen2 (restart) request #{idx}"));
+        // The restored history must still carry the post-compact tool round —
+        // proof the placeholder/folding semantics survived serialization.
+        assert!(
+            req.messages
+                .iter()
+                .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("toolu_03")),
+            "gen2 request #{idx}: restored history must retain the post-compact tool round",
+        );
+    }
 }
