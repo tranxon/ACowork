@@ -363,9 +363,11 @@ impl super::loop_::AgentLoop {
     /// Run all post-compaction maintenance tasks.
     ///
     /// ADR-051 P3: Delegates to `MemoryManager::run_post_compaction_tasks()`
-    /// (generalization + history compression + relationship generation).
+    /// (generalization + history compression).
     /// Self-evaluation (Limitation nodes) was removed — see
-    /// docs/memory-write-entrypoints.md.
+    /// docs/memory-write-entrypoints.md. Relationship auto-generation was
+    /// also removed from this path (ADR-068 M8 single-producer: owned by the
+    /// EpisodicDistiller background step).
     pub(crate) async fn run_post_compaction_memory_tasks(&self) {
         let provider = match self.core.memory_provider() {
             Some(s) => s,

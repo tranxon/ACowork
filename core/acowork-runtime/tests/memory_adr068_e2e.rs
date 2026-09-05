@@ -711,3 +711,78 @@ async fn bootstrap_is_idempotent() {
         .expect("lookup ok");
     assert_eq!(capabilities.len(), 1, "no duplicate Capability nodes");
 }
+
+// ============================================================================
+// ADR-068 M8 regression — Relationship has exactly ONE producer
+// ============================================================================
+
+/// Regression for review #32 A1: the session-end/compaction path
+/// (`MemoryManager::run_post_compaction_tasks`) must NOT write Relationship
+/// nodes. The old `run_relationship_generation` direct write produced
+/// `AutobiographicalNode{category=Relationship, key=collaboration_span}`
+/// unconditionally (bypassing the opt-in distiller and its audit trail),
+/// which contradicted the ADR-068 single-producer rule. After the fix the
+/// only producer is `EpisodicDistiller::promote_autobio_relationship`, gated
+/// by `[memory.distiller].enabled`.
+#[tokio::test]
+async fn post_compaction_tasks_do_not_write_relationship_nodes() {
+    let e2e = Adr068E2e::new();
+    let provider = e2e.provider();
+
+    // A 45-day-old episode makes the collaboration span >= 30 days — the
+    // old session-end rule would have created a Relationship node here.
+    e2e.seed_episode(
+        "First recorded interaction",
+        KnowledgeSubType::Fact,
+        Utc::now() - ChronoDuration::days(45),
+    );
+
+    let before = provider
+        .find_autobiographical_by_category(AutobioCategory::Relationship)
+        .expect("relationship lookup ok");
+    assert!(before.is_empty(), "no Relationship node before compaction tasks");
+
+    // Run the exact path compaction + session-close invoke at runtime.
+    let manager = MemoryManager::new(MemoryManagerConfig::default());
+    manager
+        .run_post_compaction_tasks(provider.as_ref(), None)
+        .await;
+
+    let after = provider
+        .find_autobiographical_by_category(AutobioCategory::Relationship)
+        .expect("relationship lookup ok");
+    assert!(
+        after.is_empty(),
+        "post-compaction tasks must not write Relationship nodes \
+         (ADR-068 single producer is the EpisodicDistiller); found: {:?}",
+        after
+            .iter()
+            .map(|n| (n.category.clone(), n.key.clone(), n.value.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // The distiller-owned producer still works and carries the audit trail —
+    // proving the capability moved, not vanished.
+    let eval = DefaultEpisodicDistiller
+        .promote_autobio_relationship(provider.as_ref())
+        .await
+        .expect("promote ok")
+        .expect("span >= 30 days -> promoted");
+    assert_eq!(eval.promoted_kind, PromotionKind::AutobioRelationship);
+    assert!(matches!(eval.decision, PromotionDecision::Promoted));
+    assert!(eval.promoted_node_id.is_some());
+
+    let nodes = provider
+        .find_autobiographical_by_category(AutobioCategory::Relationship)
+        .expect("relationship lookup ok");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].key, "collaboration_span");
+    assert!(
+        nodes[0].promotion_metadata.is_some(),
+        "distiller-produced Relationship node must carry promotion_metadata"
+    );
+    assert_eq!(
+        nodes[0].promotion_metadata.as_ref().unwrap().promoted_by,
+        "episodic_distiller"
+    );
+}

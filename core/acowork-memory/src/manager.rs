@@ -889,8 +889,8 @@ impl MemoryManager {
     ///
     /// Executes in sequence:
     /// 1. Experience generalization (Path C) - extract behavior patterns
-    /// 2. History compression - mark old History nodes as Dormant
-    /// 3. Relationship auto-generation - track collaboration span
+    /// 2. History compression - no-op since ADR-068 (episodic retention
+    ///    `mark_consolidated` + cleanup is the replacement)
     ///
     /// Each step is best-effort: failures are logged but do not block
     /// subsequent steps.
@@ -898,6 +898,15 @@ impl MemoryManager {
     /// ADR-051 P3: Replaces run_generalization_if_possible(),
     /// self_evaluate_skill_performance(), and auto_generate_relationship()
     /// in loop_memory.rs.
+    ///
+    /// ADR-068 M8: 30-day Relationship auto-generation was removed from this
+    /// method. Relationship is a runtime-observed autobiographical category
+    /// whose single producer is the EpisodicDistiller's
+    /// `promote_autobio_relationship` (invoked from the background
+    /// consolidation step, gated by `[memory.distiller].enabled`). The old
+    /// unconditional session-end/compaction direct write here produced
+    /// Relationship nodes outside the distiller and bypassed the audit trail
+    /// (`promotion_metadata` / `PromotionEvaluation`).
     pub async fn run_post_compaction_tasks(
         &self,
         provider: &dyn MemoryProvider,
@@ -906,11 +915,8 @@ impl MemoryManager {
         // Step 1: Experience generalization (Path C).
         self.run_generalization_step(provider, embedding_fn).await;
 
-        // Step 2: History compression.
+        // Step 2: History compression (no-op since ADR-068).
         self.run_history_compression(provider);
-
-        // Step 3: Relationship auto-generation.
-        self.run_relationship_generation(provider);
     }
 
     /// Activate ProceduralNodes that were retrieved and matched the context.
@@ -996,84 +1002,6 @@ impl MemoryManager {
             }
             Err(e) => {
                 tracing::debug!(error = %e, "History compression failed (non-fatal)");
-            }
-        }
-    }
-
-    /// Step 3: Auto-generate Relationship nodes at session-end.
-    ///
-    /// Checks if the earliest episode is > 30 days old. If so, creates or
-    /// updates an AutobiographicalNode with category: Relationship.
-    fn run_relationship_generation(&self, provider: &dyn MemoryProvider) {
-        use crate::{AutobioCategory, AutobiographicalNode, NodeStatus};
-
-        // Fetch a generous upper bound (not usize::MAX) so the GQL `LIMIT`
-        // literal stays within int64 range — the GrafeoDB engine rejects
-        // `18446744073709551615` with a syntax error. 10k episodes is far
-        // beyond any realistic collaboration span.
-        const EPISODES_FOR_RELATIONSHIP: usize = 10_000;
-
-        let episodes = match provider.get_episodes(None, EPISODES_FOR_RELATIONSHIP) {
-            Ok(eps) => eps,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to get episodes for relationship tracking");
-                return;
-            }
-        };
-
-        let episode_count = episodes.len() as u32;
-        let earliest_time = episodes.iter().map(|e| e.timestamp).min();
-
-        let earliest = match earliest_time {
-            Some(t) => t,
-            None => return,
-        };
-
-        let now = chrono::Utc::now();
-        let span_days = (now - earliest).num_days();
-
-        if span_days < 30 {
-            return;
-        }
-
-        let key = "collaboration_span".to_string();
-        let value = format!("已合作 {} 天（{} 次对话记录）", span_days, episode_count);
-
-        match provider.find_autobiographical_by_key(&key) {
-            Ok(Some(mut existing)) => {
-                existing.value = value;
-                existing.updated_at = now;
-                if let Err(e) = provider.update_autobiographical(&existing) {
-                    tracing::debug!(key = %key, error = %e, "Failed to update Relationship node (non-fatal)");
-                } else {
-                    tracing::info!(span_days, episode_count, "Updated Relationship node for long-standing collaboration");
-                }
-            }
-            Ok(None) => {
-                let node = AutobiographicalNode {
-                    id: None,
-                    category: AutobioCategory::Relationship,
-                    key,
-                    value,
-                    confidence: 0.9,
-                    source_episode_id: None,
-                    source_episode_ids: Vec::new(),
-                    promotion_metadata: None,
-                    embedding: None,
-                    status: NodeStatus::Active,
-                    created_at: now,
-                    updated_at: now,
-                    source: "user_statement".to_string(),
-                    metadata: HashMap::new(),
-                };
-                if let Err(e) = provider.store_autobiographical(&node) {
-                    tracing::debug!(error = %e, "Failed to store Relationship node (non-fatal)");
-                } else {
-                    tracing::info!(span_days, episode_count, "Created Relationship node for long-standing collaboration");
-                }
-            }
-            Err(e) => {
-                tracing::debug!(key = %key, error = %e, "Failed to query Relationship node (non-fatal)");
             }
         }
     }

@@ -1013,9 +1013,12 @@ impl AgentLoop {
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
 
-                    // ADR-051 P3: Run all post-compaction maintenance tasks
-                    // (generalization + history compression + relationship)
-                    // via a single MemoryManager high-level method.
+                    // ADR-051 P3 / ADR-068 M8: Run all post-compaction
+                    // maintenance tasks (generalization + history
+                    // compression) via a single MemoryManager high-level
+                    // method. Relationship auto-generation was removed from
+                    // this path — it is owned by the EpisodicDistiller
+                    // background step (ADR-068 single-producer rule).
                     self.run_post_compaction_memory_tasks().await;
 
                     tracing::info!(
