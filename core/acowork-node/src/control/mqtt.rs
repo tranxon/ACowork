@@ -268,7 +268,6 @@ impl NodeMqttClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use acowork_mqtt_session::ForceRestart;
     use std::sync::Arc;
     use std::time::Duration;
