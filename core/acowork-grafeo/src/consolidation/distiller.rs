@@ -277,6 +277,10 @@ struct ClusterMember {
 struct AutobioCluster {
     aspect: AutobioAspect,
     key_hint: String,
+    /// Embedding of `"<Aspect> <key_hint>"` (ADR-068 A5) — used for
+    /// similarity merge exactly like the knowledge clustering; `None` when no
+    /// embedding function is available (falls back to string equality).
+    key_embedding: Option<Vec<f32>>,
     members: Vec<ClusterMember>,
 }
 
@@ -576,20 +580,40 @@ fn cluster_candidates(
             extracted: ext.clone(),
         };
 
-        // Autobio candidates go to their aspect bucket.
+        // Autobio candidates go to their aspect bucket. Members are merged by
+        // key_hint *semantic similarity* (embedding cosine >= cluster
+        // threshold) — the same mechanism as knowledge clustering — so
+        // LLM-generated key_hint variants ("verbose_response" vs "verbosity")
+        // accumulate evidence instead of splitting into never-promoted
+        // singleton buckets (ADR-068 A5). Without an embedding function the
+        // merge falls back to string equality (mirrors knowledge clustering).
         if let Some(cand) = ext.autobio_candidate.as_ref()
             && cand.aspect != AutobioAspect::History
         {
-            let found = autobio
-                .iter_mut()
-                .find(|c| c.aspect == cand.aspect && c.key_hint == cand.key_hint);
-            match found {
-                Some(c) => c.members.push(member.clone()),
-                None => autobio.push(AutobioCluster {
+            let hint_text = format!("{:?} {}", cand.aspect, cand.key_hint);
+            let hint_embedding = embedding_fn.map(|f| f(&hint_text));
+            let mut merged = false;
+            for cluster in autobio.iter_mut() {
+                if cluster.aspect != cand.aspect {
+                    continue;
+                }
+                let similar = match (&cluster.key_embedding, &hint_embedding) {
+                    (Some(a), Some(b)) => cosine_similarity(a, b) >= config.cluster_threshold,
+                    _ => cluster.key_hint == cand.key_hint,
+                };
+                if similar {
+                    cluster.members.push(member.clone());
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged {
+                autobio.push(AutobioCluster {
                     aspect: cand.aspect,
                     key_hint: cand.key_hint.clone(),
+                    key_embedding: hint_embedding,
                     members: vec![member.clone()],
-                }),
+                });
             }
         }
 
@@ -2253,6 +2277,86 @@ mod tests {
         // A4: audit id maps to the stored node id.
         assert_eq!(result.promotion_evaluations.len(), 1);
         assert_eq!(result.promotion_evaluations[0].promoted_node_id, node.id);
+    }
+
+    #[tokio::test]
+    async fn test_a5_autobio_key_hint_variants_merge_via_embedding() {
+        // ADR-068 A5 (review P2-2): autobio clustering must merge by key_hint
+        // *similarity*, not string equality. LLM-generated variants
+        // ("verbose_response" vs "verbosity") that embed near-identically
+        // land in ONE cluster and can reach the evidence threshold.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..3 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "You're too verbose, give shorter answers",
+                KnowledgeSubType::Preference,
+                now - chrono::Duration::days((i * 7) as i64),
+            )));
+        }
+        // Mixed key_hints: 2 x "verbose_response", 1 x "verbosity".
+        let llm = MockLlm::new(vec![
+            extraction_response(&[
+                (ids[0], "autobio", "limitation", "verbose_response"),
+                (ids[1], "autobio", "limitation", "verbosity"),
+                (ids[2], "autobio", "limitation", "verbose_response"),
+            ]),
+            judge_response("promote", 0.95, "agent should be concise"),
+        ]);
+        let distiller = DefaultEpisodicDistiller;
+        let result = distiller
+            .run(&provider, Some(&llm), Some(&embedding_same()), &default_config())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.autobio_promoted, 1,
+            "variant key_hints must merge into a single promotable cluster"
+        );
+        assert_eq!(provider.autobio_nodes.lock().unwrap().len(), 1);
+        let node = &provider.autobio_nodes.lock().unwrap()[0];
+        assert_eq!(node.category, AutobioCategory::Limitation);
+        assert_eq!(node.source_episode_ids.len(), 3);
+        assert_eq!(node.key, "verbose_response", "first member's hint is canonical");
+    }
+
+    #[tokio::test]
+    async fn test_a5_autobio_dissimilar_key_hints_do_not_merge_without_embedding() {
+        // Fallback path: with NO embedding function the merge degrades to
+        // string equality (mirrors knowledge clustering), so two different
+        // key_hints stay in separate buckets and never reach min_evidence.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..3 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "You're too verbose, give shorter answers",
+                KnowledgeSubType::Preference,
+                now - chrono::Duration::days((i * 7) as i64),
+            )));
+        }
+        let llm = MockLlm::new(vec![extraction_response(&[
+            (ids[0], "autobio", "limitation", "verbose_response"),
+            (ids[1], "autobio", "limitation", "verbose_response"),
+            (ids[2], "autobio", "limitation", "verbosity"),
+        ])]);
+        let distiller = DefaultEpisodicDistiller;
+        // No embedding fn -> string-equality fallback: bucket sizes 2 + 1,
+        // both below autobio_min_evidence (default 3) -> Deferred, no judge.
+        let result = distiller
+            .run(&provider, Some(&llm), None, &default_config())
+            .await
+            .unwrap();
+        assert_eq!(result.autobio_promoted, 0);
+        assert_eq!(result.promotion_evaluations.len(), 2);
+        assert!(
+            result
+                .promotion_evaluations
+                .iter()
+                .all(|e| matches!(e.decision, PromotionDecision::Deferred { .. }))
+        );
     }
 
     #[tokio::test]
