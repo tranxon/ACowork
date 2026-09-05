@@ -18,6 +18,34 @@ use serde::{Deserialize, Serialize};
 use crate::types::{AutobioCategory, ConflictSignal, KnowledgeSubType, NodeStatus, PrivacyLevel};
 
 // ============================================================================
+// Event-triggered promotion input (ADR-068 D8)
+// ============================================================================
+
+/// An event-triggered History milestone (ADR-068 §2.1 / §3.4.2 Step 3).
+///
+/// History is the one autobiographical category that is NOT promoted from an
+/// episode cluster: per the two-axis matrix it is "event-triggered (no
+/// episode input)". Milestones are asserted by the agent's runtime (specific
+/// tool-call sequences, first successful deployment, major errors) and
+/// delivered to the [`EpisodicDistiller::promote_event`] entry point.
+///
+/// A future `consolidation_event` MQTT topic (ADR-068 §3.4.3) is the
+/// transport; this type is the in-process payload so the distiller stays
+/// decoupled from the transport.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryMilestoneEvent {
+    /// Stable milestone key, e.g. `"first_deployment"`. The promoted node
+    /// key becomes `milestone_<slugified>` (ADR-068 Step 3 History row).
+    pub key: String,
+    /// Human-readable description, stored as the node `value`.
+    pub value: String,
+    /// When the milestone occurred.
+    pub occurred_at: DateTime<Utc>,
+    /// Confidence of the event source [0.0, 1.0].
+    pub confidence: f32,
+}
+
+// ============================================================================
 // Embedding function type alias
 // ============================================================================
 

@@ -63,11 +63,11 @@ pub use quality::{
 
 // Re-exports: core memory types
 pub use types::{
-    AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType, ContextSource,
-    DEFAULT_EMBEDDING_DIM, DecayConfig, DecayScanResult, DistilledEpisode, Episode, KnowledgeNode,
-    KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery, NodeStatus, PrivacyLevel,
-    ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics, SearchResult, StoreHealth,
-    StoreStats,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, ConflictSignal, ConflictType,
+    ContextSource, DEFAULT_EMBEDDING_DIM, DecayConfig, DecayScanResult, DistilledEpisode, Episode,
+    KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery, NodeStatus,
+    PrivacyLevel, ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics, SearchResult,
+    StoreHealth, StoreStats,
 };
 
 // Label and edge type constants

@@ -26,9 +26,9 @@ use acowork_memory::consolidation::{
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
 };
 use acowork_memory::types::{
-    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, ResultSource,
-    SearchResult, StoreHealth, StoreStats,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
+    Episode, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode,
+    PurgeResult, ResultSource, SearchResult, StoreHealth, StoreStats,
 };
 use acowork_memory::MemoryProvider;
 use acowork_memory::quality::MemoryQualityConfig;
@@ -213,6 +213,18 @@ impl MemoryProvider for InMemoryProvider {
         unconsolidated.sort_by_key(|(_, e)| e.timestamp);
         unconsolidated.truncate(limit);
         Ok(unconsolidated)
+    }
+
+    fn collaboration_span(&self) -> Result<Option<CollaborationSpan>> {
+        let episodes = self.episodes.read().unwrap();
+        let earliest = episodes
+            .iter()
+            .map(|(_, e)| e.timestamp)
+            .min_by_key(|t| *t);
+        Ok(earliest.map(|earliest_episode_at| CollaborationSpan {
+            earliest_episode_at,
+            episode_count: episodes.len() as u64,
+        }))
     }
 
     // ── Semantic layer ──────────────────────────────────────────────────

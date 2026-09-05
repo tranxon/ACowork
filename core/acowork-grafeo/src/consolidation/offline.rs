@@ -9,11 +9,18 @@
 //! during compaction, so re-extracting on a background schedule would
 //! duplicate cost and create race conditions with the synchronous landing
 //! pipeline. The remaining steps (Pending upgrade/downgrade, generalization,
-//! history compression, relationship generation, episodic forgetting)
-//! continue to run as before.
+//! episodic forgetting) continue to run as before.
+//!
+//! ADR-068 M8: history compression and Relationship auto-generation have
+//! been removed from this module. History nodes are event-triggered
+//! (EpisodicDistiller), and 30-day Relationship nodes are produced by
+//! [`crate::consolidation::distiller::EpisodicDistiller::promote_autobio_relationship`]
+//! — this module only exposes the raw span stats via
+//! `GrafeoStore::collaboration_span`.
 
 use std::sync::Arc;
 
+use acowork_memory::types::CollaborationSpan;
 use chrono::{DateTime, TimeDelta, Utc};
 use grafeo_common::types::Value;
 
@@ -21,7 +28,7 @@ use crate::consolidation::generalization::GeneralizationConfig;
 use crate::consolidation::triple_extraction::TripleExtractorLlm;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{AutobioCategory, AutobiographicalNode, KnowledgeNode, NodeStatus, labels};
+use crate::types::{KnowledgeNode, NodeStatus, labels};
 
 // ---------------------------------------------------------------------------
 // Configuration & Result (re-exported from acowork-memory)
@@ -58,8 +65,9 @@ impl GrafeoStore {
     /// 2. ~~Triple extraction from unconsolidated episodes~~ (DELETED in ADR-057 C7)
     /// 3. ~~Conflict resolution via LLM arbitration~~ (DELETED in ADR-057 C7)
     /// 4. Experience generalization to extract ProceduralNodes
-    /// 5. Compress History nodes if too many
-    /// 6. Auto-generate Relationship nodes for long-term users
+    /// 5. ~~Compress History nodes~~ (DELETED in ADR-068 — episodic retention)
+    /// 6. ~~Auto-generate Relationship nodes~~ (MOVED to EpisodicDistiller
+    ///    `promote_autobio_relationship`, ADR-068 M8)
     ///    (~~7. Limitation generation~~ DELETED — false positives, see review doc)
     ///
     /// Note: this method does not use `tracing` — the grafeo crate
@@ -98,9 +106,11 @@ impl GrafeoStore {
         // Episodic retention (Step 7) handles space reclamation via
         // mark_consolidated + cleanup; `history_compressed` stays at 0.
 
-        // Step 6: Auto-generate Relationship nodes for long-term users.
-        // Per design §3.3: collaboration > 30 days → Relationship node.
-        let _ = self.auto_generate_relationship_nodes()?;
+        // Step 6 (ADR-068 M8): Relationship auto-generation moved out of the
+        // offline path — it now runs inside the EpisodicDistiller
+        // (`promote_autobio_relationship`) so the Relationship category has a
+        // single producer with a full audit trail. The raw span stats the
+        // distiller needs are exposed via `GrafeoStore::collaboration_span`.
 
         // Step 7: Run episodic forgetting scan.
         // Per design §2: consolidated episodes > 7 days old are candidates for
@@ -221,69 +231,39 @@ impl GrafeoStore {
     // `consolidation::conflict_llm` module for unit tests, but no production
     // code calls them.
 
-    /// Auto-generate Relationship autobiographical nodes.
+    /// Collaboration span across all episodes (ADR-068 M8).
     ///
-    /// Per design §3.3: if the user has collaborated with the agent for
-    /// more than 30 days (based on earliest episodic record), create a
-    /// Relationship node. Idempotent — skips if one already exists.
-    fn auto_generate_relationship_nodes(&self) -> Result<usize> {
-        // Check idempotency — skip if Relationship nodes already exist.
-        let existing = self.find_autobiographical_by_category(AutobioCategory::Relationship)?;
-        if !existing.is_empty() {
-            return Ok(0);
-        }
-
-        // Find the earliest episodic node.
+    /// Returns the earliest stored episode timestamp and the total episode
+    /// count, or `None` when no episodes exist. This replaced the offline
+    /// `auto_generate_relationship_nodes` step: the 30-day Relationship
+    /// decision now lives in the EpisodicDistiller, which consumes these
+    /// stats through the `MemoryProvider::collaboration_span` trait method.
+    pub fn collaboration_span(&self) -> Result<Option<CollaborationSpan>> {
+        // Find the earliest episodic node + total count.
         let graph = self.db.graph_store();
         let node_ids = graph.nodes_by_label(labels::EPISODIC);
 
-        let mut earliest_time: Option<chrono::DateTime<Utc>> = None;
-        let mut episode_count: u32 = 0;
+        let mut earliest_time: Option<DateTime<Utc>> = None;
+        let mut episode_count: u64 = 0;
 
         for id in node_ids {
-            if let Some(n) = self.db.get_node(id) {
-                episode_count += 1;
-                if let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp)
-                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
-                        match earliest_time {
-                            None => earliest_time = Some(dt),
-                            Some(earliest) if dt < earliest => earliest_time = Some(dt),
-                            _ => {}
-                        }
-                    }
+            episode_count += 1;
+            if let Some(n) = self.db.get_node(id)
+                && let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp)
+                && let Some(dt) = DateTime::from_timestamp_micros(ts.as_micros())
+            {
+                match earliest_time {
+                    None => earliest_time = Some(dt),
+                    Some(earliest) if dt < earliest => earliest_time = Some(dt),
+                    _ => {}
+                }
             }
         }
 
-        let Some(earliest) = earliest_time else {
-            return Ok(0);
-        };
-
-        let span_days = (Utc::now() - earliest).num_days();
-        if span_days < 30 {
-            return Ok(0);
-        }
-
-        let key = "collaboration_span".to_string();
-        let value = format!("已合作 {} 天（{} 次对话记录）", span_days, episode_count);
-        let node = AutobiographicalNode {
-            id: None,
-            category: AutobioCategory::Relationship,
-            key,
-            value,
-            confidence: 0.9,
-            source_episode_id: None,
-            source_episode_ids: Vec::new(),
-            promotion_metadata: None,
-            embedding: None,
-            status: NodeStatus::Active,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            // Auto-derived from collaboration episodes — internal derivation.
-            source: "self_evaluation".to_string(),
-            metadata: std::collections::HashMap::new(),
-        };
-        self.store_autobiographical(&node)?;
-        Ok(1)
+        Ok(earliest_time.map(|earliest_episode_at| CollaborationSpan {
+            earliest_episode_at,
+            episode_count,
+        }))
     }
 
     // Auto-generate Limitation autobiographical nodes — DELETED.

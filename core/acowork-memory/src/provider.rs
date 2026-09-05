@@ -26,9 +26,9 @@ use crate::consolidation::{
 };
 use crate::quality::MemoryQualityConfig;
 use crate::types::{
-    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult,
-    StoreHealth, StoreStats,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
+    Episode, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult,
+    SearchResult, StoreHealth, StoreStats,
 };
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
@@ -85,6 +85,15 @@ pub trait MemoryProvider: Send + Sync {
         subtype: Option<KnowledgeSubType>,
         limit: usize,
     ) -> Result<Vec<(u64, Episode)>>;
+
+    /// Collaboration span across all episodes (ADR-068 M8).
+    ///
+    /// Returns the earliest stored episode timestamp and the total episode
+    /// count. `None` when the store has no episodes. Consumed by the
+    /// 30-day Relationship auto-generation in the EpisodicDistiller so the
+    /// Relationship category has exactly one producer (the distiller) with a
+    /// full audit trail.
+    fn collaboration_span(&self) -> Result<Option<CollaborationSpan>>;
 
     // ── Semantic layer ───────────────────────────────────────────────────
 

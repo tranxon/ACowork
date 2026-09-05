@@ -422,6 +422,19 @@ fn default_importance() -> f32 {
     0.5
 }
 
+/// Collaboration span statistics across all sessions (ADR-068 M8).
+///
+/// Returned by [`MemoryProvider::collaboration_span`] and consumed by the
+/// 30-day Relationship auto-generation in the EpisodicDistiller. `None`
+/// (from the provider method) means the store has no episodes yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollaborationSpan {
+    /// Timestamp of the earliest stored episode.
+    pub earliest_episode_at: chrono::DateTime<Utc>,
+    /// Total number of stored episodes (all sessions, all states).
+    pub episode_count: u64,
+}
+
 /// Semantic memory node — fact, preference, or relation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeNode {

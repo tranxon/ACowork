@@ -25,8 +25,8 @@ use std::collections::HashMap;
 
 use acowork_memory::consolidation::{
     AutobioAspect, AutobioCandidate, DistillerConfig, DistillerResult, EmbeddingFn,
-    ExtractedKind, ExtractedStructure, LlmMessage, PromotionDecision, PromotionEvaluation,
-    PromotionKind, PromotionMetadata, TripleExtractorLlm,
+    ExtractedKind, ExtractedStructure, HistoryMilestoneEvent, LlmMessage, PromotionDecision,
+    PromotionEvaluation, PromotionKind, PromotionMetadata, TripleExtractorLlm,
 };
 use acowork_memory::types::{
     AutobioCategory, AutobiographicalNode, Episode, KnowledgeNode, KnowledgeSubType, NodeStatus,
@@ -65,6 +65,178 @@ pub trait EpisodicDistiller: Send + Sync {
         embedding_fn: Option<&EmbeddingFn>,
         config: &DistillerConfig,
     ) -> Result<DistillerResult>;
+
+    /// 30-day collaboration-span Relationship promotion (ADR-068 M8).
+    ///
+    /// Relationship is a *runtime-observed* autobiographical category: it is
+    /// not bootstrapped from the manifest and not produced by the legacy
+    /// offline consolidation. This method is the single producer — it runs
+    /// rule-based (no LLM judge) against the provider's collaboration span:
+    ///
+    /// * no episodes yet, or span < 30 days → `Ok(None)` (not yet eligible);
+    /// * a Relationship node already exists → `Ok(None)` (idempotent);
+    /// * otherwise creates `AutobiographicalNode{category=Relationship,
+    ///   key="collaboration_span"}` and returns its audit evaluation.
+    ///
+    /// ADR-068 M8 moved the old `auto_generate_relationship_nodes` offline
+    /// step here so the category has one producer with a full audit trail.
+    async fn promote_autobio_relationship(
+        &self,
+        provider: &dyn MemoryProvider,
+    ) -> Result<Option<PromotionEvaluation>> {
+        let Some(span) = provider.collaboration_span().map_err(grafeo_err)? else {
+            return Ok(None);
+        };
+        let span_days = (Utc::now() - span.earliest_episode_at).num_days();
+        if span_days < RELATIONSHIP_MIN_SPAN_DAYS {
+            return Ok(None);
+        }
+        // Idempotency: Relationship nodes are created once per collaboration.
+        let existing = provider
+            .find_autobiographical_by_category(AutobioCategory::Relationship)
+            .map_err(grafeo_err)?;
+        if !existing.is_empty() {
+            return Ok(None);
+        }
+
+        let now = Utc::now();
+        let value = format!(
+            "collaborated {} days ({} episodes recorded)",
+            span_days, span.episode_count
+        );
+        let node = AutobiographicalNode {
+            id: None,
+            category: AutobioCategory::Relationship,
+            key: "collaboration_span".to_string(),
+            value,
+            confidence: 0.9,
+            source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: Some(PromotionMetadata {
+                promoted_at: now,
+                promoted_by: "episodic_distiller".to_string(),
+                evidence_episode_ids: Vec::new(),
+                evidence_span_days: span_days,
+                llm_judge_confidence: 1.0,
+                llm_judge_reasoning: format!(
+                    "collaboration span {span_days}d >= {}d (ADR-068 M8 rule)",
+                    RELATIONSHIP_MIN_SPAN_DAYS
+                ),
+            }),
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: now,
+            updated_at: now,
+            // Derived from collaboration episodes — internal derivation.
+            source: "self_evaluation".to_string(),
+            metadata: std::collections::HashMap::new(),
+        };
+        let node_id = provider.store_autobiographical(&node).map_err(grafeo_err)?;
+        Ok(Some(PromotionEvaluation {
+            source_episode_ids: Vec::new(),
+            promoted_kind: PromotionKind::AutobioRelationship,
+            promoted_node_id: Some(node_id),
+            llm_reasoning: "collaboration span rule (ADR-068 M8)".to_string(),
+            llm_confidence: 1.0,
+            evidence_score: evidence_score(
+                span.episode_count as usize,
+                span_days,
+                2,
+                Some(RELATIONSHIP_MIN_SPAN_DAYS),
+            ),
+            decision: PromotionDecision::Promoted,
+        }))
+    }
+    /// Promote one event-triggered History milestone (ADR-068 D8).
+    ///
+    /// History milestones are NOT episode-clustered — the event itself is the
+    /// evidence. This entry point consumes an in-process
+    /// [`HistoryMilestoneEvent`] (the future `consolidation_event` MQTT topic
+    /// is the transport; the distiller stays transport-agnostic).
+    ///
+    /// Idempotent: an existing `category=History` node with the same
+    /// `milestone_<slug>` key suppresses re-promotion. Returns `None` in that
+    /// case, otherwise creates the node and returns its audit evaluation.
+    async fn promote_event(
+        &self,
+        event: &HistoryMilestoneEvent,
+        provider: &dyn MemoryProvider,
+    ) -> Result<Option<PromotionEvaluation>> {
+        let slug = slugify_milestone_key(&event.key);
+        let node_key = format!("milestone_{slug}");
+        // Idempotency: one node per milestone.
+        if provider
+            .find_autobiographical_by_key(&node_key)
+            .map_err(grafeo_err)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+
+        let now = Utc::now();
+        let node = AutobiographicalNode {
+            id: None,
+            category: AutobioCategory::History,
+            key: node_key,
+            value: event.value.clone(),
+            confidence: event.confidence,
+            source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: Some(PromotionMetadata {
+                promoted_at: now,
+                promoted_by: "episodic_distiller".to_string(),
+                evidence_episode_ids: Vec::new(),
+                evidence_span_days: 0,
+                llm_judge_confidence: event.confidence,
+                llm_judge_reasoning: format!(
+                    "event-triggered History milestone '{}' occurred at {} (ADR-068 D8)",
+                    event.key,
+                    event.occurred_at.to_rfc3339()
+                ),
+            }),
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: now,
+            updated_at: now,
+            // External milestone assertion — not a user statement.
+            source: "important_event".to_string(),
+            metadata: std::collections::HashMap::new(),
+        };
+        let node_id = provider.store_autobiographical(&node).map_err(grafeo_err)?;
+        Ok(Some(PromotionEvaluation {
+            source_episode_ids: Vec::new(),
+            promoted_kind: PromotionKind::AutobioHistory,
+            promoted_node_id: Some(node_id),
+            llm_reasoning: format!("event-triggered milestone '{}'", event.key),
+            llm_confidence: event.confidence,
+            evidence_score: event.confidence,
+            decision: PromotionDecision::Promoted,
+        }))
+    }
+}
+
+/// Minimum collaboration span (days) before a Relationship node is promoted.
+/// Per design §3.3: collaboration > 30 days → Relationship node.
+const RELATIONSHIP_MIN_SPAN_DAYS: i64 = 30;
+
+/// Slugify a milestone key for the History node key (`milestone_<slug>`).
+fn slugify_milestone_key(key: &str) -> String {
+    let slug: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = slug.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "event".to_string()
+    } else {
+        trimmed
+    }
 }
 
 // ============================================================================
@@ -1133,7 +1305,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use acowork_memory::consolidation::LlmResponse;
-    use acowork_memory::types::{AutobioCategory, MemoryQuery, SearchResult};
+    use acowork_memory::types::{AutobioCategory, CollaborationSpan, MemoryQuery, SearchResult};
     use acowork_memory::{
         DecayConfig, DecayScanResult, GeneralizationConfig, GeneralizationResult,
         MemoryQualityConfig, OfflineConsolidationConfig, OfflineConsolidationResult,
@@ -1265,6 +1437,14 @@ mod tests {
                 .map(|(id, e)| (*id, e.clone()))
                 .collect())
         }
+        fn collaboration_span(&self) -> acowork_core::error::Result<Option<CollaborationSpan>> {
+            let eps = self.episodes.lock().unwrap();
+            let earliest = eps.iter().map(|(_, e)| e.timestamp).min();
+            Ok(earliest.map(|earliest_episode_at| CollaborationSpan {
+                earliest_episode_at,
+                episode_count: eps.len() as u64,
+            }))
+        }
         fn store_knowledge(&self, node: &KnowledgeNode) -> acowork_core::error::Result<u64> {
             let mut next = self.next_id.lock().unwrap();
             let id = *next;
@@ -1378,15 +1558,28 @@ mod tests {
         }
         fn find_autobiographical_by_key(
             &self,
-            _k: &str,
+            k: &str,
         ) -> acowork_core::error::Result<Option<AutobiographicalNode>> {
-            unreachable!()
+            Ok(self
+                .autobio_nodes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|n| n.key == k)
+                .cloned())
         }
         fn find_autobiographical_by_category(
             &self,
-            _c: AutobioCategory,
+            c: AutobioCategory,
         ) -> acowork_core::error::Result<Vec<AutobiographicalNode>> {
-            unreachable!()
+            Ok(self
+                .autobio_nodes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|n| n.category == c)
+                .cloned()
+                .collect())
         }
         fn update_autobiographical(&self, _n: &AutobiographicalNode) -> acowork_core::error::Result<()> {
             unreachable!()
@@ -1689,6 +1882,149 @@ mod tests {
             result.promotion_evaluations[0].decision,
             PromotionDecision::Deferred { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_m8_relationship_promoted_after_30_day_span() {
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        // Earliest episode 35 days ago -> collaboration span >= 30d.
+        provider.add_episode(mk_episode(
+            "sess-old",
+            "User said hello",
+            KnowledgeSubType::Fact,
+            now - chrono::Duration::days(35),
+        ));
+        provider.add_episode(mk_episode(
+            "sess-new",
+            "User lives in Shanghai",
+            KnowledgeSubType::Fact,
+            now,
+        ));
+
+        let distiller = DefaultEpisodicDistiller;
+        let eval = distiller
+            .promote_autobio_relationship(&provider)
+            .await
+            .expect("promote ok")
+            .expect("Relationship eligible after 30 days");
+
+        assert_eq!(eval.promoted_kind, PromotionKind::AutobioRelationship);
+        assert!(matches!(eval.decision, PromotionDecision::Promoted));
+        assert!(eval.promoted_node_id.is_some());
+        assert!(eval.evidence_score > 0.0);
+
+        let nodes = provider
+            .autobio_nodes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| n.category == AutobioCategory::Relationship)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].key, "collaboration_span");
+        assert_eq!(nodes[0].promotion_metadata.as_ref().unwrap().promoted_by, "episodic_distiller");
+
+        // Idempotent: a second call does not create a duplicate.
+        let again = distiller
+            .promote_autobio_relationship(&provider)
+            .await
+            .expect("second call ok");
+        assert!(again.is_none(), "Relationship promotion must be idempotent");
+    }
+
+    #[tokio::test]
+    async fn test_m8_relationship_not_eligible_before_30_days_or_without_episodes() {
+        // No episodes at all.
+        let provider = TestProvider::default();
+        let distiller = DefaultEpisodicDistiller;
+        let eval = distiller
+            .promote_autobio_relationship(&provider)
+            .await
+            .expect("no episodes -> Ok(None)");
+        assert!(eval.is_none());
+
+        // Span below 30 days.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        provider.add_episode(mk_episode(
+            "sess",
+            "User lives in Shanghai",
+            KnowledgeSubType::Fact,
+            now - chrono::Duration::days(10),
+        ));
+        let eval = distiller
+            .promote_autobio_relationship(&provider)
+            .await
+            .expect("short span -> Ok(None)");
+        assert!(eval.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_d8_history_promoted_from_event_without_episodes() {
+        use acowork_memory::consolidation::HistoryMilestoneEvent;
+
+        // ADR-068 D8 acceptance: "no episode input + hint -> History node".
+        let provider = TestProvider::default();
+        assert!(provider.episodes.lock().unwrap().is_empty());
+
+        let event = HistoryMilestoneEvent {
+            key: "first_deployment".to_string(),
+            value: "Deployed the agent to production for the first time".to_string(),
+            occurred_at: Utc::now() - chrono::Duration::days(3),
+            confidence: 0.98,
+        };
+        let distiller = DefaultEpisodicDistiller;
+        let eval = distiller
+            .promote_event(&event, &provider)
+            .await
+            .expect("promote_event ok")
+            .expect("milestone promoted");
+
+        assert_eq!(eval.promoted_kind, PromotionKind::AutobioHistory);
+        assert!(matches!(eval.decision, PromotionDecision::Promoted));
+        assert!(eval.promoted_node_id.is_some());
+
+        let nodes = provider.autobio_nodes.lock().unwrap().clone();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].category, AutobioCategory::History);
+        assert_eq!(nodes[0].key, "milestone_first_deployment");
+        assert_eq!(nodes[0].value, event.value);
+        assert_eq!(nodes[0].confidence, 0.98);
+        let meta = nodes[0].promotion_metadata.as_ref().unwrap();
+        assert_eq!(meta.promoted_by, "episodic_distiller");
+        assert_eq!(meta.llm_judge_confidence, 0.98);
+
+        // Idempotent: same milestone key is not promoted twice.
+        let again = distiller
+            .promote_event(&event, &provider)
+            .await
+            .expect("second call ok");
+        assert!(again.is_none());
+        assert_eq!(provider.autobio_nodes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_d8_history_milestone_key_slugified() {
+        use acowork_memory::consolidation::HistoryMilestoneEvent;
+
+        let provider = TestProvider::default();
+        let distiller = DefaultEpisodicDistiller;
+        let event = HistoryMilestoneEvent {
+            key: "First Deployment!!".to_string(),
+            value: "v1.0 released".to_string(),
+            occurred_at: Utc::now(),
+            confidence: 0.9,
+        };
+        let eval = distiller
+            .promote_event(&event, &provider)
+            .await
+            .expect("promote ok")
+            .expect("promoted");
+        assert!(eval.promoted_node_id.is_some());
+        let node = &provider.autobio_nodes.lock().unwrap()[0];
+        assert_eq!(node.key, "milestone_first_deployment");
     }
 
     #[tokio::test]

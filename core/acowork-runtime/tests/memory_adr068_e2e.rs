@@ -604,3 +604,110 @@ fn episode_schema_is_two_axis_clean() {
         Some("Fact")
     );
 }
+
+// ============================================================================
+// E1 — manifest bootstrap of Identity + Capability nodes
+// ============================================================================
+
+/// E1: after agent initialization the manifest-declared Identity and
+/// Capability nodes exist (ADR-068 M8 bootstrap scope). The bootstrap free
+/// function is the testable exit point for the startup path.
+#[tokio::test]
+async fn bootstrap_creates_identity_and_capability_nodes() {
+    let toml_str = r#"
+        agent_id = "com.example.bootstrap"
+        version = "1.0.0"
+        name = "Bootstrap Agent"
+        description = "An agent used to test manifest bootstrap"
+        author = "acowork"
+        runtime_version = "0.1.0"
+        display_name = "Bootstrap"
+        role = "tester"
+
+        [memory]
+        enabled = true
+
+        [capabilities.weather]
+        description = "Query weather forecasts"
+
+        [capabilities.search]
+        description = "Search the web"
+    "#;
+    let manifest = acowork_core::manifest::AgentManifest::from_toml(toml_str)
+        .expect("manifest parses");
+    let e2e = Adr068E2e::new();
+    let provider = e2e.provider();
+
+    let outcome =
+        acowork_runtime::agent::bootstrap_autobio::bootstrap_autobiographical_from_manifest(
+            &manifest,
+            provider.as_ref(),
+        );
+    assert_eq!(outcome.skipped_existing, false);
+    // agent_id + name + description + display_name + role
+    assert_eq!(outcome.identity_written, 5);
+    assert_eq!(outcome.capability_written, 2);
+
+    let identities = provider
+        .find_autobiographical_by_category(AutobioCategory::Identity)
+        .expect("identity lookup ok");
+    assert_eq!(identities.len(), 5);
+    let keys: Vec<&str> = identities.iter().map(|n| n.key.as_str()).collect();
+    for expected in ["agent_id", "name", "description", "display_name", "role"] {
+        assert!(keys.contains(&expected), "missing Identity key {expected}");
+    }
+
+    let capabilities = provider
+        .find_autobiographical_by_category(AutobioCategory::Capability)
+        .expect("capability lookup ok");
+    assert_eq!(capabilities.len(), 2);
+    let cap_keys: Vec<&str> = capabilities.iter().map(|n| n.key.as_str()).collect();
+    assert!(cap_keys.contains(&"weather"));
+    assert!(cap_keys.contains(&"search"));
+    assert_eq!(capabilities[0].source, "manifest");
+}
+
+/// E1 (idempotency): a second bootstrap over an already-bootstrapped store
+/// is a no-op and does not duplicate nodes.
+#[tokio::test]
+async fn bootstrap_is_idempotent() {
+    let toml_str = r#"
+        agent_id = "com.example.bootstrap2"
+        version = "1.0.0"
+        name = "Bootstrap Agent 2"
+        description = "Idempotency test"
+        author = "acowork"
+        runtime_version = "0.1.0"
+
+        [capabilities.weather]
+        description = "Query weather"
+    "#;
+    let manifest = acowork_core::manifest::AgentManifest::from_toml(toml_str)
+        .expect("manifest parses");
+    let e2e = Adr068E2e::new();
+    let provider = e2e.provider();
+
+    let first = acowork_runtime::agent::bootstrap_autobio::bootstrap_autobiographical_from_manifest(
+        &manifest,
+        provider.as_ref(),
+    );
+    assert_eq!(first.identity_written, 3); // agent_id, name, description
+    assert_eq!(first.capability_written, 1);
+
+    let second = acowork_runtime::agent::bootstrap_autobio::bootstrap_autobiographical_from_manifest(
+        &manifest,
+        provider.as_ref(),
+    );
+    assert!(second.skipped_existing, "second bootstrap must be skipped");
+    assert_eq!(second.identity_written, 0);
+    assert_eq!(second.capability_written, 0);
+
+    let identities = provider
+        .find_autobiographical_by_category(AutobioCategory::Identity)
+        .expect("lookup ok");
+    assert_eq!(identities.len(), 3, "no duplicate Identity nodes");
+    let capabilities = provider
+        .find_autobiographical_by_category(AutobioCategory::Capability)
+        .expect("lookup ok");
+    assert_eq!(capabilities.len(), 1, "no duplicate Capability nodes");
+}

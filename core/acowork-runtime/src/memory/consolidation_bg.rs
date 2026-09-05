@@ -353,6 +353,26 @@ async fn run_episodic_distiller_step(
                 tracing::warn!(error = %e, "EpisodicDistiller run failed (ADR-068)");
             }
         }
+
+        // ADR-068 M8: 30-day Relationship promotion. Relationship is a
+        // runtime-observed autobiographical category with a single producer
+        // (the distiller, rule-based) — the old offline
+        // `auto_generate_relationship_nodes` step was removed. Idempotent;
+        // returns None until the collaboration span reaches 30 days.
+        match distiller.promote_autobio_relationship(provider).await {
+            Ok(Some(eval)) => {
+                tracing::info!(
+                    kind = ?eval.promoted_kind,
+                    node_id = eval.promoted_node_id,
+                    span_days = ?eval.evidence_score,
+                    "Relationship node promoted (ADR-068 M8)"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Relationship promotion failed (ADR-068 M8)");
+            }
+        }
     }
 }
 

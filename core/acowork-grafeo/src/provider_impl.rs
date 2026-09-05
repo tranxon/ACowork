@@ -14,9 +14,9 @@ use acowork_memory::consolidation::{
 };
 use acowork_memory::provider::MemoryProvider;
 use acowork_memory::{
-    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    KnowledgeSubType, MemoryQualityConfig, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult,
-    SearchResult, StoreHealth, StoreStats,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
+    Episode, KnowledgeNode, KnowledgeSubType, MemoryQualityConfig, MemoryQuery, NodeStatus,
+    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
 use chrono::{DateTime, Utc};
 
@@ -294,6 +294,10 @@ impl MemoryProvider for GrafeoStore {
                 (id, grafeo_to_memory_episode(ep))
             })
             .collect())
+    }
+
+    fn collaboration_span(&self) -> AcoworkResult<Option<CollaborationSpan>> {
+        GrafeoStore::collaboration_span(self).map_err(err_to_acowork)
     }
 
     // ── Semantic layer ───────────────────────────────────────────────────
