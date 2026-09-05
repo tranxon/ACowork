@@ -38,6 +38,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod health;
+pub mod mcp;
 pub mod path;
 pub mod server;
 pub mod service;

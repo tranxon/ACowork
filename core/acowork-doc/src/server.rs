@@ -42,11 +42,11 @@ impl DocService {
     /// Build the axum router (REST + MCP merged, **without** `/health`).
     ///
     /// D0 skeleton: only the health route. D1 attaches the REST router
-    /// (`api::router::doc_router`); D3 will merge the MCP router.
+    /// (`api::router::doc_router`); D3 merges the MCP router (`POST /mcp`).
     pub fn router(&self) -> axum::Router {
         axum::Router::new()
             .merge(crate::api::router::doc_router((*self.state).clone()))
-        // D3: .merge(crate::mcp::mcp_router(self.state.clone()))
+            .merge(crate::mcp::mcp_router((*self.state).clone()))
     }
 
     /// Serve the full router on `bind` (REST + MCP + `/health`).
