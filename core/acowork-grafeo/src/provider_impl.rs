@@ -208,10 +208,10 @@ fn err_to_acowork(e: crate::error::GrafeoError) -> AcoworkError {
 impl MemoryProvider for GrafeoStore {
     // ── Episodic layer ───────────────────────────────────────────────────
 
-    fn store_episode(&self, episode: &Episode) -> AcoworkResult<()> {
+    fn store_episode(&self, episode: &Episode) -> AcoworkResult<u64> {
         let grafeo_ep = memory_to_grafeo_episode(episode);
         GrafeoStore::store_episode(self, &grafeo_ep)
-            .map(|_| ())
+            .map(|id| id.0)
             .map_err(err_to_acowork)
     }
 
@@ -298,24 +298,24 @@ impl MemoryProvider for GrafeoStore {
 
     // ── Semantic layer ───────────────────────────────────────────────────
 
-    fn store_knowledge(&self, node: &KnowledgeNode) -> AcoworkResult<()> {
+    fn store_knowledge(&self, node: &KnowledgeNode) -> AcoworkResult<u64> {
         let grafeo_node = memory_to_grafeo_knowledge(node);
         GrafeoStore::store_knowledge(self, &grafeo_node)
-            .map(|_| ())
+            .map(|id| id.0)
             .map_err(err_to_acowork)
     }
 
-    fn store_procedural(&self, node: &ProceduralNode) -> AcoworkResult<()> {
+    fn store_procedural(&self, node: &ProceduralNode) -> AcoworkResult<u64> {
         let grafeo_node = memory_to_grafeo_procedural(node);
         GrafeoStore::store_procedural(self, &grafeo_node)
-            .map(|_| ())
+            .map(|id| id.0)
             .map_err(err_to_acowork)
     }
 
-    fn store_autobiographical(&self, node: &AutobiographicalNode) -> AcoworkResult<()> {
+    fn store_autobiographical(&self, node: &AutobiographicalNode) -> AcoworkResult<u64> {
         let grafeo_node = memory_to_grafeo_autobiographical(node);
         GrafeoStore::store_autobiographical(self, &grafeo_node)
-            .map(|_| ())
+            .map(|id| id.0)
             .map_err(err_to_acowork)
     }
 

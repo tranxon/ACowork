@@ -63,7 +63,7 @@ struct InMemoryNode {
 /// Design ref: ADR-051 §4.4, §8.5
 pub struct InMemoryProvider {
     nodes: RwLock<HashMap<u64, InMemoryNode>>,
-    episodes: RwLock<Vec<Episode>>,
+    episodes: RwLock<Vec<(u64, Episode)>>,
     edges: RwLock<Vec<(u64, u64, String)>>,
     next_id: AtomicU64,
 }
@@ -87,7 +87,13 @@ impl InMemoryProvider {
     /// tool tests (ADR-068) to assert the LLM write path correctly produces
     /// tagged episodes without touching the node layer.
     pub fn all_episodes(&self) -> Result<Vec<Episode>> {
-        Ok(self.episodes.read().unwrap().clone())
+        Ok(self
+            .episodes
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(_, e)| e.clone())
+            .collect())
     }
 
     /// Cosine similarity between two vectors.
@@ -129,36 +135,46 @@ impl Default for InMemoryProvider {
 impl MemoryProvider for InMemoryProvider {
     // ── Episodic layer ──────────────────────────────────────────────────
 
-    fn store_episode(&self, episode: &Episode) -> Result<()> {
-        self.episodes.write().unwrap().push(episode.clone());
-        Ok(())
+    fn store_episode(&self, episode: &Episode) -> Result<u64> {
+        // Assign a real storage id up front so the value returned here matches
+        // the id that `get_episodes_by_subtype` / `search_episodes` surface
+        // (ADR-068 A4: write ids must round-trip for audit mapping).
+        let id = self.alloc_id();
+        self.episodes.write().unwrap().push((id, episode.clone()));
+        Ok(id)
     }
 
     fn search_episodes(&self, query: &MemoryQuery) -> Result<Vec<SearchResult>> {
         let episodes = self.episodes.read().unwrap();
         let results: Vec<SearchResult> = episodes
             .iter()
-            .filter(|e| {
+            .filter(|(_, e)| {
                 query.query_text.is_empty()
                     || e.content
                         .to_lowercase()
                         .contains(&query.query_text.to_lowercase())
             })
             .take(query.limit)
-            .map(|e| SearchResult {
+            .map(|(id, e)| SearchResult {
                 content: e.content.clone(),
                 label: "Episodic".to_string(),
                 score: 1.0,
                 source: ResultSource::DirectMatch,
                 context_tokens: e.content.len() / 4,
-                node_id: 0,
+                node_id: *id,
                 source_context: None,
             })
             .collect();
         Ok(results)
     }
 
-    fn mark_consolidated(&self, _ids: &[u64]) -> Result<()> {
+    fn mark_consolidated(&self, ids: &[u64]) -> Result<()> {
+        let mut episodes = self.episodes.write().unwrap();
+        for (id, ep) in episodes.iter_mut() {
+            if ids.contains(id) {
+                ep.consolidated = true;
+            }
+        }
         Ok(())
     }
 
@@ -170,10 +186,10 @@ impl MemoryProvider for InMemoryProvider {
         let episodes = self.episodes.read().unwrap();
         let filtered: Vec<Episode> = episodes
             .iter()
-            .filter(|e| session_id.is_none_or(|sid| e.session_id == sid))
+            .filter(|(_, e)| session_id.is_none_or(|sid| e.session_id == sid))
             .rev()
             .take(limit)
-            .cloned()
+            .map(|(_, e)| e.clone())
             .collect();
         Ok(filtered)
     }
@@ -186,14 +202,13 @@ impl MemoryProvider for InMemoryProvider {
         let episodes = self.episodes.read().unwrap();
         let mut unconsolidated: Vec<(u64, Episode)> = episodes
             .iter()
-            .enumerate()
             .filter(|(_, e)| {
                 !e.consolidated
                     && subtype
                         .as_ref()
                         .is_none_or(|st| e.knowledge_subtype == Some(st.clone()))
             })
-            .map(|(idx, e)| (idx as u64 + 1, e.clone()))
+            .map(|(id, e)| (*id, e.clone()))
             .collect();
         unconsolidated.sort_by_key(|(_, e)| e.timestamp);
         unconsolidated.truncate(limit);
@@ -202,7 +217,7 @@ impl MemoryProvider for InMemoryProvider {
 
     // ── Semantic layer ──────────────────────────────────────────────────
 
-    fn store_knowledge(&self, node: &KnowledgeNode) -> Result<()> {
+    fn store_knowledge(&self, node: &KnowledgeNode) -> Result<u64> {
         let id = self.alloc_id();
         let content = format!("{} {} {}", node.subject, node.predicate, node.object);
         self.nodes.write().unwrap().insert(
@@ -218,10 +233,10 @@ impl MemoryProvider for InMemoryProvider {
                 created_at: node.created_at,
             },
         );
-        Ok(())
+        Ok(id)
     }
 
-    fn store_procedural(&self, node: &ProceduralNode) -> Result<()> {
+    fn store_procedural(&self, node: &ProceduralNode) -> Result<u64> {
         let id = node.id.unwrap_or_else(|| self.alloc_id());
         let content = format!("{}: {}", node.trigger_condition, node.action_pattern);
         // Memory contract: Vec (empty = no vector); storage side is Option.
@@ -243,10 +258,10 @@ impl MemoryProvider for InMemoryProvider {
                 created_at: node.created_at,
             },
         );
-        Ok(())
+        Ok(id)
     }
 
-    fn store_autobiographical(&self, node: &AutobiographicalNode) -> Result<()> {
+    fn store_autobiographical(&self, node: &AutobiographicalNode) -> Result<u64> {
         let id = node.id.unwrap_or_else(|| self.alloc_id());
         let content = format!("{}: {}: {}", node.category.as_str(), node.key, node.value);
         self.nodes.write().unwrap().insert(
@@ -262,7 +277,7 @@ impl MemoryProvider for InMemoryProvider {
                 created_at: node.created_at,
             },
         );
-        Ok(())
+        Ok(id)
     }
 
     // ── Unified retrieval ───────────────────────────────────────────────

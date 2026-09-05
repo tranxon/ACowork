@@ -568,6 +568,9 @@ async fn promote_knowledge_cluster(
     let judge = judge_cluster(cluster, llm, config).await?;
 
     // Step 5: threshold gate + write + mark consolidated.
+    // `promoted_node_id` carries the real storage id of the created node so
+    // the audit trail (ADR-068 R-R3/R-R6) can be mapped back for rollback.
+    let mut promoted_node_id: Option<u64> = None;
     let decision = if judge.confidence < config.promotion_confidence_threshold {
         PromotionDecision::Skipped {
             reason: format!(
@@ -578,11 +581,11 @@ async fn promote_knowledge_cluster(
     } else {
         match judge.decision {
             JudgeDecision::Promote => {
-                if cluster.subtype == KnowledgeSubType::Procedure {
-                    write_procedural_node(cluster, &judge, embedding_fn, span_days, provider)?;
+                promoted_node_id = Some(if cluster.subtype == KnowledgeSubType::Procedure {
+                    write_procedural_node(cluster, &judge, embedding_fn, span_days, provider)?
                 } else {
-                    write_knowledge_node(cluster, &judge, embedding_fn, span_days, provider)?;
-                }
+                    write_knowledge_node(cluster, &judge, embedding_fn, span_days, provider)?
+                });
                 provider.mark_consolidated(&ids).map_err(grafeo_err)?;
                 PromotionDecision::Promoted
             }
@@ -598,7 +601,7 @@ async fn promote_knowledge_cluster(
     Ok(PromotionEvaluation {
         source_episode_ids: ids,
         promoted_kind: kind,
-        promoted_node_id: None,
+        promoted_node_id,
         llm_reasoning: judge.reasoning.clone(),
         llm_confidence: judge.confidence,
         evidence_score: evidence_score(cluster.members.len(), span_days, min_evidence, None),
@@ -659,6 +662,7 @@ async fn promote_autobio_cluster(
     let judge = judge_autobio_cluster(cluster, llm, config).await?;
 
     // Step 5: threshold gate + write + mark consolidated.
+    let mut promoted_node_id: Option<u64> = None;
     let decision = if judge.confidence < config.promotion_confidence_threshold {
         PromotionDecision::Skipped {
             reason: format!(
@@ -669,7 +673,13 @@ async fn promote_autobio_cluster(
     } else {
         match judge.decision {
             JudgeDecision::Promote => {
-                write_autobio_node(cluster, &judge, embedding_fn, span_days, provider)?;
+                promoted_node_id = Some(write_autobio_node(
+                    cluster,
+                    &judge,
+                    embedding_fn,
+                    span_days,
+                    provider,
+                )?);
                 provider.mark_consolidated(&ids).map_err(grafeo_err)?;
                 PromotionDecision::Promoted
             }
@@ -685,7 +695,7 @@ async fn promote_autobio_cluster(
     Ok(PromotionEvaluation {
         source_episode_ids: ids,
         promoted_kind: kind,
-        promoted_node_id: None,
+        promoted_node_id,
         llm_reasoning: judge.reasoning.clone(),
         llm_confidence: judge.confidence,
         evidence_score: evidence_score(
@@ -846,7 +856,7 @@ fn write_knowledge_node(
     embedding_fn: Option<&EmbeddingFn>,
     span_days: i64,
     provider: &dyn MemoryProvider,
-) -> Result<()> {
+) -> Result<u64> {
     let ids: Vec<u64> = cluster.members.iter().map(|m| m.episode_id).collect();
     let (subject, predicate, object) = representative_triple(cluster).unwrap_or_else(|| {
         (
@@ -878,8 +888,8 @@ fn write_knowledge_node(
         privacy: PrivacyLevel::Personal,
         importance: 0.6,
     };
-    provider.store_knowledge(&node).map_err(grafeo_err)?;
-    Ok(())
+    let id = provider.store_knowledge(&node).map_err(grafeo_err)?;
+    Ok(id)
 }
 
 fn write_procedural_node(
@@ -888,7 +898,7 @@ fn write_procedural_node(
     embedding_fn: Option<&EmbeddingFn>,
     span_days: i64,
     provider: &dyn MemoryProvider,
-) -> Result<()> {
+) -> Result<u64> {
     let ids: Vec<u64> = cluster.members.iter().map(|m| m.episode_id).collect();
     let (trigger, action) = cluster.members.iter().find_map(|m| match &m.extracted.kind {
         ExtractedKind::Procedure {
@@ -931,8 +941,8 @@ fn write_procedural_node(
         promotion_metadata: Some(promotion_metadata(&ids, span_days, judge)),
         metadata: HashMap::new(),
     };
-    provider.store_procedural(&node).map_err(grafeo_err)?;
-    Ok(())
+    let id = provider.store_procedural(&node).map_err(grafeo_err)?;
+    Ok(id)
 }
 
 fn write_autobio_node(
@@ -941,7 +951,7 @@ fn write_autobio_node(
     embedding_fn: Option<&EmbeddingFn>,
     span_days: i64,
     provider: &dyn MemoryProvider,
-) -> Result<()> {
+) -> Result<u64> {
     let ids: Vec<u64> = cluster.members.iter().map(|m| m.episode_id).collect();
     let category = match cluster.aspect {
         AutobioAspect::Limitation => AutobioCategory::Limitation,
@@ -977,8 +987,8 @@ fn write_autobio_node(
         source: "offline_consolidation".to_string(),
         metadata: HashMap::new(),
     };
-    provider.store_autobiographical(&node).map_err(grafeo_err)?;
-    Ok(())
+    let id = provider.store_autobiographical(&node).map_err(grafeo_err)?;
+    Ok(id)
 }
 
 fn promotion_metadata(
@@ -1217,8 +1227,11 @@ mod tests {
 
     #[async_trait]
     impl MemoryProvider for TestProvider {
-        fn store_episode(&self, _episode: &Episode) -> acowork_core::error::Result<()> {
-            Ok(())
+        fn store_episode(&self, _episode: &Episode) -> acowork_core::error::Result<u64> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            Ok(id)
         }
         fn search_episodes(&self, _q: &MemoryQuery) -> acowork_core::error::Result<Vec<SearchResult>> {
             Ok(vec![])
@@ -1252,17 +1265,36 @@ mod tests {
                 .map(|(id, e)| (*id, e.clone()))
                 .collect())
         }
-        fn store_knowledge(&self, node: &KnowledgeNode) -> acowork_core::error::Result<()> {
+        fn store_knowledge(&self, node: &KnowledgeNode) -> acowork_core::error::Result<u64> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            drop(next);
+            // NB: the acowork-memory KnowledgeNode carries no `id` field
+            // (unlike Procedural/Autobiographical) — the storage id lives
+            // only in the provider's return value.
             self.knowledge_nodes.lock().unwrap().push(node.clone());
-            Ok(())
+            Ok(id)
         }
-        fn store_procedural(&self, node: &ProceduralNode) -> acowork_core::error::Result<()> {
-            self.procedural_nodes.lock().unwrap().push(node.clone());
-            Ok(())
+        fn store_procedural(&self, node: &ProceduralNode) -> acowork_core::error::Result<u64> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            drop(next);
+            let mut stored = node.clone();
+            stored.id = Some(id);
+            self.procedural_nodes.lock().unwrap().push(stored);
+            Ok(id)
         }
-        fn store_autobiographical(&self, node: &AutobiographicalNode) -> acowork_core::error::Result<()> {
-            self.autobio_nodes.lock().unwrap().push(node.clone());
-            Ok(())
+        fn store_autobiographical(&self, node: &AutobiographicalNode) -> acowork_core::error::Result<u64> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            drop(next);
+            let mut stored = node.clone();
+            stored.id = Some(id);
+            self.autobio_nodes.lock().unwrap().push(stored);
+            Ok(id)
         }
         fn hybrid_search(&self, _q: &MemoryQuery) -> acowork_core::error::Result<Vec<SearchResult>> {
             Ok(vec![])
@@ -1501,6 +1533,9 @@ mod tests {
         assert_eq!(result.facts_promoted, 1);
         assert_eq!(result.episodes_marked_consolidated, 5);
         assert_eq!(provider.knowledge_nodes.lock().unwrap().len(), 1);
+        // A4: promoted audit carries a node id (rollback mapping).
+        assert_eq!(result.promotion_evaluations.len(), 1);
+        assert!(result.promotion_evaluations[0].promoted_node_id.is_some());
         // D4: source_episode_ids written with all N episodes
         let node = &provider.knowledge_nodes.lock().unwrap()[0];
         assert_eq!(node.source_episode_ids.len(), 5);
@@ -1690,6 +1725,9 @@ mod tests {
         assert_eq!(node.key, "verbose_response");
         assert_eq!(node.source_episode_ids.len(), 3);
         assert!(node.promotion_metadata.is_some());
+        // A4: audit id maps to the stored node id.
+        assert_eq!(result.promotion_evaluations.len(), 1);
+        assert_eq!(result.promotion_evaluations[0].promoted_node_id, node.id);
     }
 
     #[tokio::test]
@@ -1723,6 +1761,9 @@ mod tests {
         let node = &provider.procedural_nodes.lock().unwrap()[0];
         assert_eq!(node.source_episode_ids.len(), 5);
         assert_eq!(node.trigger_condition, "user asks for weather");
+        // A4: audit id maps to the stored node id.
+        assert_eq!(result.promotion_evaluations.len(), 1);
+        assert_eq!(result.promotion_evaluations[0].promoted_node_id, node.id);
     }
 
     #[tokio::test]

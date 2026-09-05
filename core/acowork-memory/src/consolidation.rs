@@ -547,8 +547,8 @@ pub struct PromotionEvaluation {
     pub source_episode_ids: Vec<u64>,
     /// Which semantic node kind this cluster targets.
     pub promoted_kind: PromotionKind,
-    /// Storage id of the created node (None when the provider does not
-    /// return ids from its store methods, or when not promoted).
+    /// Storage id of the created node (None when the cluster was not
+    /// promoted — Deferred/Skipped).
     pub promoted_node_id: Option<u64>,
     /// LLM judge's reasoning (full audit trail).
     pub llm_reasoning: String,

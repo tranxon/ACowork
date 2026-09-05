@@ -345,7 +345,7 @@ impl Tool for MemoryStoreTool {
                 };
 
                 match provider.store_episode(&episode) {
-                    Ok(()) => {
+                    Ok(_episode_id) => {
                         // ADR-062 M3.6: lightweight write-path distribution
                         // telemetry. One structured debug event per successful
                         // write carries the resolved confidence/importance and

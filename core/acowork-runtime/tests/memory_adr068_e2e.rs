@@ -344,6 +344,15 @@ async fn distiller_promotes_autobio_limitation_and_audits() {
     assert_eq!(meta.evidence_episode_ids.len(), 3);
     assert!(meta.llm_judge_confidence > 0.0);
 
+    // A4: the audit entry must map to the REAL storage id of the promoted
+    // node (rollback requires the mapping to exist in the data).
+    assert_eq!(
+        eval.promoted_node_id,
+        node.id.map(|n| n.0),
+        "promoted_node_id must equal the stored node id"
+    );
+    assert!(eval.promoted_node_id.is_some());
+
     // Episodes are consolidated — a second run must not re-promote them.
     let remaining = e2e
         .provider()
@@ -408,6 +417,14 @@ async fn distiller_promotes_fact_with_two_evidence_episodes() {
     assert_eq!(node.sub_type, KnowledgeSubType::Fact);
     assert_eq!(node.source_episode_ids.len(), 2);
     assert!(node.promotion_metadata.is_some());
+
+    // A4: the audit entry maps to the REAL storage id of the promoted node.
+    assert_eq!(
+        eval.promoted_node_id,
+        node.id.map(|n| n.0),
+        "promoted_node_id must equal the stored node id"
+    );
+    assert!(eval.promoted_node_id.is_some());
 }
 
 /// Step-2 failure handling: with no server-side LLM the run is a no-op —
