@@ -361,15 +361,15 @@ fn default_memory_enabled() -> bool {
 /// Per-agent EpisodicDistiller configuration from the `.agent` manifest
 /// `[memory.distiller]` section (ADR-068 M4/M7).
 ///
-/// Every field is optional. When the section is absent the distiller is
-/// DISABLED (off-by-default). When present, `enabled: true` turns the
-/// distiller on for this agent; the remaining fields override the matching
-/// `DistillerConfig` defaults.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Every field is optional. When the section is absent the distiller
+/// defaults to ON (M7) — it is the authoritative promotion path now that
+/// the LLM-side write path no longer creates nodes directly. Set
+/// `enabled: false` to opt out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManifestDistillerConfig {
-    /// Master switch for the EpisodicDistiller step (ADR-068 M4).
-    /// Default: false (off-by-default).
+    /// Master switch for the EpisodicDistiller step (ADR-068 M7).
+    /// Default: true (ON — distiller is the authoritative promotion path).
     pub enabled: bool,
     /// Max episodes scanned per distillation run (DistillerConfig.batch_size).
     pub batch_size: Option<usize>,
@@ -389,6 +389,24 @@ pub struct ManifestDistillerConfig {
     pub autobio_min_span_days: Option<i64>,
     /// Min LLM judge confidence for promotion.
     pub promotion_confidence_threshold: Option<f32>,
+}
+
+impl Default for ManifestDistillerConfig {
+    fn default() -> Self {
+        Self {
+            // ADR-068 M7: distiller is the authoritative promotion path.
+            enabled: true,
+            batch_size: None,
+            cluster_threshold: None,
+            fact_min_evidence: None,
+            preference_min_evidence: None,
+            relation_min_evidence: None,
+            procedure_min_evidence: None,
+            autobio_min_evidence: None,
+            autobio_min_span_days: None,
+            promotion_confidence_threshold: None,
+        }
+    }
 }
 
 /// Optional memory-quality overrides from the `.agent` manifest

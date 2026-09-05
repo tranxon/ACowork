@@ -540,10 +540,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_scheduler_config_distiller_off_by_default() {
-        // ADR-068 M4 acceptance: distiller_enabled defaults to false.
+    async fn test_scheduler_config_distiller_on_by_default() {
+        // ADR-068 M7: distiller_enabled defaults to true — the distiller
+        // is now the authoritative promotion path.
         let config = SchedulerConfig::default();
-        assert!(!config.distiller_enabled);
+        assert!(
+            config.distiller_enabled,
+            "M7 flipped the default to true: LLM write path no longer creates nodes directly"
+        );
         assert!(config.distiller_config.is_none());
     }
 
