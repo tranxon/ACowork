@@ -11,6 +11,7 @@ pub mod chat;
 pub mod config_api;
 pub mod cron_api;
 pub mod debug_mqtt;
+pub mod doc_proxy;
 pub mod embedding_api;
 pub mod fs_browse;
 pub mod global_resources_api;

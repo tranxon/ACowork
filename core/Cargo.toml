@@ -14,6 +14,7 @@ members = [
     "acowork-embed",
     "acowork-lsp-relay",
     "acowork-pm",
+    "acowork-doc",
 ]
 resolver = "2"
 
