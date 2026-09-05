@@ -540,13 +540,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_scheduler_config_distiller_on_by_default() {
-        // ADR-068 M7: distiller_enabled defaults to true — the distiller
-        // is now the authoritative promotion path.
+    async fn test_scheduler_config_distiller_off_by_default() {
+        // ADR-068 review revision: distiller_enabled defaults to false — the
+        // distiller is opt-in per agent (manifest `[memory.distiller].enabled`).
         let config = SchedulerConfig::default();
         assert!(
-            config.distiller_enabled,
-            "M7 flipped the default to true: LLM write path no longer creates nodes directly"
+            !config.distiller_enabled,
+            "Distiller is opt-in: the runtime gates it on the manifest \
+             `[memory.distiller].enabled = true`; default must stay OFF"
         );
         assert!(config.distiller_config.is_none());
     }

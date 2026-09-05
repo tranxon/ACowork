@@ -358,10 +358,13 @@ pub struct SchedulerConfig {
     /// Default: 1 (inherited from OfflineConsolidationConfig).
     pub min_pending_age_hours: u64,
     /// Enable the EpisodicDistiller step in the background consolidation
-    /// loop (ADR-068 M4). Default: true (M7 — distiller is the
-    /// authoritative promotion path; the LLM-side write path no
-    /// longer creates Knowledge / Procedural / Autobiographical
-    /// nodes directly).
+    /// loop (ADR-068 M4). Default: false (OFF — opt-in).
+    ///
+    /// ADR-068 review revision: the distiller used to default to ON (M7),
+    /// but the shipped decision is opt-in — the runtime resolves the real
+    /// switch from the per-agent manifest `[memory.distiller].enabled`
+    /// (`MemoryConfig::distiller_enabled`), defaulting to `false` when the
+    /// section is absent. `SchedulerConfig::default()` mirrors that: OFF.
     pub distiller_enabled: bool,
     /// Distiller parameters used when `distiller_enabled` is true.
     /// `None` = use [`DistillerConfig::default`] (ADR-068 §3.4.1 defaults).
@@ -375,7 +378,7 @@ impl Default for SchedulerConfig {
             accumulation_threshold: 50,
             batch_size: 50,
             min_pending_age_hours: 1,
-            distiller_enabled: true,
+            distiller_enabled: false,
             distiller_config: None,
         }
     }

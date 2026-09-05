@@ -1099,16 +1099,13 @@ impl AgentCore {
             let list = self.global_provider_list.read().unwrap();
             list.iter().flat_map(|p| p.models.iter()).next().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string())
         };
-        // ADR-068 M4/M7: resolve the distiller switch + config from the
-        // agent manifest `[memory.distiller]` section. Off-by-default: an
-        // absent section keeps the distiller disabled.
-        let distiller_enabled = self
-            .manifest
-            .memory
-            .distiller
-            .as_ref()
-            .map(|d| d.enabled)
-            .unwrap_or(false);
+        // ADR-068 M4/M7: resolve the distiller switch from the agent manifest
+        // `[memory.distiller]` section. Off-by-default (opt-in): an absent
+        // section, an empty section, or `enabled = false` all keep the
+        // distiller disabled; only explicit `enabled = true` turns it on.
+        // The decision lives in `MemoryConfig::distiller_enabled` so the
+        // manifest tests and the runtime share one source of truth.
+        let distiller_enabled = self.manifest.memory.distiller_enabled();
         let distiller_config = self.distiller_config();
         let scheduler_config = SchedulerConfig {
             distiller_enabled,

@@ -338,9 +338,27 @@ pub struct MemoryConfig {
     pub quality: Option<ManifestMemoryQuality>,
     /// EpisodicDistiller overrides (ADR-068 M4/M7), parsed from the
     /// `[memory.distiller]` manifest section. `None` = distiller disabled
-    /// (off-by-default) with [`DistillerConfig`] defaults.
+    /// with [`DistillerConfig`] defaults.
+    ///
+    /// ADR-068 review revision: the distiller is **opt-in**. It is disabled
+    /// unless the manifest explicitly sets `[memory.distiller].enabled = true`
+    /// (see [`MemoryConfig::distiller_enabled`]).
     #[serde(default)]
     pub distiller: Option<ManifestDistillerConfig>,
+}
+
+impl MemoryConfig {
+    /// Whether the EpisodicDistiller step is enabled for this agent
+    /// (ADR-068 M4/M7).
+    ///
+    /// Single source of truth for the switch: the distiller is **off by
+    /// default** (opt-in). It turns on only when the manifest contains a
+    /// `[memory.distiller]` section with `enabled = true`. An absent section,
+    /// an empty section, or an explicit `enabled = false` all resolve to
+    /// `false`.
+    pub fn distiller_enabled(&self) -> bool {
+        self.distiller.as_ref().map(|d| d.enabled).unwrap_or(false)
+    }
 }
 
 impl Default for MemoryConfig {
@@ -361,15 +379,15 @@ fn default_memory_enabled() -> bool {
 /// Per-agent EpisodicDistiller configuration from the `.agent` manifest
 /// `[memory.distiller]` section (ADR-068 M4/M7).
 ///
-/// Every field is optional. When the section is absent the distiller
-/// defaults to ON (M7) — it is the authoritative promotion path now that
-/// the LLM-side write path no longer creates nodes directly. Set
-/// `enabled: false` to opt out.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Every field is optional. The distiller is **off by default** (opt-in,
+/// ADR-068 review revision): an absent section, an empty section, or a
+/// section without an explicit `enabled` field all keep the distiller
+/// disabled. Set `enabled = true` to turn it on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManifestDistillerConfig {
     /// Master switch for the EpisodicDistiller step (ADR-068 M7).
-    /// Default: true (ON — distiller is the authoritative promotion path).
+    /// Default: false (OFF — opt-in; set `true` to enable).
     pub enabled: bool,
     /// Max episodes scanned per distillation run (DistillerConfig.batch_size).
     pub batch_size: Option<usize>,
@@ -389,24 +407,6 @@ pub struct ManifestDistillerConfig {
     pub autobio_min_span_days: Option<i64>,
     /// Min LLM judge confidence for promotion.
     pub promotion_confidence_threshold: Option<f32>,
-}
-
-impl Default for ManifestDistillerConfig {
-    fn default() -> Self {
-        Self {
-            // ADR-068 M7: distiller is the authoritative promotion path.
-            enabled: true,
-            batch_size: None,
-            cluster_threshold: None,
-            fact_min_evidence: None,
-            preference_min_evidence: None,
-            relation_min_evidence: None,
-            procedure_min_evidence: None,
-            autobio_min_evidence: None,
-            autobio_min_span_days: None,
-            promotion_confidence_threshold: None,
-        }
-    }
 }
 
 /// Optional memory-quality overrides from the `.agent` manifest
@@ -910,5 +910,67 @@ mod tests {
         let manifest = AgentManifest::from_toml(toml_str).unwrap();
         assert_eq!(manifest.builtin_avatar.as_deref(), Some("icon-05"));
         assert_eq!(manifest.builtin_avatar(), Some("icon-05"));
+    }
+
+    // ── ADR-068 M7 distiller switch: off by default (opt-in) ──────────────
+    // The four manifest shapes must resolve through the SAME single source of
+    // truth (`MemoryConfig::distiller_enabled`). Regression test for the
+    // three-state split that existed when `#[serde(default)]` (empty section
+    // → `ManifestDistillerConfig::default()`) disagreed with the
+    // section-absent path (`Option::None` → `unwrap_or(false)` in the
+    // runtime). All four shapes now resolve to OFF unless `enabled = true`.
+
+    fn distiller_manifest(memory_section: &str) -> AgentManifest {
+        let toml_str = format!(
+            r#"
+                agent_id = "com.example.distiller"
+                version = "1.0.0"
+                name = "Distiller"
+                description = "Test"
+                author = "test"
+                runtime_version = "0.1.0"
+
+                [memory]
+                enabled = true
+                {memory_section}
+            "#
+        );
+        AgentManifest::from_toml(&toml_str).unwrap()
+    }
+
+    #[test]
+    fn test_distiller_absent_section_is_off() {
+        let manifest = distiller_manifest("");
+        assert!(manifest.memory.distiller.is_none());
+        assert!(!manifest.memory.distiller_enabled());
+    }
+
+    #[test]
+    fn test_distiller_empty_section_is_off() {
+        // Empty `[memory.distiller]` section: serde fills missing fields from
+        // `ManifestDistillerConfig::default()` where `enabled` is now false.
+        let manifest = distiller_manifest("[memory.distiller]");
+        assert!(manifest.memory.distiller.is_some());
+        assert!(!manifest.memory.distiller_enabled());
+    }
+
+    #[test]
+    fn test_distiller_section_without_enabled_field_is_off() {
+        // Section present but `enabled` omitted — same resolution as empty.
+        let manifest = distiller_manifest("[memory.distiller]\nbatch_size = 50");
+        assert!(manifest.memory.distiller.is_some());
+        assert!(!manifest.memory.distiller_enabled());
+    }
+
+    #[test]
+    fn test_distiller_explicit_false_is_off() {
+        let manifest = distiller_manifest("[memory.distiller]\nenabled = false");
+        assert!(!manifest.memory.distiller_enabled());
+    }
+
+    #[test]
+    fn test_distiller_explicit_true_is_on() {
+        let manifest = distiller_manifest("[memory.distiller]\nenabled = true");
+        assert!(manifest.memory.distiller_enabled());
     }
 }

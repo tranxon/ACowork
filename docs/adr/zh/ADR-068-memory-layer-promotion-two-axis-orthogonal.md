@@ -727,7 +727,7 @@ pub struct PromotionMetadata {
 | **M4** | `EpisodicDistiller` 挂入 `ConsolidationBgTask`(可配置开关,默认关闭) | 离线运行产生 DistillerResult,审计日志完整 | ✅(开关关即不跑) |
 | **M5** | `memory_store` 工具 schema 重写(移除 autobiographical + 移除 procedure 直写,全转 Episodic) | 工具 e2e 测试覆盖 4 类(category 枚举正确性,字段校验) | ⚠️(破坏性变更,需版本号) |
 | **M6** | `process_memory_store`/`process_knowledge`/`process_procedure`/`process_autobiographical` 删除 + `compress_history_nodes` 删除 + `memory_store` 单测清理 | cargo test 全绿,clippy 0 警告 | ⚠️(API 移除,不可回滚但 git revert 可) |
-| **M7** | `EpisodicDistiller` 默认开启(经 per-agent manifest `[memory.distiller].enabled = true`),`generalization` 降级为 fallback | e2e:跑 100 个 episode → 沉淀层节点出现 + 审计完整 | ✅(开关关) |
+| **M7** | `EpisodicDistiller` 默认关闭(**opt-in**:per-agent manifest `[memory.distiller].enabled = true` 显式开启;评审修订——原"默认开启"因全量 agent 后台 LLM 成本与行为变更被否),`generalization` 降级为 fallback | e2e:跑 100 个 episode → 沉淀层节点出现 + 审计完整 | ✅(开关关即不跑) |
 | **M8** | `bootstrap_autobiographical_from_manifest` 仍保留 Identity/Capability,Relationship 自动生成改为调 `EpisodicDistiller.promote_autobio_relationship()` | agent 启动后 Identity 节点存在;30 天后 Relationship 节点出现 | ✅ |
 
 ### 4.2 数据迁移
@@ -749,7 +749,7 @@ M5-M6 之间允许**双写期**:旧 `process_memory_store` 路径仍然可用,�
 | W1 | `memory_store` 工具 schema 中 `category` enum | `[fact, preference, relation, procedure]`(无 autobiographical) | `MemoryStoreTool::spec_value()` JSON schema 反射 |
 | W2 | `memory_store` 工具 schema 中 `aspect` 字段 | **不存在** | 同上 |
 | W3 | `process_memory_store`/`process_knowledge`/`process_procedure`/`process_autobiographical` | 全代码搜索为 0 | `grep -rn` |
-| W4 | `EpisodicDistiller` 默认开关 | per-agent manifest `[memory.distiller].enabled` 默认 `true` | 配置快照测试 |
+| W4 | `EpisodicDistiller` 默认开关 | 默认 `false`(**opt-in**);仅当 manifest 显式 `[memory.distiller].enabled = true` 时开启(四态:段缺省 / 空段 / `enabled=false` / `enabled=true`,统一由 `MemoryConfig::distiller_enabled()` 裁决) | 配置快照测试 |
 
 ### 5.2 蒸馏质量验收
 
