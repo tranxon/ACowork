@@ -615,8 +615,6 @@ pub struct DistillerConfig {
     pub autobio_min_span_days: i64,
     /// Min LLM judge confidence for promotion. Default: 0.85.
     pub promotion_confidence_threshold: f32,
-    /// LLM temperature for promotion decisions. Default: 0.2.
-    pub llm_temperature: f32,
 }
 
 impl Default for DistillerConfig {
@@ -632,7 +630,6 @@ impl Default for DistillerConfig {
             autobio_min_evidence: 3,
             autobio_min_span_days: 14,
             promotion_confidence_threshold: 0.85,
-            llm_temperature: 0.2,
         }
     }
 }

@@ -312,7 +312,6 @@ fn manifest_distiller_to_config(
         promotion_confidence_threshold: manifest
             .promotion_confidence_threshold
             .unwrap_or(base.promotion_confidence_threshold),
-        llm_temperature: base.llm_temperature,
         max_cluster_size: base.max_cluster_size,
     })
 }

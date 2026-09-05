@@ -597,6 +597,10 @@ fn cluster_candidates(
                 if cluster.aspect != cand.aspect {
                     continue;
                 }
+                // Size cap: a full bucket refuses new members (review A6).
+                if cluster.members.len() >= config.max_cluster_size {
+                    continue;
+                }
                 let similar = match (&cluster.key_embedding, &hint_embedding) {
                     (Some(a), Some(b)) => cosine_similarity(a, b) >= config.cluster_threshold,
                     _ => cluster.key_hint == cand.key_hint,
@@ -645,9 +649,15 @@ fn cluster_candidates(
         };
 
         // Single-linkage merge against existing clusters of the same subtype.
+        // The cluster is size-capped (max_cluster_size OOM guard, review A6):
+        // once full, further similar members are not merged — they start
+        // their own bounded bucket instead of growing one cluster unbounded.
         let mut merged = false;
         for cluster in knowledge.iter_mut() {
             if cluster.subtype != subtype {
+                continue;
+            }
+            if cluster.members.len() >= config.max_cluster_size {
                 continue;
             }
             let threshold = config.cluster_threshold;
@@ -1867,6 +1877,60 @@ mod tests {
         ));
         // Episodes remain unconsolidated for retry.
         assert!(!provider.episodes.lock().unwrap()[0].1.consolidated);
+    }
+
+    #[tokio::test]
+    async fn test_a6_max_cluster_size_is_an_enforced_cap() {
+        // Review A6 / P2-3: max_cluster_size must cap cluster growth. With
+        // 3 same-key episodes and max_cluster_size = 2, only 2 members merge;
+        // the third starts its own 1-member bucket (deferred) instead of
+        // growing one cluster without bound.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..3 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "User lives in Shanghai",
+                KnowledgeSubType::Fact,
+                now - chrono::Duration::days(i as i64),
+            )));
+        }
+        let llm = MockLlm::new(vec![
+            extraction_response(
+                &ids.iter()
+                    .map(|id| (*id, "triple", "lives_in", "Shanghai"))
+                    .collect::<Vec<_>>(),
+            ),
+            judge_response("promote", 0.95, "user lives in shanghai"),
+        ]);
+        let config = DistillerConfig {
+            max_cluster_size: 2,
+            ..DistillerConfig::default()
+        };
+        let distiller = DefaultEpisodicDistiller;
+        let result = distiller
+            .run(&provider, Some(&llm), None, &config)
+            .await
+            .unwrap();
+        assert_eq!(result.facts_promoted, 1);
+        let nodes = provider.knowledge_nodes.lock().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0]
+                .promotion_metadata
+                .as_ref()
+                .unwrap()
+                .evidence_episode_ids
+                .len(),
+            2,
+            "cluster is capped at max_cluster_size"
+        );
+        // The third episode is not swept into the promoted cluster; it stays
+        // unconsolidated in its own 1-member bucket.
+        let eps = provider.episodes.lock().unwrap();
+        let unconsolidated = eps.iter().filter(|(_, e)| !e.consolidated).count();
+        assert_eq!(unconsolidated, 1);
     }
 
     #[tokio::test]
