@@ -83,6 +83,13 @@ impl InMemoryProvider {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Snapshot the episodic store. Test-only helper — used by memory_store
+    /// tool tests (ADR-068) to assert the LLM write path correctly produces
+    /// tagged episodes without touching the node layer.
+    pub fn all_episodes(&self) -> Result<Vec<Episode>> {
+        Ok(self.episodes.read().unwrap().clone())
+    }
+
     /// Cosine similarity between two vectors.
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         if a.is_empty() || b.is_empty() || a.len() != b.len() {
