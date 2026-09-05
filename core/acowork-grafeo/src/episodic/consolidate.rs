@@ -16,6 +16,50 @@ impl GrafeoStore {
         Ok(())
     }
 
+    /// Record a sticky "skip" tombstone on episodes whose cluster the LLM
+    /// judge declined to promote (ADR-068 Step 4 `skip`).
+    ///
+    /// The marker is merged into the episode's `metadata` property under the
+    /// `distiller_skip` key as `{cluster_key, reason, at}` (same serialization
+    /// as [`crate::types::Episode::metadata`]). The episode stays
+    /// unconsolidated and retrievable, but
+    /// [`get_unconsolidated_episodes_by_subtype`](Self::get_unconsolidated_episodes_by_subtype)
+    /// filters marked episodes out so the distiller never re-extracts or
+    /// re-judges the cluster (no infinite retry, no repeated LLM cost).
+    pub fn mark_episodes_skipped(
+        &self,
+        ids: &[NodeId],
+        cluster_key: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let marker = serde_json::json!({
+            "cluster_key": cluster_key,
+            "reason": reason,
+            "at": chrono::Utc::now().to_rfc3339(),
+        });
+        for id in ids {
+            let mut metadata: std::collections::HashMap<String, serde_json::Value> =
+                match self.db.get_node(*id) {
+                    Some(node) => node
+                        .get_property("metadata")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default(),
+                    None => std::collections::HashMap::new(),
+                };
+            metadata.insert(
+                "distiller_skip".to_string(),
+                marker.clone(),
+            );
+            let serialized =
+                serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+            self.db
+                .set_node_property(*id, "metadata", Value::from(serialized));
+        }
+        Ok(())
+    }
+
     /// Retrieve unconsolidated episodes, ordered by timestamp ascending.
     ///
     /// These are candidates for the offline consolidation pipeline.
@@ -77,6 +121,7 @@ impl GrafeoStore {
         // Filter unconsolidated + subtype, then sort by timestamp ascending.
         episodes.retain(|ep| {
             !ep.consolidated
+                && !ep.metadata.contains_key("distiller_skip")
                 && subtype
                     .as_ref()
                     .is_none_or(|st| ep.knowledge_subtype == Some(st.clone()))
@@ -160,6 +205,48 @@ mod tests {
 
         let unconsolidated = store.get_unconsolidated_episodes(10).unwrap();
         assert!(unconsolidated.is_empty());
+    }
+
+    #[test]
+    fn test_mark_episodes_skipped_persists_and_excludes_from_scan() {
+        // ADR-068 A3 / review P2-1 (storage layer): the skip tombstone is
+        // merged into the episode metadata property and the distiller scan
+        // (get_unconsolidated_episodes_by_subtype) excludes marked episodes.
+        let store = test_store();
+        let base = test_dt();
+
+        let mut ep1 = make_episode("s1", "skip me", base);
+        ep1.knowledge_subtype = Some(crate::types::KnowledgeSubType::Fact);
+        let id1 = store.store_episode(&ep1).unwrap();
+
+        let mut ep2 = make_episode("s1", "defer me", base + TimeDelta::minutes(1));
+        ep2.knowledge_subtype = Some(crate::types::KnowledgeSubType::Fact);
+        store.store_episode(&ep2).unwrap();
+
+        store
+            .mark_episodes_skipped(&[id1], "user lives in Shanghai", "contradictory")
+            .unwrap();
+
+        // The tombstoned episode is excluded; the untouched one still appears.
+        let remaining = store
+            .get_unconsolidated_episodes_by_subtype(None, 10)
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].content, "defer me");
+        assert!(!remaining[0].metadata.contains_key("distiller_skip"));
+
+        // The marker survives the property round-trip on the marked episode.
+        let node = store.db.get_node(id1).unwrap();
+        let props = node.properties_as_btree();
+        let meta_str = props
+            .get("metadata")
+            .expect("metadata property present")
+            .as_str()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(meta_str).unwrap();
+        assert_eq!(parsed["distiller_skip"]["cluster_key"], "user lives in Shanghai");
+        assert_eq!(parsed["distiller_skip"]["reason"], "contradictory");
+        assert!(parsed["distiller_skip"]["at"].is_string());
     }
 
     #[test]

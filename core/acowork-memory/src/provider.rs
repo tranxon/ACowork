@@ -61,6 +61,21 @@ pub trait MemoryProvider: Send + Sync {
     /// Mark episodes as consolidated.
     fn mark_consolidated(&self, ids: &[u64]) -> Result<()>;
 
+    /// Record a permanent "skip" tombstone on episodes whose cluster the LLM
+    /// judge declined to promote (ADR-068 Step 4 `skip`).
+    ///
+    /// Skipped episodes stay in the episodic layer (their content remains
+    /// retrievable) but are excluded from all future distiller runs — the
+    /// judge verdict is sticky, which prevents the same cluster from being
+    /// re-extracted and re-judged on every consolidation cycle (infinite
+    /// retry + repeated LLM cost). `defer` verdicts must NOT use this method:
+    /// they keep the retry semantics (the episode may become promotable once
+    /// more evidence accumulates).
+    ///
+    /// The marker is written under [`crate::types::DISTILLER_SKIP_METADATA_KEY`]
+    /// in the episode metadata as `{cluster_key, reason, at}`.
+    fn mark_episodes_skipped(&self, ids: &[u64], cluster_key: &str, reason: &str) -> Result<()>;
+
     /// Cleanup consolidated episodes older than the given duration.
     fn cleanup_episodes(&self, older_than: Duration) -> Result<u64>;
 
@@ -77,6 +92,11 @@ pub trait MemoryProvider: Send + Sync {
     /// (`u64`) alongside the [`Episode`] — the id is required by callers to
     /// mark episodes consolidated after promotion and to record
     /// `source_episode_ids` on promoted nodes.
+    ///
+    /// Episodes carrying a distiller "skip" tombstone
+    /// ([`DISTILLER_SKIP_METADATA_KEY`](crate::types::DISTILLER_SKIP_METADATA_KEY))
+    /// are excluded here — the judge verdict is sticky (ADR-068 Step 4) and a
+    /// skipped episode must never be re-extracted or re-judged.
     ///
     /// Ordered by timestamp ascending (oldest first) so evidence accumulates
     /// across runs in a stable order.

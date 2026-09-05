@@ -178,6 +178,22 @@ impl MemoryProvider for InMemoryProvider {
         Ok(())
     }
 
+    fn mark_episodes_skipped(&self, ids: &[u64], cluster_key: &str, reason: &str) -> Result<()> {
+        let marker = serde_json::json!({
+            "cluster_key": cluster_key,
+            "reason": reason,
+            "at": chrono::Utc::now().to_rfc3339(),
+        });
+        let mut episodes = self.episodes.write().unwrap();
+        for (id, ep) in episodes.iter_mut() {
+            if ids.contains(id) {
+                ep.metadata
+                    .insert("distiller_skip".to_string(), marker.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn cleanup_episodes(&self, _older_than: Duration) -> Result<u64> {
         Ok(0)
     }
@@ -204,6 +220,7 @@ impl MemoryProvider for InMemoryProvider {
             .iter()
             .filter(|(_, e)| {
                 !e.consolidated
+                    && !e.metadata.contains_key("distiller_skip")
                     && subtype
                         .as_ref()
                         .is_none_or(|st| e.knowledge_subtype == Some(st.clone()))

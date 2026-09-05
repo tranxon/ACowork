@@ -24,6 +24,13 @@ pub use acowork_core::memory::traits::{MemoryNode, PrivacyLevel};
 /// to decouple Runtime from the grafeo crate.
 pub const DEFAULT_EMBEDDING_DIM: usize = 384;
 
+/// Episode metadata key holding the sticky distiller "skip" tombstone
+/// (ADR-068 Step 4). Present on episodes whose cluster the LLM judge
+/// declined to promote; the value is a JSON object
+/// `{cluster_key, reason, at}`. The EpisodicDistiller excludes episodes
+/// carrying this key from every future run.
+pub const DISTILLER_SKIP_METADATA_KEY: &str = "distiller_skip";
+
 // ============================================================================
 // Query Types
 // ============================================================================

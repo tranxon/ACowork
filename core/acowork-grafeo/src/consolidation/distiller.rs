@@ -770,6 +770,16 @@ async fn promote_knowledge_cluster(
         }
     };
 
+    // ADR-068 Step 4: a `skip` verdict is sticky. Record the tombstone so
+    // future runs exclude these episodes (provider.get_episodes_by_subtype
+    // filters them) — no infinite re-extraction / re-judging of the same
+    // cluster. `defer` keeps retry semantics and is NOT marked.
+    if let PromotionDecision::Skipped { reason } = &decision {
+        provider
+            .mark_episodes_skipped(&ids, &cluster.key_string(), reason)
+            .map_err(grafeo_err)?;
+    }
+
     Ok(PromotionEvaluation {
         source_episode_ids: ids,
         promoted_kind: kind,
@@ -863,6 +873,14 @@ async fn promote_autobio_cluster(
             },
         }
     };
+
+    // Sticky `skip` tombstone (ADR-068 Step 4) — see promote_knowledge_cluster.
+    if let PromotionDecision::Skipped { reason } = &decision {
+        let cluster_key = format!("{:?}/{}", cluster.aspect, cluster.key_hint);
+        provider
+            .mark_episodes_skipped(&ids, &cluster_key, reason)
+            .map_err(grafeo_err)?;
+    }
 
     Ok(PromotionEvaluation {
         source_episode_ids: ids,
@@ -1312,6 +1330,7 @@ mod tests {
         PurgeResult, SchedulerConfig, StoreHealth, StoreStats,
     };
     use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     // ========================================================================
@@ -1347,6 +1366,33 @@ mod tests {
                 content: resp,
                 usage_tokens: None,
             })
+        }
+    }
+
+    /// A fake LLM that counts every chat call (extraction AND judge), so a
+    /// test can assert that a second distiller run performs no LLM work.
+    struct CountingLlm {
+        inner: MockLlm,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingLlm {
+        fn new(responses: Vec<String>) -> Self {
+            Self {
+                inner: MockLlm::new(responses),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TripleExtractorLlm for CountingLlm {
+        async fn chat(
+            &self,
+            messages: Vec<LlmMessage>,
+        ) -> std::result::Result<LlmResponse, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.chat(messages).await
         }
     }
 
@@ -1417,6 +1463,28 @@ mod tests {
             }
             Ok(())
         }
+        fn mark_episodes_skipped(
+            &self,
+            ids: &[u64],
+            cluster_key: &str,
+            reason: &str,
+        ) -> acowork_core::error::Result<()> {
+            let marker = serde_json::json!({
+                "cluster_key": cluster_key,
+                "reason": reason,
+                "at": chrono::Utc::now().to_rfc3339(),
+            });
+            let mut eps = self.episodes.lock().unwrap();
+            for (id, ep) in eps.iter_mut() {
+                if ids.contains(id) {
+                    ep.metadata.insert(
+                        "distiller_skip".to_string(),
+                        marker.clone(),
+                    );
+                }
+            }
+            Ok(())
+        }
         fn cleanup_episodes(&self, _o: Duration) -> acowork_core::error::Result<u64> {
             Ok(0)
         }
@@ -1433,7 +1501,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(_, e)| !e.consolidated)
+                .filter(|(_, e)| !e.consolidated && !e.metadata.contains_key("distiller_skip"))
                 .map(|(id, e)| (*id, e.clone()))
                 .collect())
         }
@@ -1813,6 +1881,127 @@ mod tests {
             PromotionDecision::Skipped { .. }
         ));
         assert_eq!(provider.knowledge_nodes.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_a3_skip_verdict_is_sticky_no_llm_on_second_run() {
+        // ADR-068 A3 (review P2-1): a judge `skip` writes a sticky tombstone
+        // into the episodes' metadata. The next run excludes those episodes,
+        // so no LLM call is made — no infinite retry, no repeated judge cost.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..3 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "User prefers concise replies",
+                KnowledgeSubType::Preference,
+                now - chrono::Duration::days(i as i64),
+            )));
+        }
+        let extract = extraction_response(
+            &ids.iter()
+                .map(|id| (*id, "triple", "prefers", "concise_replies"))
+                .collect::<Vec<_>>(),
+        );
+
+        // Run 1: judge returns "skip".
+        let llm = CountingLlm::new(vec![
+            extract.clone(),
+            judge_response("skip", 0.95, "ephemeral"),
+        ]);
+        let distiller = DefaultEpisodicDistiller;
+        let result = distiller
+            .run(&provider, Some(&llm), None, &default_config())
+            .await
+            .unwrap();
+        assert!(matches!(
+            result.promotion_evaluations[0].decision,
+            PromotionDecision::Skipped { .. }
+        ));
+        // Episodes remain unconsolidated (content stays retrievable) but are
+        // tombstoned so the next run skips them.
+        {
+            let eps = provider.episodes.lock().unwrap();
+            assert!(eps.iter().all(|(_, e)| !e.consolidated));
+            assert!(
+                eps.iter()
+                    .all(|(_, e)| e.metadata.contains_key("distiller_skip")),
+                "skip verdict must write the distiller_skip tombstone"
+            );
+        }
+        let calls_after_first = llm.calls.load(Ordering::SeqCst);
+        assert_eq!(calls_after_first, 2, "run 1 = 1 extraction + 1 judge");
+
+        // Run 2 over the same provider: the skipped episodes are excluded, so
+        // the LLM is never called again (empty queue would panic on pop).
+        let result2 = distiller
+            .run(&provider, Some(&llm), None, &default_config())
+            .await
+            .unwrap();
+        assert_eq!(result2.episodes_scanned, 0);
+        assert_eq!(result2.promotion_evaluations.len(), 0);
+        assert_eq!(
+            llm.calls.load(Ordering::SeqCst),
+            calls_after_first,
+            "no LLM calls on the second run"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a3_defer_verdict_still_retries() {
+        // A `defer` verdict must NOT be tombstoned — the episode keeps retry
+        // semantics (more evidence may arrive on a future run).
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..2 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "User lives in Shanghai",
+                KnowledgeSubType::Fact,
+                now - chrono::Duration::days(i as i64),
+            )));
+        }
+        let extract = extraction_response(
+            &ids.iter()
+                .map(|id| (*id, "triple", "lives_in", "Shanghai"))
+                .collect::<Vec<_>>(),
+        );
+        let llm = CountingLlm::new(vec![
+            extract.clone(),
+            judge_response("defer", 0.9, "needs more evidence"),
+            extract.clone(),
+            judge_response("defer", 0.9, "needs more evidence"),
+        ]);
+        let distiller = DefaultEpisodicDistiller;
+        let r1 = distiller
+            .run(&provider, Some(&llm), None, &default_config())
+            .await
+            .unwrap();
+        assert!(matches!(
+            r1.promotion_evaluations[0].decision,
+            PromotionDecision::Deferred { .. }
+        ));
+        {
+            let eps = provider.episodes.lock().unwrap();
+            assert!(eps.iter().all(|(_, e)| !e.consolidated));
+            assert!(
+                eps.iter().all(|(_, e)| !e.metadata.contains_key("distiller_skip")),
+                "defer must keep retry semantics (no tombstone)"
+            );
+        }
+        // Second run retries the same cluster: extraction + judge again.
+        let r2 = distiller
+            .run(&provider, Some(&llm), None, &default_config())
+            .await
+            .unwrap();
+        assert_eq!(r2.episodes_scanned, 2);
+        assert!(matches!(
+            r2.promotion_evaluations[0].decision,
+            PromotionDecision::Deferred { .. }
+        ));
+        assert_eq!(llm.calls.load(Ordering::SeqCst), 4, "2 extraction + 2 judge");
     }
 
     #[tokio::test]

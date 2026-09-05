@@ -261,6 +261,12 @@ impl MemoryProvider for GrafeoStore {
         Ok(())
     }
 
+    fn mark_episodes_skipped(&self, ids: &[u64], cluster_key: &str, reason: &str) -> AcoworkResult<()> {
+        let node_ids: Vec<NodeId> = ids.iter().map(|id| NodeId(*id)).collect();
+        self.mark_episodes_skipped(&node_ids, cluster_key, reason)
+            .map_err(err_to_acowork)
+    }
+
     fn cleanup_episodes(&self, older_than: std::time::Duration) -> AcoworkResult<u64> {
         let retention_days = (older_than.as_secs() / 86400) as u32;
         let count = self

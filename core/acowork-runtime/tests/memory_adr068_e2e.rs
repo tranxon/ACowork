@@ -643,7 +643,7 @@ async fn bootstrap_creates_identity_and_capability_nodes() {
             &manifest,
             provider.as_ref(),
         );
-    assert_eq!(outcome.skipped_existing, false);
+    assert!(!outcome.skipped_existing);
     // agent_id + name + description + display_name + role
     assert_eq!(outcome.identity_written, 5);
     assert_eq!(outcome.capability_written, 2);
