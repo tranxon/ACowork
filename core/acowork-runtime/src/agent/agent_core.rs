@@ -942,6 +942,25 @@ impl AgentCore {
 
     #[cfg(feature = "grafeo-backend")]
     fn bootstrap_autobiographical_from_manifest(&self, provider: &dyn MemoryProvider) {
+        // ADR-068 M8 — bootstrap scope is intentionally narrow.
+        //
+        // We bootstrap ONLY the categories that are **statically declared
+        // in the agent manifest** (Identity, Capability). These are facts
+        // about the agent's identity/abilities that don't need any
+        // observational evidence to assert, so the direct
+        // `store_autobiographical` fast path is appropriate.
+        //
+        // We DO NOT bootstrap Relationship, Limitation, Preference, or
+        // History nodes — those require observational evidence that only
+        // emerges at runtime. They are produced by the offline
+        // EpisodicDistiller from episodes tagged with knowledge_subtype =
+        // Fact / Relation / etc. (see `EpisodicDistiller::promote_*`).
+        //
+        // Note: `store_autobiographical` here is the **manifest-bootstrap
+        // fast path**, distinct from the deprecated LLM-side write path
+        // (`process_memory_store`) that ADR-068 §3.3 removed. Manifest
+        // bootstrapping predates ADR-068 and remains valid because the
+        // source is the package author, not the LLM at runtime.
         match provider.find_autobiographical_by_category(AutobioCategory::Identity) {
             Ok(existing) if !existing.is_empty() => {
                 tracing::debug!(count = existing.len(), "Autobiographical nodes already exist, skipping manifest bootstrap");
@@ -994,7 +1013,11 @@ impl AgentCore {
                 tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node");
             }
         }
-        tracing::info!(identity_count = identity_entries.len(), capability_count = manifest.capabilities.len(), "Bootstrapped Autobiographical nodes from manifest");
+        tracing::info!(
+            identity_count = identity_entries.len(),
+            capability_count = manifest.capabilities.len(),
+            "Bootstrapped Autobiographical/Identity+Capability nodes from manifest (M8: Relationship/Limitation/Preference/History are runtime-observed, owned by EpisodicDistiller)"
+        );
     }
 
     /// Resolve the agent's `MemoryManagerConfig` (manifest overrides +
