@@ -347,6 +347,14 @@ impl HistoryManager {
         self.max_tokens = max_tokens;
     }
 
+    /// Current effective history token budget. This is the model-calibrated
+    /// value (via [`Self::set_max_tokens`]), NOT the static config default —
+    /// callers that log or compare budgets must use this to stay consistent
+    /// with the trim/compaction thresholds.
+    pub fn max_tokens(&self) -> u64 {
+        self.max_tokens
+    }
+
     /// Get the model name for token counting, falling back to empty string (Tier3).
     fn model_for_counting(&self) -> &str {
         self.model_name.as_deref().unwrap_or("")

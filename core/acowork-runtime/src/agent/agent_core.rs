@@ -1243,54 +1243,66 @@ impl AgentCore {
     pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
 
 
+    /// Resolve the user-configured **total context cap**:
+    /// `agent_config.json.context_window` (Layer 1) → `manifest.llm.context_window`
+    /// (Layer 2) → `DEFAULT_CONTEXT_WINDOW` (Layer 3, 200K).
+    ///
+    /// Returns `Some(0)` when the user explicitly chose "no limit"
+    /// (`context_window_override = Some(0)`); callers treat that the same
+    /// as `None` (use the model's full capacity).
+    pub(crate) fn resolved_context_cap(&self) -> Option<u64> {
+        Some(
+            self.context_window_override
+                .or(self.manifest_context_window)
+                .unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
+        )
+    }
+
     /// Resolve the effective context window budget for history trimming.
     ///
-    /// Resolution chain for the user-configured cap:
-    ///   1. agent_config.json.context_window (Layer 1)
-    ///   2. manifest.llm.context_window (Layer 2)
-    ///   3. DEFAULT_CONTEXT_WINDOW (Layer 3, 200K)
+    /// This is the single denominator for every context-usage percentage
+    /// (trigger thresholds, UI usage report, HistoryManager::max_tokens).
+    /// It treats the resolved cap as a **total** context window and subtracts
+    /// the model's output reserve *inside* the cap:
+    /// `input = min(provider_input, min(cap, window)) − output_reserve`
+    /// (see [`ModelCapabilitiesInfo::input_budget_with_cap`]).
     ///
-    /// The resolved cap is then clamped to the model's actual context window:
-    ///   effective = min(resolved_cap, model.effective_input_budget)
-    ///
-    /// When resolved_cap == 0, no cap is applied (use model's full capacity).
+    /// So a 250K cap + 32K output reserve yields a 218K input budget — not
+    /// 250K (the pre-fix behaviour, where the reserve was swallowed by the
+    /// cap). When `resolved_context_cap()` is `Some(0)`, the provider's own
+    /// input allowance (`max_input_tokens`, else `window − reserve`) is used.
     pub fn context_trim_budget(&self, model_name: &str) -> u64 {
         let max_output_limit = self.max_output_tokens_limit_for_model(model_name);
-        let resolved_cap = self
-            .context_window_override
-            .or(self.manifest_context_window)
-            .unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW);
+        let resolved_cap = self.resolved_context_cap();
 
         self.get_model_capabilities(model_name)
             .map(|caps| {
-                let model_budget = caps.effective_input_budget(max_output_limit);
-                let effective = if resolved_cap == 0 {
-                    // No user-imposed cap — use model's full capacity
-                    model_budget
-                } else {
-                    std::cmp::min(resolved_cap, model_budget)
-                };
+                let effective =
+                    caps.input_budget_with_cap(resolved_cap, max_output_limit);
                 tracing::debug!(
                     model = %model_name,
                     context_window = caps.context_window,
                     max_input_tokens = ?caps.max_input_tokens,
                     max_output_tokens_limit = max_output_limit,
-                    resolved_cap,
-                    model_budget,
+                    output_reserve = caps.output_reserve(max_output_limit),
+                    resolved_cap = resolved_cap.unwrap_or(0),
                     effective,
-                    "Computed usable context budget (capped by per-agent context_window)"
+                    "Computed usable input context budget (output reserve subtracted inside cap)"
                 );
                 effective
             })
             .unwrap_or_else(|| {
-                let fallback = if resolved_cap == 0 {
+                let fallback = if resolved_cap == Some(0) {
                     self.config.history_max_tokens
                 } else {
-                    std::cmp::min(resolved_cap, self.config.history_max_tokens)
+                    std::cmp::min(
+                        resolved_cap.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
+                        self.config.history_max_tokens,
+                    )
                 };
                 tracing::debug!(
                     model = %model_name,
-                    resolved_cap,
+                    resolved_cap = resolved_cap.unwrap_or(0),
                     fallback,
                     "No model capabilities for '{}', using capped history_max_tokens as fallback",
                     model_name
@@ -1503,25 +1515,23 @@ mod tests {
 
     #[test]
     fn test_resolution_chain_config_wins_over_manifest() {
-        // Layer 1: config=100K, Layer 2: manifest=64K → should use 100K
-        // Model: 200K, so min(100K, 200K-reserve) = 100K - 32768 = 67232
+        // Layer 1: config=100K (TOTAL window), Layer 2: manifest=64K → 100K wins.
+        // The cap is treated as a total context window: output reserve is
+        // subtracted INSIDE the cap → 100_000 − 16_384 = 83_616 input budget.
         let core = make_core(
             Some(100_000),
             Some(64_000),
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        // effective_input_budget: min(200K, 200K-16K=184K) given max_output_limit=32K
-        // Actually effective_input_budget = context_window - min(max_output_tokens, max_output_tokens_limit)
-        // = 200_000 - min(16_384, 32_768) = 200_000 - 16_384 = 183_616
-        // min(100_000, 183_616) = 100_000
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 100_000);
+        assert_eq!(budget, 83_616);
     }
 
     #[test]
     fn test_resolution_chain_manifest_over_default() {
-        // Layer 1: None, Layer 2: 64K → should use 64K
+        // Layer 1: None, Layer 2: 64K (TOTAL window) → reserve subtracted
+        // inside cap → 64_000 − 16_384 = 47_616 input budget.
         let core = make_core(
             None,
             Some(64_000),
@@ -1529,7 +1539,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 64_000);
+        assert_eq!(budget, 47_616);
     }
 
     #[test]
@@ -1550,7 +1560,8 @@ mod tests {
 
     #[test]
     fn test_resolution_chain_default_smaller_than_model() {
-        // Both None, model=1M → default 200K caps it
+        // Both None → default 200K TOTAL cap binds (model window 1M); reserve
+        // subtracted inside cap → 200_000 − 16_384 = 183_616.
         let core = make_core(
             None,
             None,
@@ -1558,8 +1569,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        // DEFAULT_CONTEXT_WINDOW=200K < model_budget=983_616 → min = 200_000
-        assert_eq!(budget, 200_000);
+        assert_eq!(budget, 183_616);
     }
 
     // ── Zero = no limit tests ───────────────────────────────────────
@@ -1596,7 +1606,8 @@ mod tests {
 
     #[test]
     fn test_user_cap_smaller_than_model() {
-        // User sets 50K, model has 200K → use 50K
+        // User sets 50K TOTAL, model has 200K → input budget = 50K cap −
+        // 16_384 output reserve = 33_616.
         let core = make_core(
             Some(50_000),
             None,
@@ -1604,7 +1615,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 50_000);
+        assert_eq!(budget, 33_616);
     }
 
     #[test]
@@ -1623,9 +1634,9 @@ mod tests {
 
     #[test]
     fn test_user_cap_exactly_equals_model_budget() {
-        // User sets 183_616 (200K-16K-384), model has 200K → min == user_cap
-        // but user_cap = 183_616 and model_budget = 200_000 - 16_384 = 183_616
-        // min(183_616, 183_616) = 183_616
+        // User sets 183_616 (the old "200K−16_384 model budget" number).
+        // With the cap now treated as a TOTAL window the output reserve is
+        // subtracted again inside the cap → 183_616 − 16_384 = 167_232.
         let core = make_core(
             Some(183_616),
             None,
@@ -1633,7 +1644,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 183_616);
+        assert_eq!(budget, 167_232);
     }
 
     // ── No model capabilities fallback tests ────────────────────────
@@ -1682,7 +1693,8 @@ mod tests {
 
     #[test]
     fn test_manifest_context_window_is_honored() {
-        // Config=None, Manifest=150K, Model=200K → min(150K, 183K) = 150K
+        // Config=None, Manifest=150K TOTAL, Model=200K → input budget =
+        // 150_000 − 16_384 = 133_616.
         let core = make_core(
             None,
             Some(150_000),
@@ -1690,7 +1702,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 150_000);
+        assert_eq!(budget, 133_616);
     }
 
     #[test]
@@ -1724,7 +1736,8 @@ mod tests {
 
     #[test]
     fn test_user_cap_of_one_token() {
-        // Extreme: user sets 1 token
+        // Extreme: user sets 1 token (TOTAL). Reserve (16_384) exceeds the
+        // capped window → saturating_sub floors the input budget at 0.
         let core = make_core(
             Some(1),
             None,
@@ -1732,7 +1745,7 @@ mod tests {
             128_000,
         );
         let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 1);
+        assert_eq!(budget, 0);
     }
 
     #[test]
@@ -1753,8 +1766,9 @@ mod tests {
 
     #[test]
     fn test_max_output_tokens_limit_affects_model_budget() {
-        // Model: 200K, max_output=16K, limit=8K → effective_input = 200K - min(16K, 8K) = 192K
-        // User cap=100K → min(100K, 192K) = 100K
+        // Model: 200K, max_output=16K, limit=8K → output reserve =
+        // min(16_384, 8_192) = 8_192. User cap=100K TOTAL →
+        // 100_000 − 8_192 = 91_808 input budget.
         let core = make_core(
             Some(100_000),
             None,
@@ -1771,9 +1785,7 @@ mod tests {
             }
         }
         let budget = core.context_trim_budget("test-model");
-        // model_budget = 200_000 - min(16_384, 8_192) = 200_000 - 8_192 = 191_808
-        // min(100_000, 191_808) = 100_000
-        assert_eq!(budget, 100_000);
+        assert_eq!(budget, 91_808);
     }
 
     // ── apply_builtin_enabled_entries (ADR-052 §3.5 shared policy) ────

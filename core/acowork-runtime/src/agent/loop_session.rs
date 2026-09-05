@@ -54,12 +54,32 @@ impl super::loop_::AgentLoop {
             let model_name = self.session.model().unwrap_or("unknown");
             let caps = self.core.get_model_capabilities(model_name)?;
             let max_output = self.core.max_output_tokens_limit_for_model(model_name);
+            // Prefer the live in-memory history token count over the
+            // persisted snapshot. After a cold-start resume, `persisted
+            // .last_input` still holds the PRE-restart value while `history`
+            // has already been re-loaded (and lossless-trimmed) — pushing
+            // the stale number made the UI report a tiny context right up to
+            // the moment compaction fired (incident 2026-09-06). Empty/new
+            // histories keep the persisted fallback so the pre-first-LLM
+            // snapshot still shows something sensible.
+            let live_tokens = self.session.history.token_count();
+            let use_live = live_tokens > 0;
+            let input_tokens = if use_live {
+                live_tokens
+            } else {
+                persisted.last_input
+            };
+            let output_tokens = if use_live { 0 } else { persisted.last_output };
             let mut ctx = build_context_usage_from_persisted(
                 &caps,
-                persisted.last_input,
-                persisted.last_output,
+                input_tokens,
+                output_tokens,
                 max_output,
-                self.core.context_window_override,
+                // Pass the RESOLVED cap (agent_config → manifest → default),
+                // not the raw override, so window display (250K) and the
+                // usable denominator (250K − output reserve = 218K) agree
+                // with the runtime trim/compaction thresholds.
+                self.core.resolved_context_cap(),
                 Some(&persisted),
             );
             // ADR-067: this path builds from persisted tokens and has no
@@ -77,6 +97,8 @@ impl super::loop_::AgentLoop {
             tracing::debug!(
                 session_id = %self.session_core.session_id.as_deref().unwrap_or("?"),
                 model = %model_name,
+                live = use_live,
+                live_tokens,
                 last_input = persisted.last_input,
                 last_output = persisted.last_output,
                 has_json = json.is_some(),

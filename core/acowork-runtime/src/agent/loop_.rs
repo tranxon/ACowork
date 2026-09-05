@@ -331,6 +331,27 @@ pub struct AgentLoop {
     /// Total input chars of the most recent ChatRequest, used for token
     /// ratio calibration together with the API-reported prompt_tokens.
     pub(crate) last_input_chars: usize,
+    /// History token count **as of the last ChatRequest build**, i.e. the
+    /// denominator for [`Self::context_overhead_tokens`].
+    ///
+    /// Calibrating `history.token_count()` against the API's `prompt_tokens`
+    /// is meaningless unless both sides measure the same history snapshot —
+    /// this field is captured in [`build_chat_request`] (loop_context.rs)
+    /// right where `last_input_chars` is set, so the request whose usage
+    /// arrives later is always the request these two anchors describe.
+    pub(crate) last_request_history_tokens: u64,
+    /// Constant non-history overhead of the next prompt, in API-counted
+    /// tokens: system prompt + tool schemas + serialisation padding.
+    ///
+    /// `history.token_count()` only covers conversation messages; the real
+    /// provider prompt also carries this overhead (≈15K on the 2026-09-06
+    /// deepseek incident). We anchor it after each reliable usage report:
+    /// `overhead = api_prompt_tokens − history_tokens_at_that_request`.
+    /// Compaction thresholds then compare PROJECTED input
+    /// (`history.token_count() + overhead`) instead of the under-counted
+    /// history-only figure. `0` until the first usage report is handled
+    /// (projection degrades gracefully to history-only).
+    pub(crate) context_overhead_tokens: u64,
     /// The reasoning_effort from the most recent build_chat_request() call.
     /// Preserved for emergency trim retry in call_llm_streaming_inner()
     /// where the context_builder is immutable.
@@ -478,6 +499,8 @@ impl AgentLoop {
             pending_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
+            context_overhead_tokens: 0,
+            last_request_history_tokens: 0,
         };
         // Initialize persistent model ratio store from agent config dir.
         let ratio_config_dir = Path::new(&loop_.core.config.work_dir).join("config");
@@ -549,6 +572,8 @@ impl AgentLoop {
             pending_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
+            context_overhead_tokens: 0,
+            last_request_history_tokens: 0,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -953,7 +978,7 @@ impl AgentLoop {
                 iteration,
                 history_token_count = self.session.history.token_count(),
                 history_message_count = self.session.history.len(),
-                history_max_tokens = self.core.config.history_max_tokens,
+                history_max_tokens = self.session.history.max_tokens(),
                 "Starting loop iteration"
             );
 
@@ -1000,7 +1025,13 @@ impl AgentLoop {
                             iteration = 0; // Reset counter
 
                             // Trim history before resuming to avoid context window overflow
-                            self.trim_history_to_budget(&current_model).await;
+                            if let Err(e) = self.trim_history_to_budget(&current_model).await {
+                                // Compaction failure while resuming — stop
+                                // (Idle) instead of continuing with an
+                                // over-budget, un-compactable context.
+                                self.transition_status(SessionStatus::Idle);
+                                return Err(e);
+                            }
 
                             break; // Resume main loop
                         }
@@ -1019,7 +1050,10 @@ impl AgentLoop {
                                     );
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    self.trim_history_to_budget(&current_model).await;
+                                    if let Err(e) = self.trim_history_to_budget(&current_model).await {
+                                        self.transition_status(SessionStatus::Idle);
+                                        return Err(e);
+                                    }
                                     break;
                                 }
                                 crate::agent::inbound::UserOp::StopLoop { reason } => {
@@ -1148,7 +1182,10 @@ impl AgentLoop {
                                     // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    self.trim_history_to_budget(&current_model).await;
+                                    if let Err(e) = self.trim_history_to_budget(&current_model).await {
+                                        self.transition_status(SessionStatus::Idle);
+                                        return Err(e);
+                                    }
                                     break; // Resume main loop
                                 }
                                 Some(InboundMessage::Stop { reason }) => {
@@ -1534,9 +1571,13 @@ impl AgentLoop {
             .on_phase_enter(crate::debug::protocol::DebugPhase::BudgetCheck)
             .await;
         self.check_budget_and_warn()?;
-        self.trim_history_to_budget(current_model).await;
+        // Absolute-budget floor: history beyond the input budget cannot be
+        // sent to the provider — force the 5-level plan now. Failure is
+        // terminal (propagated → GiveUp → Idle) instead of continuing to
+        // grow an un-compactable context (2026-09-06 incident).
+        self.trim_history_to_budget(current_model).await?;
         let mut chat_request = self.build_chat_request(context_builder, current_model);
-        if self.check_context_overflow_and_trim(current_model).await {
+        if self.check_context_overflow_and_trim(current_model).await? {
             chat_request = self.build_chat_request(context_builder, current_model);
         }
         self.core
@@ -1681,7 +1722,12 @@ impl AgentLoop {
 
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
         self.persist_and_emit_tool_results(&deduped_calls, &tool_contents);
-        self.pre_trim_for_tool_results(&tool_contents, current_model).await;
+        // Single 90% projected-input line, enforced again before appending
+        // tool results (the tool-loop's next LLM call is guarded pre-request,
+        // but compacting here keeps the results from ever landing in history
+        // above the line). Failure is terminal — propagate out of the
+        // iteration (GiveUp → Idle), never swallow and keep looping.
+        self.pre_trim_for_tool_results(&tool_contents, current_model).await?;
 
         // ── ⑧.25 Context-aware tool result trimming ──
         // After pre-trim removed old history, also truncate individual
@@ -3471,6 +3517,7 @@ mod tests {
             committed,
         )
         .unwrap();
+        let conversation = Arc::new(conversation);
 
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));
@@ -3483,7 +3530,7 @@ mod tests {
             tools,
             budget,
             None,
-            Some(Arc::new(conversation)),
+            Some(conversation.clone()),
         );
 
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
@@ -3500,6 +3547,10 @@ mod tests {
             )
             .await;
         assert!(result.is_ok(), "run() should succeed: {result:?}");
+        // JSONL writes go through the async conversation writer — await a
+        // flush so the assertions below never race the writer thread under
+        // full-suite parallel load (regression flake 2026-09-06).
+        conversation.flush_pending().await.expect("flush should succeed");
 
         // Read the JSONL file and verify the user entry is the raw message
         let jsonl_path = work_dir.join("conversations").join(format!("{session_id}.jsonl"));
@@ -3564,6 +3615,7 @@ mod tests {
             committed,
         )
         .unwrap();
+        let conversation = Arc::new(conversation);
 
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));
@@ -3576,7 +3628,7 @@ mod tests {
             tools,
             budget,
             None,
-            Some(Arc::new(conversation)),
+            Some(conversation.clone()),
         );
 
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
@@ -3592,6 +3644,10 @@ mod tests {
             )
             .await;
         assert!(result.is_ok(), "run() should succeed: {result:?}");
+        // JSONL writes go through the async conversation writer — await a
+        // flush so the assertions below never race the writer thread under
+        // full-suite parallel load (regression flake 2026-09-06).
+        conversation.flush_pending().await.expect("flush should succeed");
 
         let jsonl_path = work_dir.join("conversations").join(format!("{session_id}.jsonl"));
         let mut content = String::new();

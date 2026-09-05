@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn test_context_usage_with_override_caps_window() {
-        // Model has 200K window. User overrides to 100K.
+        // Model has 200K window. User overrides to 100K TOTAL.
         let caps = test_caps(200_000, 16_384);
         let usage = acowork_core::providers::traits::UsageInfo {
             prompt_tokens: 60_000,
@@ -1326,14 +1326,12 @@ mod tests {
             ..Default::default()
         };
         let info = compute_context_usage(&caps, &usage, 32_768, Some(100_000));
-        // effective_window = min(100_000, 200_000) = 100_000
+        // Display window stays the user-configured TOTAL (100K).
         assert_eq!(info.context_window, 100_000);
-        // effective_usable = min(usable, effective_window)
-        // usable = 200_000 - 16_384 = 183_616 (no max_input_tokens)
-        // effective_usable = min(183_616, 100_000) = 100_000
-        assert_eq!(info.usable_context, 100_000);
-        // percent = 65_000 / 100_000 * 100 = 65%
-        assert_eq!(info.usage_percent, 65);
+        // Usable input = cap − output reserve (16_384 inside the cap) = 83_616.
+        assert_eq!(info.usable_context, 83_616);
+        // percent = 65_000 / 83_616 * 100 ≈ 77.7 → 77
+        assert_eq!(info.usage_percent, 77);
     }
 
     #[test]
@@ -1662,18 +1660,21 @@ pub fn compute_section_sizes(
 
 /// Compute context usage info from model capabilities and API usage response.
 ///
-/// Usable context is derived from [`ModelCapabilitiesInfo::effective_input_budget`],
-/// which uses `max_input_tokens` when available, or reserves output space capped
-/// by `max_output_tokens_limit` (default 32K) otherwise.
+/// Usable input context is derived from
+/// [`ModelCapabilitiesInfo::input_budget_with_cap`]: when a cap is set it is
+/// treated as a **total** window and the output reserve is subtracted inside
+/// it (250K cap + 32K reserve → 218K input); without a cap the provider's own
+/// `max_input_tokens` is authoritative, else `window − reserve`.
 ///
 /// `context_window_cap` is the per-agent context window override (ADR-026):
 /// - `None` — not set, use model's full `context_window`.
 /// - `Some(0)` — "no limit" (user explicitly chose unlimited), use model's full.
 /// - `Some(n)` where `n > 0` — cap the effective window at `min(n, model_window)`.
 ///
-/// Both `context_window` and `usable_context` in the output reflect the
-/// effective (capped) values, so the frontend status panel and context-usage
-/// popup show numbers consistent with the user's per-agent setting.
+/// `context_window` in the output reflects the effective (capped) window for
+/// display; `usable_context` is the input budget used for the percentage, so
+/// the frontend status panel and context-usage popup agree with the runtime
+/// trim/compaction thresholds (single denominator).
 pub fn compute_context_usage(
     caps: &ModelCapabilitiesInfo,
     usage: &acowork_core::providers::traits::UsageInfo,
@@ -1685,8 +1686,8 @@ pub fn compute_context_usage(
         Some(0) | None => model_window,
         Some(cap) => cap.min(model_window),
     };
-    let usable = caps.effective_input_budget(max_output_tokens_limit);
-    let effective_usable = usable.min(effective_window);
+    let effective_usable =
+        caps.input_budget_with_cap(context_window_cap, max_output_tokens_limit);
     let total = usage.prompt_tokens + usage.completion_tokens;
     let percent = if effective_usable > 0 {
         ((total as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
