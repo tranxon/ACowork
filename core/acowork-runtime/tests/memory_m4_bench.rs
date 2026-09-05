@@ -19,21 +19,30 @@
 //!     Dormant via `transition_to_dormant`, 2 distractor Active nodes.
 //!   - Query set: 5 fixed queries, each with a ground-truth relevant node id.
 //!
+//! ADR-068 note: `MemoryStoreTool` only writes Episodes now, so the corpus is
+//! seeded directly into the Knowledge (sediment) layer via `GrafeoStore`'s
+//! native store path — the same path the EpisodicDistiller uses on promotion.
+//! This benchmark measures sediment-layer retrieval quality (D1/D2 gates) and
+//! is intentionally independent of the LLM write chain.
+//!
 //! IMPORTANT: self-contained — uses an in-memory `GrafeoStore`, never touches
 //! the running Gateway / Runtime / Desktop processes or their ports.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use acowork_core::tools::traits::Tool;
+use chrono::Utc;
+
 use acowork_core::EmbeddingProvider;
 
 use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::retrieval_metrics::{EvalQuery, evaluate_retrieval_quality};
+use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
-use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, NodeStatus};
-
-use acowork_runtime::memory::MemorySessionHandle;
-use acowork_runtime::tools::builtin::memory_store::MemoryStoreTool;
+use acowork_memory::{
+    KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, NodeStatus,
+    PrivacyLevel, labels,
+};
 
 use grafeo_common::types::NodeId;
 
@@ -72,62 +81,57 @@ impl EmbeddingProvider for DeterministicEmbedding {
     }
 }
 
-/// Shared harness: a real in-memory `GrafeoStore` wired into a real
-/// `MemorySessionHandle` (provider + embedding), ready for `MemoryStoreTool`
+/// Shared harness: a real in-memory `GrafeoStore`, ready for sediment seeding
 /// and `MemoryManager::retrieve`.
 struct BenchE2e {
     store: Arc<GrafeoStore>,
-    handle: Arc<MemorySessionHandle>,
 }
 
 impl BenchE2e {
     fn new() -> Self {
         let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
-        let handle = Arc::new(MemorySessionHandle::new(Some(Arc::new(
-            DeterministicEmbedding,
-        ))));
-        let provider: Arc<dyn MemoryProvider> = store.clone();
-        handle.set_provider(provider);
-        Self { store, handle }
+        Self { store }
     }
 
-    fn store_tool(&self) -> MemoryStoreTool {
-        MemoryStoreTool::new("com.test.m4-bench", Some(self.handle.clone()))
-    }
-
-    /// Parse the node id back out of `MemoryStoreTool`'s result content
-    /// (`"Stored fact: \"...\" (confidence: 0.80, id: 5)"`).
-    fn node_id_from_tool_result(content: &str) -> u64 {
-        let marker = "id: ";
-        let idx = content
-            .find(marker)
-            .unwrap_or_else(|| panic!("no `id:` marker in tool result: {content}"));
-        content[idx + marker.len()..]
-            .trim_end_matches(')')
-            .trim()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| panic!("cannot parse node id from: {content}"))
-    }
-
-    /// Store a knowledge node via the real tool chain and return its node id.
+    /// Seed a Knowledge node directly and return its node id.
+    ///
+    /// ADR-068 — see file header: the benchmark exercises sediment-layer
+    /// retrieval quality, so it seeds Knowledge nodes through `GrafeoStore`'s
+    /// native store path (the same path the EpisodicDistiller uses on
+    /// promotion) instead of the LLM `memory_store` tool, which now only
+    /// writes Episodes.
     async fn store_knowledge(&self, content: &str, confidence: f32, importance: f32) -> u64 {
-        let tool = self.store_tool();
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "category": "fact",
-                    "content": content,
-                    "confidence": confidence,
-                    "importance": importance,
-                }),
-                None,
-            )
+        let embedding = DeterministicEmbedding
+            .embed(content)
             .await
-            .expect("tool execute ok");
-        assert!(result.ok, "store failed: {:?}", result.error);
-        Self::node_id_from_tool_result(&result.content)
+            .expect("embed ok");
+        let node = GrafeoKnowledgeNode {
+            id: None,
+            subject: "user".to_string(),
+            predicate: String::new(),
+            object: content.to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            confidence,
+            source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
+            embedding: Some(embedding),
+            status: NodeStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance,
+        };
+        self.store
+            .store_node(
+                labels::KNOWLEDGE,
+                node.to_properties()
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone())),
+            )
+            .expect("store_node ok")
+            .0
     }
 }
 

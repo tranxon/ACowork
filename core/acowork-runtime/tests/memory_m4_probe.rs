@@ -1,20 +1,28 @@
-//! Temporary probe: verify the actual score domain and min_score filtering
-//! behavior on the auto_inject path. This exists to fact-check the ADR-062
-//! assumption that `min_score = 0.3` filters out everything on the RRF scale
-//! (scores ~1/(k+rank), k=60 → ~0.016). If the before/after auto_inject hit
-//! rate is identical, we must explain WHY before writing the M4 report.
+//! Probe: verify the actual score domain and min_score filtering behavior on
+//! the auto_inject path (fact-check for the ADR-062 `min_score = 0.3`
+//! assumption on the RRF scale). Runs against the Knowledge (sediment) layer.
+//!
+//! ADR-068 note: `MemoryStoreTool` only writes Episodes now, so this probe
+//! seeds Knowledge nodes directly through `GrafeoStore`'s native path — the
+//! same path the EpisodicDistiller uses on promotion — to keep measuring the
+//! sediment-layer retrieval score domain.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use acowork_core::tools::traits::Tool;
+use chrono::Utc;
+
 use acowork_core::EmbeddingProvider;
 
 use acowork_grafeo::grafeo::GrafeoStore;
+use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
-use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery};
+use acowork_memory::{
+    KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, NodeStatus,
+    PrivacyLevel, labels,
+};
 
 use acowork_runtime::memory::MemorySessionHandle;
-use acowork_runtime::tools::builtin::memory_store::MemoryStoreTool;
 
 struct DeterministicEmbedding;
 
@@ -44,18 +52,44 @@ impl EmbeddingProvider for DeterministicEmbedding {
     }
 }
 
-fn node_id_from_tool_result(content: &str) -> u64 {
-    let marker = "id: ";
-    let idx = content
-        .find(marker)
-        .unwrap_or_else(|| panic!("no `id:` marker: {content}"));
-    content[idx + marker.len()..]
-        .trim_end_matches(')')
-        .trim()
-        .split(|c: char| !c.is_ascii_digit())
-        .next()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or_else(|| panic!("cannot parse node id from: {content}"))
+/// Seed a Knowledge node directly (ADR-068 — see file header).
+async fn seed_knowledge_fact(
+    store: &GrafeoStore,
+    content: &str,
+    confidence: f32,
+    importance: f32,
+) -> u64 {
+    let embedding = DeterministicEmbedding
+        .embed(content)
+        .await
+        .expect("embed ok");
+    let node = GrafeoKnowledgeNode {
+        id: None,
+        subject: "user".to_string(),
+        predicate: String::new(),
+        object: content.to_string(),
+        sub_type: KnowledgeSubType::Fact,
+        confidence,
+        source_episode_id: None,
+        source_episode_ids: Vec::new(),
+        promotion_metadata: None,
+        embedding: Some(embedding),
+        status: NodeStatus::Active,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        metadata: HashMap::new(),
+        privacy: PrivacyLevel::Personal,
+        importance,
+    };
+    store
+        .store_node(
+            labels::KNOWLEDGE,
+            node.to_properties()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone())),
+        )
+        .expect("store_node ok")
+        .0
 }
 
 #[tokio::test]
@@ -67,21 +101,13 @@ async fn probe_min_score_domain() {
     let provider: Arc<dyn MemoryProvider> = store.clone();
     handle.set_provider(provider);
 
-    let tool = MemoryStoreTool::new("com.test.probe", Some(handle.clone()));
-    let r = tool
-        .execute(
-            serde_json::json!({
-                "category": "fact",
-                "content": "User prefers dark mode for the code editor",
-                "confidence": 0.9,
-                "importance": 0.8,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    assert!(r.ok, "{:?}", r.error);
-    let id = node_id_from_tool_result(&r.content);
+    let id = seed_knowledge_fact(
+        &store,
+        "User prefers dark mode for the code editor",
+        0.9,
+        0.8,
+    )
+    .await;
     println!("stored node id = {id}");
 
     let manager = MemoryManager::new(MemoryManagerConfig::default());

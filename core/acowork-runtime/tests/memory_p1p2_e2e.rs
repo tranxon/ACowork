@@ -4,11 +4,21 @@
 //! P2 (behavior-alignment + data-completeness) memory workstreams, driven
 //! through the REAL component chain — no mocks:
 //!
-//! - Write side: `MemoryStoreTool` → `MemoryProvider::process_memory_store`
-//!   → in-memory `GrafeoStore` (typed privacy/importance/keywords/source).
+//! - Write side (ADR-068): `MemoryStoreTool` → `MemoryProvider::store_episode`
+//!   → in-memory `GrafeoStore` episodic layer. The tool is a thin **episode
+//!   writer**: `knowledge_subtype` routes the episode, and
+//!   privacy/importance/keywords travel on `Episode.metadata` /
+//!   `Episode.importance`. The tool can no longer write sediment-layer
+//!   (Knowledge / Procedural / Autobiographical) nodes directly.
 //! - Read side: `export_nodes_filtered` (privacy filtering), `get_knowledge`
 //!   (typed field round-trip), `MemoryManager::retrieve` (abstention prompt,
 //!   HintType::Identity reaches all labels).
+//! - Sediment-layer contracts (export privacy filtering, retrieval, decay) are
+//!   exercised on nodes seeded via `GrafeoStore`'s native `store_node` path —
+//!   the same path the EpisodicDistiller uses when it promotes an episode
+//!   (ADR-068 §3.6). Those tests are therefore read-side contract tests, NOT
+//!   LLM write-path tests; the LLM write path (tool → Episode) is covered by
+//!   the A* tests below and by `memory_adr068_e2e.rs`.
 //! - Forgetting: `run_decay_scan` / `get_dormant_candidates` (FLOOR, day
 //!   unit, BOOST_CAP), `run_offline_consolidation_with_generalization`
 //!   → `run_episodic_cleanup` (three-rule policy).
@@ -16,30 +26,33 @@
 //!   auto-computation via `create_memory_edge` + `compute_edge_weight` (G12).
 //!
 //! Matrix (one test per affected branch):
-//!   A1  store_knowledge_persists_privacy_importance_keywords   (P1-2/P1-3)
-//!   A2  store_knowledge_default_privacy_personal               (P1-2 default)
-//!   A3  store_autobio_source_persisted                         (P2 G7)
-//!   A4  store_autobio_default_source                           (P2 G7 default)
-//!   B1  export_filters_private_knowledge                       (P1-2 export)
-//!   B2  export_includes_private_when_requested                 (P1-2 export)
-//!   C1  retrieve_empty_injects_abstention_prompt               (P2 G9)
-//!   C2  retrieve_identity_hint_reaches_knowledge               (P2 G10)
-//!   C3  retrieve_excludes_dormant_keeps_pending                (ADR-062 D1)
-//!   D1  decay_formula_floor_dayunit_cap                        (P1-1 formula)
-//!   D2  decay_scan_high_importance_survives                    (P1-1 scan)
-//!   D3  decay_scan_low_importance_dormant                      (P1-1 scan)
-//!   D4  episodic_cleanup_three_rules                           (P2 G13)
-//!   E1  graph_expand_thresholds_aligned                        (P2 G11)
-//!   E2  edge_weight_auto_computed                              (P2 G12)
-//!   E3  edge_weight_explicit_not_overridden                    (P2 G12)
-//!   E4  edge_weight_no_confidence_skips                        (P2 G12)
+//!   A1  store_episode_persists_privacy_importance_keywords_metadata (ADR-068)
+//!   A2  store_episode_defaults_privacy_personal                     (ADR-068)
+//!   A3  store_autobio_rejected_with_source_key                      (ADR-068 E7)
+//!   A4  store_autobio_rejected_by_schema                            (ADR-068 E7)
+//!   B1  export_filters_private_knowledge                            (P1-2 export)
+//!   B2  export_includes_private_when_requested                      (P1-2 export)
+//!   C1  retrieve_empty_injects_abstention_prompt                    (P2 G9)
+//!   C2  retrieve_identity_hint_reaches_knowledge                    (P2 G10)
+//!   C3  retrieve_excludes_dormant_keeps_pending                     (ADR-062 D1)
+//!   D1  decay_formula_floor_dayunit_cap                             (P1-1 formula)
+//!   D2  decay_scan_high_importance_survives                         (P1-1 scan)
+//!   D3  decay_scan_low_importance_dormant                           (P1-1 scan)
+//!   D4  episodic_cleanup_three_rules                                (P2 G13)
+//!   E1  graph_expand_thresholds_aligned                             (P2 G11)
+//!   E2  edge_weight_auto_computed                                   (P2 G12)
+//!   E3  edge_weight_explicit_not_overridden                         (P2 G12)
+//!   E4  edge_weight_no_confidence_skips                             (P2 G12)
 //!
 //! IMPORTANT: these tests are fully self-contained — they use an in-memory
 //! `GrafeoStore::new_in_memory()` and never touch the running Gateway /
 //! Runtime / Desktop processes, their data dirs, or the :19875/:19876 ports.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use chrono::Utc;
 
 use acowork_core::packaging::PackageOptions;
 use acowork_core::tools::traits::Tool;
@@ -48,10 +61,11 @@ use acowork_core::EmbeddingProvider;
 use acowork_grafeo::forgetting::compute_decay_score;
 use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::spreading::{GraphExpandConfig, get_expand_thresholds};
+use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
 use acowork_memory::{
-    DecayConfig, HintType, MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery,
-    OfflineConsolidationConfig, PrivacyLevel, labels,
+    DecayConfig, HintType, KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryProvider,
+    MemoryQuery, NodeStatus, OfflineConsolidationConfig, PrivacyLevel, labels,
 };
 
 use acowork_runtime::memory::MemorySessionHandle;
@@ -117,20 +131,57 @@ impl MemoryE2e {
         MemoryStoreTool::new("com.test.agent", Some(self.handle.clone()))
     }
 
-    /// Parse the node id back out of `MemoryStoreTool`'s result content
-    /// (`"Stored fact: \"...\" (confidence: 0.80, id: 5)"`).
-    fn node_id_from_tool_result(content: &str) -> u64 {
-        let marker = "id: ";
-        let idx = content
-            .find(marker)
-            .unwrap_or_else(|| panic!("no `id:` marker in tool result: {content}"));
-        content[idx + marker.len()..]
-            .trim_end_matches(')')
-            .trim()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| panic!("cannot parse node id from: {content}"))
+    /// Seed a sediment-layer (Knowledge) node directly through `GrafeoStore`'s
+    /// native store path (label + typed properties), returning its node id.
+    ///
+    /// ADR-068 §3.2 removed the LLM tool's direct sediment write: the
+    /// `memory_store` tool now emits Episodes only, and sediment-layer nodes
+    /// are created by the EpisodicDistiller during background consolidation.
+    /// Tests that exercise *read-side* sediment contracts (export filtering,
+    /// retrieval, decay) therefore seed the same kind of node the distiller
+    /// produces, bypassing the LLM tool chain on purpose. The LLM tool → Episode
+    /// semantics are asserted by the A* tests in this file and end-to-end in
+    /// `memory_adr068_e2e.rs`.
+    async fn seed_knowledge(
+        &self,
+        content: &str,
+        sub_type: KnowledgeSubType,
+        confidence: f32,
+        importance: f32,
+        privacy: PrivacyLevel,
+        status: NodeStatus,
+    ) -> u64 {
+        let embedding = DeterministicEmbedding
+            .embed(content)
+            .await
+            .expect("embed ok");
+        let node = GrafeoKnowledgeNode {
+            id: None,
+            subject: "user".to_string(),
+            predicate: String::new(),
+            object: content.to_string(),
+            sub_type,
+            confidence,
+            source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
+            embedding: Some(embedding),
+            status,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: HashMap::new(),
+            privacy,
+            importance,
+        };
+        self.store
+            .store_node(
+                labels::KNOWLEDGE,
+                node.to_properties()
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone())),
+            )
+            .expect("store_node ok")
+            .0
     }
 }
 
@@ -149,10 +200,14 @@ fn micros_days_ago(days: i64) -> i64 {
 // P2 G7 autobiographical source)
 // ============================================================================
 
-/// A1 (P1-2/P1-3): explicit `privacy`, `importance`, and `keywords` passed
-/// through `MemoryStoreTool` are persisted on the grafeo `KnowledgeNode`.
+/// A1 (ADR-068 §3.2/§3.3): `MemoryStoreTool` is a thin episode writer — a
+/// `fact` write produces an **unconsolidated Episode** carrying
+/// `knowledge_subtype = Fact`, NOT a sediment-layer KnowledgeNode. Explicit
+/// `privacy` / `importance` / `keywords` travel on the episode
+/// (`Episode.importance`, `Episode.metadata`), where the EpisodicDistiller
+/// consumes them for promotion decisions.
 #[tokio::test]
-async fn store_knowledge_persists_privacy_importance_keywords() {
+async fn store_episode_persists_privacy_importance_keywords_metadata() {
     let e2e = MemoryE2e::new();
     let tool = e2e.store_tool();
 
@@ -170,30 +225,58 @@ async fn store_knowledge_persists_privacy_importance_keywords() {
         .await
         .expect("tool execute");
     assert!(result.ok, "tool failed: {:?}", result.error);
+    assert!(
+        result.content.starts_with("Stored episode:"),
+        "tool must report an episode write, got: {}",
+        result.content
+    );
 
-    let id = MemoryE2e::node_id_from_tool_result(&result.content);
-    let node = e2e
-        .store
-        .get_knowledge(NodeId::new(id))
-        .expect("get_knowledge ok")
-        .expect("knowledge exists");
+    // The distiller Step 1 scan (unconsolidated episodes by subtype) must
+    // surface exactly this write.
+    let provider = e2e.handle.provider().expect("provider set");
+    let episodes = provider
+        .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
+        .expect("get_episodes_by_subtype ok");
+    assert_eq!(episodes.len(), 1, "exactly one Fact episode stored");
 
-    assert_eq!(node.privacy, PrivacyLevel::Public);
-    assert!((node.importance - 0.9).abs() < 1e-6, "importance = {}", node.importance);
+    let (ep_id, ep) = &episodes[0];
+    let _ = ep_id; // id is returned by the provider; tool text itself has none
+    assert_eq!(ep.knowledge_subtype, Some(KnowledgeSubType::Fact));
+    assert!(!ep.consolidated, "fresh episode must be unconsolidated");
 
-    let keywords = node
+    // importance lands on the typed field.
+    assert!((ep.importance - 0.9).abs() < 1e-6, "importance = {}", ep.importance);
+
+    // privacy / keywords land on metadata (the Episode struct has no dedicated
+    // fields for them — the distiller reads them from metadata).
+    let privacy = ep
+        .metadata
+        .get("privacy")
+        .and_then(|v| v.as_str())
+        .expect("privacy in metadata");
+    assert_eq!(privacy, "public");
+
+    let keywords = ep
         .metadata
         .get("keywords")
         .and_then(|v| v.as_array())
         .expect("keywords array persisted");
     let strings: Vec<&str> = keywords.iter().filter_map(|v| v.as_str()).collect();
     assert!(strings.contains(&"shanghai") && strings.contains(&"location"));
+
+    // W2: no legacy autobiographical routing fields leak onto the write.
+    for legacy in ["aspect", "key", "source"] {
+        assert!(
+            !ep.metadata.contains_key(legacy),
+            "episode must not carry legacy field `{legacy}`"
+        );
+    }
 }
 
-/// A2 (P1-2 default): without explicit privacy/importance, the conservative
-/// defaults `Personal` and `0.5` are applied.
+/// A2 (ADR-068): without explicit privacy/importance, the conservative
+/// defaults `Personal` (metadata) and `0.5` (`Episode.importance`) apply.
 #[tokio::test]
-async fn store_knowledge_default_privacy_personal() {
+async fn store_episode_defaults_privacy_personal() {
     let e2e = MemoryE2e::new();
     let tool = e2e.store_tool();
 
@@ -209,20 +292,29 @@ async fn store_knowledge_default_privacy_personal() {
         .expect("tool execute");
     assert!(result.ok, "tool failed: {:?}", result.error);
 
-    let id = MemoryE2e::node_id_from_tool_result(&result.content);
-    let node = e2e
-        .store
-        .get_knowledge(NodeId::new(id))
-        .expect("get_knowledge ok")
-        .expect("knowledge exists");
+    let provider = e2e.handle.provider().expect("provider set");
+    let episodes = provider
+        .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
+        .expect("get_episodes_by_subtype ok");
+    assert_eq!(episodes.len(), 1, "exactly one Fact episode stored");
 
-    assert_eq!(node.privacy, PrivacyLevel::Personal);
-    assert!((node.importance - 0.5).abs() < 1e-6, "importance = {}", node.importance);
+    let (_, ep) = &episodes[0];
+    assert_eq!(
+        ep.metadata
+            .get("privacy")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+        "personal",
+        "default privacy must be personal"
+    );
+    assert!((ep.importance - 0.5).abs() < 1e-6, "importance = {}", ep.importance);
 }
 
-/// A3 (P2 G7): explicit autobiographical `source` survives the write path.
+/// A3 (ADR-068 E7): the tool rejects `category=autobiographical` even when the
+/// legacy `aspect`/`key`/`source` routing fields are supplied. Autobiographical
+/// promotion is the distiller's job; there is no LLM-side fast path anymore.
 #[tokio::test]
-async fn store_autobio_source_persisted() {
+async fn store_autobio_rejected_with_source_key() {
     let e2e = MemoryE2e::new();
     let tool = e2e.store_tool();
 
@@ -239,19 +331,29 @@ async fn store_autobio_source_persisted() {
         )
         .await
         .expect("tool execute");
-    assert!(result.ok, "tool failed: {:?}", result.error);
+    assert!(!result.ok, "autobiographical category must be rejected");
+    let err = result.error.expect("error message present");
+    assert!(
+        err.contains("Invalid category") && err.contains("autobiographical"),
+        "rejection must name the invalid category, got: {err}"
+    );
+    assert!(
+        err.contains("fact') || err.contains('preference') || err.contains('relation') || err.contains('procedure")
+            || (err.contains("fact") && err.contains("preference") && err.contains("relation") && err.contains("procedure")),
+        "rejection must point at the four valid categories, got: {err}"
+    );
 
-    let node = e2e
-        .store
-        .find_autobiographical_by_key("style")
-        .expect("find ok")
-        .expect("autobio exists");
-    assert_eq!(node.source.as_str(), "important_event");
+    // Nothing may land in the episodic layer.
+    let provider = e2e.handle.provider().expect("provider set");
+    let all = provider
+        .get_episodes_by_subtype(None, 10)
+        .expect("get_episodes_by_subtype ok");
+    assert!(all.is_empty(), "rejected write must not produce an episode");
 }
 
-/// A4 (P2 G7 default): without an explicit `source`, `"user_statement"` is used.
+/// A4 (ADR-068 E7): same rejection without any legacy routing fields.
 #[tokio::test]
-async fn store_autobio_default_source() {
+async fn store_autobio_rejected_by_schema() {
     let e2e = MemoryE2e::new();
     let tool = e2e.store_tool();
 
@@ -260,21 +362,20 @@ async fn store_autobio_default_source() {
             serde_json::json!({
                 "category": "autobiographical",
                 "content": "I am an AI assistant",
-                "aspect": "identity",
-                "key": "agent_name",
             }),
             None,
         )
         .await
         .expect("tool execute");
-    assert!(result.ok, "tool failed: {:?}", result.error);
+    assert!(!result.ok, "autobiographical category must be rejected");
+    let err = result.error.expect("error message present");
+    assert!(err.contains("Invalid category"), "got: {err}");
 
-    let node = e2e
-        .store
-        .find_autobiographical_by_key("agent_name")
-        .expect("find ok")
-        .expect("autobio exists");
-    assert_eq!(node.source.as_str(), "user_statement");
+    let provider = e2e.handle.provider().expect("provider set");
+    let all = provider
+        .get_episodes_by_subtype(None, 10)
+        .expect("get_episodes_by_subtype ok");
+    assert!(all.is_empty(), "rejected write must not produce an episode");
 }
 
 // ============================================================================
@@ -283,37 +384,34 @@ async fn store_autobio_default_source() {
 
 /// B1 (P1-2 export): `export_nodes_filtered` with default `PackageOptions`
 /// excludes `Personal`/`Sensitive` knowledge, keeping only `Public`.
+///
+/// Sediment data is seeded directly (ADR-068: the LLM tool writes Episodes,
+/// not Knowledge nodes — see file header for the rationale).
 #[tokio::test]
 async fn export_filters_private_knowledge() {
     let e2e = MemoryE2e::new();
-    let tool = e2e.store_tool();
 
     // public knowledge
-    let r1 = tool
-        .execute(
-            serde_json::json!({
-                "category": "fact",
-                "content": "Company is called ACowork",
-                "privacy": "public",
-            }),
-            None,
-        )
-        .await
-        .expect("tool execute");
-    assert!(r1.ok);
+    e2e.seed_knowledge(
+        "Company is called ACowork",
+        KnowledgeSubType::Fact,
+        0.8,
+        0.5,
+        PrivacyLevel::Public,
+        NodeStatus::Active,
+    )
+    .await;
 
     // personal (default) knowledge — should be excluded by default export
-    let r2 = tool
-        .execute(
-            serde_json::json!({
-                "category": "preference",
-                "content": "User likes green tea",
-            }),
-            None,
-        )
-        .await
-        .expect("tool execute");
-    assert!(r2.ok);
+    e2e.seed_knowledge(
+        "User likes green tea",
+        KnowledgeSubType::Preference,
+        0.8,
+        0.5,
+        PrivacyLevel::Personal,
+        NodeStatus::Active,
+    )
+    .await;
 
     let filtered = e2e
         .store
@@ -333,35 +431,31 @@ async fn export_filters_private_knowledge() {
 
 /// B2 (P1-2 export): with `include_private_knowledge = true`, private
 /// knowledge is included.
+///
+/// Sediment data is seeded directly (ADR-068 — see file header).
 #[tokio::test]
 async fn export_includes_private_when_requested() {
     let e2e = MemoryE2e::new();
-    let tool = e2e.store_tool();
 
-    let r1 = tool
-        .execute(
-            serde_json::json!({
-                "category": "fact",
-                "content": "Company is called ACowork",
-                "privacy": "public",
-            }),
-            None,
-        )
-        .await
-        .expect("tool execute");
-    assert!(r1.ok);
+    e2e.seed_knowledge(
+        "Company is called ACowork",
+        KnowledgeSubType::Fact,
+        0.8,
+        0.5,
+        PrivacyLevel::Public,
+        NodeStatus::Active,
+    )
+    .await;
 
-    let r2 = tool
-        .execute(
-            serde_json::json!({
-                "category": "preference",
-                "content": "User likes green tea",
-            }),
-            None,
-        )
-        .await
-        .expect("tool execute");
-    assert!(r2.ok);
+    e2e.seed_knowledge(
+        "User likes green tea",
+        KnowledgeSubType::Preference,
+        0.8,
+        0.5,
+        PrivacyLevel::Personal,
+        NodeStatus::Active,
+    )
+    .await;
 
     let options = PackageOptions {
         include_private_knowledge: true,
@@ -412,22 +506,21 @@ async fn retrieve_empty_injects_abstention_prompt() {
 
 /// C2 (P2 G10): `HintType::Identity` searches all labels, so a `Knowledge`
 /// node is reachable through an Identity hint.
+///
+/// Sediment data is seeded directly (ADR-068 — see file header).
 #[tokio::test]
 async fn retrieve_identity_hint_reaches_knowledge() {
     let e2e = MemoryE2e::new();
-    let tool = e2e.store_tool();
 
-    let result = tool
-        .execute(
-            serde_json::json!({
-                "category": "fact",
-                "content": "User lives in Shanghai",
-            }),
-            None,
-        )
-        .await
-        .expect("tool execute");
-    assert!(result.ok, "tool failed: {:?}", result.error);
+    e2e.seed_knowledge(
+        "User lives in Shanghai",
+        KnowledgeSubType::Fact,
+        0.9,
+        0.5,
+        PrivacyLevel::Personal,
+        NodeStatus::Active,
+    )
+    .await;
 
     let manager = MemoryManager::new(MemoryManagerConfig::default());
     let mut query = MemoryQuery::new("User lives in Shanghai");
@@ -458,42 +551,37 @@ async fn retrieve_identity_hint_reaches_knowledge() {
 /// separate low-confidence node kept as Pending must remain retrievable
 /// (Pending nodes participate in retrieval and are naturally down-ranked
 /// by confidence — ADR-062 §3.3).
+///
+/// Sediment data is seeded directly (ADR-068 — see file header). Node
+/// statuses mirror what the write path used to produce before ADR-068
+/// (confidence ≥ direct_active_threshold → Active, below → Pending).
 #[tokio::test]
 async fn retrieve_excludes_dormant_keeps_pending() {
     let e2e = MemoryE2e::new();
-    let tool = e2e.store_tool();
 
     // ── Node A: high-confidence Active, low importance → decays to Dormant ──
-    let a = tool
-        .execute(
-            serde_json::json!({
-                "category": "fact",
-                "content": "User keeps a travel journal about Tokyo",
-                "confidence": 0.95,
-                "importance": 0.1,
-            }),
-            None,
+    let a_id = e2e
+        .seed_knowledge(
+            "User keeps a travel journal about Tokyo",
+            KnowledgeSubType::Fact,
+            0.95,
+            0.1,
+            PrivacyLevel::Personal,
+            NodeStatus::Active,
         )
-        .await
-        .expect("tool execute A");
-    assert!(a.ok, "tool A failed: {:?}", a.error);
-    let a_id = MemoryE2e::node_id_from_tool_result(&a.content);
+        .await;
 
     // ── Node B: low-confidence → Pending, stays retrievable ──
-    let b = tool
-        .execute(
-            serde_json::json!({
-                "category": "fact",
-                "content": "User may prefer cycling to work",
-                "confidence": 0.6,
-                "importance": 0.5,
-            }),
-            None,
+    let b_id = e2e
+        .seed_knowledge(
+            "User may prefer cycling to work",
+            KnowledgeSubType::Fact,
+            0.6,
+            0.5,
+            PrivacyLevel::Personal,
+            NodeStatus::Pending,
         )
-        .await
-        .expect("tool execute B");
-    assert!(b.ok, "tool B failed: {:?}", b.error);
-    let b_id = MemoryE2e::node_id_from_tool_result(&b.content);
+        .await;
 
     let manager = MemoryManager::new(MemoryManagerConfig::default());
     let query = |text: &str| {

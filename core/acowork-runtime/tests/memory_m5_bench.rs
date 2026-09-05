@@ -15,13 +15,20 @@
 //!     where ONLY the K* node can match (BM25 alone, content-only, cannot hit
 //!     K* nodes because their content is lexically generic).
 //!   - Two states:
-//!     * before = `quality.keyword_index = false` (M4 behaviour, keywords are
-//!       metadata-only and BM25 cannot see them).
-//!     * after  = `quality.keyword_index = true`  (M5 behaviour, keywords are
-//!       folded into `object` so BM25 matches).
+//!     * before = keywords metadata-only (BM25 cannot see them).
+//!     * after  = keywords additionally folded into the BM25-indexed
+//!       `object` field so BM25 matches.
 //!   - Metrics: Precision@5 / Recall@5 / MRR (full query set) + keyword
 //!     hit rate (fraction of K* queries that returned their ground-truth K*
 //!     in top-5).
+//!
+//! ADR-068 note: `MemoryStoreTool` only writes Episodes now, so the corpus is
+//! seeded directly into the Knowledge (sediment) layer via `GrafeoStore`'s
+//! native store path — the same path the EpisodicDistiller uses on promotion.
+//! The before/after fold states are produced by passing `fold_into_object` to
+//! the seed helper (the runtime write-time fold no longer exists on the LLM
+//! tool path). This benchmark measures sediment-layer retrieval quality and is
+//! intentionally independent of the LLM write chain.
 //!
 //! Determinism:
 //!   - `enable_graph_expand = false` to disable PageRank boost (random
@@ -32,18 +39,21 @@
 //! IMPORTANT: uses in-memory `GrafeoStore`, never touches the running
 //! Gateway / Runtime / Desktop processes or their ports.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use acowork_core::tools::traits::Tool;
+use chrono::Utc;
+
 use acowork_core::EmbeddingProvider;
 
 use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::retrieval_metrics::{EvalQuery, evaluate_retrieval_quality};
+use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
-use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery};
-
-use acowork_runtime::memory::MemorySessionHandle;
-use acowork_runtime::tools::builtin::memory_store::MemoryStoreTool;
+use acowork_memory::{
+    KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryQuery, NodeStatus, PrivacyLevel,
+    labels,
+};
 
 use grafeo_common::types::NodeId;
 
@@ -89,84 +99,104 @@ impl EmbeddingProvider for DeterministicEmbedding {
 
 struct BenchE2e {
     store: Arc<GrafeoStore>,
-    handle: Arc<MemorySessionHandle>,
 }
 
 impl BenchE2e {
     fn new() -> Self {
         let store = Arc::new(GrafeoStore::new_in_memory().expect("in-memory store"));
-        let handle = Arc::new(MemorySessionHandle::new(Some(Arc::new(
-            DeterministicEmbedding,
-        ))));
-        let provider: Arc<dyn acowork_memory::MemoryProvider> = store.clone();
-        handle.set_provider(provider);
-        Self { store, handle }
+        Self { store }
     }
 
-    fn store_tool(&self) -> MemoryStoreTool {
-        MemoryStoreTool::new("com.test.m5-bench", Some(self.handle.clone()))
-    }
-
-    fn node_id_from_tool_result(content: &str) -> u64 {
-        let marker = "id: ";
-        let idx = content
-            .find(marker)
-            .unwrap_or_else(|| panic!("no `id:` marker in tool result: {content}"));
-        content[idx + marker.len()..]
-            .trim_end_matches(')')
-            .trim()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| panic!("cannot parse node id from: {content}"))
-    }
-
-    /// Store a content-only knowledge node (no keywords).
+    /// Store a content-only Knowledge node (no keywords) and return its id.
+    ///
+    /// ADR-068 — see file header: the benchmark measures sediment-layer
+    /// retrieval quality, so the corpus is seeded directly into the Knowledge
+    /// layer via `GrafeoStore`'s native store path (the same path the
+    /// EpisodicDistiller uses on promotion) instead of the LLM `memory_store`
+    /// tool, which now only writes Episodes.
     async fn store_knowledge(&self, content: &str, confidence: f32, importance: f32) -> u64 {
-        let tool = self.store_tool();
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "category": "fact",
-                    "content": content,
-                    "confidence": confidence,
-                    "importance": importance,
-                }),
-                None,
-            )
+        self.store_knowledge_impl(content, confidence, importance, &[], false)
             .await
-            .expect("tool execute ok");
-        assert!(result.ok, "store failed: {:?}", result.error);
-        Self::node_id_from_tool_result(&result.content)
     }
 
-    /// Store a knowledge node WITH LLM-provided keywords. When the
-    /// `quality.keyword_index` gate is on at write-time (Plan Y), the
-    /// keywords are folded into the BM25-indexed `object` field so text
-    /// search naturally matches them.
+    /// Store a Knowledge node WITH keywords and return its id.
+    ///
+    /// Keywords always land in `metadata["keywords"]`. When `fold_into_object`
+    /// is true they are ALSO folded into the BM25-indexed `object` field —
+    /// this simulates the Plan Y (ADR-062 §6.2) write-time keyword_index fold
+    /// that ADR-068's distiller-owned sediment writes perform. The two bench
+    /// states therefore differ exactly as before:
+    ///   - before: `metadata`-only keywords → BM25 cannot match K* queries;
+    ///   - after:  keywords folded into `object` → BM25 matches.
     async fn store_knowledge_with_keywords(
         &self,
         content: &str,
         confidence: f32,
         importance: f32,
         keywords: &[&str],
+        fold_into_object: bool,
     ) -> u64 {
-        let tool = self.store_tool();
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "category": "fact",
-                    "content": content,
-                    "confidence": confidence,
-                    "importance": importance,
-                    "keywords": keywords,
-                }),
-                None,
-            )
+        self.store_knowledge_impl(content, confidence, importance, keywords, fold_into_object)
             .await
-            .expect("tool execute ok");
-        assert!(result.ok, "store failed: {:?}", result.error);
-        Self::node_id_from_tool_result(&result.content)
+    }
+
+    async fn store_knowledge_impl(
+        &self,
+        content: &str,
+        confidence: f32,
+        importance: f32,
+        keywords: &[&str],
+        fold_into_object: bool,
+    ) -> u64 {
+        let embedding = DeterministicEmbedding
+            .embed(content)
+            .await
+            .expect("embed ok");
+
+        let mut object = content.to_string();
+        let mut metadata = HashMap::new();
+        if !keywords.is_empty() {
+            metadata.insert(
+                "keywords".to_string(),
+                serde_json::Value::Array(
+                    keywords
+                        .iter()
+                        .map(|k| serde_json::Value::String(k.to_string()))
+                        .collect(),
+                ),
+            );
+            if fold_into_object {
+                object = format!("{object} {}", keywords.join(" "));
+            }
+        }
+
+        let node = GrafeoKnowledgeNode {
+            id: None,
+            subject: "user".to_string(),
+            predicate: String::new(),
+            object,
+            sub_type: KnowledgeSubType::Fact,
+            confidence,
+            source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
+            embedding: Some(embedding),
+            status: NodeStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata,
+            privacy: PrivacyLevel::Personal,
+            importance,
+        };
+        self.store
+            .store_node(
+                labels::KNOWLEDGE,
+                node.to_properties()
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.clone())),
+            )
+            .expect("store_node ok")
+            .0
     }
 }
 
@@ -342,25 +372,12 @@ async fn m5_keyword_index_before_after() {
     }
 
     // K* corpus (content + keywords). Keywords are persisted into
-    // metadata["keywords"] unconditionally; whether they ALSO fold into the
-    // BM25-indexed `object` is controlled by `quality.keyword_index` at
-    // write-time (Plan Y — applied during retrieval here via per-state cfg).
-    //
-    // Note: the corpus is built ONCE with `keyword_index=false` so that
-    // before/after states only differ in the retrieval cfg. The Plan Y
-    // write-time fold is exercised by `after` in the search path: keywords
-    // already live in metadata["keywords"], so the before state has them
-    // there but NOT in object; the after state — when we additionally
-    // re-store with keyword_index=true — would put them in object.
-    //
-    // To keep the corpus fixed across both states, we instead exercise the
-    // M5 fold path via a SECOND store pass with `keyword_index=true` (see
-    // helper below): the K* node ids in the BEFORE state have keywords in
-    // metadata only; in the AFTER state the same K* nodes have keywords
-    // folded into object. Both ground-truth ids refer to the K* node.
+    // metadata["keywords"] unconditionally. This is the BEFORE state:
+    // keywords are metadata-only (no fold), so BM25 cannot match the K*
+    // keyword-only queries.
     for (key, content, confidence, importance, keywords) in K_CORPUS {
         let id = e2e
-            .store_knowledge_with_keywords(content, *confidence, *importance, keywords)
+            .store_knowledge_with_keywords(content, *confidence, *importance, keywords, false)
             .await;
         ids_by_key.insert(*key, id);
     }
@@ -393,20 +410,19 @@ async fn m5_keyword_index_before_after() {
         keyword_ground_truth_ids.insert(text.to_string(), k_id);
     }
 
-    // ── 3. BEFORE: keyword_index = false (M4 baseline behaviour) ────────
+    // ── 3. BEFORE: keywords metadata-only (M4 baseline behaviour) ───────
     // Plan Y: keywords remain in metadata["keywords"] only, BM25 cannot
     // see them, K* queries return 0 relevant hits.
     let before =
         run_state(&e2e, &relevant, &keyword_ground_truth_ids, false).await;
 
-    // ── 4. AFTER: keyword_index = true (M5 behaviour) ───────────────────
-    // Plan Y: keywords are folded into the BM25-indexed `object` field at
-    // write-time, K* queries hit their ground truth via BM25.
-    //
-    // To simulate the write-time fold under the after-state cfg, we re-store
-    // the K* nodes with `keyword_index=true` so that the fold is applied to
-    // `object` for THIS state. The M4 nodes are unchanged (their content
-    // matches M4 queries regardless of keywords).
+    // ── 4. AFTER: keywords folded into `object` (M5 behaviour) ──────────
+    // Plan Y: the write-time fold puts keywords into the BM25-indexed
+    // `object` field, so K* queries hit their ground truth via BM25. We
+    // re-seed the K* nodes with `fold_into_object = true` for this state
+    // (the runtime LLM write path no longer performs the fold — ADR-068).
+    // The M4 nodes are unchanged (their content matches M4 queries
+    // regardless of keywords).
     let m5_store = BenchE2e::new();
     let mut m5_ids: std::collections::HashMap<&str, u64> =
         std::collections::HashMap::new();
@@ -417,20 +433,12 @@ async fn m5_keyword_index_before_after() {
         m5_ids.insert(*key, id);
     }
     for (key, content, confidence, importance, keywords) in K_CORPUS {
-        // The fold happens inside process_memory_store based on
-        // self.quality().keyword_index. To exercise it under the after-state
-        // cfg, we set the gate on the in-memory provider before re-storing.
-        m5_store
-            .store
-            .apply_quality_config(
-                &acowork_memory::quality::MemoryQualityConfig {
-                    keyword_index: true,
-                    ..Default::default()
-                },
-            )
-            .expect("apply quality config ok");
+        // AFTER state: keywords folded into the BM25-indexed `object` (the
+        // Plan Y write-time fold, now expressed via the seed helper's
+        // `fold_into_object` flag — the fold no longer lives on the LLM tool
+        // path, see file header).
         let id = m5_store
-            .store_knowledge_with_keywords(content, *confidence, *importance, keywords)
+            .store_knowledge_with_keywords(content, *confidence, *importance, keywords, true)
             .await;
         m5_ids.insert(*key, id);
     }
