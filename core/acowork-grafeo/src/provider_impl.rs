@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
 use acowork_memory::consolidation::{
-    GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
+    GeneralizationConfig, GeneralizationResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig,
 };
 use acowork_memory::provider::MemoryProvider;

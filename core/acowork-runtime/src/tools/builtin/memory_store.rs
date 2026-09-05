@@ -322,13 +322,13 @@ impl Tool for MemoryStoreTool {
                         _ => "personal",
                     }),
                 );
-                if let Some(kw) = routed_keywords.as_ref() {
-                    if !kw.is_empty() {
-                        metadata.insert(
-                            "keywords".to_string(),
-                            serde_json::to_value(kw).unwrap_or_default(),
-                        );
-                    }
+                if let Some(kw) = routed_keywords.as_ref()
+                    && !kw.is_empty()
+                {
+                    metadata.insert(
+                        "keywords".to_string(),
+                        serde_json::to_value(kw).unwrap_or_default(),
+                    );
                 }
 
                 let episode = Episode {
@@ -911,8 +911,8 @@ mod tests {
         let episodes = provider.all_episodes().unwrap();
         assert_eq!(episodes.len(), 1);
         // `aspect`/`source`/`key` must NOT have leaked into metadata.
-        assert!(episodes[0].metadata.get("aspect").is_none());
-        assert!(episodes[0].metadata.get("key").is_none());
-        assert!(episodes[0].metadata.get("source").is_none());
+        assert!(!episodes[0].metadata.contains_key("aspect"));
+        assert!(!episodes[0].metadata.contains_key("key"));
+        assert!(!episodes[0].metadata.contains_key("source"));
     }
 }
