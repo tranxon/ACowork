@@ -1,14 +1,26 @@
 //! LongMemEval 5-dimension evaluation framework.
 //!
-//! P3-5: IE and Abs dimensions now use real Grafeo store operations
-//! instead of hardcoded scores. MR, TR, KU remain placeholder until
-//! Phase 3 offline consolidation provides the data foundation.
+//! P3-5: the IE and Abs dimensions exercise the real
+//! **episode → distiller → sediment** chain (ADR-068): observations are
+//! stored as classified Episodes, promoted by `DefaultEpisodicDistiller`
+//! (driven by a scripted server-side LLM), and only then evaluated through
+//! the semantic retrieval APIs. MR, TR, and KU remain placeholders until the
+//! offline consolidation foundation matures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 
-use crate::consolidation::MemoryStoreInput;
+use async_trait::async_trait;
+use chrono::{Duration as ChronoDuration, Utc};
+
+use acowork_memory::consolidation::{
+    DistillerConfig, DistillerResult, LlmMessage, LlmResponse, TripleExtractorLlm,
+};
+use acowork_memory::MemoryProvider;
+
+use crate::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
 use crate::grafeo::GrafeoStore;
-use crate::types::{DEFAULT_EMBEDDING_DIM, KnowledgeSubType};
+use crate::types::{Episode, KnowledgeSubType, labels};
 
 /// LongMemEval dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,14 +109,14 @@ impl EvalResult {
 
 /// Run evaluation using an in-memory Grafeo store.
 ///
-/// P3-5: IE and Abs dimensions use real store operations:
-/// - IE: Store episodes via `process_memory_store()`, then search
-///   and verify that the correct facts can be retrieved.
-/// - Abs: Store multiple related episodes, then verify that
-///   generalization creates abstract patterns.
+/// P3-5: IE and Abs use real store operations over the ADR-068 pipeline:
+/// - IE: Store Fact episodes, run the distiller, then verify the promoted
+///   KnowledgeNodes carry the extracted facts.
+/// - Abs: Store repeated Preference / Procedure / autobiographical episodes
+///   and verify the distiller abstracts them into single sediment nodes.
 ///
-/// MR, TR, KU remain placeholder scores until Phase 3 offline
-/// consolidation provides the necessary data foundation.
+/// MR, TR, KU remain placeholder scores until Phase 3 offline consolidation
+/// provides the necessary data foundation.
 pub fn run_eval(config: &EvalConfig) -> EvalResult {
     let mut scores = HashMap::new();
 
@@ -129,192 +141,356 @@ pub fn run_eval(config: &EvalConfig) -> EvalResult {
     result
 }
 
+// ============================================================================
+// Scripted server-side LLM (distiller Step 2a extraction + Step 4 judge)
+// ============================================================================
+
+/// A fake `TripleExtractorLlm` returning a fixed response queue. The
+/// distiller pops one response per LLM call: first the batch extraction
+/// JSON, then one judge JSON per evidence-backed candidate cluster.
+struct ScriptedLlm {
+    responses: Mutex<VecDeque<String>>,
+}
+
+impl ScriptedLlm {
+    fn new(responses: Vec<String>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl TripleExtractorLlm for ScriptedLlm {
+    async fn chat(
+        &self,
+        _messages: Vec<LlmMessage>,
+    ) -> std::result::Result<LlmResponse, String> {
+        let resp = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| "ScriptedLlm: response queue exhausted".to_string())?;
+        Ok(LlmResponse {
+            content: resp,
+            usage_tokens: None,
+        })
+    }
+}
+
+fn raw_triple(episode_id: u64, predicate: &str, object: &str) -> String {
+    format!(
+        r#"{{"episode_id":{id},"structure":{{"kind":"triple","subject":"user","predicate":"{p}","object":"{o}"}},"autobio_candidate":null}}"#,
+        id = episode_id,
+        p = predicate,
+        o = object
+    )
+}
+
+fn raw_procedure(episode_id: u64, trigger: &str, action: &str) -> String {
+    format!(
+        r#"{{"episode_id":{id},"structure":{{"kind":"procedure","trigger_condition":"{t}","action_pattern":"{a}"}},"autobio_candidate":null}}"#,
+        id = episode_id,
+        t = trigger,
+        a = action
+    )
+}
+
+fn raw_autobio(episode_id: u64, aspect: &str, key_hint: &str) -> String {
+    format!(
+        r#"{{"episode_id":{id},"structure":null,"autobio_candidate":{{"aspect":"{a}","key_hint":"{k}"}}}}"#,
+        id = episode_id,
+        a = aspect,
+        k = key_hint
+    )
+}
+
+fn extraction_response(items: &[String]) -> String {
+    format!("[{}]", items.join(","))
+}
+
+fn judge_promote(confidence: f32, merged_content: &str) -> String {
+    format!(
+        r#"{{"decision":"promote","confidence":{c},"reasoning":"eval fixture","merged_content":"{m}"}}"#,
+        c = confidence,
+        m = merged_content
+    )
+}
+
+/// Run one ADR-068 distillation pass over the episodes already stored in
+/// `store`, with the scripted LLM response queue given by `responses`.
+///
+/// Returns the full `DistillerResult` audit when the run succeeds.
+fn distill(
+    store: &GrafeoStore,
+    responses: Vec<String>,
+    config: DistillerConfig,
+) -> Option<DistillerResult> {
+    let llm = ScriptedLlm::new(responses);
+    let provider: &dyn MemoryProvider = store;
+    tokio::runtime::Runtime::new()
+        .ok()?
+        .block_on(DefaultEpisodicDistiller.run(provider, Some(&llm), None, &config))
+        .ok()
+}
+
+/// Store a classified episode directly (as if the LLM `memory_store` tool had
+/// written it). Returns the new episode's node ID.
+fn seed_episode(
+    store: &GrafeoStore,
+    session_id: &str,
+    content: &str,
+    subtype: KnowledgeSubType,
+    ts: chrono::DateTime<Utc>,
+) -> Option<u64> {
+    let ep = Episode {
+        id: None,
+        session_id: session_id.to_string(),
+        turn_index: 0,
+        role: "assistant".to_string(),
+        content: content.to_string(),
+        embedding: None,
+        timestamp: ts,
+        consolidated: false,
+        metadata: HashMap::new(),
+        importance: 0.6,
+        knowledge_subtype: Some(subtype),
+    };
+    store.store_episode(&ep).ok().map(|id| id.as_u64())
+}
+
+/// Number of KnowledgeNode nodes currently in the store.
+fn knowledge_count(store: &GrafeoStore) -> usize {
+    store
+        .db
+        .graph_store()
+        .nodes_by_label(labels::KNOWLEDGE)
+        .len()
+}
+
 /// IE (Information Extraction) evaluation.
 ///
-/// Tests whether facts stored via `process_memory_store()` can be
-/// correctly retrieved via text search. Uses an in-memory GrafeoStore.
-///
-/// Test cases:
-/// 1. Store "User prefers dark mode" → search "dark mode" → found
-/// 2. Store "User lives in Tokyo" → search "Tokyo" → found
-/// 3. Store "User works at Acme" → search "Acme" → found
-/// 4. Store "User speaks Japanese" → search "Japanese" → found
-/// 5. Store "User likes cats" → search "dogs" → NOT found (precision)
+/// Stores each test fact as a classified Episode and runs the distiller
+/// (evidence threshold relaxed to 1 so each fact promotes in isolation).
+/// Verifies the promoted sediment nodes actually carry the extracted
+/// subject/predicate/object and that a query for absent information finds
+/// nothing.
 fn eval_information_extraction() -> f32 {
     let store = match GrafeoStore::new_in_memory() {
         Ok(s) => s,
         Err(_) => return 0.0,
     };
 
+    // (content, predicate, object, should_be_found)
     let test_cases = [
-        ("User prefers dark mode", "dark mode", "prefers", true),
-        ("User lives in Tokyo", "Tokyo", "lives", true),
-        ("User works at Acme Corp", "Acme", "works", true),
-        ("User speaks Japanese", "Japanese", "speaks", true),
-        ("User likes cats", "dogs", "likes", false),
+        ("User prefers dark mode", "prefers", "dark mode", true),
+        ("User lives in Tokyo", "lives_in", "Tokyo", true),
+        ("User works at Acme Corp", "works_at", "Acme Corp", true),
+        ("User speaks Japanese", "speaks", "Japanese", true),
+        ("User likes cats", "likes", "cats", false),
     ];
 
-    // Store all facts.
-    let const_emb = vec![0.5f32; DEFAULT_EMBEDDING_DIM];
-    for (content, _, predicate, _) in &test_cases {
-        let input = MemoryStoreInput {
-            content: content.to_string(),
-            sub_type: KnowledgeSubType::Fact,
-            subject: Some("user".to_string()),
-            predicate: Some(predicate.to_string()),
-            object: Some(content.split_whitespace().last().unwrap_or("").to_string()),
-            confidence: Some(0.9),
-            source_episode_id: None,
-            embedding: Some(const_emb.clone()),
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
-        };
-        if store.process_memory_store(&input).is_err() {
-            continue;
-        }
+    let now = Utc::now();
+    let mut ids = Vec::with_capacity(test_cases.len());
+    for (content, _, _, _) in &test_cases {
+        ids.push(
+            seed_episode(&store, "eval-ie", content, KnowledgeSubType::Fact, now).unwrap_or(0),
+        );
     }
 
-    // Evaluate retrieval for each test case.
+    // Scripted extraction + one judge call per promoted cluster.
+    let extraction: Vec<String> = ids
+        .iter()
+        .zip(test_cases.iter())
+        .map(|(id, (_, predicate, object, _))| raw_triple(*id, predicate, object))
+        .collect();
+    let mut responses = vec![extraction_response(&extraction)];
+    for (content, _, _, _) in &test_cases {
+        responses.push(judge_promote(0.95, content));
+    }
+
+    let config = DistillerConfig {
+        fact_min_evidence: 1,
+        ..Default::default()
+    };
+    let Some(result) = distill(&store, responses, config) else {
+        return 0.0;
+    };
+    if result.facts_promoted != test_cases.len() {
+        // The pipeline did not promote every fact — cannot score the run.
+        return 0.0;
+    }
+
+    // Verify each positive case was extracted into a retrievable node.
     let mut correct = 0usize;
-    let total = test_cases.len();
-
-    for (_, query, _, should_find) in &test_cases {
-        let results = store.text_search_with_filter("Knowledge", "content", query, 5, None);
-
-        match results {
-            Ok(found) => {
-                let found_any = !found.is_empty();
-                if found_any == *should_find {
+    for (content, predicate, object, should_find) in &test_cases {
+        let node = store
+            .find_knowledge_by_subject("user", predicate)
+            .ok()
+            .flatten();
+        match (node, *should_find) {
+            (Some(n), true) => {
+                if n.object.contains(object) || object.contains(&n.object) {
                     correct += 1;
                 }
             }
-            Err(_) => {
-                if !should_find {
-                    correct += 1; // Error counts as "not found", which is correct for negative cases
+            (None, true) => {}
+            (Some(_), false) => {
+                // Negative case: the fact is stored, but a search for the
+                // *absent* information must not surface it.
+                let hits = store
+                    .text_search_with_filter("Knowledge", "object", "dogs", 5, None)
+                    .ok()
+                    .map(|r| r.len())
+                    .unwrap_or(0);
+                if hits == 0 {
+                    correct += 1;
                 }
             }
+            (None, false) => {
+                // Nothing stored at all is also a valid "not found".
+                correct += 1;
+            }
         }
+        let _ = content;
     }
 
-    if total == 0 {
-        return 0.0;
-    }
-    (correct as f32 / total as f32) * 100.0
+    (correct as f32 / test_cases.len() as f32) * 100.0
 }
 
 /// Abs (Abstraction) evaluation.
 ///
-/// Tests whether multiple related episodes can lead to generalized
-/// knowledge. Uses an in-memory GrafeoStore.
-///
-/// Test cases:
-/// 1. Store 3 episodes about Python errors → check for procedural patterns
-/// 2. Store 2 episodes about the same user preference → verify dedup
-/// 3. Store multiple "prefers X" facts → verify category grouping
+/// Verifies that repeated evidence episodes abstract into *single* sediment
+/// nodes through the distiller rather than one node per episode:
+/// 1. 3 Preference episodes → one KnowledgeNode (not three).
+/// 2. 5 Procedure episodes → one ProceduralNode.
+/// 3. 3 autobiographical limitation episodes spanning 14+ days → one
+///    `AutobiographicalNode` under the limitation key.
 fn eval_abstraction() -> f32 {
-    let store = match GrafeoStore::new_in_memory() {
-        Ok(s) => s,
-        Err(_) => return 0.0,
-    };
-
     let mut correct = 0usize;
     let total = 3usize;
 
-    // Test 1: Store multiple similar facts and check dedup.
-    // Two near-identical preferences should result in dedup, not two nodes.
-    let emb_a = vec![0.9f32; DEFAULT_EMBEDDING_DIM];
-    let emb_b = vec![0.91f32; DEFAULT_EMBEDDING_DIM]; // Very similar
-
-    let input_a = MemoryStoreInput {
-        content: "User prefers dark mode for IDE".to_string(),
-        sub_type: KnowledgeSubType::Preference,
-        subject: Some("user".to_string()),
-        predicate: Some("prefers".to_string()),
-        object: Some("dark mode".to_string()),
-        confidence: Some(0.8),
-        source_episode_id: None,
-        embedding: Some(emb_a),
-        privacy: None,
-        importance: None,
-        keywords: None,
-        autobiographical: None,
+    // ---- Test 1: repeated Preference episodes → one KnowledgeNode ----
+    {
+        let store = match GrafeoStore::new_in_memory() {
+            Ok(s) => s,
+            Err(_) => return 0.0,
         };
-    let input_b = MemoryStoreInput {
-        content: "User prefers dark mode in editor".to_string(),
-        sub_type: KnowledgeSubType::Preference,
-        subject: Some("user".to_string()),
-        predicate: Some("prefers".to_string()),
-        object: Some("dark mode".to_string()),
-        confidence: Some(0.85),
-        source_episode_id: None,
-        embedding: Some(emb_b),
-        privacy: None,
-        importance: None,
-        keywords: None,
-        autobiographical: None,
+        let now = Utc::now();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let content = match i {
+                0 => "User prefers dark mode for the IDE",
+                1 => "User prefers dark mode in the editor",
+                _ => "User generally prefers dark mode",
+            };
+            ids.push(
+                seed_episode(&store, "eval-abs1", content, KnowledgeSubType::Preference, now)
+                    .unwrap_or(0),
+            );
+        }
+        let extraction: Vec<String> = ids
+            .iter()
+            .map(|id| raw_triple(*id, "prefers", "dark mode"))
+            .collect();
+        let responses = vec![
+            extraction_response(&extraction),
+            judge_promote(0.95, "User prefers dark mode"),
+        ];
+        let Some(result) = distill(&store, responses, DistillerConfig::default()) else {
+            return 0.0;
         };
-
-    let _ = store.process_memory_store(&input_a);
-    let result_b = store.process_memory_store(&input_b);
-
-    // Dedup should have been triggered (same predicate+object, similar embedding).
-    // Check: the second store should return Some (either boost or new node).
-    if result_b.is_ok() {
-        correct += 1;
-    }
-
-    // Test 2: Verify ProceduralNode storage and retrieval.
-    let proc_emb = vec![0.7f32; DEFAULT_EMBEDDING_DIM];
-    let proc_input = MemoryStoreInput {
-        content: "When using Python, prefer type hints".to_string(),
-        sub_type: KnowledgeSubType::Fact,
-        subject: Some("user".to_string()),
-        predicate: Some("prefers".to_string()),
-        object: Some("type hints".to_string()),
-        confidence: Some(0.8),
-        source_episode_id: None,
-        embedding: Some(proc_emb),
-        privacy: None,
-        importance: None,
-        keywords: None,
-        autobiographical: None,
-        };
-
-    if store.process_memory_store(&proc_input).is_ok() {
-        // Verify it can be found via search.
-        let found = store.text_search_with_filter("Knowledge", "content", "type hints", 5, None);
-        if found.ok().is_some_and(|r| !r.is_empty()) {
+        if result.preferences_promoted == 1 && knowledge_count(&store) == 1 {
             correct += 1;
         }
     }
 
-    // Test 3: Autobiographical node storage and retrieval.
-    use crate::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
+    // ---- Test 2: repeated Procedure episodes → one ProceduralNode ----
+    {
+        let store = match GrafeoStore::new_in_memory() {
+            Ok(s) => s,
+            Err(_) => return 0.0,
+        };
+        let now = Utc::now();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(
+                seed_episode(
+                    &store,
+                    "eval-abs2",
+                    "When user asks for a summary, reply in 3 sentences",
+                    KnowledgeSubType::Procedure,
+                    now,
+                )
+                .unwrap_or(0),
+            );
+        }
+        let extraction: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                raw_procedure(*id, "when user asks for a summary", "reply in 3 sentences")
+            })
+            .collect();
+        let responses = vec![
+            extraction_response(&extraction),
+            judge_promote(0.95, "when the user asks for a summary, reply in 3 sentences"),
+        ];
+        let Some(result) = distill(&store, responses, DistillerConfig::default()) else {
+            return 0.0;
+        };
+        let procedures = store.get_all_procedural_nodes().ok().unwrap_or_default();
+        if result.procedures_promoted == 1 && procedures.len() == 1 {
+            correct += 1;
+        }
+    }
 
-    let autobio = AutobiographicalNode {
-        id: None,
-        category: AutobioCategory::Identity,
-        key: "name".to_string(),
-        value: "Test User".to_string(),
-        confidence: 0.95,
-        source_episode_id: None,
-        source_episode_ids: Vec::new(),
-        promotion_metadata: None,
-        embedding: None,
-        status: NodeStatus::Active,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        source: "user_statement".to_string(),
-        metadata: HashMap::new(),
-    };
-
-    if store.store_autobiographical(&autobio).is_ok()
-        && let Ok(Some(found)) = store.find_autobiographical_by_key("name")
-            && found.value == "Test User" {
-                correct += 1;
-            }
+    // ---- Test 3: autobiographical limitation episodes → one node ----
+    {
+        let store = match GrafeoStore::new_in_memory() {
+            Ok(s) => s,
+            Err(_) => return 0.0,
+        };
+        let now = Utc::now();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let content = match i {
+                0 => "You are too verbose, give shorter answers",
+                1 => "Your replies are too long, be concise",
+                _ => "Please stop over-explaining, keep it brief",
+            };
+            ids.push(
+                seed_episode(
+                    &store,
+                    "eval-abs3",
+                    content,
+                    KnowledgeSubType::Preference,
+                    now - ChronoDuration::days(i as i64 * 7),
+                )
+                .unwrap_or(0),
+            );
+        }
+        let extraction: Vec<String> = ids
+            .iter()
+            .map(|id| raw_autobio(*id, "limitation", "verbose_response"))
+            .collect();
+        let responses = vec![
+            extraction_response(&extraction),
+            judge_promote(0.95, "agent should be concise"),
+        ];
+        let Some(result) = distill(&store, responses, DistillerConfig::default()) else {
+            return 0.0;
+        };
+        if result.autobio_promoted == 1
+            && store
+                .find_autobiographical_by_key("verbose_response")
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            correct += 1;
+        }
+    }
 
     if total == 0 {
         return 0.0;

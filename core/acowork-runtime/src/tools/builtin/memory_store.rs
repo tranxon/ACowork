@@ -285,8 +285,8 @@ impl Tool for MemoryStoreTool {
                 // ADR-068: emit a normalized Episode into the episodic
                 // store. The distiller (background consolidation step)
                 // consumes episodes tagged with knowledge_subtype and
-                // decides promotion. No more `process_memory_store` /
-                // `autobiographical` fast paths — those are gone.
+                // decides promotion. The legacy instant-writer fast paths
+                // (fact/procedure/autobiographical direct writes) are gone.
                 let source_display = String::new();
                 let routed_keywords = _keywords;
 
@@ -699,7 +699,7 @@ mod tests {
 
     /// Migrated from test_memory_store_basic_fact: uses InMemoryProvider
     /// instead of None. ADR-068 — verifies the **episode write path** is
-    /// invoked, not the deleted process_memory_store() pipeline. The
+    /// invoked, not a legacy direct-to-sediment write pipeline. The
     /// episode is tagged with knowledge_subtype = Fact and routed to
     /// the episodic layer (NOT to a Knowledge node directly).
     #[tokio::test]

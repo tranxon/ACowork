@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::consolidation::{
-    EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
+    EmbeddingFn, GeneralizationConfig, GeneralizationResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
 };
 use crate::quality::MemoryQualityConfig;
@@ -168,28 +168,6 @@ pub trait MemoryProvider: Send + Sync {
         k: usize,
         min_score: Option<f32>,
     ) -> Result<Vec<(u64, f64)>>;
-
-    // ── Phase 1: memory_store tool entry ────────────────────────────────
-
-    /// **Deprecated (ADR-068 §3.3):** the LLM-side `memory_store` tool no
-    /// longer calls this method. The tool is a thin episode writer
-    /// (`store_episode` + `knowledge_subtype`); promotion into the
-    /// sediment layer is the offline distiller's job.
-    ///
-    /// This trait method is preserved as a no-op stub so existing
-    /// test-only implementations keep compiling. New code must not call
-    /// it. See `EpisodicDistiller` (acowork-grafeo) for the replacement
-    /// write path.
-    #[deprecated(
-        since = "0.4.0",
-        note = "ADR-068: removed direct LLM→Knowledge/Procedural/Autobiographical write path; use store_episode + distiller"
-    )]
-    fn process_memory_store(
-        &self,
-        _input: &MemoryStoreInput,
-    ) -> Result<Option<MemoryStoreResult>> {
-        Ok(None)
-    }
 
     // ── Phase 1: Ambiguous conflict confirmation ────────────────────────
 

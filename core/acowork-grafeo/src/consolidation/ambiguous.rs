@@ -184,6 +184,49 @@ mod tests {
         v
     }
 
+    /// Create a pair of KnowledgeNodes that share a `conflict_group_id` —
+    /// the same state the ambiguous-conflict detector produces at landing
+    /// time. ADR-068 removed the old instant-writer that used to create
+    /// these in tests; this helper writes the sediment nodes directly.
+    fn seed_conflict_pair(
+        store: &GrafeoStore,
+        group_id: &str,
+    ) -> (grafeo_common::types::NodeId, grafeo_common::types::NodeId) {
+        let two_days_ago = Utc::now() - chrono::TimeDelta::days(2);
+        let make = |object: &str, emb: Vec<f32>, created_at: chrono::DateTime<Utc>| KnowledgeNode {
+            id: None,
+            subject: "user".to_string(),
+            predicate: "prefers".to_string(),
+            object: object.to_string(),
+            sub_type: KnowledgeSubType::Preference,
+            confidence: 0.8,
+            source_episode_id: None,
+            source_episode_ids: Vec::new(),
+            promotion_metadata: None,
+            embedding: Some(emb),
+            status: NodeStatus::Active,
+            created_at,
+            updated_at: created_at,
+            metadata: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "conflict_group_id".to_string(),
+                    serde_json::Value::String(group_id.to_string()),
+                );
+                m
+            },
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
+        };
+        let node_a = make("dark mode", const_emb(1.0), two_days_ago);
+        // flipped_emb(15) → cos ≈ 0.922 — similar but below the dedup
+        // threshold, so store_knowledge keeps it as a separate node.
+        let node_b = make("light mode", flipped_emb(15), Utc::now());
+        let id_a = store.store_knowledge(&node_a).unwrap();
+        let id_b = store.store_knowledge(&node_b).unwrap();
+        (id_a, id_b)
+    }
+
     // =====================================================================
     // Test 1: get_pending_ambiguous_conflicts returns tracked conflicts
     // =====================================================================
@@ -193,43 +236,7 @@ mod tests {
         let store = test_store();
 
         // Create two conflicting nodes marked as ambiguous.
-        let two_days_ago = Utc::now() - chrono::TimeDelta::days(2);
-        let existing = KnowledgeNode {
-            id: None,
-            subject: "user".to_string(),
-            predicate: "prefers".to_string(),
-            object: "dark mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            confidence: 0.8,
-            source_episode_id: None,
-            source_episode_ids: Vec::new(),
-            promotion_metadata: None,
-            embedding: Some(const_emb(1.0)),
-            status: NodeStatus::Active,
-            created_at: two_days_ago,
-            updated_at: two_days_ago,
-            metadata: std::collections::HashMap::new(),
-            privacy: PrivacyLevel::Personal,
-            importance: 0.5,
-        };
-        let existing_id = store.store_knowledge(&existing).unwrap();
-
-        let input = crate::consolidation::MemoryStoreInput {
-            content: "User prefers light mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            subject: Some("user".to_string()),
-            predicate: Some("prefers".to_string()),
-            object: Some("light mode".to_string()),
-            confidence: Some(0.88),
-            source_episode_id: None,
-            embedding: Some(flipped_emb(15)),
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
-        };
-        let result = store.process_memory_store(&input).unwrap();
-        assert!(result.is_some());
+        let (existing_id, _) = seed_conflict_pair(&store, "cg_get_pending");
 
         let pending = store.get_pending_ambiguous_conflicts().unwrap();
         assert_eq!(pending.len(), 1);
@@ -245,43 +252,8 @@ mod tests {
         let store = test_store();
         assert_eq!(store.count_pending_ambiguous().unwrap(), 0);
 
-        // Trigger ambiguous conflict.
-        let two_days_ago = Utc::now() - chrono::TimeDelta::days(2);
-        let existing = KnowledgeNode {
-            id: None,
-            subject: "user".to_string(),
-            predicate: "prefers".to_string(),
-            object: "dark mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            confidence: 0.8,
-            source_episode_id: None,
-            source_episode_ids: Vec::new(),
-            promotion_metadata: None,
-            embedding: Some(const_emb(1.0)),
-            status: NodeStatus::Active,
-            created_at: two_days_ago,
-            updated_at: two_days_ago,
-            metadata: std::collections::HashMap::new(),
-            privacy: PrivacyLevel::Personal,
-            importance: 0.5,
-        };
-        store.store_knowledge(&existing).unwrap();
-
-        let input = crate::consolidation::MemoryStoreInput {
-            content: "User prefers light mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            subject: Some("user".to_string()),
-            predicate: Some("prefers".to_string()),
-            object: Some("light mode".to_string()),
-            confidence: Some(0.88),
-            source_episode_id: None,
-            embedding: Some(flipped_emb(15)),
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
-        };
-        store.process_memory_store(&input).unwrap();
+        // Create one ambiguous conflict.
+        seed_conflict_pair(&store, "cg_count");
 
         assert_eq!(store.count_pending_ambiguous().unwrap(), 1);
     }
@@ -367,42 +339,7 @@ mod tests {
         assert!(store.generate_confirmation_hint().unwrap().is_none());
 
         // Create one ambiguous conflict.
-        let two_days_ago = Utc::now() - chrono::TimeDelta::days(2);
-        let existing = KnowledgeNode {
-            id: None,
-            subject: "user".to_string(),
-            predicate: "prefers".to_string(),
-            object: "dark mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            confidence: 0.8,
-            source_episode_id: None,
-            source_episode_ids: Vec::new(),
-            promotion_metadata: None,
-            embedding: Some(const_emb(1.0)),
-            status: NodeStatus::Active,
-            created_at: two_days_ago,
-            updated_at: two_days_ago,
-            metadata: std::collections::HashMap::new(),
-            privacy: PrivacyLevel::Personal,
-            importance: 0.5,
-        };
-        store.store_knowledge(&existing).unwrap();
-
-        let input = crate::consolidation::MemoryStoreInput {
-            content: "User prefers light mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            subject: Some("user".to_string()),
-            predicate: Some("prefers".to_string()),
-            object: Some("light mode".to_string()),
-            confidence: Some(0.88),
-            source_episode_id: None,
-            embedding: Some(flipped_emb(15)),
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
-        };
-        store.process_memory_store(&input).unwrap();
+        seed_conflict_pair(&store, "cg_hint");
 
         let hint = store.generate_confirmation_hint().unwrap();
         assert!(hint.is_some());
@@ -420,56 +357,21 @@ mod tests {
     fn test_resolve_ambiguous() {
         let store = test_store();
 
-        let two_days_ago = Utc::now() - chrono::TimeDelta::days(2);
-        let existing = KnowledgeNode {
-            id: None,
-            subject: "user".to_string(),
-            predicate: "prefers".to_string(),
-            object: "dark mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            confidence: 0.8,
-            source_episode_id: None,
-            source_episode_ids: Vec::new(),
-            promotion_metadata: None,
-            embedding: Some(const_emb(1.0)),
-            status: NodeStatus::Active,
-            created_at: two_days_ago,
-            updated_at: two_days_ago,
-            metadata: std::collections::HashMap::new(),
-            privacy: PrivacyLevel::Personal,
-            importance: 0.5,
-        };
-        let existing_id = store.store_knowledge(&existing).unwrap();
-
-        let input = crate::consolidation::MemoryStoreInput {
-            content: "User prefers light mode".to_string(),
-            sub_type: KnowledgeSubType::Preference,
-            subject: Some("user".to_string()),
-            predicate: Some("prefers".to_string()),
-            object: Some("light mode".to_string()),
-            confidence: Some(0.88),
-            source_episode_id: None,
-            embedding: Some(flipped_emb(15)),
-            privacy: None,
-            importance: None,
-            keywords: None,
-            autobiographical: None,
-        };
-        let result = store.process_memory_store(&input).unwrap();
-        let new_id = result.unwrap().node_id;
+        // Create one ambiguous conflict pair; resolve keeping the newer node.
+        let (_existing_id, new_id) = seed_conflict_pair(&store, "cg_resolve");
 
         let pending = store.get_pending_ambiguous_conflicts().unwrap();
         assert_eq!(pending.len(), 1);
         let group_id = pending[0].conflict_group_id.clone();
 
         // Resolve: keep the new node.
-        store.resolve_ambiguous(&group_id, NodeId::new(new_id)).unwrap();
+        store.resolve_ambiguous(&group_id, new_id).unwrap();
 
-        let kept = store.get_knowledge(NodeId::new(new_id)).unwrap().unwrap();
+        let kept = store.get_knowledge(new_id).unwrap().unwrap();
         assert_eq!(kept.status, NodeStatus::Active);
         assert!(!kept.metadata.contains_key("conflict_group_id"));
 
-        let demoted = store.get_knowledge(existing_id).unwrap().unwrap();
+        let demoted = store.get_knowledge(_existing_id).unwrap().unwrap();
         assert_eq!(demoted.status, NodeStatus::Dormant);
         assert!(!demoted.metadata.contains_key("conflict_group_id"));
     }

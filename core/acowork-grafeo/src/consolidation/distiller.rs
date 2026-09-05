@@ -1311,14 +1311,6 @@ mod tests {
         ) -> acowork_core::error::Result<Vec<(u64, f64)>> {
             Ok(vec![])
         }
-        fn process_memory_store(
-            &self,
-            _i: &acowork_memory::consolidation::MemoryStoreInput,
-        ) -> acowork_core::error::Result<
-            Option<acowork_memory::consolidation::MemoryStoreResult>,
-        > {
-            unreachable!()
-        }
         fn should_trigger_confirmation(&self) -> acowork_core::error::Result<bool> {
             unreachable!()
         }

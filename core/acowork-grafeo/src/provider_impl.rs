@@ -510,10 +510,10 @@ impl MemoryProvider for GrafeoStore {
 
     // ── memory_store tool entry (ADR-068 §3.3 removed) ──────────────────
     //
-    // The default trait impl (deprecated no-op) is used. The LLM-side
-    // `memory_store` tool now goes through `store_episode` directly; the
-    // GrafeoStore::process_memory_store method itself has been deleted
-    // from this crate (M6). The distiller owns promotion.
+    // The `MemoryProvider` trait method for this entry was removed with
+    // ADR-068 — the LLM-side `memory_store` tool writes Episodes via
+    // `store_episode` and the EpisodicDistiller owns promotion. This impl
+    // intentionally provides no direct LLM→sediment write path.
 
     // ── Ambiguous conflict confirmation ──────────────────────────────────
 

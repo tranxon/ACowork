@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_inmemory_provider_store_and_retrieve() {
-        // ADR-068: the legacy `process_memory_store` path is gone.
+        // ADR-068: the legacy direct LLM→sediment write path is gone.
         // Verify the new episodic-side store_episode / search round trip.
         let provider = InMemoryProvider::new();
 

@@ -957,10 +957,10 @@ impl AgentCore {
         // Fact / Relation / etc. (see `EpisodicDistiller::promote_*`).
         //
         // Note: `store_autobiographical` here is the **manifest-bootstrap
-        // fast path**, distinct from the deprecated LLM-side write path
-        // (`process_memory_store`) that ADR-068 §3.3 removed. Manifest
-        // bootstrapping predates ADR-068 and remains valid because the
-        // source is the package author, not the LLM at runtime.
+        // fast path**, distinct from the deprecated LLM-side direct write
+        // path that ADR-068 §3.3 removed. Manifest bootstrapping predates
+        // ADR-068 and remains valid because the source is the package
+        // author, not the LLM at runtime.
         match provider.find_autobiographical_by_category(AutobioCategory::Identity) {
             Ok(existing) if !existing.is_empty() => {
                 tracing::debug!(count = existing.len(), "Autobiographical nodes already exist, skipping manifest bootstrap");
