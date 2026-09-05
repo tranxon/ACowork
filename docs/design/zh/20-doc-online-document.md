@@ -1,10 +1,10 @@
 # acowork-doc 在线文档服务设计
 
-> 版本：v0.1（草案）| 日期：2026-08-30
+> 版本：v1.0（定稿）| 日期：2026-09（D0–D4 实施完成）
 >
 > 关联 PRD：[`docs/prd/zh/prd-doc-pm.md`](../../prd/zh/prd-doc-pm.md)（§4 在线文档）
 > 关联设计：[`04-gateway.md`](./04-gateway.md)、[`14-desktop-app.md`](./14-desktop-app.md)
-> 关联 ADR：[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）
+> 关联 ADR：[`ADR-070-doc-standalone-process-and-tree-storage.md`](../../adr/zh/ADR-070-doc-standalone-process-and-tree-storage.md)（doc 独立进程 + 存储选型，本 v1.0 依其定案）、[`ADR-064-pm-standalone-process.md`](../../adr/zh/ADR-064-pm-standalone-process.md)（独立进程范式先例）、[`ADR-055-remote-runtime-node-topology.md`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点访问）
 >
 > **一句话**：`acowork-doc` 是 Gateway 托管的本地在线文档服务，提供目录树文档库的 REST API 与 doc MCP Server。人类经 Desktop 本地 React 组件使用；Agent 经 HTTP MCP 工具读写，修改走「PR 式审核流」。
 
@@ -28,7 +28,7 @@
 | Q3 | **MCP transport = HTTP** | 服务常驻、连接开销低；现有 `McpTransport` 已支持 HTTP |
 | Q4 | **Agent 修改已有文档走 PR 式审核流** | Agent 先在本地生成缓存副本 → 修改 → `doc_submit_update` 提交更新请求（pending）→ 人类在 Desktop 审核（approve/reject）→ approve 后合并入库。**新增文档（add to doc）直接生效，不审核**。临时文件放工作区 `.acowork/tmp/` 或系统 tmp（agent home 工作区除外） |
 | Q7 | **暴露给远程节点** | 与 embed 一致：endpoint 用 `advertise_host` 构造，经 MQTT 全局资源/AgentHello 下发，远程 Runtime 可访问 doc MCP（§8） |
-| Q8 | **数据目录 = `{data}/acowork-doc/`** | 与 Gateway 自身数据（models/packages 等）在 `<root>/data/` 下平行，独立成目录 |
+| Q8 | **数据目录 = `$HOME/.acowork/acowork-doc/`** | ADR-070 决策 3：修正草案 `{data}/acowork-doc/`（嵌套 Gateway 数据目录）——与 pm 对齐，doc 数据与 Gateway 数据目录**平级独立**（`$HOME/.acowork/` 下与 gateway/node/pm 并列），生命周期互不耦合 |
 
 > 未列出的 Q5/Q6 属于 acowork-pm，见 [21-pm-project-management.md](./21-pm-project-management.md)。
 
@@ -39,15 +39,15 @@
 ### 2.1 组件形态
 
 - 独立 Rust crate：`core/acowork-doc/`（新增），axum HTTP 服务，与 `acowork-embed` 同构（CLI + logging + shutdown + health）。
-- 由 Gateway 生命周期模块拉起与监督：复用 `lifecycle/embed.rs` 进程拉起 + `embed_supervisor.rs` SSE 心跳/指数退避重启模式，新增 `lifecycle/doc.rs` + `doc_supervisor.rs`。
+- 由 Gateway 生命周期模块拉起与监督：复用 `pm_supervisor` 的 spawn + `/health` 轮询 + 指数退避重启模式，新增 `lifecycle/doc_supervisor.rs`（`core/acowork-gateway/src/lifecycle/doc_supervisor.rs`）。
 - 绑定 `127.0.0.1:{doc_port}`，默认端口 **18081**（可配置，端口冲突自动递增，同现有 http.port 策略）。
 - 不内置 Web 前端：只暴露 REST API + MCP HTTP 端点。
 
-### 2.2 数据目录布局（Q8）
+### 2.2 数据目录布局（Q8 → ADR-070 决策 3）
 
 ```
-<root>/data/                          # Gateway 数据根（project_data_dir）
-├── models/  packages/  logs/ …      # Gateway 自身数据（现有，平行共存）
+$HOME/.acowork/                       # 各服务数据根（平级，生命周期互不耦合）
+├── acowork-gateway/  acowork-node/  acowork-pm/ …   # 现有，平行共存
 └── acowork-doc/                      # ← 本文档库根（新增）
     ├── library.json                  # 根目录索引：只管本级文件与子目录
     ├── 产品方案.md
@@ -62,17 +62,19 @@
     └── .requests/                    # 更新请求（PR 式审核流，§5）
 ```
 
-### 2.3 配置项（草案，Gateway `[doc]` 小节）
+> 用户可通过 `[doc].data_dir` 覆盖默认位置；`[doc].port` 默认 18081，冲突自动递增。
+
+### 2.3 配置项（已实现，Gateway `[doc]` 小节）
 
 ```toml
 [doc]
 enabled = true
-port = 18081
-data_dir = "<root>/data/acowork-doc"   # 默认
-advertise_host = null                  # 缺省用 Gateway 的 advertise_host
-mcp_http_path = "/mcp"                 # MCP HTTP 端点路径
-auto_inject_mcp = true                 # 是否自动注入 doc MCP 到每个 Agent
-request_ttl_hours = 168                # 待审核请求过期时间（默认 7 天）
+port = 18081                          # 冲突自动递增（最多 +20）
+data_dir = null                       # 缺省 = $HOME/.acowork/acowork-doc
+mcp_http_path = "/api/doc/mcp"        # MCP 公开端点（Gateway 反代路径，doc_mcp_url 用）
+auto_inject_mcp = true                # 自动注入 doc MCP 到每个 Agent（catalog）
+request_ttl_hours = 72                # 待审核请求过期时间（默认 72 小时）
+trash_retention_days = 30             # 回收站保留天数
 ```
 
 ---
@@ -90,7 +92,7 @@ request_ttl_hours = 168                # 待审核请求过期时间（默认 7 
 ### 3.2 library.json 结构
 
 ```jsonc
-// {data}/acowork-doc/library.json（根目录示例）
+// $HOME/.acowork/acowork-doc/library.json（根目录示例）
 {
   "dir_id": "root",
   "parent": null,
@@ -214,13 +216,13 @@ sequenceDiagram
   1. 当前 Agent 工作区根下 `.acowork/tmp/docs/{doc_id}.md`（工作区专用临时目录，类似其他 Agent 应用约定）。
   2. **例外**：Agent 工作区即 agent home（无独立 workspace 目录）时，用系统 tmp `{temp_dir()}/acowork-doc/{agent_id}/{doc_id}.md`。
 - `.acowork/` 仅存临时/缓存，不进入文档库、不随共享导出。
-- `doc_pull` 的语义 = `doc_read` 内容落盘为缓存副本 + 记录 base_version，供 Agent 编辑后提交。
+- `doc_pull` 语义（D3 实施修正，见 §12 OD-1）：**服务端不落盘**——返回 Markdown 原文 + `base_version` + 建议缓存相对路径（`.acowork/tmp/docs/{doc_id}.md`），由调用方（Runtime/Agent 文件工具）写入其工作区。doc 进程与 Agent 工作区可能不在同一信任边界（远程 Agent），落盘职责归 Agent 侧。
 
 ---
 
 ## 6. MCP 工具设计（Agent 接口，HTTP transport）
 
-- MCP Server 端点：`http://{listen_addr}:{doc_port}/mcp`（Q3 = HTTP）。远程 Runtime 用 §8 的 advertise endpoint。
+- MCP Server 端点：`http://127.0.0.1:{doc_port}/mcp`（doc 进程内部端点，仅 loopback；Q3 = HTTP）。Gateway 反代公开入口为 `http://{advertise_host}:{gw_http_port}/api/doc/mcp`（§8）。
 - Gateway 将 doc MCP 配置注入每个 Agent 的 `catalog` 列表（`auto_inject_mcp=true` 时），Agent 默认获得 `doc_*` 工具。
 - 每个工具调用携带 `agent_id`（由 Runtime MCP 层注入或服务端从连接上下文取），服务端据此做身份归属校验（NFR-04）。
 
@@ -228,7 +230,7 @@ sequenceDiagram
 |------|------|------|------|
 | `doc_list` | `path?`（目录，缺省根）`query?` `offset?` `limit?` | 该目录下文档/子目录条目 | 目录树逐级浏览 |
 | `doc_read` | `doc_id` 或 `path` | Markdown 原文 + `version` + 元数据 | 读取共享文档 |
-| `doc_pull` | `doc_id` 或 `path` | 落盘路径 + `base_version` | 下载本地缓存副本（§5.5），供修改后提交 |
+| `doc_pull` | `doc_id` 或 `path` | 内容 + `base_version` + 建议缓存相对路径 | 拉取缓存副本（§5.5，服务端不落盘），供修改后提交 |
 | `doc_add` | `path?`（目标目录，缺省根）`title?` `content` `source_workspace?` `source_path?` | 新 `doc_id` | **add to doc**：新增文档直接生效（快照导入）；同名冲突返回 409 |
 | `doc_submit_update` | `doc_id` 或 `path` `content` `base_version` | `request_id` + `status=pending` | **PR 式更新请求**（§5），不直接写库 |
 | `doc_check_request` | `request_id` | 审核状态（pending/approved/rejected/expired） | Agent 轮询审核结果 |
@@ -241,40 +243,39 @@ sequenceDiagram
 
 ## 7. Desktop 集成（本地 React 组件，Q1）
 
-- `docs` 视图（替换 [AppLayout.tsx:897-903](../../../apps/acowork-desktop/src/components/layout/AppLayout.tsx#L897) 的 TODO）：
-  - **左侧**：文档库目录树（可展开/折叠目录，复用文件树交互模式）。
-  - **右侧**：编辑器，**复用现有 [MarkdownPreviewView.tsx](../../../apps/acowork-desktop/src/components/editor/MarkdownPreviewView.tsx)**（编辑/预览双模式），保证与桌面端其他 Markdown 渲染风格一致。
-- 数据获取：本地 React 组件经 Gateway 反向代理调用 REST API（`http://127.0.0.1:19876/api/doc/*`），不直接连 doc 服务端口（保持单入口 + 鉴权点）。
-- **审核队列入口**：docs 视图顶部或独立 Tab 展示「待审核更新请求」，人类 approve/reject（§5）。
-- 服务离线提示：doc 服务不可用时显示「文档服务不可用 + 重试」而非白屏（与现有错误态一致）。
-- 无需引入新依赖：ReactMarkdown / remark-gfm / CodeBlock / 目录树组件均已存在。
+- `docs` 视图 = [views/DocsView.tsx](../../../apps/acowork-desktop/src/views/DocsView.tsx)（已接入 [AppLayout.tsx:924](../../../apps/acowork-desktop/src/components/layout/AppLayout.tsx#L924) 主导航，替换原 TODO 占位）：
+  - **左侧**：文档库目录树（[DocTreeSidebar.tsx](../../../apps/acowork-desktop/src/views/doc/DocTreeSidebar.tsx)，可展开/折叠目录，复用文件树交互模式）。
+  - **右侧**：编辑器（[DocEditor.tsx](../../../apps/acowork-desktop/src/views/doc/DocEditor.tsx)，编辑/预览双模式，预览复用 [MarkdownPreviewView.tsx](../../../apps/acowork-desktop/src/components/editor/MarkdownPreviewView.tsx) 同栈渲染），保证与桌面端其他 Markdown 渲染风格一致。
+- 数据获取：本地 React 组件经 Gateway 反向代理调用 REST API（`http://127.0.0.1:{gw_http_port}/api/doc/*`），不直接连 doc 服务端口（保持单入口 + 鉴权点）；doc_types/doc-api 客户端对齐服务端 wire DTO。
+- **审核队列**：[ReviewQueue.tsx](../../../apps/acowork-desktop/src/views/doc/ReviewQueue.tsx) 展示「待审核更新请求」，人类 approve/reject（§5）；回收站 [TrashDialog.tsx](../../../apps/acowork-desktop/src/views/doc/TrashDialog.tsx)。
+- 服务离线提示：healthStore 30s 轮询 + 连续失败判离线，显示「文档服务不可用 + 重试」而非白屏（与 pm 离线面板同设计）。
+- 无需引入新依赖：zustand stores（`stores/doc/*`）+ ReactMarkdown / remark-gfm / CodeBlock / 目录树组件均已存在。
 
 ---
 
 ## 8. 远程节点访问（Q7）
 
-与 embed 完全一致（参考 ADR-055 §6.3/§6.8）：
+与 embed 一致（参考 ADR-055 §6.3/§6.8），**但入口收敛到 Gateway 反代**（D4-1 实施定案）：
 
-- doc 服务作为 **global scope** sidecar 部署在 Gateway 机器。
-- 对外 endpoint 用 Gateway `advertise_host` 构造：`http://{advertise_host}:{doc_port}/mcp`。
-- 下发路径：复用 MQTT 全局资源（global resources）与 AgentHello 回执（`handle_agent_hello` 内嵌 endpoint），远程 Runtime 经 MQTT 收到 endpoint 后直接 HTTP 调用 doc MCP。
-- REST API 面（人类）仍只经 Desktop → Gateway 反代访问 `127.0.0.1`，不暴露公网。
-- **安全**：MCP HTTP 端点暴露到 advertise_host 后网络可达，必须做调用方身份校验（agent_id）+ 可选 token（Gateway 注入），禁止匿名写操作。明细见 §9 安全。
+- doc 服务作为 **global scope** sidecar 部署在 Gateway 机器，只绑定 `127.0.0.1`（内部端口 18081），**不直接暴露公网**。
+- 对外 endpoint 用 Gateway `advertise_host` + HTTP 端口构造（D4-1 在 [gateway/mod.rs:702](../../../core/acowork-gateway/src/gateway/mod.rs#L702) 定案）：`http://{advertise_host}:{gw_http_port}/api/doc/mcp`——远程 Runtime 先到 Gateway 公共 HTTP 入口，由 `doc_proxy` 校验身份后反代到 doc 进程 `/mcp`。
+- 下发路径：Gateway 启动时把 `doc_mcp_url` 写入共享状态，经 MQTT 全局资源 `build_available_mcps` 注入（[global_resources_builders.rs:180](../../../core/acowork-gateway/src/mqtt/global_resources_builders.rs#L180)），远程 Runtime 收到 endpoint 后 HTTP 调用 doc MCP；REST 与 MCP 两路均由 doc_proxy 鉴权（`X-Actor: human` 注入 / `X-MCP-Actor` 校验）。
+- **安全**：MCP HTTP 端点的身份校验发生在 Gateway `doc_proxy`（单一鉴权点）——`X-MCP-Actor ∈ installed_agents` 才透传（受信 agent），否则剥离为匿名（仅只读工具 list/read/search/pull/check_request）。禁止匿名写操作。明细见 §9。
 
 ```mermaid
 graph LR
     subgraph Gateway 机器
-        GW[Gateway]
-        DOC["acowork-doc<br/>127.0.0.1:18081<br/>advertise: {advertise_host}:18081"]
-        GW --> DOC
+        GW["Gateway<br/>advertise_host:{gw_http_port}"]
+        DOC["acowork-doc<br/>127.0.0.1:18081（仅 loopback）"]
+        GW -->|"doc_proxy 反代<br/>/api/doc/mcp → /mcp<br/>校验 X-MCP-Actor"| DOC
     end
     subgraph 远程节点
         R[Remote Runtime]
         A[Remote Agent]
         R --> A
     end
-    R -- "HTTP MCP<br/>http://{advertise_host}:18081/mcp" --> DOC
-    DESK[Desktop 本地组件] -- "REST via Gateway 反代<br/>127.0.0.1:19876/api/doc/*" --> GW
+    R -- "HTTP MCP<br/>http://{advertise_host}:{gw_http_port}/api/doc/mcp" --> GW
+    DESK[Desktop 本地组件] -- "REST via Gateway 反代<br/>http://127.0.0.1:{gw_http_port}/api/doc/*" --> GW
 ```
 
 ---
@@ -295,8 +296,8 @@ graph LR
 
 - **崩溃恢复**：`.requests/` 为文件存储，重启后 pending 请求保留；写库均为原子替换，无中间态。
 - **监督**：doc 进程崩溃/卡死 → Gateway 指数退避重启；启动失败不阻塞 Gateway（NFR-02）。
-- **日志**：`{data}/logs/doc.log`，复用 `init_subprocess_logging`（与 embed 同目录）。
-- **备份**：整个 `{data}/acowork-doc/` 为纯文件，直接拷贝即备份；`library.json` 与 `.md` 同时备份即完整还原。
+- **日志**：`{gateway.data_dir}/logs/doc.log`（doc_supervisor 把 doc 进程 stderr 重定向到该文件，同 pm/embed）。
+- **备份**：整个 `$HOME/.acowork/acowork-doc/` 为纯文件，直接拷贝即备份；`library.json` 与 `.md` 同时备份即完整还原。
 
 ---
 
@@ -312,11 +313,25 @@ graph LR
 
 ---
 
-## 12. 开放问题（实施前确认）
+## 12. 实施决策记录（原开放问题表，v1.0 已全部定案）
 
-| 编号 | 问题 | 倾向 |
+| 编号 | 问题 | 决策（实施定案） |
 |------|------|------|
-| OD-1 | `.acowork/tmp` 缓存是否需要在 Agent 重启/会话结束时清理？ | 会话结束时清理，避免堆积 |
-| OD-2 | 更新请求是否支持「驳回后 Agent 重新提交」的迭代，还是每次新请求？ | 每次新请求（简单、可审计） |
-| OD-3 | 文档编辑是否需要「草稿」概念（人类在 Desktop 未保存的编辑态）？ | 不需要，仅客户端本地状态 |
-| OD-4 | 回收站是否纳入 v1 范围（PRD 标 P1/P2）？ | 纳入 v1（成本低），.trash 已预留 |
+| OD-1 | `.acowork/tmp` 缓存是否需要在 Agent 重启/会话结束时清理？ | **服务端不落盘**（D3 实施修正）：`doc_pull` 只返回内容 + base_version + 建议缓存相对路径（`.acowork/tmp/docs/{doc_id}.md`），由调用方（Runtime/Agent 文件工具）写入其工作区——doc 进程与 Agent 工作区可能不在同一信任边界（远程 Agent），落盘职责归 Agent 侧。见 [mcp/tools.rs](../../../core/acowork-doc/src/mcp/tools.rs) |
+| OD-2 | 更新请求是否支持「驳回后 Agent 重新提交」的迭代，还是每次新请求？ | **每次新请求**（简单、可审计）；reject 保留 `review_note` 供 Agent 参考重新提交 |
+| OD-3 | 文档编辑是否需要「草稿」概念？ | **不需要**——仅 Desktop 客户端本地状态（editorStore dirty + 409 conflict 引导刷新）；服务端无草稿 |
+| OD-4 | 回收站是否纳入 v1 范围？ | **纳入 v1**：`.trash/` + sidecar（恢复信息）+ `trash_retention_days`（默认 30 天）启动惰性清理；Desktop TrashDialog 支持 restore / purge |
+
+---
+
+## 13. 实施状态（D0–D4 完成）
+
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| D0 骨架 | `core/acowork-doc` crate（CLI + axum + /health + 日志 + shutdown）；Gateway `[doc]` 配置 + `lifecycle/doc_supervisor.rs` 拉起/监督 + `doc_proxy.rs` 反代 | ✅ 已交付 |
+| D1 存储 + REST | 目录树存储（library.json + .md + reconcile）、REST API（tree/docs/dirs/search/trash/requests）、版本号乐观并发、Service 层封装 | ✅ 已交付（97 测试） |
+| D2 Desktop docs 视图 | 目录树 + 编辑器（Markdown 同栈预览）+ 审核队列 + 回收站 + 离线降级，接入 AppLayout | ✅ 已交付（vite build 通过） |
+| D3 更新审核流 + MCP | PR 式审核全链路（REST + MCP 工具 8 个 + 身份校验 + catalog 自动注入） | ✅ 已交付（MCP e2e 闭环） |
+| D4 Agent 接口 + 远程 | doc MCP HTTP（8 工具）、Gateway catalog 注入、advertise endpoint 下发、远程 e2e | ✅ 已交付（remote_e2e 2 场景） |
+
+> 注：实施顺序为 D0 → D1 → D3（MCP 服务端先行，与 D2 并行无冲突）→ D2（Desktop）→ D4（远程验证）。全套测试 114+ 全绿，clippy 0 warning。
