@@ -292,6 +292,35 @@ pub struct AgentCore {
     pub(crate) agent_total_cache_write_tokens: AtomicU64,
 }
 
+/// Map a manifest `[memory.distiller]` section to a [`DistillerConfig`].
+///
+/// ADR-068 M4/M7: fields that are absent keep the `DistillerConfig` defaults;
+/// returns `None` when no section is present (distiller stays disabled).
+fn manifest_distiller_to_config(
+    manifest: &acowork_core::manifest::ManifestDistillerConfig,
+) -> Option<acowork_memory::consolidation::DistillerConfig> {
+    let base = acowork_memory::consolidation::DistillerConfig::default();
+    Some(acowork_memory::consolidation::DistillerConfig {
+        batch_size: manifest.batch_size.unwrap_or(base.batch_size),
+        cluster_threshold: manifest.cluster_threshold.unwrap_or(base.cluster_threshold),
+        fact_min_evidence: manifest.fact_min_evidence.unwrap_or(base.fact_min_evidence),
+        preference_min_evidence: manifest
+            .preference_min_evidence
+            .unwrap_or(base.preference_min_evidence),
+        relation_min_evidence: manifest.relation_min_evidence.unwrap_or(base.relation_min_evidence),
+        procedure_min_evidence: manifest
+            .procedure_min_evidence
+            .unwrap_or(base.procedure_min_evidence),
+        autobio_min_evidence: manifest.autobio_min_evidence.unwrap_or(base.autobio_min_evidence),
+        autobio_min_span_days: manifest.autobio_min_span_days.unwrap_or(base.autobio_min_span_days),
+        promotion_confidence_threshold: manifest
+            .promotion_confidence_threshold
+            .unwrap_or(base.promotion_confidence_threshold),
+        llm_temperature: base.llm_temperature,
+        max_cluster_size: base.max_cluster_size,
+    })
+}
+
 impl AgentCore {
     // ── ADR-063 §3.7.5: accessor methods for LLM call sites ──
     //
@@ -1012,6 +1041,22 @@ impl AgentCore {
             .unwrap_or_default()
     }
 
+    /// Resolve the EpisodicDistiller config from the agent manifest
+    /// `[memory.distiller]` section (ADR-068 M4/M7).
+    ///
+    /// Returns `Some(config)` only when the section is present; fields that
+    /// are absent keep the `DistillerConfig` defaults. The caller gates the
+    /// step itself on `enabled`.
+    pub(crate) fn distiller_config(
+        &self,
+    ) -> Option<acowork_memory::consolidation::DistillerConfig> {
+        self.manifest
+            .memory
+            .distiller
+            .as_ref()
+            .and_then(manifest_distiller_to_config)
+    }
+
     pub fn start_consolidation_pipeline(&mut self) {
         let Some(ref provider) = self.memory_provider else {
             tracing::debug!("Cannot start consolidation: memory provider not initialized");
@@ -1031,9 +1076,25 @@ impl AgentCore {
             let list = self.global_provider_list.read().unwrap();
             list.iter().flat_map(|p| p.models.iter()).next().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string())
         };
+        // ADR-068 M4/M7: resolve the distiller switch + config from the
+        // agent manifest `[memory.distiller]` section. Off-by-default: an
+        // absent section keeps the distiller disabled.
+        let distiller_enabled = self
+            .manifest
+            .memory
+            .distiller
+            .as_ref()
+            .map(|d| d.enabled)
+            .unwrap_or(false);
+        let distiller_config = self.distiller_config();
+        let scheduler_config = SchedulerConfig {
+            distiller_enabled,
+            distiller_config,
+            ..SchedulerConfig::default()
+        };
         let params = ConsolidationParams {
             provider: provider.clone(), llm_provider: self.provider.clone(), model,
-            embedding_provider: embedding.clone(), scheduler_config: SchedulerConfig::default(),
+            embedding_provider: embedding.clone(), scheduler_config,
             poll_interval: Duration::from_secs(60),
             work_dir: Some(std::path::PathBuf::from(&self.config.work_dir)),
         };

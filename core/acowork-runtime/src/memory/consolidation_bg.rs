@@ -228,7 +228,7 @@ async fn run_consolidation_loop(
                         vec![]
                     }
                 }
-            }) as Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>
+            }) as DistillerEmbeddingFn
         };
 
         // Build offline config from scheduler config.
@@ -236,6 +236,21 @@ async fn run_consolidation_loop(
             batch_size: scheduler.config().batch_size,
             min_pending_age_hours: scheduler.config().min_pending_age_hours,
         };
+
+        // ADR-068 M4: EpisodicDistiller step (off-by-default).
+        // The distiller promotes classified episodes to the semantic layer.
+        // It runs BEFORE the legacy offline consolidation (which targets
+        // Pending nodes) — the two pipelines are independent (two-axis
+        // orthogonalization) but share the same trigger.
+        if scheduler.config().distiller_enabled {
+            run_episodic_distiller_step(
+                provider.as_ref(),
+                &*llm,
+                &embedding_fn,
+                scheduler.config(),
+            )
+            .await;
+        }
 
         // Run consolidation through the provider trait.
         let gen_config = GeneralizationConfig::default();
@@ -263,6 +278,80 @@ async fn run_consolidation_loop(
         if let Some(ref work_dir) = work_dir {
             let sentinel = work_dir.join(".consolidation_last_run");
             let _ = std::fs::write(&sentinel, Utc::now().to_rfc3339());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EpisodicDistiller step (ADR-068 M4)
+// ---------------------------------------------------------------------------
+
+type DistillerEmbeddingFn = Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>;
+
+/// Run one EpisodicDistiller pass inside the background consolidation loop.
+///
+/// ADR-068 M4: the distiller is the ONLY producer of semantic-layer nodes
+/// (R3). It scans unconsolidated episodes tagged with a `knowledge_subtype`
+/// and promotes evidence-backed clusters to Knowledge/Procedural/
+/// Autobiographical nodes. The step is off-by-default (`distiller_enabled`),
+/// so this function is a no-op unless explicitly configured.
+///
+/// The distiller lives in `acowork-grafeo`, which is an optional runtime
+/// dependency behind the `grafeo-backend` feature. When that feature is
+/// disabled the step degrades to a logged no-op.
+async fn run_episodic_distiller_step(
+    provider: &dyn acowork_memory::MemoryProvider,
+    llm: &dyn TripleExtractorLlm,
+    embedding_fn: &DistillerEmbeddingFn,
+    config: &SchedulerConfig,
+) {
+    // When grafeo is not compiled in, nothing to do.
+    #[cfg(not(feature = "grafeo-backend"))]
+    {
+        let _ = (provider, llm, embedding_fn, config);
+        tracing::warn!(
+            "EpisodicDistiller step requested but acowork-grafeo is not enabled \
+             (feature 'grafeo-backend' is off); skipping"
+        );
+    }
+
+    #[cfg(feature = "grafeo-backend")]
+    {
+        use acowork_grafeo::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
+
+        let distiller = DefaultEpisodicDistiller;
+        let distiller_config = config.distiller_config.clone().unwrap_or_default();
+        match distiller
+            .run(provider, Some(llm), Some(embedding_fn), &distiller_config)
+            .await
+        {
+            Ok(result) => {
+                tracing::info!(
+                    episodes_scanned = result.episodes_scanned,
+                    facts_promoted = result.facts_promoted,
+                    preferences_promoted = result.preferences_promoted,
+                    relations_promoted = result.relations_promoted,
+                    procedures_promoted = result.procedures_promoted,
+                    autobio_promoted = result.autobio_promoted,
+                    episodes_marked_consolidated = result.episodes_marked_consolidated,
+                    evaluations = result.promotion_evaluations.len(),
+                    "EpisodicDistiller run complete (ADR-068)"
+                );
+                // Full audit trail at debug level (one line per evaluation).
+                for eval in &result.promotion_evaluations {
+                    tracing::debug!(
+                        kind = ?eval.promoted_kind,
+                        decision = ?eval.decision,
+                        confidence = eval.llm_confidence,
+                        evidence_score = eval.evidence_score,
+                        episodes = ?eval.source_episode_ids,
+                        "distiller evaluation"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "EpisodicDistiller run failed (ADR-068)");
+            }
         }
     }
 }
@@ -315,6 +404,7 @@ pub fn start_consolidation_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acowork_memory::consolidation::DistillerConfig;
 
     #[tokio::test]
     async fn test_timer_notify_active_resets_idle() {
@@ -443,5 +533,170 @@ mod tests {
             Some(TriggerReason::Accumulation),
             "Should trigger via accumulation when pending >= threshold"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // EpisodicDistiller step (ADR-068 M4)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_scheduler_config_distiller_off_by_default() {
+        // ADR-068 M4 acceptance: distiller_enabled defaults to false.
+        let config = SchedulerConfig::default();
+        assert!(!config.distiller_enabled);
+        assert!(config.distiller_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_config_distiller_config_roundtrip() {
+        let cfg = DistillerConfig {
+            fact_min_evidence: 4,
+            ..DistillerConfig::default()
+        };
+        let config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_config: Some(cfg.clone()),
+            ..SchedulerConfig::default()
+        };
+        assert!(config.distiller_enabled);
+        assert_eq!(
+            config.distiller_config.as_ref().unwrap().fact_min_evidence,
+            4
+        );
+        // Using ..Default::default() keeps existing fields untouched.
+        assert_eq!(config.accumulation_threshold, 50);
+        let _ = cfg;
+    }
+
+    #[cfg(feature = "grafeo-backend")]
+    #[tokio::test]
+    async fn test_distiller_step_promotes_facts_when_enabled() {
+        use super::distiller_fixture::{
+            build_distiller_test_fixture, run_episodic_distiller_step_inner,
+        };
+        let (provider, llm) = build_distiller_test_fixture();
+        let config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_config: Some(DistillerConfig::default()),
+            ..SchedulerConfig::default()
+        };
+        let result = run_episodic_distiller_step_inner(provider.as_ref(), &*llm, config).await;
+        assert!(result.episodes_scanned >= 2);
+        assert_eq!(result.facts_promoted, 1);
+    }
+
+    #[cfg(feature = "grafeo-backend")]
+    #[tokio::test]
+    async fn test_distiller_step_noop_when_disabled() {
+        use super::distiller_fixture::{
+            build_distiller_test_fixture, run_episodic_distiller_step_inner,
+        };
+        let (provider, llm) = build_distiller_test_fixture();
+        let config = SchedulerConfig {
+            distiller_enabled: false,
+            ..SchedulerConfig::default()
+        };
+        // When disabled the step is never invoked; the inner function mirrors
+        // the loop's gate: nothing happens.
+        let result = run_episodic_distiller_step_inner(provider.as_ref(), &*llm, config).await;
+        assert_eq!(result.facts_promoted, 0);
+        assert_eq!(result.episodes_scanned, 0);
+    }
+}
+
+#[cfg(all(test, feature = "grafeo-backend"))]
+mod distiller_fixture {
+    use super::*;
+    use acowork_memory::consolidation::{DistillerResult, LlmMessage, LlmResponse};
+
+    pub struct MockDistillerLlm {
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+    }
+
+    impl MockDistillerLlm {
+        pub fn new(responses: Vec<String>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses.into()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TripleExtractorLlm for MockDistillerLlm {
+        async fn chat(
+            &self,
+            _messages: Vec<LlmMessage>,
+        ) -> std::result::Result<LlmResponse, String> {
+            let resp = self.responses.lock().unwrap().pop_front().unwrap();
+            Ok(LlmResponse {
+                content: resp,
+                usage_tokens: None,
+            })
+        }
+    }
+
+    pub fn build_distiller_test_fixture() -> (Arc<acowork_grafeo::GrafeoStore>, Arc<MockDistillerLlm>) {
+        let store = Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
+        let provider: Arc<dyn acowork_memory::MemoryProvider> = store.clone();
+        // Seed 2 unconsolidated Fact episodes.
+        use acowork_memory::types::{Episode, KnowledgeSubType};
+        use chrono::Utc;
+        for i in 0..2 {
+            let ep = Episode {
+                session_id: format!("sess-{i}"),
+                turn_index: 0,
+                role: "user".to_string(),
+                content: "User lives in Shanghai".to_string(),
+                embedding: None,
+                timestamp: Utc::now(),
+                consolidated: false,
+                metadata: Default::default(),
+                importance: 0.5,
+                knowledge_subtype: Some(KnowledgeSubType::Fact),
+            };
+            provider.store_episode(&ep).unwrap();
+        }
+        // Read back the actual storage ids assigned by the provider so the
+        // mock LLM's extraction response references the correct episode_id.
+        let raw = provider
+            .get_episodes_by_subtype(Some(KnowledgeSubType::Fact), 10)
+            .unwrap();
+        let ids: Vec<u64> = raw.iter().map(|(id, _)| *id).collect();
+        let extraction_items: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                format!(
+                    r#"{{"episode_id": {id}, "structure": {{"kind":"triple","subject":"user","predicate":"lives_in","object":"Shanghai"}}, "autobio_candidate": null}}"#
+                )
+            })
+            .collect();
+        let extraction_resp = format!("[{}]", extraction_items.join(","));
+        let llm = Arc::new(MockDistillerLlm::new(vec![
+            extraction_resp,
+            r#"{"decision":"promote","confidence":0.95,"reasoning":"consistent","merged_content":"user lives_in Shanghai"}"#
+                .to_string(),
+        ]));
+        (store, llm)
+    }
+
+    /// Mirrors the gated distiller step; returns the result so tests can
+    /// assert on promotion behaviour without running the full loop.
+    pub async fn run_episodic_distiller_step_inner(
+        provider: &dyn acowork_memory::MemoryProvider,
+        llm: &dyn TripleExtractorLlm,
+        config: SchedulerConfig,
+    ) -> DistillerResult {
+        use acowork_grafeo::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
+        if !config.distiller_enabled {
+            return DistillerResult::default();
+        }
+        let distiller = DefaultEpisodicDistiller;
+        let distiller_config = config.distiller_config.unwrap_or_default();
+        // No embedding function in the fixture — clustering falls back to
+        // exact key equality (episodes share the same triple key).
+        distiller
+            .run(provider, Some(llm), None, &distiller_config)
+            .await
+            .expect("distiller run should succeed")
     }
 }

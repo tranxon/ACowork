@@ -336,6 +336,11 @@ pub struct MemoryConfig {
     /// `[memory.quality]` manifest section.
     #[serde(default)]
     pub quality: Option<ManifestMemoryQuality>,
+    /// EpisodicDistiller overrides (ADR-068 M4/M7), parsed from the
+    /// `[memory.distiller]` manifest section. `None` = distiller disabled
+    /// (off-by-default) with [`DistillerConfig`] defaults.
+    #[serde(default)]
+    pub distiller: Option<ManifestDistillerConfig>,
 }
 
 impl Default for MemoryConfig {
@@ -344,12 +349,46 @@ impl Default for MemoryConfig {
             enabled: default_memory_enabled(),
             retention_days: None,
             quality: None,
+            distiller: None,
         }
     }
 }
 
 fn default_memory_enabled() -> bool {
     true
+}
+
+/// Per-agent EpisodicDistiller configuration from the `.agent` manifest
+/// `[memory.distiller]` section (ADR-068 M4/M7).
+///
+/// Every field is optional. When the section is absent the distiller is
+/// DISABLED (off-by-default). When present, `enabled: true` turns the
+/// distiller on for this agent; the remaining fields override the matching
+/// `DistillerConfig` defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ManifestDistillerConfig {
+    /// Master switch for the EpisodicDistiller step (ADR-068 M4).
+    /// Default: false (off-by-default).
+    pub enabled: bool,
+    /// Max episodes scanned per distillation run (DistillerConfig.batch_size).
+    pub batch_size: Option<usize>,
+    /// Embedding cosine threshold for cluster merging (DistillerConfig.cluster_threshold).
+    pub cluster_threshold: Option<f32>,
+    /// Min episodes to promote a Fact.
+    pub fact_min_evidence: Option<usize>,
+    /// Min episodes to promote a Preference.
+    pub preference_min_evidence: Option<usize>,
+    /// Min episodes to promote a Relation.
+    pub relation_min_evidence: Option<usize>,
+    /// Min episodes to promote a Procedure.
+    pub procedure_min_evidence: Option<usize>,
+    /// Min episodes to promote an autobiographical cluster.
+    pub autobio_min_evidence: Option<usize>,
+    /// Min time span (days) for autobiographical promotion.
+    pub autobio_min_span_days: Option<i64>,
+    /// Min LLM judge confidence for promotion.
+    pub promotion_confidence_threshold: Option<f32>,
 }
 
 /// Optional memory-quality overrides from the `.agent` manifest

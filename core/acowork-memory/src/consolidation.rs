@@ -357,6 +357,13 @@ pub struct SchedulerConfig {
     /// Minimum age (in hours) before a Pending node is eligible.
     /// Default: 1 (inherited from OfflineConsolidationConfig).
     pub min_pending_age_hours: u64,
+    /// Enable the EpisodicDistiller step in the background consolidation
+    /// loop (ADR-068 M4). Default: false — the distiller does NOT run unless
+    /// explicitly enabled (off-by-default per ADR-068 M4 acceptance).
+    pub distiller_enabled: bool,
+    /// Distiller parameters used when `distiller_enabled` is true.
+    /// `None` = use [`DistillerConfig::default`] (ADR-068 §3.4.1 defaults).
+    pub distiller_config: Option<DistillerConfig>,
 }
 
 impl Default for SchedulerConfig {
@@ -366,6 +373,8 @@ impl Default for SchedulerConfig {
             accumulation_threshold: 50,
             batch_size: 50,
             min_pending_age_hours: 1,
+            distiller_enabled: false,
+            distiller_config: None,
         }
     }
 }
