@@ -1,6 +1,6 @@
 # ADR-068:记忆两轴正交化与离线蒸馏器重构(Episodic-as-Source-of-Truth)
 
-**状态**:草案(待评审)
+**状态**:已实现(2026-09 经 [review #32](../../review/zh/32-adr-068-memory-layer-promotion-two-axis-orthogonal-review.md) 评审修复完成)
 **日期**:2026-09
 **决策者**:大鱼
 **前置**:
@@ -771,7 +771,7 @@ M5-M6 之间允许**双写期**:旧 `process_memory_store` 路径仍然可用,�
 | D16 | **Episode schema 零结构化 + 零 autobio 字段** | `Episode` 上**不**存在 subject/predicate/object/trigger_condition/action_pattern/candidate_autobio_aspect 任一字段 | `cargo doc` / 字段反射测试 |
 | D17 | **Step 2b embedding 聚簇** | 5 个 episode 用不同谓词(`lives_in` / `is_located_in` / `home_city` / `based_in` / `resides_in`)描述同一事实 → 全部聚到 1 个 cluster(余弦 ≥ 0.85) | 单测 `test_cluster_embedding_unifies_synonyms` |
 | D18 | **Step 2b 跨桶不聚** | embedding 相似度 < 0.85 的不同 predicate 不合并 | 单测 |
-| D19 | **memory_store 工具零 autobiographical** | 工具描述中**不**包含 `autobiographical` / `candidate_autobio_aspect` 等关键词 | `MemoryStoreTool::spec_value()` JSON schema 文本断言 |
+| D19 | **memory_store 工具零 autobiographical** | 工具 JSON schema 中**不**暴露 `candidate_autobio_aspect` / `aspect` / `key` / `source` 等字段;`description` 保留 "Autobiographical" 一词作为 R-R1(b) 迁移指引(取舍:模型导航价值 > 字面零出现,见 [review §P2-4](../../review/zh/32-adr-068-memory-layer-promotion-two-axis-orthogonal-review.md)) | `MemoryStoreTool::spec_value()` JSON schema 文本断言 |
 
 ### 5.3 e2e 验收
 

@@ -467,6 +467,19 @@ mod tests {
                 .unwrap()
                 .contains_key("source")
         );
+        // D19 text assertion (ADR-068 review P2-4): the tool description must
+        // not reintroduce the candidate/aspect schema vocabulary...
+        assert!(
+            !spec.description.contains("candidate_autobio_aspect"),
+            "candidate_autobio_aspect must not appear in the tool description"
+        );
+        // ...while keeping the deliberate migration hint ("Autobiographical
+        // feedback ...") that steers models toward category=fact/preference —
+        // the recorded trade-off vs a literal zero-occurrence reading of D19.
+        assert!(
+            spec.description.contains("Autobiographical"),
+            "migration guidance keeps the 'Autobiographical' hint (ADR-068 R-R1(b) trade-off)"
+        );
     }
 
     #[tokio::test]
