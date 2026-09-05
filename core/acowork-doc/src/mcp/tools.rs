@@ -195,8 +195,12 @@ async fn doc_pull(state: &DocState, args: Value) -> Result<Value> {
     let (_dir, doc_id) =
         resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let read = state.docs.read(&doc_id).await?;
+    let base_version = read.meta.version;
     let cache_path = format!(".acowork/tmp/docs/{}.md", read.meta.doc_id);
-    doc_to_value(read.meta, Some(read.content), read.path, Some(&cache_path))
+    let mut v = doc_to_value(read.meta, Some(read.content), read.path, Some(&cache_path))?;
+    // §5.5：pull 的版本号即后续 doc_submit_update 的 base_version。
+    v["base_version"] = Value::from(base_version);
+    Ok(v)
 }
 
 /// 共享的文档响应序列化（doc_read / doc_pull 复用）。
