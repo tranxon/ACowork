@@ -284,6 +284,18 @@ pub struct GatewayState {
     /// `build_available_mcps` 应把 pm MCP 注入到 `acowork/global/mcps` 资源
     /// （每个 Agent 的 catalog），使 Agent 自动获得 `pm_*` 工具。
     pub pm_mcp_url: Option<String>,
+    /// acowork-doc 独立进程状态（supervisor 管理，ADR-064 范式）。
+    ///
+    /// 由 `Gateway::run` 启动 doc supervisor 后写入；`None` 表示 doc 进程
+    /// 未启动（`doc.enabled=false`）或尚未 ready。HTTP 反代层
+    /// （`http/doc_proxy.rs`）读取 `port` 构造代理目标；doc 未就绪时返回 503。
+    pub doc_process: Option<crate::lifecycle::doc_supervisor::DocProcessState>,
+    /// doc MCP HTTP 端点 URL（`http://{advertise_host}:{http.port}{doc.mcp_http_path}`）。
+    ///
+    /// 启动时在 `doc.auto_inject_mcp` 时设置；`Some` 表示
+    /// `build_available_mcps` 应把 doc MCP 注入到 `acowork/global/mcps` 资源
+    /// （每个 Agent 的 catalog），使 Agent 自动获得 `doc_*` 工具。
+    pub doc_mcp_url: Option<String>,
 }
 
 impl GatewayState {
@@ -311,6 +323,8 @@ impl GatewayState {
             bootstrap: BootstrapState::default(),
             pm_process: None,
             pm_mcp_url: None,
+            doc_process: None,
+            doc_mcp_url: None,
         }
     }
 

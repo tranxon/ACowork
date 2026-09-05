@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn test_context_usage_with_override_caps_window() {
-        // Model has 200K window. User overrides to 100K.
+        // Model has 200K window. User overrides to 100K TOTAL.
         let caps = test_caps(200_000, 16_384);
         let usage = acowork_core::providers::traits::UsageInfo {
             prompt_tokens: 60_000,
@@ -1326,13 +1326,13 @@ mod tests {
             ..Default::default()
         };
         let info = compute_context_usage(&caps, &usage, 32_768, Some(100_000));
-        // effective_window = min(100_000, 200_000) = 100_000
+        // Display window stays the user-configured TOTAL (100K).
         assert_eq!(info.context_window, 100_000);
-        // effective_usable = min(usable, effective_window)
-        // usable = 200_000 - 16_384 = 183_616 (no max_input_tokens)
-        // effective_usable = min(183_616, 100_000) = 100_000
-        assert_eq!(info.usable_context, 100_000);
-        // percent = 65_000 / 100_000 * 100 = 65%
+        // Usable input (compaction denominator only) = cap − output reserve
+        // inside the cap = 83_616.
+        assert_eq!(info.usable_context, 83_616);
+        // UI percent = total (input + output) / window TOTAL = 65 000/100 000 = 65.
+        // (Decoupled from usable_context — see compute_context_usage doc.)
         assert_eq!(info.usage_percent, 65);
     }
 
@@ -1662,18 +1662,28 @@ pub fn compute_section_sizes(
 
 /// Compute context usage info from model capabilities and API usage response.
 ///
-/// Usable context is derived from [`ModelCapabilitiesInfo::effective_input_budget`],
-/// which uses `max_input_tokens` when available, or reserves output space capped
-/// by `max_output_tokens_limit` (default 32K) otherwise.
+/// Usable input context is derived from
+/// [`ModelCapabilitiesInfo::input_budget_with_cap`]: when a cap is set it is
+/// treated as a **total** window and the output reserve is subtracted inside
+/// it (250K cap + 32K reserve → 218K input); without a cap the provider's own
+/// `max_input_tokens` is authoritative, else `window − reserve`.
 ///
 /// `context_window_cap` is the per-agent context window override (ADR-026):
 /// - `None` — not set, use model's full `context_window`.
 /// - `Some(0)` — "no limit" (user explicitly chose unlimited), use model's full.
 /// - `Some(n)` where `n > 0` — cap the effective window at `min(n, model_window)`.
 ///
-/// Both `context_window` and `usable_context` in the output reflect the
-/// effective (capped) values, so the frontend status panel and context-usage
-/// popup show numbers consistent with the user's per-agent setting.
+/// `context_window` in the output reflects the effective (capped) window for
+/// display and stays the **user-configured total** (e.g. 250K).
+/// `usable_context` is the runtime input budget (218K) used by compaction
+/// thresholds — NOT the UI denominator.
+///
+/// The UI-facing `usage_percent` is deliberately decoupled from the
+/// compaction threshold (2026-09-06 review): the frontend reads it as
+/// "used / total window" (including input AND output of the reported turn),
+/// while automatic compaction fires on PROJECTED input vs `usable_context`.
+/// So the denominator here is `context_window` (total), not the input
+/// budget — the two never move together.
 pub fn compute_context_usage(
     caps: &ModelCapabilitiesInfo,
     usage: &acowork_core::providers::traits::UsageInfo,
@@ -1685,11 +1695,14 @@ pub fn compute_context_usage(
         Some(0) | None => model_window,
         Some(cap) => cap.min(model_window),
     };
-    let usable = caps.effective_input_budget(max_output_tokens_limit);
-    let effective_usable = usable.min(effective_window);
+    let effective_usable =
+        caps.input_budget_with_cap(context_window_cap, max_output_tokens_limit);
     let total = usage.prompt_tokens + usage.completion_tokens;
-    let percent = if effective_usable > 0 {
-        ((total as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+    // UI percent = total (input + output) / window total. The compaction
+    // line lives on the PROJECTED input vs usable_context and is NOT the
+    // number displayed here.
+    let percent = if effective_window > 0 {
+        ((total as f64 / effective_window as f64) * 100.0).min(100.0) as u8
     } else {
         0
     };

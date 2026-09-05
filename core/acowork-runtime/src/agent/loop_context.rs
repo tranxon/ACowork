@@ -3,7 +3,7 @@
 //! Extracted from loop_.rs (ADR-014 Phase 1).
 //! Contains all methods related to context window management:
 //! - Token budget calculation
-//! - History trimming (FIFO + emergency)
+//! - History trimming (5-level compression)
 //! - LLM-based context compaction
 //! - Model resolution for compaction/distillation
 //! - Runtime config application (affects context limits)
@@ -20,23 +20,32 @@ use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
 // ── Context compression thresholds ─────────────────────────────────────
-// All percentages are relative to the **effective usable input budget**
-// (`ModelCapabilitiesInfo::effective_input_budget`, i.e. context_window
-// minus the reserved output space).
+// All *compression* percentages below are relative to the **effective
+// usable input budget** (`AgentCore::context_trim_budget`, the single
+// denominator: the resolved total context cap minus the model's output
+// reserve — e.g. 250K cap + 32K output = 218K input budget).
 //
-// They drive a multi-tier strategy (ADR-011):
-//   WARN      → soft log / preemptive history trim before appending tool
-//               results that would push the total over this threshold.
-//   COMPACT   → trigger LLM-based compaction (`compact_via_llm` +
-//               `replace_middle_with_summary`).
-//   HARD      → force `emergency_trim` before the next LLM call (the
-//               chat request is rebuilt after trimming).
-//   CRITICAL  → `emergency_trim` safety net, applied directly when usage
-//               jumps to ≥ this, or post-compaction if compaction alone
-//               didn't bring usage back under it.
+// This is deliberately SEPARATE from the UI-facing `usage_percent` pushed in
+// ContextUsageInfo, which the frontend reads as "used (input + output) /
+// window total" (250K). The two never move together — see
+// `compute_context_usage` in context.rs.
+//
+// ADR-011 tier scheme (revised 2026-09: FIFO/emergency trim deleted by
+// ADR-061, so the early tiers lost their original purpose):
+//   WARN      → informational log only (70%). No action — the old 70%
+//               pre-trim FORCED a full LLM summary before appending tool
+//               results; with the 5-level plan (which folds/trims tool
+//               results progressively and guarantees a fit at level 5) that
+//               early compaction was premature and is removed.
+//   COMPACT   → the single automatic LLM compaction line (90%). Fired
+//               pre-request and before appending tool results, measured on
+//               the PROJECTED next-request input tokens (last API
+//               `prompt_tokens` anchor + growth since) instead of raw
+//               history tokens.
+//   CRITICAL  → post-compaction sanity log only (95%) — kept as
+//               documentation of the deleted emergency-trim safety net.
 pub(crate) const CONTEXT_WARN_PERCENT: f64 = 70.0;
-pub(crate) const CONTEXT_COMPACT_PERCENT: f64 = 80.0;
-pub(crate) const CONTEXT_HARD_PERCENT: f64 = 90.0;
+pub(crate) const CONTEXT_COMPACT_PERCENT: f64 = 90.0;
 pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
 
 // ── ADR-056: Distillation resolution types ────────────────────────
@@ -112,8 +121,12 @@ impl AgentLoop {
                 self.effective_context_budget(&model_name)
             {
                 let total_tokens = self.session.history.token_count();
-                let percent = if effective_usable > 0 {
-                    ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                // UI percent denominator = window TOTAL (incl. output), not
+                // the input budget — see compute_context_usage doc. The
+                // compaction threshold lives on projected input vs
+                // effective_usable and is NOT shown here.
+                let percent = if effective_window > 0 {
+                    ((total_tokens as f64 / effective_window as f64) * 100.0).min(100.0) as u8
                 } else {
                     0
                 };
@@ -192,48 +205,92 @@ impl AgentLoop {
     /// Returns `(caps, effective_window, effective_usable)` if model
     /// capabilities are available, otherwise `None`.
     ///
-    /// This is the **display-layer** budget: it considers only the runtime
-    /// `context_window_override`, not `manifest_context_window` or the
-    /// `DEFAULT_CONTEXT_WINDOW` fallback. The latter two feed
-    /// [`Self::context_trim_budget`] (the actual trim threshold), and the
-    /// divergence is intentional — the UI shows the model's full capacity
-    /// by default while trimming honours user-imposed caps.
+    /// `effective_window` is the user-facing **total context length** shown
+    /// in the UI: the resolved cap (agent_config → manifest →
+    /// DEFAULT_CONTEXT_WINDOW) clamped to the model window, so a 250K
+    /// setting stays 250K on screen (never 218K). It is also the display
+    /// percent denominator ("used incl. output / window total").
+    /// `effective_usable` is the runtime input budget from
+    /// [`Self::context_trim_budget`] (resolved cap − output reserve) — the
+    /// single denominator for the compaction thresholds only.
     pub(crate) fn effective_context_budget(
         &self,
         model_name: &str,
     ) -> Option<(acowork_core::protocol::ModelCapabilitiesInfo, u64, u64)> {
         let caps = self.core.get_model_capabilities(model_name)?;
-        let max_output_limit = self.core.max_output_tokens_limit_for_model(model_name);
-        let usable = caps.effective_input_budget(max_output_limit);
-        let effective_window = match self.core.context_window_override {
+        // Display window follows the SAME resolved cap chain as the trim
+        // budget (agent_config → manifest → DEFAULT_CONTEXT_WINDOW), so the
+        // frontend shows the user-configured "context length" (e.g. 250K)
+        // instead of the model's raw window (1M) when a cap is configured.
+        let effective_window = match self.core.resolved_context_cap() {
             Some(0) | None => caps.context_window,
             Some(cap) => cap.min(caps.context_window),
         };
-        Some((caps, effective_window, usable.min(effective_window)))
+        let effective_usable = self.core.context_trim_budget(model_name);
+        Some((caps, effective_window, effective_usable))
     }
 
-    /// Trim history to fit within the context window budget.
+    /// Projected size of the NEXT chat-request input, in API-counted tokens.
     ///
-    /// The budget comes from [`context_trim_budget`] →
-    /// [`ModelCapabilitiesInfo::effective_input_budget`], which already
-    /// reserves output space (capped at `max_output_tokens_limit`, default 32K).
-    /// No additional margin is applied here — [`compact_history_if_needed`]
-    /// provides early warning at 80% usage.
+    /// `history.token_count()` only covers conversation messages; the real
+    /// prompt also carries the system prompt + tool schemas (~15K on the
+    /// 2026-09-06 deepseek incident). We anchor that constant overhead to the
+    /// most recent reliable API `prompt_tokens` (see
+    /// [`Self::process_llm_response_usage`]) and add it back — so thresholds
+    /// compare against what the provider actually counts instead of the
+    /// under-counted history-only figure.
+    pub(crate) fn projected_input_tokens(&self) -> u64 {
+        self.session
+            .history
+            .token_count()
+            .saturating_add(self.context_overhead_tokens)
+    }
+
+    /// Projected input INCLUDING not-yet-appended tool results (measured
+    /// before they land in history).
+    pub(crate) fn projected_input_tokens_with(
+        &self,
+        pending_extra_tokens: u64,
+    ) -> u64 {
+        self.projected_input_tokens().saturating_add(pending_extra_tokens)
+    }
+
+    /// Absolute token count at which compaction fires: `CONTEXT_COMPACT_PERCENT`
+    /// (90%) of the single input budget. When this is crossed the agent runs
+    /// the 5-level plan BEFORE the next LLM request.
+    pub(crate) fn compact_threshold_tokens(&self, model_name: &str) -> u64 {
+        let budget = self.context_trim_budget(model_name);
+        ((budget as f64 * (CONTEXT_COMPACT_PERCENT / 100.0)) as u64).min(budget)
+    }
+
+    /// Whether the projected next-input is at/over the compaction line.
+    pub(crate) fn projected_exceeds_compact_threshold(
+        &self,
+        model_name: &str,
+        pending_extra_tokens: u64,
+    ) -> bool {
+        self.projected_input_tokens_with(pending_extra_tokens)
+            >= self.compact_threshold_tokens(model_name)
+    }
+
+    /// Trim history to fit within the input budget.
     ///
-    /// ADR-061 §11.2: ensure history fits the model budget by routing
-    /// through the 8-level compression plan exclusively.
+    /// The budget comes from [`context_trim_budget`] — the resolved total
+    /// context cap minus the model's output reserve (250K cap + 32K output
+    /// → 218K input). `HistoryManager::max_tokens` is synced to the same
+    /// value so downstream token accounting uses the correct threshold.
     ///
-    /// FIFO trim and emergency trim are deleted; when history exceeds the
-    /// budget, [`Self::compact_history_if_needed`] is forced so the
-    /// 8-level plan runs (level 8 is guaranteed to fit once the summary
-    /// size is known — §19.5). Failure is explicit: the compaction path
-    /// emits `ChunkEvent::Error` and leaves history untouched (§11.3)
-    /// instead of silently destroying cache continuity.
+    /// ADR-061 §11.2: when history exceeds the budget, the ADR-061 v3
+    /// 5-level compression plan is forced (level 5 is guaranteed to fit
+    /// once the summary size is known — §19.5). Failure is explicit: the
+    /// error propagates so the agent loop stops instead of continuing to
+    /// grow the context (§11.3) — `history` is left untouched.
     ///
-    /// When history is already within budget this is a no-op — the
-    /// per-iteration call sites (loop_.rs budget check) only pay a
-    /// token-count comparison.
-    pub(crate) async fn trim_history_to_budget(&mut self, model_name: &str) {
+    /// When history is already within budget this is a no-op.
+    pub(crate) async fn trim_history_to_budget(
+        &mut self,
+        model_name: &str,
+    ) -> crate::error::Result<()> {
         let budget = self.context_trim_budget(model_name);
 
         // Sync HistoryManager::max_tokens to the actual model budget so
@@ -244,8 +301,9 @@ impl AgentLoop {
         self.session.history.set_max_tokens(budget);
 
         if self.session.history.token_count() > budget {
-            self.compact_history_if_needed(model_name, true).await;
+            self.compact_history_if_needed(model_name, true).await?;
         }
+        Ok(())
     }
 
     /// Resolve the model to use for session distillation or compaction.
@@ -563,36 +621,48 @@ impl AgentLoop {
         }
     }
 
-    /// Check context usage after LLM response and trigger compaction if needed.
+    /// Run LLM-based context compaction (5-level plan).
     ///
-    /// Per [ADR-011], this implements the three-stage compaction strategy:
-    /// - 80% usage → LLM-based compaction (`compact_via_llm` + 8-level plan)
+    /// ADR-061: FIFO / emergency trim are deleted; the 5-level plan
+    /// (level-5 floor) covers every case and LLM failure is explicit —
+    /// history is left untouched and the error is returned so callers stop
+    /// the agent loop instead of continuing to grow an un-compactable
+    /// context (2026-09-06 incident: the UI showed the error while the loop
+    /// kept iterating).
     ///
-    /// ADR-061: the `CONTEXT_CRITICAL_PERCENT` emergency-trim stage is
-    /// deleted (§11); the 8-level plan (level 8 floor) replaces it, and
-    /// LLM failure emits `ChunkEvent::Error` instead of FIFO trimming (§11.3).
+    /// The single automatic trigger is 90% of the projected next-request
+    /// input (see [`Self::compact_threshold_tokens`] /
+    /// [`Self::projected_exceeds_compact_threshold`]); `force=true` bypasses
+    /// the threshold for manual compression and absolute-budget guards.
     ///
-    /// When `force` is true (manual trigger from user), the 80% threshold is
-    /// bypassed and compaction proceeds regardless of current usage percentage.
-    ///
-    /// Called after each LLM response (force=false) and on manual user trigger
-    /// (force=true via `SessionMessage::CompactContext`).
-    pub(crate) async fn compact_history_if_needed(&mut self, model_name: &str, force: bool) {
+    /// Returns `Ok(())` on success (or when no compaction was needed).
+    pub(crate) async fn compact_history_if_needed(
+        &mut self,
+        model_name: &str,
+        force: bool,
+    ) -> crate::error::Result<()> {
         let budget = self.context_trim_budget(model_name);
         let current_tokens = self.session.history.token_count();
 
         if budget == 0 {
-            return;
+            return Ok(());
         }
 
         let usage_percent = (current_tokens as f64 / budget as f64) * 100.0;
+        let projected = self.projected_input_tokens();
 
-        // Stage 2: CONTEXT_COMPACT_PERCENT → LLM-based compaction
-        // (or force=true bypasses threshold).
-        if force || usage_percent >= CONTEXT_COMPACT_PERCENT {
+        // The single automatic compaction line: 90% of the input budget,
+        // measured on the PROJECTED next-request input (history + anchored
+        // system/tools overhead) — not the under-counted history-only figure.
+        // `force=true` bypasses the threshold for manual compression and the
+        // absolute-budget floor.
+        if force || self.projected_exceeds_compact_threshold(model_name, 0) {
             tracing::info!(
                 usage_percent = ?usage_percent,
                 current_tokens,
+                projected,
+                overhead_tokens = self.context_overhead_tokens,
+                threshold = self.compact_threshold_tokens(model_name),
                 budget,
                 force,
                 "Triggering LLM compaction"
@@ -706,6 +776,10 @@ impl AgentLoop {
                 }
             }
 
+            // Whether every distill tier failed (no summary produced).
+            // Failure must abort the agent loop — see the tail of this fn.
+            let compaction_failed = succeeded.is_none();
+
             match succeeded {
                 Some((_resolved_distill, compact_model, (summary, usage))) => {
                     // ADR-027 (revised for compaction): record raw Provider
@@ -735,7 +809,7 @@ impl AgentLoop {
                         Some(&self.session.history.user_intent_fallback_text()),
                     );
                     // ADR-061: summary first (input = full history), then
-                    // pick the 8-level plan against the now-known summary
+                    // pick the 5-level plan against the now-known summary
                     // size, then apply (§19.1). History is untouched when no
                     // plan fits the budget (§19.5).
                     //
@@ -790,7 +864,7 @@ impl AgentLoop {
                                         new_tokens = outcome.new_tokens,
                                         compression_ratio = ?outcome.compression_ratio,
                                         removed_messages = outcome.removed_messages,
-                                        "ADR-061: 8-level compression plan applied"
+                                        "ADR-061: 5-level compression plan applied"
                                     );
 
                                     // ADR-060 v2 §5.4: idempotent — inject
@@ -1028,9 +1102,9 @@ impl AgentLoop {
                         "LLM compaction completed"
                     );
 
-                    // Stage 3: 95% → the 8-level plan already guarantees
+                    // Stage 3: 95% → the 5-level plan already guarantees
                     // post-compaction size ≤ budget (apply validates
-                    // projected ≤ budget; level 8 is the floor — §19.5).
+                    // projected ≤ budget; level 5 is the floor — §19.5).
                     // Usage ≥ CRITICAL here simply means the conversation
                     // is still large after a successful level-1..7 fit;
                     // emergency trim is deleted (ADR-061 §11) and the next
@@ -1045,24 +1119,15 @@ impl AgentLoop {
                 None => {
                     // ADR-061 §11.3: LLM unavailable → explicit failure.
                     // History is left untouched; the FIFO + emergency trim
-                    // fallback is deleted. The user decides (new session /
-                    // larger-window model / manual compress) instead of
-                    // silently destroying cache continuity.
+                    // fallback is deleted. The error is RETURNED (not just
+                    // logged) so the caller aborts the loop → session Idle,
+                    // instead of continuing to grow an over-budget context
+                    // while the UI already shows the failure.
                     tracing::error!(
                         error = %last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
                         target_count = targets.len(),
                         "ADR-061: LLM compaction failed — history untouched (no FIFO fallback)"
                     );
-                    let _ = self.session_core.try_send_chunk(ChunkEvent::Error {
-                        user_message: "Context compaction failed. Please start a new conversation or compress manually."
-                            .to_string(),
-                        detail: last_err
-                            .as_ref()
-                            .map(|e| e.to_string())
-                            .unwrap_or_default(),
-                        error_type: "ContextOverflow".to_string(),
-                        message_id: "compaction-failed".to_string(),
-                    });
                 }
             }
 
@@ -1093,8 +1158,10 @@ impl AgentLoop {
                 self.effective_context_budget(model_name)
             {
                 let total_tokens = self.session.history.token_count();
-                let usage_percent = if effective_usable > 0 {
-                    ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                // Same decoupling as compute_context_usage: display percent
+                // over window TOTAL; thresholds use effective_usable (input).
+                let usage_percent = if effective_window > 0 {
+                    ((total_tokens as f64 / effective_window as f64) * 100.0).min(100.0) as u8
                 } else {
                     0
                 };
@@ -1143,13 +1210,28 @@ impl AgentLoop {
                 ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
+
+            // Failure tail: every distill tier failed (no summary produced).
+            // The CompactingEnded / session-state / ContextUsage events above
+            // already fired so the UI is consistent — now signal the loop to
+            // STOP. The caller (pre-request / post-append / absolute-budget
+            // guard) propagates this out of the iteration; `decide_retry_action`
+            // treats `CompactionFailed` as non-retryable → GiveUp → Idle, so
+            // the agent never keeps looping with an un-compactable context.
+            if compaction_failed {
+                let detail = last_err
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default();
+                return Err(crate::error::RuntimeError::CompactionFailed(detail));
+            }
         } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
             // NOTE: this branch is unreachable today — CONTEXT_COMPACT_PERCENT
-            // (80) < CONTEXT_CRITICAL_PERCENT (95), so any usage ≥ 95% enters
+            // (90) < CONTEXT_CRITICAL_PERCENT (95), so any usage ≥ 95% enters
             // the compaction branch above first. It is kept as documentation
             // of the deleted Stage-3 emergency-trim safety net (ADR-061 §11):
-            // the 8-level plan replaces it, and explicit failure (ChunkEvent::Error)
-            // replaces silent FIFO trimming.
+            // the 5-level plan replaces it, and explicit failure (returned
+            // `Err(CompactionFailed)`) replaces silent FIFO trimming.
             tracing::error!(
                 usage_percent = ?usage_percent,
                 current_tokens,
@@ -1157,6 +1239,8 @@ impl AgentLoop {
                 "Unexpected critical usage without compaction — unreachable; no emergency trim (ADR-061)"
             );
         }
+
+        Ok(())
     }
 
     // ── Sub-methods extracted from execute_single_iteration (ADR-014 Phase 1) ──
@@ -1323,6 +1407,11 @@ impl AgentLoop {
 
         // Compute total input chars for next round's token ratio calibration.
         self.last_input_chars = count_chat_request_chars(&chat_request);
+        // Snapshot the history token count this request is built on. When the
+        // usage report returns, `api_prompt_tokens − this snapshot` = the
+        // constant non-history overhead (system prompt + tools), which the
+        // compaction thresholds add back to form the PROJECTED next input.
+        self.last_request_history_tokens = self.session.history.token_count();
 
         // Inject transient tool results from the previous iteration
         // (ADR-032 C3a — preserved for future tools that need one-shot
@@ -1339,40 +1428,47 @@ impl AgentLoop {
         chat_request
     }
 
-    /// ②.6 Context usage circuit-breaking — run the 8-level compression
-    /// plan when context exceeds the hard threshold (90%), warn when
-    /// approaching the limit (70%).
+    /// ②.6 Pre-request circuit-breaking — the single automatic compaction
+    /// trigger. Runs the ADR-061 v3 5-level plan when the PROJECTED
+    /// next-request input tokens (history + system/tools overhead measured
+    /// against the last API `prompt_tokens`) reach `CONTEXT_COMPACT_PERCENT`
+    /// (90%) of the input budget. WARN (70%) remains informational only.
     ///
-    /// ADR-061 §11.2: the hard-threshold path routes through
-    /// [`Self::compact_history_if_needed`] (force) — `emergency_trim` is
-    /// deleted, and failure is explicit (`ChunkEvent::Error`).
+    /// ADR-061 §11.2: this routes through [`Self::compact_history_if_needed`]
+    /// (force) — `emergency_trim` is deleted, and failure is returned so the
+    /// iteration aborts (session → Idle) instead of continuing to grow.
     ///
     /// Returns `true` if the chat_request needs to be rebuilt after trimming.
-    pub(crate) async fn check_context_overflow_and_trim(&mut self, current_model: &str) -> bool {
+    pub(crate) async fn check_context_overflow_and_trim(
+        &mut self,
+        current_model: &str,
+    ) -> crate::error::Result<bool> {
         let usable = self.context_trim_budget(current_model);
         let warn_threshold = (usable as f64 * (CONTEXT_WARN_PERCENT / 100.0)) as u64;
-        let hard_threshold = (usable as f64 * (CONTEXT_HARD_PERCENT / 100.0)) as u64;
         let current_tokens = self.session.history.token_count();
+        let projected = self.projected_input_tokens();
 
-        if current_tokens > hard_threshold {
-            tracing::error!(
+        if self.projected_exceeds_compact_threshold(current_model, 0) {
+            tracing::info!(
+                projected,
                 current_tokens,
-                hard_threshold,
+                threshold = self.compact_threshold_tokens(current_model),
                 usable_context = usable,
-                "Context usage exceeds hard limit, running 8-level compaction"
+                "Projected next-request input at compaction threshold — running 5-level compression"
             );
-            self.compact_history_if_needed(current_model, true).await;
-            true // signal that request needs rebuild
+            self.compact_history_if_needed(current_model, true).await?;
+            Ok(true) // signal that request needs rebuild
         } else if current_tokens > warn_threshold {
             tracing::warn!(
                 current_tokens,
+                projected,
                 warn_threshold,
                 usable_context = usable,
-                "Context usage approaching limit"
+                "Context usage approaching limit (informational)"
             );
-            false
+            Ok(false)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -1414,6 +1510,22 @@ impl AgentLoop {
                     .history
                     .calibrate_from_usage(usage.prompt_tokens, self.last_input_chars);
 
+                // Anchor the constant non-history overhead (system prompt +
+                // tool schemas) to this response's API count. The next
+                // compaction threshold compares PROJECTED input =
+                // history.token_count() + this overhead — i.e. what the
+                // provider will actually count — instead of the under-counted
+                // history-only figure.
+                self.context_overhead_tokens = usage
+                    .prompt_tokens
+                    .saturating_sub(self.last_request_history_tokens);
+                tracing::debug!(
+                    api_prompt_tokens = usage.prompt_tokens,
+                    history_tokens_at_request = self.last_request_history_tokens,
+                    context_overhead_tokens = self.context_overhead_tokens,
+                    "Anchored context overhead for projected-input compaction checks"
+                );
+
                 // Persist the calibrated ratio into SessionState so the
                 // next emit_session_state checkpoint will pick it up.
                 if let Some(ratio) = self.session.history.model_ratio() {
@@ -1442,7 +1554,7 @@ impl AgentLoop {
                         &caps,
                         usage,
                         max_output_limit,
-                        self.core.context_window_override,
+                        self.core.resolved_context_cap(),
                     )
                 } else {
                     // Re-resolve via the helper: model_caps in scope and the
@@ -1450,8 +1562,10 @@ impl AgentLoop {
                     let (caps, effective_window, effective_usable) = self
                         .effective_context_budget(current_model)
                         .expect("model_caps already verified Some above");
-                    let percent = if effective_usable > 0 {
-                        ((local_estimate as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
+                    // Display percent over window TOTAL (incl. output);
+                    // effective_usable stays the compaction denominator only.
+                    let percent = if effective_window > 0 {
+                        ((local_estimate as f64 / effective_window as f64) * 100.0).min(100.0) as u8
                     } else {
                         0
                     };
@@ -1605,40 +1719,49 @@ impl AgentLoop {
                 });
             }
 
-            // Check if context usage triggers compaction
-            self.compact_history_if_needed(current_model, false).await;
+            // ADR-067: no response tail auto-compaction. The single 90%
+            // projected-input compaction line is enforced right before the
+            // next LLM request (pre-request path), where the projected input
+            // reflects the summary of history + this just-completed response.
         }
     }
 
-    /// ⑥ Pre-trim for tool results — make room in the context window before
-    /// appending tool results, which can be very large.
+    /// ⑥ Pre-append enforcement of the SINGLE 90% projected-input compaction
+    /// line — runs the 5-level plan before tool results land in history when
+    /// `projected input + estimated_result_tokens` already crosses the line.
     ///
-    /// Triggers when `current_tokens + estimated_result_tokens > 70% of usable context`.
+    /// This is NOT a separate threshold: it uses the same
+    /// [`Self::projected_exceeds_compact_threshold`] denominator and 90%
+    /// cut-off as the pre-request check (the old 70%-of-usable pre-trim was
+    /// removed — see file header). Compacting here instead of one iteration
+    /// later keeps the tool results from ever being appended above the line.
     ///
-    /// ADR-061 §11.2: the pre-trim routes through the 8-level plan
-    /// (force) instead of `trim_fifo` (deleted).
+    /// Returns `Ok(())` when no compaction was needed or it succeeded; on LLM
+    /// failure the caller aborts the iteration (→ GiveUp → Idle) rather than
+    /// swallowing the error and continuing to grow the context.
     pub(crate) async fn pre_trim_for_tool_results(
         &mut self,
         tool_results: &[String],
         current_model: &str,
-    ) {
+    ) -> crate::error::Result<()> {
         let result_tokens_estimate: u64 = tool_results
             .iter()
             .map(|r| crate::token::count_text(r, current_model) as u64)
             .sum();
-        let usable_budget = self.context_trim_budget(current_model);
-        let trim_threshold = (usable_budget as f64 * (CONTEXT_WARN_PERCENT / 100.0)) as u64;
-        let current_tokens = self.session.history.token_count();
-        if current_tokens.saturating_add(result_tokens_estimate) > trim_threshold {
+        if result_tokens_estimate > 0
+            && self.projected_exceeds_compact_threshold(current_model, result_tokens_estimate)
+        {
             tracing::info!(
-                current_tokens,
+                projected = self.projected_input_tokens(),
                 result_tokens_estimate,
-                trim_threshold,
-                usable_budget,
-                "Pre-trimming history before appending tool results"
+                threshold = self.compact_threshold_tokens(current_model),
+                budget = self.context_trim_budget(current_model),
+                "Projected input + pending tool results at compaction threshold — \
+                 compacting before append"
             );
-            self.compact_history_if_needed(current_model, true).await;
+            self.compact_history_if_needed(current_model, true).await?;
         }
+        Ok(())
     }
 
     /// ⑥.5 Context-aware tool result trimming — truncate individual tool
