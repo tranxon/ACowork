@@ -210,10 +210,10 @@ pub mod win_job {
 /// Recovery actions after a system wake.
 ///
 /// Called from both the 2-second polling task and the `Focused(true)`
-
 /// window event handler when [`acowork_mqtt_session::power::detect_resume`]
-/// reports genuine sleep:
-
+/// reports genuine sleep. Recovery is a strict, ordered sequence — each
+/// step is issued only after the previous one completes, which is exactly
+/// what makes it race-free by construction:
 ///
 /// 1. **Rebuild the MQTT connection deterministically** – the OS tears
 ///    down TCP sockets during sleep, so the old EventLoop is unusable by
@@ -222,12 +222,39 @@ pub mod win_job {
 ///    the stale pre-sleep `Connected` value) and requests a fresh client
 ///    + EventLoop pair.
 ///
-/// 2. **No webview reload** – the frontend follows `mqtt-status` events
-///    (ADR-036: Rust is the source of truth) plus the `get_mqtt_status`
-///    poll fallback and retained bootstrap data, so it recovers in place.
-///    Reloading the webview was the original recovery mechanism, but it
-///    raced the reconnection (showing "Connecting to agent..." for tens
-///    of seconds) and reset UI state unnecessarily.
+/// 2. **Wait for a real ConnAck** – the webview reload of step 3 is
+///    deliberately deferred until after `wait_for_connected` succeeds, so
+///    the freshly loaded frontend sees `connected: true` on its very
+///    first `get_mqtt_status` / `mqtt-status` signal. Reloading before
+///    the reconnect would boot the frontend against a Connecting client
+///    and show "Connecting to agent..." for tens of seconds. That UX race
+///    was the historical excuse for removing the reload; ordering
+///    eliminates the race instead of removing the recovery.
+///
+/// 3. **Reload the webview** – REQUIRED, never remove. System sleep
+///    routinely freezes or kills the WebView2 renderer / GPU compositor
+///    (Chromium resume bug): JS timers stop firing, the IPC channel
+///    breaks silently, the compositor stops submitting frames and the
+///    window shows only its transparent/blurred background. MQTT recovery
+///    (steps 1–2) does nothing for a frozen renderer, and any "frontend
+///    converges in place" logic only works while the webview JS is alive
+///    — after a wake it may not be. The reload is the only deterministic
+///    recovery for the renderer and is the programmatic equivalent of the
+///    user pressing F5 (which always recovers). It is issued through the
+///    native browser-process API `WebviewWindow::reload()` rather than a
+///    JS `eval`-only reload, because eval requires a live JS context
+///    while the native call forces a fresh renderer even when the old one
+///    is frozen. Immediately before reloading, a best-effort eval sets
+///    the `acowork_recovery_reload` sessionStorage flag (with a short
+///    grace period so the eval can run inside a thawing renderer).
+///    `App.tsx` reads that flag to skip the Splash screen and —
+///    critically — re-register the Tauri event listeners destroyed by
+///    the reload (`initMqttListener`, `initWorkspaceFsListener`); without
+///    them the frontend `mqttConnected` flag stays false and the UI would
+///    hang on "Connecting to agent". Losing the flag (the eval never
+///    runs on a frozen renderer) is a safe degradation: the normal boot
+///    path registers the same listeners after the Splash gateway check,
+///    which passes instantly because the Gateway survived the wake.
 ///
 /// **Concurrency guard**: `RECOVERY_IN_PROGRESS` prevents overlapping
 /// calls.  Although `detect_resume()` atomically updates the clock
@@ -236,8 +263,55 @@ pub mod win_job {
 /// race on the very first call.  The guard ensures only one recovery
 /// task runs at a time, preventing a double `recover_after_wake()` that
 /// would reset the connection the first task is waiting on.
+///
+/// **Regression warning — do NOT remove the webview reload**: a previous
+/// refactor (ADR-065 migration, Sep 2026) dropped the reload citing a
+/// "race with the reconnection" that the ordered sequence above already
+/// eliminates, and replaced it with "frontend converges in place". The
+/// consequence was a real-world wake (2026-09-06) where the renderer
+/// froze for minutes with no self-healing path until the user pressed
+/// F5. MQTT and the webview renderer are independent subsystems: a
+/// healthy connection says nothing about a live renderer. Future changes
+/// must only harden this sequence — never remove the reload step.
 static RECOVERY_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Cooldown gate for post-wake webview reloads.
+///
+/// `WebviewWindow::reload()` is asynchronous — the old renderer/GPU
+/// processes are torn down lazily. Without a gate, rapid sleep/wake
+/// cycles would stack successive reloads (and their process spawns)
+/// before the previous ones exited, leaking renderer/GPU processes
+/// (original rationale: commit 825ab899). 15 s is far longer than a
+/// reload takes (< 2 s) and far shorter than any realistic sleep/wake
+/// interval, so a genuine second wake is never starved.
+mod reload_cooldown {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const RELOAD_COOLDOWN: Duration = Duration::from_secs(15);
+
+    static LAST_RELOAD: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Returns `true` when the cooldown window has elapsed since the last
+    /// successful reload. A poisoned mutex degrades to "allowed" so a
+    /// panic elsewhere can never block wake recovery.
+    pub fn allowed() -> bool {
+        let last = LAST_RELOAD.lock().unwrap_or_else(|e| e.into_inner());
+        match *last {
+            Some(prev) => prev.elapsed() >= RELOAD_COOLDOWN,
+            None => true,
+        }
+    }
+
+    /// Records that a reload was issued. Called only after a successful
+    /// reload, so a failed one leaves the gate open for an immediate
+    /// retry on the next wake.
+    pub fn mark() {
+        let mut last = LAST_RELOAD.lock().unwrap_or_else(|e| e.into_inner());
+        *last = Some(Instant::now());
+    }
+}
 
 fn recover_from_wake(app_handle: &tauri::AppHandle) {
     // Concurrency guard: only one recovery task at a time.
@@ -247,6 +321,9 @@ fn recover_from_wake(app_handle: &tauri::AppHandle) {
     }
 
     let mqtt_client = app_handle.state::<AppState>().mqtt_client.clone();
+    // Resolve the main window before spawning: the lookup is host-side and
+    // always works, but the renderer it fronts may be frozen after a wake.
+    let window = app_handle.get_webview_window("main");
 
     tauri::async_runtime::spawn(async move {
         // Ensure the guard is cleared even if the task panics.
@@ -265,14 +342,19 @@ fn recover_from_wake(app_handle: &tauri::AppHandle) {
             }
         }
 
-        // 2. Wait for a real ConnAck. No webview reload happens here –
-        //    the frontend converges in place via `mqtt-status` events
-        //    (ADR-036) + the `get_mqtt_status` poll fallback, so a
-        //    reload would only add latency and UI flicker.
+        // 2. Wait for a real ConnAck. The step-3 webview reload must come
+        //    AFTER this so the reloaded frontend boots against a live
+        //    connection instead of a Connecting one (see function docs).
         let connected = {
             let guard = mqtt_client.lock().await;
             match guard.as_ref() {
-                Some(client) => client.lock().await.wait_for_connected(Duration::from_secs(10)).await,
+                Some(client) => {
+                    client
+                        .lock()
+                        .await
+                        .wait_for_connected(Duration::from_secs(10))
+                        .await
+                }
                 None => false,
             }
         };
@@ -281,8 +363,48 @@ fn recover_from_wake(app_handle: &tauri::AppHandle) {
             tracing::info!("MQTT reconnected after wake");
         } else {
             tracing::warn!(
-                "MQTT not connected within 10s after wake – frontend poll fallback will converge"
+                "MQTT not connected within 10s after wake - reloading anyway; frontend converges via poll fallback"
             );
+        }
+
+        // 3. Renderer recovery: reload the webview (REQUIRED — see the
+        //    function docs and the regression warning there). Gated by
+        //    the 15 s cooldown so rapid sleep/wake cycles cannot
+        //    accumulate renderer/GPU processes.
+        if reload_cooldown::allowed() {
+            if let Some(window) = window {
+                // Best-effort recovery flag consumed by `App.tsx` (skip
+                // Splash + re-register the Tauri event listeners that the
+                // reload destroys). The short grace period lets the eval
+                // execute inside a thawing renderer before the native
+                // reload tears the JS context down; on a frozen renderer
+                // the eval never runs and the flag is lost — a safe
+                // degradation (normal boot registers the same listeners).
+                if window
+                    .eval("sessionStorage.setItem('acowork_recovery_reload', '1');")
+                    .is_ok()
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+
+                // Native reload issued by the browser process — forces a
+                // fresh renderer even when the old one is frozen; the
+                // programmatic equivalent of the user pressing F5.
+                match window.reload() {
+                    Ok(()) => {
+                        reload_cooldown::mark();
+                        tracing::info!("Webview reloaded after wake (renderer recovery)");
+                    }
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "Native webview reload failed after wake - renderer may stay frozen until a manual F5"
+                    ),
+                }
+            } else {
+                tracing::warn!(
+                    "No main webview window available after wake - renderer recovery skipped"
+                );
+            }
         }
     });
 }
