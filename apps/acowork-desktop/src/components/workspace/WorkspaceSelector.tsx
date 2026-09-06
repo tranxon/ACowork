@@ -193,6 +193,13 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
             "absolute left-0 w-60 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700",
             dropDirection === "down" ? "top-full mt-1" : "bottom-full mb-1",
           )} style={{ zIndex: 100 }}>
+            {/* Menu title */}
+            <div className="px-3 pt-2.5 pb-1">
+              <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+                {t("workspace.title")}
+              </h2>
+            </div>
+
             {/* Workspace list */}
             <div className="max-h-56 overflow-y-auto py-1">
               {/* Agent Home — always first, cannot be deleted */}
@@ -203,7 +210,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                   setOpen(false);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
+                  "flex w-full items-center gap-2 px-3 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                 )}
               >
                 <Home className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
@@ -221,7 +228,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
               </button>
 
               {/* Divider */}
-              <div className="mx-2 my-1 border-t border-zinc-200 dark:border-zinc-700" />
+              <div className="mx-3 my-1 border-t border-zinc-200 dark:border-zinc-700" />
 
               {loading ? (
                 <div className="py-4 text-center text-xs text-zinc-400">{t("workspace.loading")}</div>
@@ -239,7 +246,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                     return (
                       <div
                         key={dir.id}
-                        className="group flex items-center gap-2 px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
+                        className="group flex items-center gap-2 px-3 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
                       >
                         {/* Select workspace button */}
                         <button
@@ -337,7 +344,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
             {/* Add workspace button */}
             <button
               onClick={handleBrowse}
-              className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
+              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}

@@ -2662,8 +2662,15 @@ function ModelMenu({
           )}
           style={{ width: `${menuWidth}px` }}
         >
+          {/* Menu title */}
+          <div className="px-3 pt-2.5 pb-1">
+            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+              {t("chatPanel.modelMenuTitle")}
+            </h2>
+          </div>
+
           {/* Model list */}
-          <div className="max-h-[240px] overflow-y-auto">
+          <div className="max-h-[240px] overflow-y-auto py-1">
             {models.map((m) => {
               const isActive = m.name === currentModel && m.provider === currentProvider;
               return (
@@ -2675,7 +2682,7 @@ function ModelMenu({
                     setOpen(false);
                   }}
                   className={cn(
-                    "flex w-full items-center justify-between px-2.5 py-1.5 text-xs font-medium transition-colors",
+                    "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
                     isActive
                       ? "text-[var(--color-accent)]"
                       : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
@@ -2717,7 +2724,7 @@ function ModelMenu({
               setShowAddDialog(true);
               setOpen(false);
             }}
-            className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
+            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("chatPanel.addModel")}
@@ -2803,35 +2810,45 @@ function ReasoningEffortMenu({
           )}
           style={{ width: "140px" }}
         >
-          {OPTIONS.map((opt) => {
-            const isActive = opt.value === effort;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => {
-                  onChange(opt.value);
-                  setOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-xs font-medium transition-colors",
-                  isActive
-                    ? "text-[var(--color-accent)]"
-                    : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
-                )}
-              >
-                <span
-                  className="h-2 w-2 rounded-full shrink-0"
-                  style={{ backgroundColor: opt.color }}
-                />
-                <span
-                  className={cn("font-medium", isActive && "text-[var(--color-accent)]")}
+          {/* Menu title */}
+          <div className="px-3 pt-2.5 pb-1">
+            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+              {t("chatPanel.reasoningMenuTitle")}
+            </h2>
+          </div>
+
+          {/* Options */}
+          <div className="py-1">
+            {OPTIONS.map((opt) => {
+              const isActive = opt.value === effort;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt.value);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors",
+                    isActive
+                      ? "text-[var(--color-accent)]"
+                      : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
+                  )}
                 >
-                  {opt.label}
-                </span>
-              </button>
-            );
-          })}
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{ backgroundColor: opt.color }}
+                  />
+                  <span
+                    className={cn("font-medium", isActive && "text-[var(--color-accent)]")}
+                  >
+                    {opt.label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </ToolbarDropdownTrigger>

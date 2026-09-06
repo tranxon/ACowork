@@ -95,7 +95,7 @@ export function ExpandableRow({
           variant === "section"
             ? "min-h-[30px] rounded-md bg-zinc-100 px-2.5 hover:bg-zinc-200/80 dark:bg-zinc-700/60 dark:hover:bg-zinc-600/50"
             : surface === "inset"
-              ? "min-h-[36px] px-3 hover:bg-zinc-400 dark:hover:bg-zinc-700/40"
+              ? "min-h-[36px] px-3 hover:bg-zinc-100 dark:hover:bg-zinc-700/40"
               : "min-h-[36px] px-3 hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
           interactive && "cursor-pointer",
           className,

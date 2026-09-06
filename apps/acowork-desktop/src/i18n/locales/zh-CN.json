@@ -193,7 +193,9 @@
     "reasoningLow": "低",
     "reasoningMedium": "中",
     "reasoningHigh": "高",
-    "addModel": "添加模型"
+    "addModel": "添加模型",
+    "modelMenuTitle": "模型",
+    "reasoningMenuTitle": "思考深度"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理进行中",
@@ -698,6 +700,7 @@
     "newFile": "新建文件",
     "newFolder": "新建文件夹",
     "addWorkspace": "添加工作区",
+    "title": "工作区",
     "remoteBrowseTitle": "浏览远程服务器",
     "remoteBrowseBtn": "浏览服务器",
     "remoteBrowseEmpty": "未找到目录",

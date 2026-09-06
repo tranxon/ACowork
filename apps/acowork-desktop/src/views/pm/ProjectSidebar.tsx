@@ -17,7 +17,7 @@ import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmProject } from "../../lib/pm-types";
 
-export function ProjectSidebar() {
+export function ProjectSidebar({ width }: { width?: number }) {
   const { t } = useTranslation();
   const projects = usePmProjectStore((s) => s.projects);
   const selected = usePmProjectStore((s) => s.selected);
@@ -66,7 +66,10 @@ export function ProjectSidebar() {
   }, [deleting, deleteProject, t]);
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-200 dark:border-zinc-700">
+    <aside
+      className="flex shrink-0 flex-col rounded-xl bg-nav-surface"
+      style={{ width: width ?? 240 }}
+    >
       {/* 标题 + 新建按钮 */}
       <div className="flex items-center justify-between px-3 py-2">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
@@ -76,7 +79,7 @@ export function ProjectSidebar() {
           type="button"
           onClick={() => openCreate()}
           disabled={healthy === false}
-          className="rounded-md px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+          className="rounded-md px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-nav-item-hover hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:text-zinc-200"
           aria-label={t("pm.newProject")}
           title={t("pm.newProject")}
         >
@@ -100,8 +103,8 @@ export function ProjectSidebar() {
               className={cn(
                 "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
                 active
-                  ? "bg-zinc-200/80 text-zinc-900 dark:bg-zinc-700/70 dark:text-zinc-100"
-                  : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800",
+                  ? "bg-[var(--color-accent)]/10 font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20"
+                  : "text-zinc-600 hover:bg-nav-item-hover dark:text-zinc-300",
               )}
               aria-current={active ? "page" : undefined}
             >

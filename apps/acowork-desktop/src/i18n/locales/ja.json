@@ -193,7 +193,9 @@
     "reasoningLow": "低",
     "reasoningMedium": "中",
     "reasoningHigh": "高",
-    "addModel": "モデルを追加"
+    "addModel": "モデルを追加",
+    "modelMenuTitle": "モデル",
+    "reasoningMenuTitle": "思考深度"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM推論中",
@@ -683,6 +685,7 @@
     "newFile": "New file",
     "newFolder": "New folder",
     "addWorkspace": "ワークスペースを追加",
+    "title": "ワークスペース",
     "remoteBrowseTitle": "リモートサーバーを閲覧",
     "remoteBrowseBtn": "サーバーを閲覧",
     "remoteBrowseEmpty": "ディレクトリが見つかりません",
