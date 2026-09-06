@@ -5,6 +5,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { AgentListResponse, GatewayConfig, GatewayMode } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { ACCENT_PRESETS } from "../../lib/accentPresets";
@@ -75,6 +76,11 @@ function GatewayTab() {
   const [urlDraft, setUrlDraft] = useState(gatewayUrl);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  // Tools-tab style level-1 collapsible cards (default open)
+  const [gatewayModeOpen, setGatewayModeOpen] = useState(true);
+  const [localGatewayOpen, setLocalGatewayOpen] = useState(true);
+  const [gatewayConnOpen, setGatewayConnOpen] = useState(true);
+  const [agentsOpen, setAgentsOpen] = useState(true);
 
   // Sync draft when gatewayUrl changes externally
   useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
@@ -179,23 +185,36 @@ function GatewayTab() {
   return (
     <div className="max-w-lg space-y-4">
       {/* Mode selection */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.gatewayMode")}</h2>
-        <RadioGroup
-          name="gatewayMode"
-          value={gatewayMode}
-          options={[
-            { label: t("settings.local"), value: "local" as GatewayMode },
-            { label: t("settings.remote"), value: "remote" as GatewayMode },
-          ]}
-          onChange={handleModeChange}
-        />
-      </div>
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={gatewayModeOpen}
+          onToggle={() => setGatewayModeOpen((v) => !v)}
+          title={t("settings.gatewayMode")}
+          ariaLabel={t("settings.gatewayMode")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <RadioGroup
+            name="gatewayMode"
+            value={gatewayMode}
+            options={[
+              { label: t("settings.local"), value: "local" as GatewayMode },
+              { label: t("settings.remote"), value: "remote" as GatewayMode },
+            ]}
+            onChange={handleModeChange}
+          />
+        </ExpandableRow>
+      </ListBox>
 
       {/* Local mode: status + controls */}
       {gatewayMode === "local" && (
-        <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-          <h2 className="mb-3 text-xs font-medium">{t("settings.localGateway")}</h2>
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={localGatewayOpen}
+            onToggle={() => setLocalGatewayOpen((v) => !v)}
+            title={t("settings.localGateway")}
+            ariaLabel={t("settings.localGateway")}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          >
 
           <div className="flex items-center gap-2 text-xs">
             <span className="text-zinc-500">{t("settings.status")}</span>
@@ -255,13 +274,20 @@ function GatewayTab() {
               {t("settings.gatewayRunningExternal")}
             </p>
           )}
-        </div>
+          </ExpandableRow>
+        </ListBox>
       )}
 
       {/* Remote mode: URL + test */}
       {gatewayMode === "remote" && (
-        <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-          <h2 className="mb-3 text-xs font-medium">{t("settings.gatewayConnection")}</h2>
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={gatewayConnOpen}
+            onToggle={() => setGatewayConnOpen((v) => !v)}
+            title={t("settings.gatewayConnection")}
+            ariaLabel={t("settings.gatewayConnection")}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          >
 
           <div className="space-y-3">
             <div>
@@ -319,27 +345,34 @@ function GatewayTab() {
               {testing ? t("settings.testing") : t("settings.testConnection")}
             </button>
           </div>
-        </div>
+          </ExpandableRow>
+        </ListBox>
       )}
 
       {/* Connected Agents (shared between modes) */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.connectedAgents")}</h2>
-
-        {status !== "connected" ? (
-          <p className="text-xs text-zinc-400">{t("settings.connectToSeeAgents")}</p>
-        ) : agentsLoading ? (
-          <p className="text-xs text-zinc-400">{t("settings.loading")}</p>
-        ) : agents.length === 0 ? (
-          <p className="text-xs text-zinc-400">{t("settings.noAgentsRunning")}</p>
-        ) : (
-          <div className="space-y-1">
-            {agents.map((agent) => (
-              <RuntimeRow key={agent.agent_id} agent={agent} />
-            ))}
-          </div>
-        )}
-      </div>
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={agentsOpen}
+          onToggle={() => setAgentsOpen((v) => !v)}
+          title={t("settings.connectedAgents")}
+          ariaLabel={t("settings.connectedAgents")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          {status !== "connected" ? (
+            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.connectToSeeAgents")}</div>
+          ) : agentsLoading ? (
+            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.loading")}</div>
+          ) : agents.length === 0 ? (
+            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.noAgentsRunning")}</div>
+          ) : (
+            <ListBox variant="plain">
+              {agents.map((agent) => (
+                <RuntimeRow key={agent.agent_id} agent={agent} />
+              ))}
+            </ListBox>
+          )}
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }
@@ -363,28 +396,32 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
   }, [agent.agent_id]);
 
   return (
-    <div className="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
+    <ListRow
+      surface="inset"
+      leading={<Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />}
+      trailing={
+        <div className="flex items-center gap-2 shrink-0">
+          {modelInfo ? (
+            <span className="text-xs text-zinc-500">{modelInfo.provider}/{modelInfo.model}</span>
+          ) : (
+            <span className="text-xs text-zinc-400">—</span>
+          )}
+        </div>
+      }
+    >
       <div className="flex items-center gap-2 min-w-0">
-        <Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-        <span className="text-xs font-medium truncate">{agent.name}</span>
+        <span className="truncate text-xs font-medium">{agent.name}</span>
         {/* ADR-048 follow-up: badge reflects current DevMode capability
             (debug_state), not startup intent (dev_mode) — an agent can be
             flipped into DevMode at runtime without restart. */}
         {agent.debug_state === "enabled" && (
-          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
             <Bug className="h-3 w-3" />
             {t("settings.debug")}
           </span>
         )}
       </div>
-      <div className="flex items-center gap-2 shrink-0">
-        {modelInfo ? (
-          <span className="text-xs text-zinc-500">{modelInfo.provider}/{modelInfo.model}</span>
-        ) : (
-          <span className="text-xs text-zinc-400">—</span>
-        )}
-      </div>
-    </div>
+    </ListRow>
   );
 }
 
@@ -393,6 +430,13 @@ function AppearanceTab() {
   const { t } = useTranslation();
   const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, setAccentColor } = useSettingsStore();
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  // Tools-tab style level-1 collapsible cards (default open)
+  const [themeOpen, setThemeOpen] = useState(true);
+  const [accentOpen, setAccentOpen] = useState(true);
+  const [contentWidthOpen, setContentWidthOpen] = useState(true);
+  const [fontSizeOpen, setFontSizeOpen] = useState(true);
+  const [opacityOpen, setOpacityOpen] = useState(true);
+  const [resetOpen, setResetOpen] = useState(true);
 
   // Content width options: 40-100%, step 10
   const contentWidths = [
@@ -416,109 +460,153 @@ function AppearanceTab() {
 
   return (
     <div className="w-fit space-y-4">
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.theme")}</h2>
-        <RadioGroup
-          name="theme"
-          value={theme}
-          options={[
-            { label: t("settings.light"), value: "light" as const },
-            { label: t("settings.dark"), value: "dark" as const },
-            { label: t("settings.system"), value: "system" as const },
-          ]}
-          onChange={setTheme}
-        />
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.accentColor")}</h2>
-        <p className="mb-3 text-xs text-zinc-500">{t("settings.accentColor")}</p>
-        <div className="flex flex-wrap gap-[14px]">
-          {ACCENT_PRESETS.map((c) => (
-            <Tooltip content={c.label} variant="plain" key={c.id}>
-              <button
-                onClick={() => setAccentColor(c.hex)}
-                aria-label={c.label}
-                data-accent-id={c.id}
-                className={cn(
-                  "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
-                  accentColor.toLowerCase() === c.hex.toLowerCase()
-                    ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
-                    : "hover:scale-105",
-                )}
-                style={{
-                  backgroundColor: c.hex,
-                  "--tw-ring-color": c.hex,
-                } as React.CSSProperties}
-              />
-            </Tooltip>
-          ))}
-        </div>
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.contentWidth")}</h2>
-        <p className="mb-2 text-xs text-zinc-500">{t("settings.contentWidthHint")}</p>
-        <RadioGroup
-          name="contentWidth"
-          value={contentWidth}
-          options={contentWidths}
-          onChange={setContentWidth}
-          noWrap
-        />
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.fontSize")}</h2>
-        <RadioGroup
-          name="fontSize"
-          value={fontSize}
-          options={fontSizes}
-          onChange={setFontSize}
-        />
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.opacity")}</h2>
-        <p className="mb-2 text-xs text-zinc-500">{t("settings.opacityHint")}</p>
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            min="0"
-            max="1.0"
-            step="0.01"
-            value={opacity}
-            onChange={(e) => setOpacity(parseFloat(e.target.value))}
-            className="flex-1"
-            style={{ "--progress": `${opacity * 100}%` } as React.CSSProperties}
-          />
-          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400">
-            {Math.round(opacity * 100)}%
-          </span>
-        </div>
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <button
-          onClick={() => setShowResetConfirm(true)}
-          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs"
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={themeOpen}
+          onToggle={() => setThemeOpen((v) => !v)}
+          title={t("settings.theme")}
+          ariaLabel={t("settings.theme")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
-          {t("settings.resetToDefaults")}
-        </button>
+          <RadioGroup
+            name="theme"
+            value={theme}
+            options={[
+              { label: t("settings.light"), value: "light" as const },
+              { label: t("settings.dark"), value: "dark" as const },
+              { label: t("settings.system"), value: "system" as const },
+            ]}
+            onChange={setTheme}
+          />
+        </ExpandableRow>
+      </ListBox>
 
-        <ConfirmDialog
-          open={showResetConfirm}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={accentOpen}
+          onToggle={() => setAccentOpen((v) => !v)}
+          title={t("settings.accentColor")}
+          ariaLabel={t("settings.accentColor")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <p className="mb-3 text-xs text-zinc-500">{t("settings.accentColor")}</p>
+          <div className="flex flex-wrap gap-[14px]">
+            {ACCENT_PRESETS.map((c) => (
+              <Tooltip content={c.label} variant="plain" key={c.id}>
+                <button
+                  onClick={() => setAccentColor(c.hex)}
+                  aria-label={c.label}
+                  data-accent-id={c.id}
+                  className={cn(
+                    "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
+                    accentColor.toLowerCase() === c.hex.toLowerCase()
+                      ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
+                      : "hover:scale-105",
+                  )}
+                  style={{
+                    backgroundColor: c.hex,
+                    "--tw-ring-color": c.hex,
+                  } as React.CSSProperties}
+                />
+              </Tooltip>
+            ))}
+          </div>
+        </ExpandableRow>
+      </ListBox>
+
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={contentWidthOpen}
+          onToggle={() => setContentWidthOpen((v) => !v)}
+          title={t("settings.contentWidth")}
+          ariaLabel={t("settings.contentWidth")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <p className="mb-2 text-xs text-zinc-500">{t("settings.contentWidthHint")}</p>
+          <RadioGroup
+            name="contentWidth"
+            value={contentWidth}
+            options={contentWidths}
+            onChange={setContentWidth}
+            noWrap
+          />
+        </ExpandableRow>
+      </ListBox>
+
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={fontSizeOpen}
+          onToggle={() => setFontSizeOpen((v) => !v)}
+          title={t("settings.fontSize")}
+          ariaLabel={t("settings.fontSize")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <RadioGroup
+            name="fontSize"
+            value={fontSize}
+            options={fontSizes}
+            onChange={setFontSize}
+          />
+        </ExpandableRow>
+      </ListBox>
+
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={opacityOpen}
+          onToggle={() => setOpacityOpen((v) => !v)}
+          title={t("settings.opacity")}
+          ariaLabel={t("settings.opacity")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <p className="mb-2 text-xs text-zinc-500">{t("settings.opacityHint")}</p>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min="0"
+              max="1.0"
+              step="0.01"
+              value={opacity}
+              onChange={(e) => setOpacity(parseFloat(e.target.value))}
+              className="flex-1"
+              style={{ "--progress": `${opacity * 100}%` } as React.CSSProperties}
+            />
+            <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400">
+              {Math.round(opacity * 100)}%
+            </span>
+          </div>
+        </ExpandableRow>
+      </ListBox>
+
+      {/* Reset appearance to defaults */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={resetOpen}
+          onToggle={() => setResetOpen((v) => !v)}
           title={t("settings.resetAppearance")}
-          message={t("settings.resetAppearanceConfirm")}
-          confirmLabel={t("settings.reset")}
-          destructive
-          onConfirm={() => {
-            setTheme(DEFAULT_THEME); setFontSize(DEFAULT_FONT_SIZE); setContentWidth(DEFAULT_CONTENT_WIDTH); setOpacity(DEFAULT_OPACITY); setAccentColor(DEFAULT_ACCENT_COLOR);
-            setShowResetConfirm(false);
-          }}
-          onCancel={() => setShowResetConfirm(false)}
-        />
-      </div>
+          ariaLabel={t("settings.resetAppearance")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <button
+            onClick={() => setShowResetConfirm(true)}
+            className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs"
+          >
+            {t("settings.resetToDefaults")}
+          </button>
+
+          <ConfirmDialog
+            open={showResetConfirm}
+            title={t("settings.resetAppearance")}
+            message={t("settings.resetAppearanceConfirm")}
+            confirmLabel={t("settings.reset")}
+            destructive
+            onConfirm={() => {
+              setTheme(DEFAULT_THEME); setFontSize(DEFAULT_FONT_SIZE); setContentWidth(DEFAULT_CONTENT_WIDTH); setOpacity(DEFAULT_OPACITY); setAccentColor(DEFAULT_ACCENT_COLOR);
+              setShowResetConfirm(false);
+            }}
+            onCancel={() => setShowResetConfirm(false)}
+          />
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }
@@ -530,6 +618,11 @@ function GeneralTab() {
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showResetOnboardingConfirm, setShowResetOnboardingConfirm] = useState(false);
+  // Tools-tab style level-1 collapsible cards (default open)
+  const [logSetupOpen, setLogSetupOpen] = useState(true);
+  const [dataDirectoryOpen, setDataDirectoryOpen] = useState(true);
+  const [aboutOpen, setAboutOpen] = useState(true);
+  const [resetOnboardingOpen, setResetOnboardingOpen] = useState(true);
   const { logLevel, setLogLevel, logFileSizeMb, setLogFileSizeMb, logFileCount, setLogFileCount, frontendLogLevel, setFrontendLogLevel } = useSettingsStore();
 
   useEffect(() => {
@@ -564,8 +657,14 @@ function GeneralTab() {
 
   return (
     <div className="max-w-lg space-y-4">
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.logSetup")}</h2>
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={logSetupOpen}
+          onToggle={() => setLogSetupOpen((v) => !v)}
+          title={t("settings.logSetup")}
+          ariaLabel={t("settings.logSetup")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
 
         {/* Log level */}
         <div className="mb-3">
@@ -725,58 +824,80 @@ function GeneralTab() {
             </div>
           </div>
         )}
-      </div>
+        </ExpandableRow>
+      </ListBox>
 
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.dataDirectory")}</h2>
-        <input
-          type="text"
-          value={config?.data_dir ?? "\u2014"}
-          readOnly
-          className={`w-full ${inputReadonly}`}
-        />
-      </div>
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={dataDirectoryOpen}
+          onToggle={() => setDataDirectoryOpen((v) => !v)}
+          title={t("settings.dataDirectory")}
+          ariaLabel={t("settings.dataDirectory")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <input
+            type="text"
+            value={config?.data_dir ?? "\u2014"}
+            readOnly
+            className={`w-full ${inputReadonly}`}
+          />
+        </ExpandableRow>
+      </ListBox>
 
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.about")}</h2>
-        <div className="text-xs text-zinc-500 dark:text-zinc-400">
-          <p>ACowork Desktop v0.1.0</p>
-          <p className="mt-1">Built with Tauri v2 + React 19</p>
-        </div>
-      </div>
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={aboutOpen}
+          onToggle={() => setAboutOpen((v) => !v)}
+          title={t("settings.about")}
+          ariaLabel={t("settings.about")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+            <p>ACowork Desktop v0.1.0</p>
+            <p className="mt-1">Built with Tauri v2 + React 19</p>
+          </div>
+        </ExpandableRow>
+      </ListBox>
 
       {/* Reset Onboarding */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="text-xs font-medium">{t("settings.resetOnboarding")}</h2>
-        <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          {t("settings.resetOnboardingDesc")}
-        </p>
-        <button
-          onClick={() => setShowResetOnboardingConfirm(true)}
-          className="mt-3 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
-        >
-          {t("settings.resetOnboardingBtn")}
-        </button>
-
-        <ConfirmDialog
-          open={showResetOnboardingConfirm}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={resetOnboardingOpen}
+          onToggle={() => setResetOnboardingOpen((v) => !v)}
           title={t("settings.resetOnboarding")}
-          message={t("settings.resetOnboardingConfirm")}
-          confirmLabel={t("settings.reset")}
-          destructive
-          onConfirm={async () => {
-            setShowResetOnboardingConfirm(false);
-            try {
-              const { resetOnboarding } = await import("../../lib/gateway-api");
-              await resetOnboarding();
-            } catch (e) {
-              log.error("Failed to reset onboarding:", e);
-            }
-            window.location.reload();
-          }}
-          onCancel={() => setShowResetOnboardingConfirm(false)}
-        />
-      </div>
+          ariaLabel={t("settings.resetOnboarding")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            {t("settings.resetOnboardingDesc")}
+          </p>
+          <button
+            onClick={() => setShowResetOnboardingConfirm(true)}
+            className="mt-3 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium"
+          >
+            {t("settings.resetOnboardingBtn")}
+          </button>
+
+          <ConfirmDialog
+            open={showResetOnboardingConfirm}
+            title={t("settings.resetOnboarding")}
+            message={t("settings.resetOnboardingConfirm")}
+            confirmLabel={t("settings.reset")}
+            destructive
+            onConfirm={async () => {
+              setShowResetOnboardingConfirm(false);
+              try {
+                const { resetOnboarding } = await import("../../lib/gateway-api");
+                await resetOnboarding();
+              } catch (e) {
+                log.error("Failed to reset onboarding:", e);
+              }
+              window.location.reload();
+            }}
+            onCancel={() => setShowResetOnboardingConfirm(false)}
+          />
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }

@@ -106,9 +106,8 @@ export function MemoryNodeList({
         <ExpandableRow
           open={listOpen}
           onToggle={() => setListOpen((v) => !v)}
-          title={t("memoryPanel.memoryList")}
-          ariaLabel={t("memoryPanel.memoryList")}
-          meta={<Badge mono>{total}</Badge>}
+          title={t("memoryPanel.memoryList", { count: total })}
+          ariaLabel={t("memoryPanel.memoryList", { count: total })}
           trailing={pager}
           bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
         >

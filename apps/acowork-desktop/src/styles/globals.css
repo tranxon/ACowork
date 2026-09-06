@@ -86,13 +86,13 @@
         with no `dark:` prefix needed. */
   --color-page-bg: hsl(0 0% 98%);
   /* = #FAFAFA — unified page background (chat/settings/harness/pm/doc) */
-  --color-right-panel: hsl(0 0% 95.3%);
+  --color-right-panel: hsl(0 0% 95%);
   /* = #F3F3F3, zinc-100 — right panel surface (light) */
   --color-panel-block: hsl(0 0% 100%);
   /* = #FFFFFF — right-panel embedded card/list/block base (light).
      Formerly scattered across modal-surface / bg-zinc-* fills inside
      the right-side tabs; this one token now drives them all. */
-  --color-panel-inset: hsl(0 0% 98%);
+  --color-panel-inset: hsl(0 0% 100%);
   /* = #e4e4e7, zinc-200 — the EXPANDED list sub-surface (light), one
      step below `panel-block`: the body revealed by an ExpandableRow
      header (PROMPT / context-snapshot / compression-history / tool
@@ -100,7 +100,7 @@
      stays legible. The .dark block flips this to zinc-900@60%. Tune
      the header-vs-list contrast here — one value drives every expanded
      list body in the app. */
-  --color-panel-inset-2: hsl(0 0% 94%);
+  --color-panel-inset-2: hsl(0 0% 98%);
   /* = #d4d4d8, zinc-300 — LEVEL-2 nested content surface (light), one
      step below `panel-inset`: content revealed by a level-1 row inside
      an expanded body (e.g. MCP server -> its tool list). Keeps

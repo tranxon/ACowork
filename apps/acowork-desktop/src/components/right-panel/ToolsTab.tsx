@@ -77,13 +77,8 @@ function McpServerCard({
       open={showBody}
       onToggle={() => setOpen((v) => !v)}
       disabled={!hasExpandableBody}
-      title={server.name}
-      meta={
-        <>
-          <Badge>{server.transport}</Badge>
-          {tools.length > 0 && <Badge mono>{tools.length}</Badge>}
-        </>
-      }
+      title={`${server.name}${tools.length > 0 ? ` (${tools.length})` : ""}`}
+      meta={<Badge>{server.transport}</Badge>}
       description={server.command || server.url || ""}
       trailing={
         // The Switch component owns its own click handler; we stop
@@ -470,9 +465,8 @@ export function ToolsTab() {
           <ExpandableRow
             open={builtinOpen}
             onToggle={() => setBuiltinOpen((v) => !v)}
-            title={t("agentSetup.builtinTools")}
-            ariaLabel={t("agentSetup.builtinTools")}
-            meta={<Badge mono>{builtinToolsAll.length}</Badge>}
+            title={t("agentSetup.builtinTools", { count: builtinToolsAll.length })}
+            ariaLabel={t("agentSetup.builtinTools", { count: builtinToolsAll.length })}
             bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
           >
             {builtinToolsAll.length === 0 ? (
@@ -519,9 +513,8 @@ export function ToolsTab() {
           <ExpandableRow
             open={searchOpen}
             onToggle={() => setSearchOpen((v) => !v)}
-            title={t("agentSetup.webSearchProviders")}
-            ariaLabel={t("agentSetup.webSearchProviders")}
-            meta={<Badge mono>{searchProviders.length}</Badge>}
+            title={t("agentSetup.webSearchProviders", { count: searchProviders.length })}
+            ariaLabel={t("agentSetup.webSearchProviders", { count: searchProviders.length })}
             bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
           >
             {searchProviders.length === 0 ? (
@@ -603,9 +596,8 @@ export function ToolsTab() {
           <ExpandableRow
             open={mcpOpen}
             onToggle={() => setMcpOpen((v) => !v)}
-            title={t("agentSetup.mcpServers")}
-            ariaLabel={t("agentSetup.mcpServers")}
-            meta={<Badge mono>{mcpServerDefs.length}</Badge>}
+            title={t("agentSetup.mcpServers", { count: mcpServerDefs.length })}
+            ariaLabel={t("agentSetup.mcpServers", { count: mcpServerDefs.length })}
             bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
           >
             {mcpServerDefs.length === 0 ? (
