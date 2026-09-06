@@ -862,6 +862,8 @@
     "cancel": "キャンセル"
   },
   "memoryPanel": {
+    "memoryList": "メモリノード",
+    "emptyNodes": "メモリノードがありません",
     "consolidate": "ノードを統合",
     "refresh": "更新",
     "selectAgent": "Agentを選択してメモリを表示",

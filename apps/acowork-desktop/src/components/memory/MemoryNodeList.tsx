@@ -1,8 +1,17 @@
+//! Memory node master list — level-1 collapsible card in the same
+//! grammar as the Debug-panel "Context Snapshots" list: a box card whose
+//! header (chevron + title + count Badge + page controls on the empty
+//! right side) toggles the whole list, which sits on the level-1 inset
+//! surface (`bg-panel-inset`). Clicking a row drills into the
+//! MemoryNodeDetail view (master-detail; intentionally NOT an inline
+//! expansion — the detail pane carries edit/delete controls).
+import { useState } from "react";
 import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useNodeTypeLabel, useSubTypeLabel } from "./nodeTypeI18n";
+import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/list";
 
 interface MemoryNodeListProps {
   nodes: MemoryNodeResponse[];
@@ -16,12 +25,7 @@ interface MemoryNodeListProps {
   onPageChange: (page: number) => void;
 }
 
-const accentBg = "bg-[var(--color-accent)]/10 dark:bg-[var(--color-accent)]/20";
 const accentText = "text-[var(--color-accent)]";
-
-function getTypeColor(_nodeType: string) {
-  return { bg: accentBg, text: accentText, darkBg: "", darkText: "" };
-}
 
 function formatDate(ts: number): string {
   if (ts === 0) return "—";
@@ -38,150 +42,162 @@ export function MemoryNodeList({
   nodes,
   total,
   page,
-  pageSize,
   totalPages,
   loading,
   selectedNodeId,
   onSelectNode,
   onPageChange,
 }: MemoryNodeListProps) {
-  const start = (page - 1) * pageSize + 1;
-  const end = Math.min(page * pageSize, total);
+  // Level-1 collapse of the whole list card — same interaction as the
+  // Context Snapshots card. Default open.
+  const [listOpen, setListOpen] = useState(true);
   const labelOf = useNodeTypeLabel();
   const subLabelOf = useSubTypeLabel();
   const { t } = useTranslation();
 
+  // Page controls live in the empty right side of the card header.
+  // Clicking them must not toggle the collapse, and flips the card open
+  // when it was collapsed (mirrors the snapshot pager behaviour).
+  const pager =
+    totalPages > 1 ? (
+      <span
+        className="flex items-center gap-1"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          aria-label="Previous memory page"
+          disabled={page <= 1}
+          onClick={() => {
+            setListOpen(true);
+            onPageChange(page - 1);
+          }}
+          className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500">
+          {page}/{totalPages}
+        </span>
+        <button
+          type="button"
+          aria-label="Next memory page"
+          disabled={page >= totalPages}
+          onClick={() => {
+            setListOpen(true);
+            onPageChange(page + 1);
+          }}
+          className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </span>
+    ) : undefined;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      {/* List header */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-        <span>
-          {total > 0 ? (
-            <>Showing {start}–{end} of {total}</>
+      <ListBox
+        dividers={false}
+        className={cn(
+          "overflow-hidden",
+          listOpen && "flex min-h-0 flex-1 flex-col",
+        )}
+      >
+        <ExpandableRow
+          open={listOpen}
+          onToggle={() => setListOpen((v) => !v)}
+          title={t("memoryPanel.memoryList")}
+          ariaLabel={t("memoryPanel.memoryList")}
+          meta={<Badge mono>{total}</Badge>}
+          trailing={pager}
+          bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          {loading && nodes.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center py-10">
+              <Loader2 className="h-5 w-5 animate-spin text-zinc-400 dark:text-zinc-500" />
+            </div>
+          ) : !loading && nodes.length === 0 ? (
+            <EmptyState
+              message={t("memoryPanel.emptyNodes")}
+              className="flex-1 items-center justify-center"
+            />
           ) : (
-            <>No nodes</>
-          )}
-        </span>
-      </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <ListBox variant="plain">
+                {nodes.map((node) => {
+                  const isSelected = node.node_id === selectedNodeId;
 
-      {/* Node list */}
-      <div className="flex-1 overflow-y-auto">
-        {loading && nodes.length === 0 && (
-          <div className="flex h-full items-center justify-center">
-            <Loader2 className="h-6 w-6 animate-spin text-zinc-400 dark:text-zinc-500" />
-          </div>
-        )}
-
-        {!loading && nodes.length === 0 && (
-          <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
-            No memory data available
-          </div>
-        )}
-
-        <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-          {nodes.map((node) => {
-            const colors = getTypeColor(node.node_type);
-            const isSelected = node.node_id === selectedNodeId;
-
-            return (
-              <button
-                key={node.node_id}
-                onClick={() => onSelectNode(node.node_id)}
-                className={cn(
-                  "flex w-full flex-col gap-1 px-3 py-2 text-left transition-colors",
-                  isSelected
-                    ? "bg-zinc-100 dark:bg-zinc-800"
-                    : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
-                )}
-              >
-                {/* Top row: type + status */}
-                <div className="flex items-center gap-2">
-                  <span
-                    className={cn(
-                      "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
-                      colors.bg,
-                      colors.text,
-                    )}
-                    data-node-type={node.node_type}
-                  >
-                    {labelOf(node.node_type)}
-                  </span>
-                  {node.sub_type && (
-                    <span
-                      className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                      data-sub-type={node.sub_type}
-                      title={node.sub_type}
+                  return (
+                    <ListRow
+                      key={node.node_id}
+                      selected={isSelected}
+                      surface="inset"
+                      onClick={() => onSelectNode(node.node_id)}
                     >
-                      {subLabelOf(node.node_type, node.sub_type)}
-                    </span>
-                  )}
-                  <span
-                    className={cn(
-                      "text-[10px] font-medium",
-                      node.status === "active"
-                        ? accentText
-                        : "text-zinc-400 dark:text-zinc-500",
-                    )}
-                  >
-                    {node.status}
-                  </span>
-                </div>
+                      <div className="flex flex-col gap-1">
+                        {/* Top row: type + status */}
+                        <div className="flex items-center gap-2">
+                          <Badge tone="accent" uppercase data-node-type={node.node_type}>
+                            {labelOf(node.node_type)}
+                          </Badge>
+                          {node.sub_type && (
+                            <Badge
+                              tone="neutral"
+                              uppercase
+                              data-sub-type={node.sub_type}
+                              title={node.sub_type}
+                            >
+                              {subLabelOf(node.node_type, node.sub_type)}
+                            </Badge>
+                          )}
+                          <span
+                            className={cn(
+                              "text-[10px] font-medium",
+                              node.status === "active"
+                                ? accentText
+                                : "text-zinc-400 dark:text-zinc-500",
+                            )}
+                          >
+                            {node.status}
+                          </span>
+                        </div>
 
-                {/* Content summary */}
-                <p className="text-xs text-zinc-700 dark:text-zinc-300">
-                  {truncateContent(node.content)}
-                </p>
+                        {/* Content summary */}
+                        <p className="text-xs text-zinc-700 dark:text-zinc-300">
+                          {truncateContent(node.content)}
+                        </p>
 
-                {/* Bottom row: score + decay + date.
-                    Episodic nodes carry `importance` (重要程度) but no
-                    `confidence`; the other three types carry `confidence`
-                    (置信度) but no `importance`. Each is shown verbatim —
-                    the backend never derives one from the other. */}
-                <div className="flex items-center gap-2 text-[11px] text-zinc-400 dark:text-zinc-500">
-                  {node.node_type === "Episodic" ? (
-                    <span>
-                      {t("memoryNodeDetail.labelImportance")}:{" "}
-                      {(node.importance * 100).toFixed(0)}%
-                    </span>
-                  ) : (
-                    <span>
-                      {t("memoryNodeDetail.labelConfidence")}:{" "}
-                      {(node.confidence * 100).toFixed(0)}%
-                    </span>
-                  )}
+                        {/* Bottom row: score + decay + date.
+                            Episodic nodes carry `importance` (重要程度) but no
+                            `confidence`; the other three types carry `confidence`
+                            (置信度) but no `importance`. Each is shown verbatim —
+                            the backend never derives one from the other. */}
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 dark:text-zinc-500">
+                          {node.node_type === "Episodic" ? (
+                            <span>
+                              {t("memoryNodeDetail.labelImportance")}:{" "}
+                              {(node.importance * 100).toFixed(0)}%
+                            </span>
+                          ) : (
+                            <span>
+                              {t("memoryNodeDetail.labelConfidence")}:{" "}
+                              {(node.confidence * 100).toFixed(0)}%
+                            </span>
+                          )}
 
-                  <span>Decay: {node.decay_score.toFixed(2)}</span>
+                          <span>Decay: {node.decay_score.toFixed(2)}</span>
 
-                  <span className="ml-auto">{formatDate(node.created_at)}</span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between border-t border-zinc-200 px-1 py-1.5 dark:border-zinc-800">
-          <button
-            onClick={() => onPageChange(page - 1)}
-            disabled={page <= 1}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" />
-          </button>
-          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-            Page {page} of {totalPages}
-          </span>
-          <button
-            onClick={() => onPageChange(page + 1)}
-            disabled={page >= totalPages}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
+                          <span className="ml-auto">{formatDate(node.created_at)}</span>
+                        </div>
+                      </div>
+                    </ListRow>
+                  );
+                })}
+              </ListBox>
+            </div>
+          )}
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }

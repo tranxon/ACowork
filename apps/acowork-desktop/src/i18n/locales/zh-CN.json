@@ -879,6 +879,8 @@
     "cancel": "取消"
   },
   "memoryPanel": {
+    "memoryList": "记忆节点",
+    "emptyNodes": "暂无记忆节点",
     "consolidate": "合并节点",
     "refresh": "刷新",
     "selectAgent": "请选择一个 Agent 以查看记忆",

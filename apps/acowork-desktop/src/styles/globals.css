@@ -5,6 +5,16 @@
   --color-text-secondary: hsl(240 3.7% 46.9%);
   /* ~zinc-500: secondary labels & icons */
 
+  /* Semantic status colors — foreground values for Badge tones
+     (success / warning). Consumers write `text-ok` / `bg-ok/12` /
+     `text-warning` and the .dark block below flips the value, so
+     no `dark:` prefix is needed. `danger` reuses the existing
+     --color-destructive token (defined in :root). */
+  --color-ok: #059669;
+  /* = emerald-600 — success badge foreground (light) */
+  --color-warning: #d97706;
+  /* = amber-600 — warning badge foreground (light) */
+
   /* Chat palette — background shades for the message surface and
      nested blocks inside it. Used by:
        - ChatPanel.tsx       (assistant/thought/error/system message bubbles)
@@ -82,6 +92,20 @@
   /* = #FFFFFF — right-panel embedded card/list/block base (light).
      Formerly scattered across modal-surface / bg-zinc-* fills inside
      the right-side tabs; this one token now drives them all. */
+  --color-panel-inset: hsl(0 0% 98%);
+  /* = #e4e4e7, zinc-200 — the EXPANDED list sub-surface (light), one
+     step below `panel-block`: the body revealed by an ExpandableRow
+     header (PROMPT / context-snapshot / compression-history / tool
+     lists). Rows sitting on it use `surface="inset"` so their hover
+     stays legible. The .dark block flips this to zinc-900@60%. Tune
+     the header-vs-list contrast here — one value drives every expanded
+     list body in the app. */
+  --color-panel-inset-2: hsl(0 0% 94%);
+  /* = #d4d4d8, zinc-300 — LEVEL-2 nested content surface (light), one
+     step below `panel-inset`: content revealed by a level-1 row inside
+     an expanded body (e.g. MCP server -> its tool list). Keeps
+     level-1 rows vs level-2 content visually distinct. The .dark block
+     flips this to solid zinc-900. */
   --color-modal-surface: hsl(0 0% 100%);
   /* = #FFFFFF — dialog / dropdown / card content surface (light) */
   --color-modal-overlay: hsl(0 0% 0% / 0.5);
@@ -156,6 +180,13 @@
   --spacing-agent-list: 240px;
   --spacing-right-panel: 320px;
   --spacing-chat-min: 360px;
+  /* 12px — page gutter for content INSIDE the right-panel tabs (same
+     value as the p-3 card containers in Tools / Debug / Status /
+     Setup): lists & cards sit this far from the panel edges AND from
+     the hairline dividers above/below them.
+     Generated utilities: px-panel-gutter / py-panel-gutter /
+     mx-panel-gutter… */
+  --spacing-panel-gutter: 0.75rem;
 
   /* UI element sizing tokens */
   --ui-input-py: 0.375rem;
@@ -261,8 +292,22 @@
      perceptually distinct from pure-white/pure-black desktop wallpaper
      — solving the "agent list blends into the border" issue when the
      opacity slider is dragged down to zero. */
-  --glass-tint-light: 0 0% 92%;
+   --glass-tint-light: 0 0% 92%;
   --glass-tint-dark:  0 0% 14%;
+}
+
+/* Right-panel page gutter — single token, one place to tune.
+   Consumed by right-panel tab containers that need their list cards to
+   sit off the panel edges and off the hairline dividers above/below
+   them (same 12px value as the p-3 card containers in Tools/Debug/
+   Status/Setup; --spacing-panel-gutter above stays the source of
+   truth). */
+@utility px-panel-gutter {
+  padding-inline: var(--spacing-panel-gutter);
+}
+
+@utility py-panel-gutter {
+  padding-block: var(--spacing-panel-gutter);
 }
 
 /* ── Per-accent frosted-glass tints ──────────────────────────────
@@ -299,6 +344,12 @@
   --color-text-secondary: hsl(240 5% 64.9%);
   /* ~zinc-400 for dark mode */
 
+  /* Semantic status colors (dark) — auto-flips the @theme light values */
+  --color-ok: #34d399;
+  /* = emerald-400 — success badge foreground (dark) */
+  --color-warning: #fbbf24;
+  /* = amber-400 — warning badge foreground (dark) */
+
   /* Chat palette (dark) — auto-flips the @theme light values (6 tokens) */
   --color-chat-bubble: hsl(240 3.8% 15.7% / 0.7);
   /* = zinc-800, #27272a — message surface */
@@ -324,6 +375,14 @@
   /* = #1E1E1E — right panel surface (dark) */
   --color-panel-block: hsl(240 3.8% 15.7%);
   /* = zinc-800, #27272a — right-panel embedded card/list/block base (dark) */
+  --color-panel-inset: #1C1C1C;
+  /* = zinc-900 @ 60% alpha over the zinc-800 card ≈ #1e1e22 — expanded
+     list sub-surface (dark). Previously hardcoded per-file as
+     `bg-zinc-200 dark:bg-zinc-900/60`; now a single token. */
+  --color-panel-inset-2: #161616;
+  /* = zinc-950 附近 — LEVEL-2 nested list surface (dark), clearly one
+     step darker than `panel-inset` (≈#1e1e22): e.g. MCP server ->
+     its tool list, snapshot Iteration -> its sections area. */
   --color-modal-surface: hsl(240 3.8% 15.7%);
   /* = zinc-800, #27272a — dialog / dropdown / card content surface (dark) */
   /* modal-overlay is theme-independent (black/50 in both modes) */

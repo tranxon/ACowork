@@ -32,9 +32,10 @@ import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useDebugStore } from "../../stores/debugStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { getGatewayUrl } from "../../lib/config";
-import { ChevronDown, ChevronRight, RefreshCw, FileText, Loader2 } from "lucide-react";
+import { RefreshCw, FileText, Loader2 } from "lucide-react";
 import { log } from "../../lib/logger";
 import { cn } from "../../lib/utils";
+import { ListBox, ListRow, ExpandableRow, Badge } from "../common/list";
 
 // ── Wire types (mirror Rust `http/prompts.rs` envelope shapes) ────────
 
@@ -224,130 +225,123 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
         {t("prompts.title")}
       </span>
 
-      {/* Card — shared right-panel block surface (bg-panel-block) with a
-          border. The header row stays INSIDE the card
-          (chevron + count on the left toggle the body; reload button on
-          the right stops propagation so it doesn't toggle). The body
-          uses a thin border-t to separate from the header when open. */}
-      <div className="mt-1 rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
-        <div className="flex w-full items-center gap-2 px-3 py-2">
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="flex flex-1 items-center gap-2 text-left text-xs font-medium text-zinc-700 dark:text-zinc-300"
-          >
-            {open ? (
-              <ChevronDown className="h-3.5 w-3.5" />
-            ) : (
-              <ChevronRight className="h-3.5 w-3.5" />
-            )}
-            <span>{t("prompts.title")}</span>
-            {prompts && (
-              <span className="ml-1 rounded bg-zinc-100 px-1.5 py-px text-[10px] font-mono text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+      {/* Card — shared right-panel block surface (ListBox on
+          bg-panel-block). The header row stays INSIDE the card: an
+          ExpandableRow whose chevron + count badge toggle the body; the
+          reload button (trailing slot) stops propagation so it does not
+          toggle. The body uses a thin border-t to separate from the
+          header when open. */}
+      <ListBox className="mt-1" dividers={false}>
+        <ExpandableRow
+          open={open}
+          onToggle={() => setOpen((v) => !v)}
+          title={t("prompts.title")}
+          meta={
+            prompts && (
+              <Badge mono>
                 {prompts.filter((p) => p.overridden).length}/{prompts.length}
-              </span>
-            )}
-          </button>
-          {/* Reload — icon-only, matches the ControlButton style used by
-              the debug action block (p-1.5 + 14px icon). */}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              void reload();
-            }}
-            disabled={reloading}
-            className="rounded p-1.5 transition-colors text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-300 dark:disabled:text-zinc-600"
-            aria-label={t("prompts.reloadAria")}
-          >
-            {reloading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-          </button>
-        </div>
-
-        {open && (
-          <div className="border-t border-zinc-200 dark:border-zinc-700">
-            {loading && (
-              <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] text-zinc-400">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {t("prompts.loading")}
-              </div>
-            )}
-            {error && (
-              <div className="px-3 py-2 text-[10px] text-red-600 dark:text-red-400">
-                {t("prompts.error", { message: error })}
-              </div>
-            )}
-            {reloadNotice && (
-              <div className="px-3 py-2 text-[10px] text-emerald-600 dark:text-emerald-400">
-                {reloadNotice}
-              </div>
-            )}
-            {prompts && !loading && (
-              <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {/* Required prompts (system.md) first, then optional
-                    overrides — stable order so the mandatory entry is
-                    always visible without scrolling. */}
-                {[...prompts]
-                  .sort((a, b) => Number(b.required) - Number(a.required))
-                  .map((p) => (
-                  <li key={p.name}>
-                    <button
-                      type="button"
-                      onClick={() => void openInEditor(p)}
-                      className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                      aria-label={t("prompts.openAria", { name: p.name })}
-                    >
+              </Badge>
+            )
+          }
+          trailing={
+            /* Reload — icon-only, matches the ControlButton style used
+               by the debug action block (p-1.5 + 14px icon). */
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void reload();
+              }}
+              disabled={reloading}
+              className="rounded p-1 transition-colors text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-300 dark:disabled:text-zinc-600"
+              aria-label={t("prompts.reloadAria")}
+            >
+              {reloading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+            </button>
+          }
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          {loading && (
+            <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] text-zinc-400">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {t("prompts.loading")}
+            </div>
+          )}
+          {error && (
+            <div className="px-3 py-2 text-[10px] text-red-600 dark:text-red-400">
+              {t("prompts.error", { message: error })}
+            </div>
+          )}
+          {reloadNotice && (
+            <div className="px-3 py-2 text-[10px] text-emerald-600 dark:text-emerald-400">
+              {reloadNotice}
+            </div>
+          )}
+          {prompts && !loading && (
+            <ListBox variant="plain">
+              {/* Required prompts (system.md) first, then optional
+                  overrides — stable order so the mandatory entry is
+                  always visible without scrolling. */}
+              {[...prompts]
+                .sort((a, b) => Number(b.required) - Number(a.required))
+                .map((p) => (
+                  <ListRow
+                    key={p.name}
+                    surface="inset"
+                    onClick={() => void openInEditor(p)}
+                    ariaLabel={t("prompts.openAria", { name: p.name })}
+                    leading={
                       <FileText
                         className={cn(
-                          "mt-0.5 h-3 w-3 flex-shrink-0",
+                          "h-3 w-3",
                           p.overridden
                             ? "text-emerald-500 dark:text-emerald-400"
                             : "text-zinc-400 dark:text-zinc-500",
                         )}
                       />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-[11px] font-medium text-zinc-800 dark:text-zinc-200">
-                            {p.name}
-                          </span>
-                          {p.required && !p.overridden && (
-                            <span className="rounded bg-amber-100 px-1 py-px text-[9px] font-medium uppercase text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-                              {t("prompts.badgeMissing")}
-                            </span>
-                          )}
-                          {p.required && (
-                            <span className="rounded bg-red-100 px-1 py-px text-[9px] font-medium uppercase text-red-700 dark:bg-red-900/40 dark:text-red-300">
-                              {t("prompts.badgeRequired")}
-                            </span>
-                          )}
-                          {p.overridden ? (
-                            <span className="rounded bg-emerald-100 px-1 py-px text-[9px] font-medium uppercase text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
-                              {t("prompts.badgeOverridden")}
-                            </span>
-                          ) : (
-                            !p.required && (
-                              <span className="rounded bg-zinc-100 px-1 py-px text-[9px] font-medium uppercase text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                                {t("prompts.badgeBuiltin")}
-                              </span>
-                            )
-                          )}
-                        </div>
-                        <div className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-                          {p.purpose}
-                        </div>
-                      </div>
-                    </button>
-                  </li>
+                    }
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 truncate font-mono text-[11px] font-medium text-zinc-800 dark:text-zinc-200">
+                        {p.name}
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        {p.required && !p.overridden && (
+                          <Badge tone="warning" uppercase>
+                            {t("prompts.badgeMissing")}
+                          </Badge>
+                        )}
+                        {p.required && (
+                          <Badge tone="danger" uppercase>
+                            {t("prompts.badgeRequired")}
+                          </Badge>
+                        )}
+                        {p.overridden ? (
+                          <Badge tone="success" uppercase>
+                            {t("prompts.badgeOverridden")}
+                          </Badge>
+                        ) : (
+                          !p.required && (
+                            <Badge tone="neutral" uppercase>
+                              {t("prompts.badgeBuiltin")}
+                            </Badge>
+                          )
+                        )}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                      {p.purpose}
+                    </div>
+                  </ListRow>
                 ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </div>
+            </ListBox>
+          )}
+        </ExpandableRow>
+      </ListBox>
 
       {/* Bottom — ToolsTab-style help hint under the card. */}
       <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">

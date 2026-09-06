@@ -7,7 +7,7 @@ import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { Switch } from "../common/Switch";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/list";
 import type { SearchProviderListItem, AgentSearchProvider, McpServerView, AgentMcpToolItem } from "../../lib/types";
 
 const EMPTY_ARRAY: string[] = [];
@@ -64,59 +64,32 @@ function McpServerCard({
   // list is available. An inactive server (e.g. `playwright` before it
   // is enabled) or one with no reconciled tool data would otherwise
   // show a right-arrow that expands to an empty body, which reads as
-  // broken. Hide the chevron in that case; enabling the server (PUT
-  // /mcp-servers → reconnect → reconcile) materialises the tool list
-  // and the chevron appears.
+  // broken. Hide the chevron in that case (ExpandableRow disabled);
+  // enabling the server (PUT /mcp-servers → reconnect → reconcile)
+  // materialises the tool list and the chevron appears.
   const hasExpandableBody = isChecked && tools.length > 0;
   const showBody = open && hasExpandableBody;
+  // Note: no outer ListBox here — the caller places each server row
+  // inside the MCP group card's plain body list (Debug-panel style),
+  // which owns the hairline separation between rows.
   return (
-    <div className="rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
-      {/* Header — clickable to toggle collapse; switch stops
-          propagation so the activation toggle stays independent. */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-        aria-expanded={showBody}
-        aria-label={`Toggle ${server.name} tools`}
-      >
-        {hasExpandableBody ? (
-          open ? (
-            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-          )
-        ) : (
-          // No expandable body — reserve the space so the name column
-          // does not shift when tools appear later, but render nothing
-          // clickable (no dead right-arrow).
-          <span className="h-3.5 w-3.5 shrink-0" />
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-              {server.name}
-            </span>
-            <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
-              {server.transport}
-            </span>
-            {tools.length > 0 && (
-              <span className="rounded bg-zinc-100 px-1.5 py-px font-mono text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                {tools.length}
-              </span>
-            )}
-          </div>
-          <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
-            {server.command || server.url || ""}
-          </span>
-        </div>
-        <span
-          // The Switch component owns its own click handler; we stop
-          // propagation so clicking the activation toggle does not
-          // also collapse/expand the card.
-          onClick={(e) => e.stopPropagation()}
-          className="shrink-0"
-        >
+    <ExpandableRow
+      open={showBody}
+      onToggle={() => setOpen((v) => !v)}
+      disabled={!hasExpandableBody}
+      title={server.name}
+      meta={
+        <>
+          <Badge>{server.transport}</Badge>
+          {tools.length > 0 && <Badge mono>{tools.length}</Badge>}
+        </>
+      }
+      description={server.command || server.url || ""}
+      trailing={
+        // The Switch component owns its own click handler; we stop
+        // propagation so clicking the activation toggle does not
+        // also collapse/expand the row.
+        <span onClick={(e) => e.stopPropagation()}>
           <Switch
             checked={isChecked}
             onChange={onToggleServer}
@@ -125,45 +98,44 @@ function McpServerCard({
             aria-label={server.name}
           />
         </span>
-      </button>
-      {showBody && (
-        // Body — matches Builtin Tools visual contract (one row per
-        // tool, name on the left, Switch on the right) but with a
-        // deep left indent (`pl-10` vs `px-3`) so the nested tools
-        // read clearly as "children of the server card" rather than
-        // a flat continuation. Right padding stays at `pr-3` so the
-        // Switch column keeps the same right edge as the Builtin
-        // Tools list and the MCP card header above.
-        <div className="border-t border-zinc-200 dark:border-zinc-700">
-          <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-            {tools.map((tool) => (
-              <div
-                key={tool.name}
-                className="flex items-center gap-2 pl-10 pr-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-              >
-                <div className="flex-1 min-w-0">
-                  <span className="block truncate font-mono text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                    {tool.name}
-                  </span>
-                  {tool.description && (
-                    <span className="block truncate text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
-                      {tool.description}
-                    </span>
-                  )}
-                </div>
-                <Switch
-                  checked={tool.enabled}
-                  onChange={() => onToggleTool(tool.name)}
-                  disabled={toolSwitchDisabled}
-                  size="sm"
-                  aria-label={tool.name}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+      }
+      surface="inset"
+      bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset-2 dark:border-zinc-700"
+      ariaLabel={`Toggle ${server.name} tools`}
+    >
+      {/* Body — one row per tool, name on the left, Switch on the
+          right (same visual contract as the Builtin Tools list) with a
+          deep left indent so the nested tools read clearly as
+          "children of the server row". Right edge stays aligned with
+          the header Switch column. */}
+      <ListBox variant="plain">
+        {tools.map((tool) => (
+          <ListRow
+            key={tool.name}
+            padding="nested"
+            surface="inset"
+            trailing={
+              <Switch
+                checked={tool.enabled}
+                onChange={() => onToggleTool(tool.name)}
+                disabled={toolSwitchDisabled}
+                size="sm"
+                aria-label={tool.name}
+              />
+            }
+          >
+            <span className="block truncate font-mono text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+              {tool.name}
+            </span>
+            {tool.description && (
+              <span className="block truncate text-[9px] leading-tight text-zinc-400 dark:text-zinc-500">
+                {tool.description}
+              </span>
+            )}
+          </ListRow>
+        ))}
+      </ListBox>
+    </ExpandableRow>
   );
 }
 
@@ -205,6 +177,14 @@ export function ToolsTab() {
   // never maintains its own tool list or defaults.
   const [mcpToolsConfig, setMcpToolsConfig] = useState<Record<string, AgentMcpToolItem[]>>({});
   const [mcpToolsSaving, setMcpToolsSaving] = useState(false);
+
+  // Group-level collapse state for the three tool cards (Builtin Tools /
+  // Web Search / MCP). Each card mirrors the Debug-panel "Context
+  // Snapshots" level-1 collapsible style; default open so the previous
+  // always-visible behavior is preserved on first mount.
+  const [builtinOpen, setBuiltinOpen] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(true);
+  const [mcpOpen, setMcpOpen] = useState(true);
 
   useEffect(() => {
     if (!selectedAgentId) return;
@@ -480,41 +460,49 @@ export function ToolsTab() {
 
   return (
     <div className="flex-1 overflow-y-auto bg-right-panel p-3">
-      {/* ADR-029: Builtin Tools */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.builtinTools")}
-        </label>
-        {builtinToolsAll.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
-              {t("agentSetup.noBuiltinTools")}
-            </span>
-          </div>
-        ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
-            <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-              {builtinToolsAll.map((entry) => (
-                <div
-                  key={entry.name}
-                  className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                >
-                  <span className="flex-1 min-w-0 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                    {entry.name}
-                  </span>
-                  <Switch
-                    checked={entry.enabled}
-                    onChange={() => toggleBuiltinTool(entry.name)}
-                    disabled={builtinSaving || !selectedAgentId}
-                    size="sm"
-                    aria-label={entry.name}
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+      {/* ── Builtin Tools card ─────────────────────────────────────
+          Level-1 collapsible card in the same language as the
+          Debug-panel "Context Snapshots" list: chevron on the left,
+          title + count Badge on the right of it, click to expand the
+          tool rows (ADR-029). Row contract: name + activation Switch. */}
+      <div>
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={builtinOpen}
+            onToggle={() => setBuiltinOpen((v) => !v)}
+            title={t("agentSetup.builtinTools")}
+            ariaLabel={t("agentSetup.builtinTools")}
+            meta={<Badge mono>{builtinToolsAll.length}</Badge>}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          >
+            {builtinToolsAll.length === 0 ? (
+              <EmptyState message={t("agentSetup.noBuiltinTools")} />
+            ) : (
+              <ListBox variant="plain" maxHeight={192}>
+                {builtinToolsAll.map((entry) => (
+                  <ListRow
+                    key={entry.name}
+                    surface="inset"
+                    trailing={
+                      <Switch
+                        checked={entry.enabled}
+                        onChange={() => toggleBuiltinTool(entry.name)}
+                        disabled={builtinSaving || !selectedAgentId}
+                        size="sm"
+                        aria-label={entry.name}
+                      />
+                    }
+                  >
+                    <span className="truncate text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                      {entry.name}
+                    </span>
+                  </ListRow>
+                ))}
+              </ListBox>
+            )}
+          </ExpandableRow>
+        </ListBox>
+        <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.builtinToolsDesc")}
         </p>
       </div>
@@ -524,85 +512,79 @@ export function ToolsTab() {
           workspace/memory panel divider style. */}
       <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
 
-      {/* Web Search Providers */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.webSearchProviders")}
-        </label>
-        {searchProviders.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
-              {t("agentSetup.noSearchKeys")}
-            </span>
-          </div>
-        ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
-            <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-              {searchProviders.map((sp) => {
-                const active = activeSearch.find((p) => p.provider === sp.id);
-                const isChecked = !!active;
-                const priority = active?.priority;
-                const hasKey = !!sp.id; // Providers listed here already have vault keys
-                const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
-                return (
-                  <Tooltip key={sp.id} content={hasKey ? "" : t("agentSetup.noApiKey")} variant="plain">
-                    <div
-                      className={`flex items-center gap-2 px-3 py-2 transition-colors ${hasKey
-                        ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                        : "opacity-50"
-                        }`}
-                    >
-                      <div className="flex-1 min-w-0">
+      {/* Web Search Providers card — same Debug-panel collapsible
+          style as the Builtin Tools card above. */}
+      <div>
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={searchOpen}
+            onToggle={() => setSearchOpen((v) => !v)}
+            title={t("agentSetup.webSearchProviders")}
+            ariaLabel={t("agentSetup.webSearchProviders")}
+            meta={<Badge mono>{searchProviders.length}</Badge>}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          >
+            {searchProviders.length === 0 ? (
+              <EmptyState message={t("agentSetup.noSearchKeys")} />
+            ) : (
+              <ListBox variant="plain" maxHeight={192}>
+                {searchProviders.map((sp) => {
+                  const active = activeSearch.find((p) => p.provider === sp.id);
+                  const isChecked = !!active;
+                  const priority = active?.priority;
+                  const hasKey = !!sp.id; // Providers listed here already have vault keys
+                  const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
+                  return (
+                    <Tooltip key={sp.id} content={hasKey ? "" : t("agentSetup.noApiKey")} variant="plain">
+                      <ListRow
+                        disabled={!hasKey}
+                        surface="inset"
+                        trailing={
+                          <div className="flex items-center gap-1">
+                            {isChecked && activeIdx > 0 && (
+                              <Tooltip content={t("agentSetup.moveUp")} variant="plain">
+                                <button
+                                  onClick={() => moveSearchProviderUp(sp.id)}
+                                  disabled={searchSaving}
+                                  className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="m18 15-6-6-6 6" />
+                                  </svg>
+                                </button>
+                              </Tooltip>
+                            )}
+                            <Switch
+                              checked={isChecked}
+                              onChange={() => toggleSearchProvider(sp.id)}
+                              disabled={searchSaving || !hasKey}
+                              size="sm"
+                              aria-label={sp.name || sp.id}
+                            />
+                          </div>
+                        }
+                      >
                         <div className="flex items-center gap-1.5">
-                          <span className={`text-[11px] font-medium ${hasKey
-                            ? "text-zinc-700 dark:text-zinc-300"
-                            : "text-zinc-400 dark:text-zinc-500"
-                            }`}>
+                          <span className="truncate text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
                             {sp.name || sp.id}
                           </span>
                           {isChecked && priority !== undefined && (
-                            <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
-                              {t("agentSetup.priority", { value: priority })}
-                            </span>
+                            <Badge>{t("agentSetup.priority", { value: priority })}</Badge>
                           )}
-                          {!hasKey && (
-                            <span className="rounded bg-amber-50 px-1 py-0.5 text-[9px] text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
-                              {t("agentSetup.noKey")}
-                            </span>
-                          )}
+                          {!hasKey && <Badge tone="warning">{t("agentSetup.noKey")}</Badge>}
                         </div>
-                        <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
+                        <span className="block truncate text-[9px] leading-tight text-zinc-400 dark:text-zinc-500">
                           {sp.description || sp.base_url || ""}
                         </span>
-                      </div>
-                      {isChecked && activeIdx > 0 && (
-                        <Tooltip content={t("agentSetup.moveUp")} variant="plain">
-                          <button
-                            onClick={() => moveSearchProviderUp(sp.id)}
-                            disabled={searchSaving}
-                            className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="m18 15-6-6-6 6" />
-                            </svg>
-                          </button>
-                        </Tooltip>
-                      )}
-                      <Switch
-                        checked={isChecked}
-                        onChange={() => toggleSearchProvider(sp.id)}
-                        disabled={searchSaving || !hasKey}
-                        size="sm"
-                        aria-label={sp.name || sp.id}
-                      />
-                    </div>
-                  </Tooltip>
-                );
-              })}
-            </div>
-          </div>
-        )}
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+                      </ListRow>
+                    </Tooltip>
+                  );
+                })}
+              </ListBox>
+            )}
+          </ExpandableRow>
+        </ListBox>
+        <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.searchProvidersDesc")}
         </p>
       </div>
@@ -612,52 +594,53 @@ export function ToolsTab() {
           workspace/memory panel divider style. */}
       <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
 
-      {/* MCP Server Activation */}
-      <div className="mb-3 space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.mcpServers")}
-        </label>
-        {mcpServerDefs.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
-              {t("agentSetup.noMcpInCatalog")}
-            </span>
-          </div>
-        ) : (
-          // ADR-068 UX: each MCP server renders as its own collapsible
-          // card (matches `PromptList.tsx` Debug-panel style). Default
-          // collapsed so a server with many tools (e.g. `pm` = 12) does
-          // not visually dominate the panel. The header row toggles the
-          // body via ChevronDown/Right; the activation Switch stops
-          // propagation so clicking it does not also toggle collapse.
-          <div className="space-y-1">
-              {mcpServerDefs.map((server) => {
-                const isChecked = activeServers.includes(server.name);
-                // ADR-069: the per-tool list comes entirely from
-                // `GET /agents/{id}/mcp-tools` — the backend provides
-                // the complete list (name + enabled + description)
-                // reconciled against the live MCP `tools/list`. The
-                // frontend renders it directly and never maintains a
-                // hardcoded tool list.
-                const tools: AgentMcpToolItem[] = mcpToolsConfig[server.name] ?? [];
-                return (
-                  <McpServerCard
-                    key={server.name}
-                    server={server}
-                    isChecked={isChecked}
-                    tools={tools}
-                    onToggleTool={(tool) => toggleMcpTool(server.name, tool)}
-                    onToggleServer={() =>
-                      selectedAgentId && toggleServer(selectedAgentId, server.name)
-                    }
-                    switchDisabled={activationLoading || !selectedAgentId}
-                    toolSwitchDisabled={mcpToolsSaving || !selectedAgentId}
-                  />
-                );
-              })}
-            </div>
-          )}
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+      {/* MCP Servers card — the group is a level-1 collapsible card
+          like the Debug-panel snapshot list; each server renders as a
+          collapsible row inside the card body, and each server row
+          expands to its per-tool list (ADR-068 UX / ADR-069 data). */}
+      <div>
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={mcpOpen}
+            onToggle={() => setMcpOpen((v) => !v)}
+            title={t("agentSetup.mcpServers")}
+            ariaLabel={t("agentSetup.mcpServers")}
+            meta={<Badge mono>{mcpServerDefs.length}</Badge>}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          >
+            {mcpServerDefs.length === 0 ? (
+              <EmptyState message={t("agentSetup.noMcpInCatalog")} />
+            ) : (
+              <ListBox variant="plain">
+                {mcpServerDefs.map((server) => {
+                  const isChecked = activeServers.includes(server.name);
+                  // ADR-069: the per-tool list comes entirely from
+                  // `GET /agents/{id}/mcp-tools` — the backend provides
+                  // the complete list (name + enabled + description)
+                  // reconciled against the live MCP `tools/list`. The
+                  // frontend renders it directly and never maintains a
+                  // hardcoded tool list.
+                  const tools: AgentMcpToolItem[] = mcpToolsConfig[server.name] ?? [];
+                  return (
+                    <McpServerCard
+                      key={server.name}
+                      server={server}
+                      isChecked={isChecked}
+                      tools={tools}
+                      onToggleTool={(tool) => toggleMcpTool(server.name, tool)}
+                      onToggleServer={() =>
+                        selectedAgentId && toggleServer(selectedAgentId, server.name)
+                      }
+                      switchDisabled={activationLoading || !selectedAgentId}
+                      toolSwitchDisabled={mcpToolsSaving || !selectedAgentId}
+                    />
+                  );
+                })}
+              </ListBox>
+            )}
+          </ExpandableRow>
+        </ListBox>
+        <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.mcpToggleDesc")}
         </p>
         {/* Surface MCP PUT errors that the store would otherwise swallow.

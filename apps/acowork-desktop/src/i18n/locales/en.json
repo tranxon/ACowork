@@ -960,6 +960,8 @@
     "cancel": "Cancel"
   },
   "memoryPanel": {
+    "memoryList": "Memory Nodes",
+    "emptyNodes": "No memory nodes found",
     "consolidate": "Consolidate",
     "refresh": "Refresh",
     "selectAgent": "Select an agent to view memory",

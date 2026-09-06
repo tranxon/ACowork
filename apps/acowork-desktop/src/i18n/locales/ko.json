@@ -863,6 +863,8 @@
     "cancel": "취소"
   },
   "memoryPanel": {
+    "memoryList": "메모리 노드",
+    "emptyNodes": "메모리 노드가 없습니다",
     "consolidate": "노드 통합",
     "refresh": "새로고침",
     "selectAgent": "Agent를 선택하여 메모리 보기",

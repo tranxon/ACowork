@@ -18,6 +18,8 @@ import {
   RefreshCw,
   RotateCcw,
   Bug,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ToolsTab } from "./ToolsTab";
@@ -30,6 +32,7 @@ import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
 // prepare overrides before clicking "Enter Debug"; the reload button
 // stays reachable once DevMode is on).
 import { PromptList } from "../debug/PromptList";
+import { ListBox, ExpandableRow } from "../common/list";
 import { Switch } from "../common/Switch";
 import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
 
@@ -299,6 +302,31 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
       .catch(() => {/* ignore */});
   }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
 
+  // Context-snapshots level-1 collapse (whole card body toggles from the
+  // card header — same interaction as the PROMPT card). Default open.
+  const [snapshotsOpen, setSnapshotsOpen] = useState(true);
+  // Status-tab level-1 collapsible cards (Session Status / Agent
+  // Status) — same grammar as the Tools-tab "Builtin Tools" list:
+  // the header row toggles the whole body; default open.
+  const [sessionStatusOpen, setSessionStatusOpen] = useState(true);
+  const [agentStatusOpen, setAgentStatusOpen] = useState(true);
+  // Context snapshots are paged (like the memory list) so a long session
+  // with dozens of iterations cannot push the compression-history card
+  // out of the visible area. Page controls live in the empty right side
+  // of the card header.
+  const [snapshotPage, setSnapshotPage] = useState(0);
+  const SNAPSHOT_PAGE_SIZE = 20;
+  const snapshotTotalPages = Math.max(1, Math.ceil(snapshots.length / SNAPSHOT_PAGE_SIZE));
+  const snapshotStart = snapshotPage * SNAPSHOT_PAGE_SIZE;
+  const pageSnapshots = snapshots.slice(snapshotStart, snapshotStart + SNAPSHOT_PAGE_SIZE);
+  // Clamp back to the last page when the list shrinks (session switch /
+  // reload) and the current page no longer exists.
+  useEffect(() => {
+    if (snapshotPage >= snapshotTotalPages) {
+      setSnapshotPage(Math.max(0, snapshotTotalPages - 1));
+    }
+  }, [snapshotPage, snapshotTotalPages]);
+
   return (
     <div className="relative flex flex-col shrink-0 ml-1" style={{ width }}>
       {/* Resize handle overlay — sits at the left edge */}
@@ -371,9 +399,11 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               {/* Action block — always shown when the agent is running.
                   Left: two-state text button (Enter/Exit Debug, btn-solid,
                   no icon). Right: 4 session debug buttons, only rendered
-                  once DevMode is on. */}
-              <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
-                <div className="flex min-h-[26px] items-center gap-1">
+                  once DevMode is on. Same strip height (36px, no vertical
+                  padding) as the collapsible card headers below, so the
+                  debug tab's horizontal bars share one rhythm. */}
+              <div className="flex min-h-[36px] items-center rounded-md border border-zinc-200 bg-panel-block px-2 dark:border-zinc-700">
+                <div className="flex w-full items-center gap-1">
                   <Switch
                     checked={selectedAgent?.debug_state === "enabled"}
                     onChange={async (checked) => {
@@ -527,49 +557,100 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                         />
                       </div>
                     </div>
-                    {/* Context snapshots card */}
-                    <div className="rounded-md border border-zinc-200 bg-panel-block p-3 dark:border-zinc-700">
-                      <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                        {t("rightPanel.contextSnapshots", { count: snapshots.length })}
-                      </div>
-                      {snapshots.length === 0 && (
-                        <div className="py-3 text-center text-xs text-zinc-400">
-                          {t("rightPanel.noSnapshots")}
-                          <br />
-                          {t("rightPanel.sendMessageToGenerate")}
-                        </div>
-                      )}
-                      {snapshots.map((snap) => (
-                        <SnapshotNode
-                          key={snap.iteration}
-                          snapshot={snap}
-                          expandedSections={expandedSections}
-                          sectionCache={sectionCache}
-                          editingSection={editingSection}
-                          onToggleSection={(section) => toggleSection(snap.iteration, section)}
-                          onStartEdit={(section, original) =>
-                            setEditingSection({ iteration: snap.iteration, section, original, current: original })
-                          }
-                          onCancelEdit={() => setEditingSection(null)}
-                          onSaveEdit={(section, content) => {
-                            const patches: Record<string, unknown> = {};
-                            patches[section] = content;
-                            patchContext(activeSessionId, patches).catch(log.error);
-                            setEditingSection(null);
-                          }}
-                          onEditChange={(content) =>
-                            setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
-                          }
-                          onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
-                          getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
-                          // Anchor per-section token counts to the real, LLM-billed
-                          // total for the latest call so they sum exactly to
-                          // the value the user sees in the context-usage popover
-                          // instead of the per-section `token_estimate` heuristic.
-                          realTotalTokens={contextUsage?.total_tokens ?? undefined}
-                        />
-                      ))}
-                    </div>
+                    {/* Context snapshots card — level-1 collapsible list:
+                        the header toggles the whole snapshot list (same
+                        interaction as the PROMPT card, default open);
+                        snapshot rows are separated by the unified hairline
+                        so each iteration reads as a clear list row. When
+                        there is more than one page, the empty right side of
+                        the header carries the page number + arrows. */}
+                    <ListBox dividers={false}>
+                      <ExpandableRow
+                        open={snapshotsOpen}
+                        onToggle={() => setSnapshotsOpen((v) => !v)}
+                        title={t("rightPanel.contextSnapshots", { count: snapshots.length })}
+                        ariaLabel={t("rightPanel.contextSnapshots", { count: snapshots.length })}
+                        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                        trailing={
+                          snapshotTotalPages > 1 ? (
+                            <span
+                              className="flex items-center gap-1"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                aria-label="Previous snapshot page"
+                                disabled={snapshotPage === 0}
+                                onClick={() => {
+                                  setSnapshotsOpen(true);
+                                  setSnapshotPage((p) => Math.max(0, p - 1));
+                                }}
+                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                              >
+                                <ChevronLeft className="h-3.5 w-3.5" />
+                              </button>
+                              <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500">
+                                {snapshotPage + 1}/{snapshotTotalPages}
+                              </span>
+                              <button
+                                type="button"
+                                aria-label="Next snapshot page"
+                                disabled={snapshotPage >= snapshotTotalPages - 1}
+                                onClick={() => {
+                                  setSnapshotsOpen(true);
+                                  setSnapshotPage((p) => Math.min(snapshotTotalPages - 1, p + 1));
+                                }}
+                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                              >
+                                <ChevronRight className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          ) : undefined
+                        }
+                      >
+                        {snapshots.length === 0 && (
+                          <div className="px-3 py-3 text-center text-xs text-zinc-400">
+                            {t("rightPanel.noSnapshots")}
+                            <br />
+                            {t("rightPanel.sendMessageToGenerate")}
+                          </div>
+                        )}
+                        {pageSnapshots.length > 0 && (
+                          <ListBox variant="plain">
+                            {pageSnapshots.map((snap) => (
+                              <SnapshotNode
+                                key={snap.iteration}
+                                snapshot={snap}
+                                expandedSections={expandedSections}
+                                sectionCache={sectionCache}
+                                editingSection={editingSection}
+                                onToggleSection={(section) => toggleSection(snap.iteration, section)}
+                                onStartEdit={(section, original) =>
+                                  setEditingSection({ iteration: snap.iteration, section, original, current: original })
+                                }
+                                onCancelEdit={() => setEditingSection(null)}
+                                onSaveEdit={(section, content) => {
+                                  const patches: Record<string, unknown> = {};
+                                  patches[section] = content;
+                                  patchContext(activeSessionId, patches).catch(log.error);
+                                  setEditingSection(null);
+                                }}
+                                onEditChange={(content) =>
+                                  setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
+                                }
+                                onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
+                                getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
+                                // Anchor per-section token counts to the real, LLM-billed
+                                // total for the latest call so they sum exactly to
+                                // the value the user sees in the context-usage popover
+                                // instead of the per-section `token_estimate` heuristic.
+                                realTotalTokens={contextUsage?.total_tokens ?? undefined}
+                              />
+                            ))}
+                          </ListBox>
+                        )}
+                      </ExpandableRow>
+                    </ListBox>
                     <CompressionHistoryCard
                       agentId={selectedAgentId}
                       sessionId={activeSessionId}
@@ -585,12 +666,18 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
       {/* ── Status tab content ───────────────────────────────────── */}
       {activeTab === "status" && (
         <div className="flex-1 overflow-y-auto bg-right-panel p-3">
-          {/* Token statistics */}
-          <div>
-            <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              {t("rightPanel.sessionStatus")}
-            </h3>
-            <div className="rounded-md bg-panel-block p-3 text-xs">
+          {/* Session Status — level-1 collapsible card matching the
+              Tools-tab "Builtin Tools" grammar: the clickable header
+              row (chevron + title) toggles the whole stats body, which
+              sits on the inset surface below a hairline. Default open. */}
+          <ListBox dividers={false}>
+            <ExpandableRow
+              open={sessionStatusOpen}
+              onToggle={() => setSessionStatusOpen((v) => !v)}
+              title={t("rightPanel.sessionStatus")}
+              ariaLabel={t("rightPanel.sessionStatus")}
+              bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 text-xs dark:border-zinc-700"
+            >
               {/* Context usage progress bar */}
               {contextUsage ? (
                 <div className="mb-3">
@@ -716,20 +803,24 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   {sessionStatus ? sessionStatus.status.replace(/_/g, " ") : "\u2014"}
                 </span>
               </div>
-            </div>
-          </div>
+            </ExpandableRow>
+          </ListBox>
 
           {/* Divider — full panel-width hairline separating the Session
-              Status block (above) from the Agent Status block (below).
+              Status card (above) from the Agent Status card (below).
               Matches the workspace/memory panel divider style. */}
           <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
 
-          {/* Agent running status */}
-          <div>
-            <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              {t("rightPanel.agentStatus")}
-            </h3>
-            <div className="rounded-md bg-panel-block p-3 text-xs">
+          {/* Agent Status — level-1 collapsible card, same grammar as
+              the Session Status card above. */}
+          <ListBox dividers={false}>
+            <ExpandableRow
+              open={agentStatusOpen}
+              onToggle={() => setAgentStatusOpen((v) => !v)}
+              title={t("rightPanel.agentStatus")}
+              ariaLabel={t("rightPanel.agentStatus")}
+              bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 text-xs dark:border-zinc-700"
+            >
               {selectedAgent ? (
                 <>
                   <div className="flex justify-between py-1">
@@ -845,8 +936,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               ) : (
                 <div className="py-1 text-zinc-400 dark:text-zinc-500">{t("rightPanel.noAgentSelected")}</div>
               )}
-            </div>
-          </div>
+            </ExpandableRow>
+          </ListBox>
         </div>
       )}
 
