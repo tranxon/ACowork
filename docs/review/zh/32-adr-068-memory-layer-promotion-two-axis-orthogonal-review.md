@@ -63,6 +63,25 @@
 2. **`consolidation_event` MQTT topic 仍为设计占位**：`HistoryMilestoneEvent` 只能经 `promote_event` 程序内触发，全库无 `acowork/consolidation/event` 订阅入口 → History 晋升在真实部署缺事件触发面（ADR §3.4.3）。
 3. **e2e 走 scripted mock LLM**：未串联真实 `ProviderLlmAdapter` JSON 序列化路径。
 4. **promote_autobio_relationship 创建后不刷新 value**：协作天数信息冻结在创建时刻（ADR 幂等语义，可接受；如需刷新需扩展 distiller 侧而非 manager 侧）。
+5. **`triple_extraction` 保留为 manual/batch 导入路径**：注释明确标注非生产链路（LLM 提取 + 落库），但其晋升**不写 `promotion_metadata`、不经 distiller 审计**——如需正式化应改为经 distiller 或补审计，见 0.7 决策。
+
+### 0.7 Path C 伪规则残留下线 + 文档同步（2026-09，new Phase）
+
+**决策（用户拍板）**：沉淀层节点只允许两类可信语义生产者 —— (a) 图数据库统计归纳（节点/边关系）、(b) LLM 分析归纳（EpisodicDistiller）；规则式替代 LLM 的"数据沉淀"手段全部下线。经全量排查，残留的 rule-based 归纳 = `generalization.rs`（Path C），本轮清除：
+
+**下线对象（commit 详见 git log `refactor(memory): retire Path C…`）**
+- `MemoryManager::run_post_compaction_tasks` / `run_generalization_step` / `run_history_compression`（[manager.rs](../../../core/acowork-memory/src/manager.rs) 已删，含 `GeneralizationConfig`/`Arc` import 清理）；
+- runtime 三个调用点：`loop_context.rs`（compaction 后）、`loop_session.rs`（session 关闭）、`loop_memory.rs::run_post_compaction_memory_tasks` 已删；
+- `GrafeoStore::run_offline_consolidation_with_generalization` Step 4 不再执行 generalization（参数保留 deprecated 兼容，consolidation_bg.rs 传 `None`）；
+- 回归测试改名强化：`offline_consolidation_does_not_write_relationship_nodes`（原 `post_compaction_tasks_do_not_write_relationship_nodes`）。
+
+**保留对象**：`triple_extraction.rs::extract_triples` —— 标注为 manual/batch LLM 导入路径（LLM 驱动、非生产活跃、非规则 hack），按"LLM 归纳可信"原则保留；缺口（无审计）记入 0.6-5。
+
+**Path C 为何不可信（代码级证据）**：(1) 扫描对象非真实经验——真实对话轮次不落库，可扫描的 assistant 轮次仅 memory_store 记录，tool_call 结构化信息从不进入 Episode.content；(2) 特征提取 = 文本 hack（首非空行前 100 字符 = action；`"name": "xxx"` 正则 = tool）；(3) "归纳" = 字符串精确全等 + 计数，措辞差一字符即不合并；(4) 消费过的 episode 从不标记 consolidated（`mark_consolidated` 无调用），每轮重复 boost、`success_count` 无限虚增。
+
+**验证**：`acowork-memory` 30 / `acowork-grafeo`(consolidation) 110 / `acowork-runtime --lib` 1332（1 个预存在基线失败，同上）/ `memory_adr068_e2e` 10 全绿；clippy 0 警告。
+
+**文档同步（保持 doc-code 一致）**：ADR-068 §1.2/§3.4.3/§3.4.4/§3.7/M7/R-R4/§7 就地修订（`run_generalization` 唯一来源与 fallback 语义移除）；[05-memory.md](../../design/zh/05-memory.md) 分层图/§3.3 自传体来源/§4.1 工具 schema（4 类 Episode-only）/§4.2 重写为 EpisodicDistiller/§6.4 冲突仲裁收敛到 Judge/§8.1.1 子分类写入语义/§9 覆盖声明；[memory-write-entrypoints.md](../../memory-write-entrypoints.md) 有效入口表（A→Episodic，F→distiller）+ 追加 I/J 废弃行。
 
 ---
 
