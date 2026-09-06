@@ -1539,6 +1539,15 @@ mod tests {
                 .map(|(id, e)| (*id, e.clone()))
                 .collect())
         }
+        fn count_unconsolidated_episodes(&self) -> acowork_core::error::Result<usize> {
+            Ok(self
+                .episodes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, e)| !e.consolidated && !e.metadata.contains_key("distiller_skip"))
+                .count())
+        }
         fn collaboration_span(&self) -> acowork_core::error::Result<Option<CollaborationSpan>> {
             let eps = self.episodes.lock().unwrap();
             let earliest = eps.iter().map(|(_, e)| e.timestamp).min();

@@ -397,6 +397,18 @@ pub struct SchedulerConfig {
     /// Distiller parameters used when `distiller_enabled` is true.
     /// `None` = use [`DistillerConfig::default`] (ADR-068 §3.4.1 defaults).
     pub distiller_config: Option<DistillerConfig>,
+    /// Distiller auto-trigger interval in seconds (ADR-071 D1).
+    /// The distiller may only fire when at least this much time has passed
+    /// since the previous run (`last_distill_at`). Default: 3600 (1h).
+    pub distiller_interval_secs: u64,
+    /// Minimum unconsolidated-episode backlog required for the distiller to
+    /// fire at an interval point (ADR-071 D1). Default: 50.
+    pub distiller_accumulation: usize,
+    /// Idle threshold (seconds) that — combined with a non-empty
+    /// unconsolidated backlog — allows the distiller to fire at an interval
+    /// point even when the backlog is below [`Self::distiller_accumulation`]
+    /// (ADR-071 D1). Default: 1800 (30 min).
+    pub distiller_idle_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -408,6 +420,9 @@ impl Default for SchedulerConfig {
             min_pending_age_hours: 1,
             distiller_enabled: false,
             distiller_config: None,
+            distiller_interval_secs: 3600,
+            distiller_accumulation: 50,
+            distiller_idle_secs: 1800,
         }
     }
 }

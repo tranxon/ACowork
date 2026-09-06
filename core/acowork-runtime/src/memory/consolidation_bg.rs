@@ -39,6 +39,12 @@ pub enum TriggerReason {
     Accumulation,
     /// Manually triggered by the user or API.
     Manual,
+    /// Distiller (ADR-071 D1): interval point reached and the
+    /// unconsolidated-episode backlog is at/above the accumulation threshold.
+    DistillerAccumulation,
+    /// Distiller (ADR-071 D1): interval point reached, the backlog is
+    /// non-empty and the agent has been idle long enough.
+    DistillerIdle,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,15 +65,22 @@ pub struct ConsolidationTimer {
 struct TimerState {
     last_active_at: chrono::DateTime<Utc>,
     pending_count: usize,
+    /// Unconsolidated-episode backlog (distiller input, ADR-071 D1).
+    episode_count: usize,
+    /// Last time the distiller actually ran (interval gate, ADR-071 D1).
+    last_distill_at: chrono::DateTime<Utc>,
 }
 
 impl ConsolidationTimer {
     pub fn new(config: SchedulerConfig) -> Self {
+        let now = Utc::now();
         Self {
             config,
             state: Mutex::new(TimerState {
-                last_active_at: Utc::now(),
+                last_active_at: now,
                 pending_count: 0,
+                episode_count: 0,
+                last_distill_at: now,
             }),
         }
     }
@@ -82,6 +95,18 @@ impl ConsolidationTimer {
     pub async fn update_pending_count(&self, count: usize) {
         let mut state = self.state.lock().await;
         state.pending_count = count;
+    }
+
+    /// Update the unconsolidated-episode backlog (distiller input, ADR-071 D1).
+    pub async fn update_episode_count(&self, count: usize) {
+        let mut state = self.state.lock().await;
+        state.episode_count = count;
+    }
+
+    /// Record that a distiller run just happened (ADR-071 D1 interval gate).
+    pub async fn mark_distill_run(&self) {
+        let mut state = self.state.lock().await;
+        state.last_distill_at = Utc::now();
     }
 
     /// Check whether consolidation should run now.
@@ -104,6 +129,41 @@ impl ConsolidationTimer {
         None
     }
 
+    /// Check whether the EpisodicDistiller should run (ADR-071 D1).
+    ///
+    /// Independent of [`Self::should_run`]: the distiller's trigger is
+    /// decoupled from the legacy `Pending`-node count, which has had no
+    /// producer since ADR-068 (memory_store writes episodes only; the
+    /// distiller promotes straight to Active nodes). Instead the distiller
+    /// fires at most once per `distiller_interval_secs`, provided the
+    /// unconsolidated-episode backlog is at/above `distiller_accumulation`
+    /// OR the agent has been idle for at least `distiller_idle_secs` with a
+    /// non-empty backlog.
+    pub async fn should_run_distill(&self) -> Option<TriggerReason> {
+        let state = self.state.lock().await;
+        if !self.config.distiller_enabled {
+            return None;
+        }
+        let now = Utc::now();
+
+        // Interval gate (outer): at most one run per configured period.
+        let since_last = now - state.last_distill_at;
+        if since_last.num_seconds() < self.config.distiller_interval_secs as i64 {
+            return None;
+        }
+
+        // Inner gate: backlog accumulation or idle with a non-empty backlog.
+        if state.episode_count >= self.config.distiller_accumulation {
+            return Some(TriggerReason::DistillerAccumulation);
+        }
+        let idle_secs = (now - state.last_active_at).num_seconds();
+        if idle_secs >= self.config.distiller_idle_secs as i64 && state.episode_count > 0 {
+            return Some(TriggerReason::DistillerIdle);
+        }
+
+        None
+    }
+
     /// Get the scheduler config (used for batch_size / min_pending_age_hours).
     pub fn config(&self) -> &SchedulerConfig {
         &self.config
@@ -121,6 +181,20 @@ impl ConsolidationTimer {
     pub async fn pending_count(&self) -> usize {
         let state = self.state.lock().await;
         state.pending_count
+    }
+
+    /// Get the current unconsolidated-episode backlog (ADR-071 D1).
+    /// Used by the HTTP status endpoint.
+    pub async fn episode_count(&self) -> usize {
+        let state = self.state.lock().await;
+        state.episode_count
+    }
+
+    /// Get the time elapsed since the last distiller run, in seconds.
+    /// Used by the HTTP status endpoint and tests.
+    pub async fn secs_since_distill(&self) -> i64 {
+        let state = self.state.lock().await;
+        (Utc::now() - state.last_distill_at).num_seconds()
     }
 }
 
@@ -197,7 +271,7 @@ async fn run_consolidation_loop(
     loop {
         interval.tick().await;
 
-        // Update pending count from the provider.
+        // Update pending count from the provider (legacy lifecycle input).
         let pending_count = match provider.get_pending_consolidation_count() {
             Ok(count) => count,
             Err(e) => {
@@ -207,13 +281,40 @@ async fn run_consolidation_loop(
         };
         scheduler.update_pending_count(pending_count).await;
 
-        // Check if consolidation should run.
-        let trigger = match scheduler.should_run().await {
-            Some(reason) => reason,
-            None => continue,
-        };
+        // Update the unconsolidated-episode backlog (distiller input).
+        // Only polled when the distiller is enabled (off by default, so a
+        // disabled distiller costs nothing beyond the pending-count query).
+        let distiller_enabled = scheduler.config().distiller_enabled;
+        if distiller_enabled {
+            let episode_count = match provider.count_unconsolidated_episodes() {
+                Ok(count) => count,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to count unconsolidated episodes for distiller");
+                    continue;
+                }
+            };
+            scheduler.update_episode_count(episode_count).await;
+        }
 
-        tracing::info!(?trigger, pending = pending_count, "Consolidation triggered");
+        // ADR-071 D1: the distiller and the legacy lifecycle pass trigger
+        // independently. A tick that satisfies either condition runs its
+        // own pipeline; neither blocks the other.
+        let legacy_trigger = scheduler.should_run().await;
+        let distill_trigger = if distiller_enabled {
+            scheduler.should_run_distill().await
+        } else {
+            None
+        };
+        if legacy_trigger.is_none() && distill_trigger.is_none() {
+            continue;
+        }
+        if let Some(reason) = &legacy_trigger {
+            tracing::info!(?reason, pending = pending_count, "Consolidation (legacy lifecycle) triggered");
+        }
+        if let Some(reason) = &distill_trigger {
+            let backlog = scheduler.episode_count().await;
+            tracing::info!(?reason, backlog, "EpisodicDistiller triggered");
+        }
 
         // Build embedding function from the embedding provider.
         let embedding_fn = {
@@ -237,12 +338,10 @@ async fn run_consolidation_loop(
             min_pending_age_hours: scheduler.config().min_pending_age_hours,
         };
 
-        // ADR-068 M4: EpisodicDistiller step (off-by-default).
-        // The distiller promotes classified episodes to the semantic layer.
-        // It runs BEFORE the legacy offline consolidation (which targets
-        // Pending nodes) — the two pipelines are independent (two-axis
-        // orthogonalization) but share the same trigger.
-        if scheduler.config().distiller_enabled {
+        // ADR-071 D1: EpisodicDistiller step (off-by-default), triggered by
+        // its OWN condition — not by the legacy Pending-node trigger. The
+        // distiller promotes classified episodes to the semantic layer.
+        if distill_trigger.is_some() {
             run_episodic_distiller_step(
                 provider.as_ref(),
                 &*llm,
@@ -250,32 +349,34 @@ async fn run_consolidation_loop(
                 scheduler.config(),
             )
             .await;
+            scheduler.mark_distill_run().await;
         }
 
-        // Run offline consolidation through the provider trait.
-        // ADR-068 revision: Experience generalization (Path C) is retired —
-        // no `gen_config` is passed; Procedural promotion is owned by the
-        // EpisodicDistiller (gated above). The offline pass only manages the
-        // node lifecycle (Pending -> Active/Dormant) and episodic retention.
-        match provider
-            .run_offline_consolidation(
-                &offline_config,
-                Some(&*llm),
-                Some(embedding_fn),
-                None, // gen_config — generalization retired
-            )
-            .await
-        {
-            Ok(result) => {
-                tracing::info!(
-                    trigger = ?trigger,
-                    upgraded = result.upgraded,
-                    conflicts_resolved = result.conflicts_resolved,
-                    "Consolidation run complete"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Consolidation run failed");
+        // Run offline consolidation through the provider trait (legacy
+        // lifecycle only): Pending -> Active/Dormant upgrade and episodic
+        // retention. ADR-068 revision: generalization is retired; Procedural
+        // promotion is owned exclusively by the EpisodicDistiller above.
+        if let Some(reason) = legacy_trigger {
+            match provider
+                .run_offline_consolidation(
+                    &offline_config,
+                    Some(&*llm),
+                    Some(embedding_fn),
+                    None, // gen_config — generalization retired
+                )
+                .await
+            {
+                Ok(result) => {
+                    tracing::info!(
+                        trigger = ?reason,
+                        upgraded = result.upgraded,
+                        conflicts_resolved = result.conflicts_resolved,
+                        "Consolidation run complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Consolidation run failed");
+                }
             }
         }
 
@@ -463,6 +564,101 @@ mod tests {
         timer.update_pending_count(0).await;
         let trigger = timer.should_run().await;
         assert_eq!(trigger, None);
+    }
+
+    // ── ADR-071 D1: distiller trigger (independent of legacy Pending) ──
+
+    #[tokio::test]
+    async fn test_distiller_trigger_disabled_by_default() {
+        // distiller_enabled = false (default) → never fires even with backlog.
+        let timer = ConsolidationTimer::new(SchedulerConfig {
+            distiller_accumulation: 1,
+            ..Default::default()
+        });
+        timer.update_episode_count(10).await;
+        assert_eq!(timer.should_run_distill().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_distiller_trigger_interval_gate() {
+        // Interval gate: backlog high but the previous run was < 1h ago.
+        let config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_accumulation: 5,
+            distiller_interval_secs: 3600,
+            distiller_idle_secs: 1800,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        timer.update_episode_count(10).await;
+        // Fresh timer: last_distill_at = now → interval not elapsed.
+        assert_eq!(timer.should_run_distill().await, None);
+        // Even after a mark, still gated.
+        timer.mark_distill_run().await;
+        assert_eq!(timer.should_run_distill().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_distiller_trigger_accumulation() {
+        let config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_accumulation: 5,
+            distiller_interval_secs: 3600,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        // Backdate the last run so the interval gate is open.
+        {
+            let mut state = timer.state.lock().await;
+            state.last_distill_at = Utc::now() - chrono::TimeDelta::hours(2);
+        }
+        timer.update_episode_count(10).await;
+        assert_eq!(
+            timer.should_run_distill().await,
+            Some(TriggerReason::DistillerAccumulation)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_distiller_trigger_idle_with_backlog() {
+        let config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_accumulation: 100, // backlog below threshold
+            distiller_interval_secs: 3600,
+            distiller_idle_secs: 1800,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        {
+            let mut state = timer.state.lock().await;
+            state.last_distill_at = Utc::now() - chrono::TimeDelta::hours(2);
+            state.last_active_at = Utc::now() - chrono::TimeDelta::minutes(40);
+        }
+        timer.update_episode_count(3).await;
+        assert_eq!(
+            timer.should_run_distill().await,
+            Some(TriggerReason::DistillerIdle)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_distiller_trigger_empty_backlog_never_fires() {
+        let config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_accumulation: 1,
+            distiller_interval_secs: 1,
+            distiller_idle_secs: 0,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        timer.update_episode_count(0).await;
+        {
+            let mut state = timer.state.lock().await;
+            state.last_distill_at = Utc::now() - chrono::TimeDelta::hours(2);
+            state.last_active_at = Utc::now() - chrono::TimeDelta::hours(2);
+        }
+        // Interval open + idle open, but no backlog → no run.
+        assert_eq!(timer.should_run_distill().await, None);
     }
 
     #[tokio::test]

@@ -302,6 +302,15 @@ impl MemoryProvider for GrafeoStore {
             .collect())
     }
 
+    fn count_unconsolidated_episodes(&self) -> AcoworkResult<usize> {
+        // Same candidate set as the distiller's Step 1 (unconsolidated,
+        // non-skipped; subtype=None keeps every classification).
+        let episodes = self
+            .get_unconsolidated_episodes_by_subtype(None, i64::MAX as usize)
+            .map_err(err_to_acowork)?;
+        Ok(episodes.len())
+    }
+
     fn collaboration_span(&self) -> AcoworkResult<Option<CollaborationSpan>> {
         GrafeoStore::collaboration_span(self).map_err(err_to_acowork)
     }

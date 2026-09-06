@@ -106,6 +106,14 @@ pub trait MemoryProvider: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(u64, Episode)>>;
 
+    /// Count unconsolidated, non-skipped episodes (ADR-071 D1).
+    ///
+    /// This is the EpisodicDistiller's candidate backlog and drives the
+    /// background scheduler's distiller trigger — decoupled from the legacy
+    /// `Pending` sediment-node count, which has had no producer since
+    /// ADR-068 and therefore can no longer gate the distiller.
+    fn count_unconsolidated_episodes(&self) -> Result<usize>;
+
     /// Collaboration span across all episodes (ADR-068 M8).
     ///
     /// Returns the earliest stored episode timestamp and the total episode

@@ -232,6 +232,12 @@ impl MemoryProvider for InMemoryProvider {
         Ok(unconsolidated)
     }
 
+    fn count_unconsolidated_episodes(&self) -> Result<usize> {
+        Ok(self
+            .get_episodes_by_subtype(None, usize::MAX)?
+            .len())
+    }
+
     fn collaboration_span(&self) -> Result<Option<CollaborationSpan>> {
         let episodes = self.episodes.read().unwrap();
         let earliest = episodes
