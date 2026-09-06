@@ -41,14 +41,18 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 │  仿生对应：新皮层长期存储                                 │
 └─────────────────────────────────────────────────────────┘
 
-         ┌─── 巩固管道 ───┐
-         │                 │
-    经历层 ──(即时提取)──→ 沉淀层    ← LLM 自主 tool call（memory_store）
-         │                 │
-    经历层 ──(离线回放)──→ 沉淀层    ← 空闲时专用 LLM 调用（Phase 3）
-         │                 │
+         ┌─── 巩固管道（ADR-068 2026-09 revision）───┐
+         │                                          │
+    瞬态层 ──(LLM 摘要)──→ 经历层   ← compaction / session 关闭
+         │                                          │
+    LLM ──(memory_store,即时)──→ 经历层   ← 只写 Episode,带 knowledge_subtype
+         │                                          │
+    经历层 ──(EpisodicDistiller 离线蒸馏,opt-in)──→ 沉淀层   ← 沉淀层唯一生产者
+         │                                          │
+    manifest ──(bootstrap,权威导入)──→ 沉淀层   ← 仅 Identity/Capability 直写
+         │                                          │
     沉淀层 ──(遗忘衰减)──→ dormant → (可选 purge)
-         │                 │
+         │                                          │
     沉淀层 ──(关联扩散)──→ 多跳检索结果
 ```
 
@@ -63,7 +67,7 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 | 流动方向            | 机制     | 触发条件                                                                                                     |
 | ------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入 Grafeo。不再每轮写入，避免与 JSONL 冗余 |
-| 经历层 → 沉淀层     | 巩固管道 | 即时提取（LLM 自主 tool call）+ 离线回放（空闲时专用调用）                                                   |
+| 经历层 → 沉淀层     | 巩固管道 | 唯一管道 = 离线 `EpisodicDistiller`（ADR-068,per-agent opt-in:`[memory.distiller].enabled = true`）。**已下线**:即时提取直写沉淀层、PendingKnowledgeNode、rule-based generalization、offline compress_history_nodes、Relationship 自动生成(2026-09 revision) |
 | 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-agent opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-agent opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
 | 沉淀层/经历层内流动 | 关联扩散 | 检索时沿图边 1-2 跳扩展                                                                                      |
 | 沉淀层 → Dormant    | 遗忘衰减 | 后台定期计算 decay_score                                                                                     |
@@ -130,9 +134,9 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 - **summary**：自然语言摘要文本，存入 `Episode.content`，同时用于向量检索（HNSW）与 BM25 全文匹配
 - **user_intent**：当前对话用户的核心意图（可选块），存入 `Episode.metadata.user_intent`，便于历史回放时还原用户目标
 
-沉淀层落地完全依赖两条独立管道：
-1. **即时提取**：LLM 主动调用 `memory_store` 工具——有完整上下文、LLM 自评 confidence、可指定 sub_type，质量由 LLM 自我保证
-2. **离线巩固**（Phase 3）：`run_offline_consolidation_with_generalization` 复用 Episode 摘要重新提取并仲裁冲突（与 triples 块完全独立）
+沉淀层落地收敛为两条语义管道（ADR-068 2026-09 revision）：
+1. **LLM 即时写经历层**：`memory_store` 只落 Episode（content + `knowledge_subtype`），不直写沉淀层——沉淀层类型判定与晋升全部交给离线蒸馏（§4.1）
+2. **离线蒸馏**（唯一沉淀层生产者）：`EpisodicDistiller` 批量扫描 episode → 服务端 LLM 结构化提取 + embedding 聚簇 + LLM Judge → 晋升 Knowledge/Procedural/Autobiographical 节点（含 `promotion_metadata` 审计）；per-agent opt-in（`[memory.distiller].enabled = true`）。manifest bootstrap 仅对 Identity/Capability 权威直写（§3.3）
 
 设计理由：
 - 每轮提取的成本（~65 tokens/轮）在 ADR-011 之后不再合理——经历层不再逐轮写入，存储目的已消失
@@ -347,11 +351,9 @@ struct AutobiographicalNode {
     aspect: AutobiographicalAspect,  // 自我认知的维度
     content: String,                 // 具体内容
     confidence: f32,
-    source: String,                  // "manifest" / "self_evaluation" / "user_statement" / "important_event"
-                                        // v3.11: 由 memory_store(category=autobiographical) 即时写入时
-                                        //        LLM 通过 `source` 参数标注, 取值集合扩展为 4 项
-                                        // v3.12 (P2 G7): source 已升级为 typed 字段（非仅 metadata），
-                                        //        持久化到 grafeo property，读取缺省回退 "user_statement"（向后兼容旧库）
+    source: String,                  // "manifest"（bootstrap 权威导入）/ "offline_consolidation"（EpisodicDistiller 晋升）
+                                        // ADR-068 2026-09 revision: memory_store 的 autobiographical source 标注已下线,
+                                        //        生产者收敛为 manifest bootstrap 与 EpisodicDistiller 两类
     updated_at: DateTime,
 
     // 自传体记忆不参与遗忘衰减——这是 Agent 的核心身份
@@ -371,12 +373,16 @@ enum AutobiographicalAspect {
 }
 ```
 
-**自传体记忆的来源：**
+**自传体记忆的来源（ADR-068 2026-09 revision 收敛）：**
 
-1. **Manifest 派生**（自动）：从 `manifest.toml` 的 `agent.name`、`agent.description`、`skills/` 列表自动生成 Identity 和 Capability 节点
-2. **自我评估**（定期）：Agent 空闲时，根据 SkillExperience 的 model_compatibility 和执行统计，生成/更新 Limitation 节点（"在 qwen3:8b 上，复杂推理任务的成功率约 60%"）
-3. **用户陈述**（即时）：用户直接表达对 Agent 的评价（"你太啰嗦了"），由 LLM 在 Tool Call 阶段调用 `memory_store` 工具，传入 `category: "autobiographical"` + `aspect: "Preference"` 落地。详见 §4.1 工具定义。
-4. **重要事件**（即时）：关键交互（首次学会新 Skill、重大错误修正、用户表达强烈情绪）由 LLM 判断后调用 `memory_store` 工具，传入 `category: "autobiographical"` + `aspect: "History"`（按事件追加，append-only）落地。同一事件不会因反复写入而膨胀。
+1. **Manifest 派生**（权威导入,启动时直写）：从 `manifest.toml` 的 `agent_id/name/description/display_name/role` 与 `capabilities` 列表生成 Identity 和 Capability 节点,`source = "manifest"`,幂等 upsert(同 key 覆盖)。这是唯一不经 `EpisodicDistiller` 的沉淀层直写——manifest 是权威数据源,不属于"经历→沉淀"语义归纳
+2. **离线蒸馏识别**（`EpisodicDistiller`）:服务端 LLM 从 `knowledge_subtype` 标注的 episode 识别 autobiographical 候选(布尔分类 + 4 值 aspect),经 Step 4 LLM Judge 仲裁后晋升为 AutobiographicalNode(含 `promotion_metadata` 证据链/审计)
+
+**已下线（2026-09 revision,ADR-068 M5/M6/M8）:**
+- ~~memory_store 的 `autobiographical` category 与 `aspect`/`key`/`source` 参数~~——schema 收窄为 4 类(§4.1),与 agent 相关的内容写 `category: fact/preference` 即可
+- ~~自我评估自动生成 Limitation~~——`success_count` 从未被递增,统计驱动路径已整体删除(见 §9 Phase 2 移除原因)
+- ~~Relationship 自动生成~~——30 天合作规则的直写路径已删除,Relationship 由蒸馏器从 `knowledge_subtype=Relation` episode 晋升
+- ~~autobiographical 幂等 upsert / History append-only 直写~~——沉淀层节点统一由蒸馏器管理生命周期
 
 **自传体记忆的注入：**
 
@@ -395,7 +401,7 @@ enum AutobiographicalAspect {
 
 AutobiographicalNode 不参与遗忘，但需要容量控制防止无限膨胀：
 
-- **History 节点摘要压缩**：当 History 节点超过 10 条时，离线巩固阶段自动将多条旧 History 合并为一条摘要节点（"2026 年 4-6 月主要事件：学会了周报和代码审查两个 Skill，与用户磨合期结束"），原始节点转为 Dormant（不 purge）
+- **History 节点摘要压缩（已下线,2026-09 revision）**：离线 `compress_history_nodes`(10 条自动合并)已整体删除——History 摘要由 `EpisodicDistiller` 的事件归纳统一承担,不再存在独立的规则式合并路径
 - **注入上限**：自传体摘要注入 System Prompt 时，按重要性取 Top-K（Identity / Capability / Limitation 必注入，History 取最近 5 条摘要 + 最近 3 条明细，Relationship 取 Top-3）
 - 总 token 预算：自传体不超过 200 token（约 150 个中文字符）
 
@@ -407,21 +413,20 @@ AutobiographicalNode 不参与遗忘，但需要容量控制防止无限膨胀�
 
 即时提取通过 **Tool Call 机制**实现——`memory_store` 作为 Agent 的内置工具之一，LLM 在生成回复时自主判断是否调用。无需额外的 LLM 调用、异步管道或预过滤规则。
 
-**即时提取产出定义（v3.7 明确化）**：
+**即时提取产出定义（ADR-068 2026-09 revision）**：
 
-即时提取阶段产出 **PendingKnowledgeNode**，与正式 KnowledgeNode 有明确区分：
+`memory_store` 是**经历层薄写入器**——LLM 入口只写 `Episode`（带 `knowledge_subtype` 路由提示），不再直写任何沉淀层节点：
 
 ```
-PendingKnowledgeNode：
-  confidence = 0.7（默认值）
-  status = Pending（立即可检索但标记为"待确认"）
-  参与常规 hybrid_search，但结果中标注 [待确认] 标记
-  不参与 graph_expand（待确认节点不做关联扩散）
+Episode：
+  content              自然语言内容（不拆三元组）
+  knowledge_subtype    Fact | Preference | Relation | Procedure（LLM 自选 4 类之一）
+  confidence           LLM 自评（high/medium/low → 0.85/0.7/0.5，可选）
+  keywords             经 ADR-062 keyword sanitize 门禁后进 metadata（可选）
+  privacy / importance 可选
 
-高置信度直接生效：
-  如果即时提取的 confidence >= 0.85（即 LLM 输出 confidence="high"），
-  直接创建正式 KnowledgeNode（status = Active），无需离线确认
-  → 适用于用户明确表达的事实（如"我住在北京"），避免高确定性信息被不必要地标记为待确认
+已下线：PendingKnowledgeNode / status=Pending / confidence>=0.85 直写 KnowledgeNode
+——这些机制随 ADR-068 M5/M6 整体删除。沉淀层晋升是 EpisodicDistiller 的唯一职责。
 ```
 
 **设计决策：Tool Call 而非单独调用**
@@ -437,12 +442,12 @@ PendingKnowledgeNode：
 
 选择 Tool Call 的核心理由：即时提取的目标是"能用"而非"完美"。LLM 天然具备判断"什么值得记住"的能力——"今天天气如何"不值得存，它自己就知道。Phase 3 的离线巩固再用专用 prompt 做深度提取补漏。
 
-**memory_store 工具定义（Phase 2 简化版，v3.11 扩展自传体入口）**：
+**memory_store 工具定义（ADR-068 M5 收窄版,4 类 Episode-only）**：
 
 ```json
 {
   "name": "memory_store",
-  "description": "存储值得长期记住的用户信息或行为模式。仅在对话中包含新的、重要的、非临时性信息时调用。不要存储显而易见的常识或临时性信息。",
+  "description": "把值得长期记住的信息写入经历层。仅在对话中包含新的、重要的、非临时性信息时调用。不要存储显而易见的常识或临时性信息。",
   "parameters": {
     "type": "object",
     "properties": {
@@ -452,21 +457,8 @@ PendingKnowledgeNode：
       },
       "category": {
         "type": "string",
-        "enum": ["fact", "preference", "relation", "procedure", "autobiographical"],
-        "description": "信息类型：fact=客观事实, preference=用户偏好, relation=人物/实体关系, procedure=行为模式, autobiographical=Agent 自我认知（须配合 aspect 参数，见下）"
-      },
-      "aspect": {
-        "type": "string",
-        "enum": ["Identity", "Capability", "Limitation", "Preference", "History", "Relationship"],
-        "description": "仅当 category=autobiographical 时必填。自传体六维分类（详见 §3.3）。Identity/Capability/Limitation/Preference/Relationship 使用幂等 upsert（同 key 覆盖），History 走 append-only（每次新建节点）。"
-      },
-      "key": {
-        "type": "string",
-        "description": "仅当 category=autobiographical 且 aspect 不是 History 时建议填写。幂等键：相同 key 多次写入会更新同一节点而不是新建。History 节点不需要 key——其本身就是事件流水。"
-      },
-      "source": {
-        "type": "string",
-        "description": "可选，autobiographical 节点的来源标签（如「user_statement」「important_event」），便于审计与离线分类统计。"
+        "enum": ["fact", "preference", "relation", "procedure"],
+        "description": "信息类型（= knowledge_subtype 路由提示）：fact=客观事实, preference=用户偏好, relation=人物/实体关系, procedure=行为模式（when X do Y）。沉淀层落地类型（Knowledge/Procedural/Autobiographical 节点）由离线 EpisodicDistiller 依据 episode 语义判定，工具层不承诺类型"
       },
       "confidence": {
         "type": "string",
@@ -476,7 +468,7 @@ PendingKnowledgeNode：
       "keywords": {
         "type": "array",
         "items": { "type": "string" },
-        "description": "关键词，可选。Runtime 会自动从 memory_hint.e 补充，通常不需要填写"
+        "description": "关键词，可选。Runtime 侧经 keyword sanitize 门禁后写入 episode metadata，供 BM25 检索"
       }
     },
     "required": ["content", "category"]
@@ -484,51 +476,47 @@ PendingKnowledgeNode：
 }
 ```
 
-> **⚠️ 注意**：category=autobiographical 时 `aspect` 必填。工具 schema 通过 JSON Schema 的 `allOf` 条件分支声明这一约束（`if category=autobiographical then aspect required`），帮助 LLM 客户端在调用前完成校验；Runtime 端在 `MemoryStoreTool` 中再做一次兜底校验（缺失或非法 `aspect` 会返回 `invalid_aspect` 错误），双保险保证自传体写入不会落到错误的分层。
+**接口简化设计理由（ADR-068 修订）**：
+- 旧设计要求 LLM 拆分三元组 `{subject, predicate, object}`，负担重且不可靠（同一事实可能拆出不同 predicate）——ADR-068 进一步移除所有结构化字段（subject/predicate/object/trigger_condition/action_pattern/key/aspect/source），LLM 只给自然语言 + 4 类 subtype
+- keywords 由 LLM 提供、Runtime 过 sanitize 门禁，不依赖 memory_hint
+- 沉淀层三元组结构化与类型判定全部收敛到离线 `EpisodicDistiller`（服务端 LLM 提取 + LLM Judge，见 §4.2）——不存在第二条 LLM 直写沉淀层的通道
+- `autobiographical` 类目与 `aspect`/`key` 参数已下线：与 agent 自身相关的内容写 `category: fact/preference/relation` 即可，是否晋升 AutobiographicalNode 由蒸馏器判断（ADR-068 §3.4 Step 4 Judge）
 
-**接口简化设计理由**：
-- 旧设计要求 LLM 拆分三元组 `{subject, predicate, object}`，负担重且不可靠（同一事实可能拆出不同 predicate）
-- 新设计让 LLM 用自然语言描述要记住什么，Runtime 负责后续的结构化处理
-- keywords 可复用同轮 memory_hint.e 的值，LLM 甚至可以不填，由 Runtime 自动合并
-- 三元组提取移至离线巩固阶段（Phase 3），此时 LLM 有完整上下文和充裕时间
-- `autobiographical` 类目是 §3.3 中"用户陈述（即时）"与"重要事件（即时）"两条来源的具体实现——LLM 不再需要等待离线巩固去发现自传体节点，可在 Tool Call 阶段直接写入；保留 Manifest 派生与离线自我评估两条自动路径不变
+**即时阶段 Prompt 职责（ADR-068 修订）**：
 
-详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.9
-
-**即时阶段 Prompt 职责（v3.7 明确化）**：
-
-即时提取的 Prompt 职责限定为**轻量操作**，与离线巩固的深度操作有明确分工：
+即时提取的 Prompt 职责限定为**轻量写入经历层**，与离线蒸馏的深度晋升有明确分工：
 
 ```
 即时阶段 Prompt（约 100 tokens）：
-  ─ 事实识别：判断本轮是否包含值得记住的新信息
-  ─ 类型标注：category = fact / preference / relation / procedure / autobiographical
-  ─ 自传体维度：仅当 category=autobiographical 时标注 aspect ∈ {Identity, Capability, Limitation, Preference, History, Relationship}
-  ─ 关键词提取：提取核心实体（复用 memory_hint.e）
+  ─ 信息筛选：判断本轮是否包含值得长期记住的新信息
+  ─ 类型标注：category = fact / preference / relation / procedure（= Episode.knowledge_subtype）
+  ─ 关键词提取：可选，供 BM25 检索（Runtime 侧 sanitize）
   ─ 置信度评估：confidence = high / medium / low
 
   不做的事：
   ✗ 关联发现（无法跨轮次）
   ✗ 冲突判定（缺乏完整上下文）
-  ✗ 模式提炼（需要多轮数据）
-  ✗ 质量评估（需要对比已有知识）
+  ✗ 模式提炼 / 行为归纳（伪规则已下线,归 LLM Judge）
+  ✗ 沉淀层落库（晋升由 EpisodicDistiller 离线完成）
+  ✗ 自传体识别（autobiographical category 已移除,由蒸馏器 Step 2a 判定）
 ```
 
-**System Prompt 中的提取指引（Phase 2 简化版）**：
+**System Prompt 中的提取指引（ADR-068 修订）**：
 
 ```
 ## 记忆管理
 
-你可以使用 memory_store 工具存储值得长期记住的信息。使用原则：
+你可以使用 memory_store 工具把值得长期记住的信息写入经历层。使用原则：
 - 用户透露了新的个人信息（住址、职业、家庭成员等）→ 存为 category: fact
 - 用户表达了偏好或风格（"我喜欢简洁的回复"）→ 存为 category: preference
+- 用户提到了人物/实体间关系（"张三是我同事"）→ 存为 category: relation
 - 用户反复纠正你的行为模式（"别用表格了"）→ 存为 category: procedure
 
 不要存储：临时性信息、已存储的重复知识、显而易见的常识。
 confidence 由你判断：用户明确表达的 → high，推测的 → medium，不确定的 → low。
 ```
 
-**即时提取流程（Phase 2 更新）**：
+**即时提取流程（ADR-068 revision）**：
 
 ```
 用户消息到达
@@ -538,124 +526,74 @@ LLM 生成回复（含 tool call 判断）
    │
    ├─ LLM 判断"无值得记住的信息"
    │   → 仅生成自然语言回复
-   │   → 对话内容仍写入经历层（episode）
+   │   → 对话内容仍通过 compaction/session 写入经历层（episode）
    │
    └─ LLM 判断"有值得记住的信息"
        → 生成自然语言回复
        → 同时调用 memory_store({content, category, confidence?, keywords?})
        → Runtime 执行工具调用：
-           ├─ confidence >= 0.85（high）→ 直接创建正式 KnowledgeNode
-           ├─ confidence < 0.85 → 写入 PendingKnowledgeNode（待离线确认）
-           ├─ 冲突候选检测（三层信号，§6.4）
-           └─ 标记相关 episode
+           ├─ category → knowledge_subtype 映射（fact/preference/relation/procedure）
+           ├─ keywords 过 ADR-062 sanitize 门禁
+           └─ 组装 Episode 落经历层（不直写沉淀层）
 
-离线巩固时（Phase 3）：
-  → LLM 批量处理 PendingKnowledgeNode
-  → confidence >= 0.85 → 升级为正式 KnowledgeNode
-  → confidence 在 [0.5, 0.85) → 保持 Pending，等待更多证据
-  → confidence < 0.5 → 标记为 Dormant（可能是噪声）
-  → 构建图边、执行冲突分类
+离线蒸馏时（EpisodicDistiller，per-agent opt-in）：
+  → 批量扫描 knowledge_subtype 标注 + unconsolidated 的 episode
+  → Step 2a 服务端 LLM 结构化提取 + autobio 候选识别
+  → Step 3 embedding 聚簇 + 证据累计（min_evidence 阈值）
+  → Step 4 LLM Judge 仲裁 → 晋升沉淀层节点（含 promotion_metadata 证据链）
+  → 失败/证据不足 → 原 episode 保留待重试
 ```
 
 **关键行为保证：**
 
 - **不强制提取**：LLM 有权不在每轮调用 memory_store。简单问候、天气查询等不存储，这比预过滤规则更智能
-- **Fact 自动去重**：Runtime 在执行 memory_store 时检查 (subject, predicate) 是否已存在，避免重复
+- **LLM 入口只写经历层**：memory_store 永不直写 Knowledge/Procedural/Autobiographical 节点——沉淀层晋升是 EpisodicDistiller 的唯一职责（ADR-068）
 - **对话始终记录**：每轮对话内容写入 JSONL 文件（瞬态层），经历层仅通过 Compaction 摘要 / Session 关闭蒸馏写入（ADR-011）
 - **工具调用可见**：memory_store 的调用记录在对话历史中，用户知道 Agent 记住了什么
-- **防重复提取机制**（v3.7 新增）：离线巩固前先查询已有 KnowledgeNode，embedding 相似度 > 0.95 的跳过（避免重复提取相同事实）。这一阈值比冲突检测的 0.85 更严格——0.95 意味着几乎完全相同的语义内容
+- **防重复晋升**（distiller 侧）：蒸馏器晋升前对候选 episode 做 embedding 聚簇——同类证据达到 `min_evidence` 阈值才晋升；对已晋升主题的重复 episode 由 Step 4 LLM Judge 判定合并或拒绝，`promotion_metadata` 保留完整证据链可审计回滚
 
-### 4.2 离线巩固（Phase 3）
+### 4.2 离线蒸馏（ADR-068，EpisodicDistiller）
 
-> **实现状态**：离线巩固的完整实现（空闲检测 + 批量回放 + 关联发现 + 冲突分类）标记为 **Phase 3**。Phase 2 仅实现了即时提取（Tool Call）+ 按需遗忘计算。离线巩固的触发机制和专用 LLM 调用将在 Phase 3 实现。
+> **实现状态（ADR-068 M1-M8 落地）**：离线巩固已由 `EpisodicDistiller`（`core/acowork-grafeo/src/consolidation/distiller.rs`）承载，由 `ConsolidationBgTask`（后台周期任务）调度，per-agent opt-in（manifest `[memory.distiller].enabled = true`）。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线，不再存在。
 
-即时提取（Tool Call）覆盖了"显式信息的即时记忆"，但有两类信息它处理不了：
-
-1. **隐式关联**：用户三次提到上海，但每次都没说"我住在上海"——Tool Call 不会触发，但离线回放可以发现"用户可能常住上海"
-2. **跨片段模式**：多个 Skill 都因"输出太长"被纠正——单个 Tool Call 只记录 ProceduralNode，但离线巩固能发现跨 Skill 的通用模式
-3. **主动假设验证**（Phase 3 补充）：LLM 在回放时主动提出"如果…会怎样"类型的假设，生成 HypothesisNode 暂存供后续验证——这是困境三（记忆泛化与抽象）在 Phase 3 的具体补全
-
-离线巩固用**专用 LLM 调用**（非 Tool Call），因为它的输入是批量情景记忆而非实时对话，需要独立的 prompt 和推理空间。
-
-**离线巩固升级条件（v3.7 明确化）**：
-
-离线巩固对 PendingKnowledgeNode 的处理有明确的升级/降级规则：
+**蒸馏输入/输出**：
 
 ```
-PendingKnowledgeNode 离线处理：
-  LLM 重新评估 PendingKnowledgeNode，根据完整上下文重新打分：
-    confidence >= 0.85 → 升级为正式 KnowledgeNode（status = Active）
-    confidence 在 [0.5, 0.85) → 保持 Pending，等待更多证据
-      → 同一事实在后续离线巩固中被再次提及 → 累加证据，confidence 递增
-    confidence < 0.5 → 标记为 Dormant（可能是噪声，如 LLM 误判的临时信息）
+输入：consolidated=false 且带 knowledge_subtype 标注的 Episode
+  （LLM 端唯一写入方 = memory_store 工具，§4.1）
 
-防重复提取（§4.1）：
-  离线巩固前先查询已有 KnowledgeNode，embedding 相似度 > 0.95 的跳过
-  → 避免重复提取相同事实，浪费 LLM 调用
+6 步流水线（详见 ADR-068 §3.4）：
+  ① 扫描候选 episode（knowledge_subtype 过滤 + 数量上限）
+  ② LLM 结构化提取（Fact/Preference/Relation → subject/predicate/object，
+     Procedure → trigger_condition/action_pattern）+ autobio 候选识别（布尔分类 + aspect）
+  ③ embedding 聚簇 + 证据累计（min_evidence 阈值门控）
+  ④ LLM Judge 仲裁（合并/拒绝/确认晋升）
+  ⑤ 晋升落库：KnowledgeNode / ProceduralNode / AutobiographicalNode
+     （节点携带 promotion_metadata：证据 episode id 链 + Judge reasoning + 时间戳）
+  ⑥ 标记 episode consolidated + 清理
+
+输出：沉淀层节点（唯一生产者）+ 完整审计（DistillerResult.promotion_evaluations）
 ```
 
-**离线阶段 Prompt 职责（v3.7 明确化）**：
+**可信沉淀方式原则（2026-09 revision）**：沉淀层节点只允许两类语义生产者——
+1. **图/统计归纳**：图数据库统计节点/边关系（Grafeo 原生能力）
+2. **LLM 分析归纳**：`EpisodicDistiller`（服务端 LLM 提取 + LLM Judge）
+规则式替代（字符串全等计数、文本特征 grep、30 天/10 条等启发式）一律不得用于"经历→沉淀"语义归纳；规则只保留在幂等/去重门槛、生命周期、权威数据源导入（manifest bootstrap）、事件触发判定四类位置。
 
-```
-离线阶段 Prompt（约 500 tokens）：
-  ─ 关联发现：同一主体在多个 episode 中出现但未被显式存储
-  ─ 冲突判定：新提取的知识与已有 KnowledgeNode 是否矛盾（三层信号，§6.4）
-  ─ 模式提炼：多个 Skill 的 failure_cases 是否指向同一根本原因
-  ─ 质量评估：重新评估 PendingKnowledgeNode 的 confidence
-  ─ Artifact 摘要增强：模板摘要 → LLM 语义摘要
-  ─ 主动假设：提出"如果…会怎样"类型的假设
+**蒸馏触发（per-agent opt-in）**：
 
-  与即时阶段的区别：
-  ✓ 有完整的多轮上下文（而非单轮）
-  ✓ 有时间做深度推理（而非实时响应的延迟约束）
-  ✓ 可以对比已有知识（而非仅做单点判断）
-  ✓ 可以跨 episode 发现隐式关联
-```
+- `ConsolidationBgTask` 后台周期调度（受 `[memory.distiller].enabled` 门控，关即不跑）
+- 失败/证据不足的 episode 原样保留，下轮重试；不存在降级到规则路径的 fallback
 
-```
-Agent 空闲（无对话超过 N 分钟）
-   │
-   ▼
-① 扫描未巩固的情景记忆（consolidated = false, importance >= 0.3）
-   │
-   ▼
-② 批量回放：将情景记忆按时间分组，LLM 提取跨片段的关联知识
-   │
-   ▼
-③ 知识合并：检查是否与已有 KnowledgeNode 冲突
-   - 新旧一致 → 更新 confidence
-   - 新旧冲突 → LLM 判断哪个更准确，或标记为待确认
-   - 全新知识 → 创建新节点
-   │
-   ▼
-④ 程序记忆提炼：从多个 SkillExecution 的失败模式中提炼通用 ProceduralNode
-   │
-   ▼
-⑤ 自我评估更新：根据近期执行统计更新 AutobiographicalNode
-   │
-   ▼
-⑥ 标记已巩固 + 清理过老的已巩固情景
-```
+**与即时提取的区别：**
 
-**离线巩固的触发条件（OR 关系，任一满足即触发）：**
-
-- Agent 空闲超过 30 分钟（可配置）
-- 未巩固情景积攒超过 50 条
-- 用户手动触发
-
-三者取 OR 而非 AND——避免"既要空闲又要积攒"导致长期不触发的情况。
-
-**离线巩固与即时提取的区别：**
-
-| 维度        | 即时提取（Tool Call）                                                         | 离线巩固（专用调用）                                    |
-| ----------- | ----------------------------------------------------------------------------- | ------------------------------------------------------- |
-| 触发        | LLM 在回复时自主调用                                                          | Agent 空闲时系统触发                                    |
-| 粒度        | 单轮对话中的显式信息                                                          | 多轮对话的隐式关联                                      |
-| 能力        | 事实识别 + 类型标注 + 关键词提取 + 置信度评估                                 | 关联发现 + 冲突判定 + 模式提炼 + 质量评估               |
-| 产出        | PendingKnowledgeNode（confidence=0.7）/ 正式 KnowledgeNode（confidence≥0.85） | 升级/降级 PendingKnowledgeNode + 新建正式 KnowledgeNode |
-| 成本        | 零额外 API 调用（每轮 ~150 token 工具定义开销）                               | 批量 LLM 调用（空闲时进行）                             |
-| 可靠性      | 中（依赖 LLM 自主判断，可能遗漏）                                             | 高（专用 prompt，深度推理）                             |
-| Prompt 规模 | ~100 tokens                                                                   | ~500 tokens                                             |
+| 维度   | 即时提取（memory_store,LLM 端）          | 离线蒸馏（EpisodicDistiller,服务端）  |
+| ------ | ---------------------------------------- | ------------------------------------- |
+| 触发   | LLM 在回复时自主调用                     | 后台周期任务（per-agent opt-in）      |
+| 粒度   | 单轮对话中的显式信息                     | 跨 episode 的证据聚簇 + 语义归纳      |
+| 写入   | 只写 Episode（content + knowledge_subtype） | 晋升沉淀层节点（含审计证据链）     |
+| LLM 判断 | LLM 自评 confidence/category           | 服务端结构化提取 + Judge 仲裁         |
+| 成本   | 零额外 API 调用（工具定义随主回复）      | 每批 2 次 LLM 调用（Step 2a + Step 4）|
 
 ## 5. 遗忘机制
 
@@ -977,93 +915,33 @@ Grafeo 内置图算法过程（`algos` feature），可直接调用以提升记�
 
 详见 docs/module-design/04-grafeo.md §图算法增强
 
-### 6.4 冲突处理（Phase 2 新增，v3.8 简化为两层信号）
+### 6.4 冲突处理（ADR-068 2026-09 revision — 仲裁收敛到蒸馏器 Judge）
 
-冲突处理采用**两阶段方案**：即时阶段做粗筛（两层信号候选冲突标记），离线阶段做精确分类与解决。
+**位置**：经历→沉淀只有一条管道（EpisodicDistiller），冲突仲裁因此只发生在蒸馏的 **Step 3 聚簇 + Step 4 LLM Judge**，不再存在"即时阶段写入节点时的两层信号冲突检测"（该机制随即时直写沉淀层一并下线）。
 
-> **v3.8 简化**：移除了 Layer 3（上下文否定关键词）和启发式快速路径（Evolution/Correction 自动判定）。理由见 docs/module-design/04-grafeo.md §冲突检测。
-
-**两层冲突信号模型**：
-
-冲突检测不再仅依赖语义相似度，而是综合两层信号提高冲突识别的准确性：
-
-| 层级        | 信号       | 检测机制                                | 说明                         |
-| ----------- | ---------- | --------------------------------------- | ---------------------------- |
-| **Layer 1** | 语义相似度 | embedding cosine similarity > threshold | 已有机制，保留并细化         |
-| **Layer 2** | 时间冲突   | 同一主体 24h 内矛盾陈述                 | 24h 内置信度 0.7，24h 外 0.5 |
-
-**Layer 1 — 语义相似度（已有，保留并细化）**：
-
-embedding cosine similarity 超过动态阈值即标记为候选冲突。阈值按知识类型区分：
-
-| 知识类型   | 冲突检测阈值 | 理由                                                                                 |
-| ---------- | ------------ | ------------------------------------------------------------------------------------ |
-| Fact       | 0.85         | 事实性知识需较严格的语义匹配                                                         |
-| Preference | 0.80         | 偏好更容易变化，稍低阈值可捕获更多潜在冲突（如“喜欢简洁”vs“喜欢详细”在不同上下文中） |
-| Relation   | 0.90         | 关系需更严格匹配，避免误报（如“经理是王五”vs“同事是王五”）                           |
-
-**Layer 2 — 时间冲突（v3.7 新增）**：
-
-同一主体（subject 字段匹配）在短时间窗口内出现矛盾陈述，优先触发冲突检测：
+**候选冲突的产生（Step 3）**：
 
 ```
-时间冲突检测：
-  条件：新节点与已有节点的 subject 字段匹配
-        AND 两者 object 不同
-        AND 时间差 < time_window（默认 24h）
-  动作：标记为高优先级冲突候选
-
-  利用 Grafeo CDC history API 获取节点创建时间：
-    let history = db.history(EntityId::Node(node_id))?;
-    let created_at = history.first().timestamp;
-
-  时间窗口可配置（默认 24h）：
-    → 24h 内矛盾陈述更可能是纠正（correction）
-    → 超过 24h 更可能是演进（evolution）
+embedding 聚簇（cluster_threshold，默认 0.85，per-agent 可调 0.80~0.92）：
+  → 同一候选主题的多条 episode 落入同一簇 → 证据累计（evidence_count）
+  → 相似但语义不同的 episode 也同簇 → 交 Judge 仲裁（防误聚）
 ```
 
-**即时阶段（每轮 memory_store 时，两层信号联合检测）**：
+**仲裁与解决（Step 4 LLM Judge）**：
 
 ```
-PendingKnowledgeNode 写入时：
-  1. Layer 1：计算新节点 embedding 与已有 Active 节点的余弦相似度
-     → 相似度超过动态阈值（Fact: 0.85 / Preference: 0.80 / Relation: 0.90）
-       → 标记为候选冲突（conflict_candidate = true）
-  2. Layer 2：检查新节点与已有节点的创建时间差
-     → 时间差 < 24h → 置信度 0.7
-     → 时间差 ≥ 24h → 置信度 0.5
-  3. 所有冲突统一标记 ConflictType::Ambiguous，共享 conflict_group_id
-  4. 新节点立即可被检索，但暂不参与 graph_expand
-```
-
-**离线阶段（巩固管道，Phase 3）**：
-
-```
-离线巩固时，LLM 批量处理候选冲突：
-
-输入：冲突的两条记忆 + 各自的 source_episode 上下文 + 两层信号标注
+输入：同簇 episode 文本 + 各自时间戳 + 已有沉淀层节点上下文
 输出：
-  - type: "evolution" | "correction" | "ambiguous"
-  - action: "replace" | "keep_both" | "ask_user"
-  - reasoning: 一句话解释判断理由
+  - type: "evolution" | "correction" | "ambiguous" | "duplicate" | "distinct"
+  - action: "promote" | "replace" | "merge_into_existing" | "keep_both" | "reject"
+  - reasoning（写入 promotion_metadata，人工可审计回滚）
+
+时间语义：Judge 依据 episode 时间戳判断——
+  → 短窗口内矛盾陈述更可能是纠正（correction）
+  → 长间隔陈述变化更可能是演进（evolution）
 ```
 
-| 类型                    | LLM 判断依据                     | 处理                                                |
-| ----------------------- | -------------------------------- | --------------------------------------------------- |
-| **演进**（Evolution）   | 理解上下文语义（如"我搬家了"）   | 新值 Active，旧值 Dormant，写 conflict_log          |
-| **纠正**（Correction）  | 理解否定语义（如"不是 X，是 Y"） | 新值 Active，旧值 Dormant，降低旧来源可信度         |
-| **不确定**（Ambiguous） | 无法从上下文确定                 | 两个都 Active，标记 conflict_group_id，等待用户确认 |
-
-**ambiguous 用户确认流程（v3.7 细化）**：
-
-- ambiguous 累计 3+ 个时，通过 `memory_store` 工具的 `hint` 字段引导 Agent 在对话中自然询问用户确认
-- 不通过弹窗打扰，在对话中自然地询问
-- 引导方式：在 Agent 的 System Prompt 中注入待确认的记忆摘要，Agent 自行决定何时自然地询问
-
-**设计理由**：冲突分类是语义判断，遵循 LLM 优先原则。即时阶段仅做语义 + 时间的粗筛（两层信号），统一标记 Ambiguous。硬编码关键词匹配（否定词、变化词）已被证明覆盖面和可靠性不足，Phase 3 LLM 有完整上下文，判定质量远超启发式规则。
-
-详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.9
-
+**已下线（ADR-068）**：即时路径的 conflict_candidate 标记、`ConflictType::Ambiguous`、`conflict_group_id`、新节点暂不参与 graph_expand——因为 memory_store 不再创建沉淀层节点，全部候选冲突只在蒸馏阶段被识别。
 ### 6.5 Abstention（拒答）机制（v3.7 新增）
 
 **设计动机**：当检索结果的置信度不足时，Agent 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。
@@ -1239,9 +1117,9 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 | `Episodic`          | —             | 无子分类                                                                  | —                                       | §2       |
 | `Procedural`        | —             | 无子分类                                                                  | —                                       | §3.2     |
 
-**写入语义（v3.11 明确化）：**
-- `Knowledge` 子分类由 `memory_store(category=…)` 工具即时写入时一次性确定（见 §4.1）；离线巩固阶段不再做二次分类（避免引入幻觉）。`Fact`/`Preference`/`Relation`/`Procedure` 与 `category` enum 一一对应。
-- `Autobiographical` 子分类由 Manifest 派生（§3.3 路径 1）、离线自我评估（路径 2）、以及 `memory_store(category="autobiographical", aspect=…)` 即时写入（路径 3、4）共同填充。History 节点 append-only，其余五类按 `key` 幂等 upsert。
+**写入语义（ADR-068 2026-09 revision）：**
+- `Knowledge.sub_type` 是蒸馏产物,不是即时写入值——`memory_store` 只把 LLM 的 4 类 `category` 作为 `Episode.knowledge_subtype` 路由提示写入经历层;蒸馏器 Step 2a 从 episode 语义结构化提取 `(subject, predicate, object)`,落库时按提取结论确定最终节点类型(sub_type 由蒸馏结论而非 category 直通决定)。`Fact`/`Preference`/`Relation`/`Procedure` 与 `category` enum 一一对应仅作为蒸馏输入侧的路由分类
+- `Autobiographical.category` 只由两个生产者填充:Manifest 派生(仅 Identity/Capability,§3.3)与 `EpisodicDistiller` 自传体识别晋升(Step 2a 布尔分类 + aspect → Step 4 Judge,History/Relationship 均走蒸馏,无 append-only / key 幂等 upsert 的即时直写)
 
 **读取语义：**
 - `AdminNodeRecord.sub_type` 在序列化时只在节点有子分类时携带（`skip_serializing_if = "Option::is_none"`），避免 Episodic / Procedural 节点多出一个恒为空的字段。
@@ -1290,6 +1168,8 @@ Zone 用于区分记忆的**业务场景分区**，与 NodeType 正交：
 
 ## 9. 分阶段实现路线
 
+> **ADR-068（2026-09 revision）覆盖声明**：本节为历史分阶段规划（Phase 1/2/3 路线图）。自 ADR-068 M1-M8 落地后,实际实现以"§4.1 即时薄写经历层 + §4.2 EpisodicDistiller 离线蒸馏 + manifest bootstrap 权威导入"为准;本节中与 ADR-068 冲突的规划文字（PendingKnowledgeNode、即时直写沉淀层、`memory_store` autobiographical 类目、rule-based generalization、HypothesisNode、authoritative/alternate 冲突保留制、Skill↔ProceduralNode failure_cases 联动、激活计数驱动降级等）均视为**未落地或被取代的历史设计**,不再作为实现依据。
+
 ### Phase 1：记忆基础（对应 Roadmap Phase 2）
 
 **目标：** 让 Agent 能记住用户，能检索，能遗忘，但不做深度抽象和跨时段的巩固。
@@ -1318,13 +1198,15 @@ Episode 内容分类压缩落地：信息性内容原样存储，工件性内容
 
 **核心组件一：ProceduralNode 完整生命周期**
 
-ProceduralNode 的来源有三条路径：
+ProceduralNode 的来源（ADR-068 2026-09 revision 收敛为单一语义生产者）：
 
-路径 A — 用户反馈即时提取（Phase 1 已有，Tool Call）：用户明确纠正（"太长了" / "不要用表格"）→ ProceduralNode.trigger_condition = "用户要求简洁输出"，action_pattern = "优先给结论，控制长度"。
+路径 A — 用户反馈写经历层（Tool Call）：用户明确纠正（"太长了" / "不要用表格"）→ `memory_store(category="procedure")` → Episode(knowledge_subtype=Procedure)。不直写 ProceduralNode。
 
-~~路径 B — 执行失败自动总结~~ **（已移除，v3.12）**：原设计 SkillExecution 的 failure_case 触发，将 failure_case 摘要写入 ProceduralNode。实际代码中 `failure_case → ProceduralNode` 自动写入路径从未落地，且 SkillExecution 的 `success_count` 从未被递增，据此派生任何"成功率"类节点都会产生 false-positive（见 offline.rs DELETED 注释）。当前程序记忆来源收敛为：路径 A（用户反馈即时提取）+ 路径 C（离线巩固提炼），失败学习暂缓。
+~~路径 B — 执行失败自动总结~~ **（已移除，v3.12）**：原设计 SkillExecution 的 failure_case 触发，将 failure_case 摘要写入 ProceduralNode。实际代码中 `failure_case → ProceduralNode` 自动写入路径从未落地，且 SkillExecution 的 `success_count` 从未被递增，据此派生任何"成功率"类节点都会产生 false-positive（见 offline.rs DELETED 注释）。
 
-路径 C — 离线巩固提炼（Phase 3 的离线巩固负责，Phase 2 先做单 Skill 内模式识别）。
+~~路径 C' — rule-based generalization~~ **（已移除，2026-09 revision）**：原 `generalization.rs::detect_simple_patterns`（字符串全等计数 + action/tool_calls 文本特征 hack）已下线,不再被任何生产路径调用。
+
+路径 C — 离线蒸馏提炼（唯一生产者）：`EpisodicDistiller::promote_procedures` 扫描 Episode(knowledge_subtype=Procedure) → Step 2a 服务端 LLM 提取 `(trigger_condition, action_pattern)` → Step 4 LLM Judge 仲裁 → 晋升 ProceduralNode（含 promotion_metadata 证据链）。
 
 ProceduralNode 的激活时机：每次 Agent 生成回复前，检索 relevant ProceduralNode（按 trigger_condition 匹配当前上下文），activation_count += 1，更新 last_accessed。被激活的 ProceduralNode 注入 System Prompt 行为准则区，格式："当 [trigger_condition] 时，优先 [action_pattern]"。
 
@@ -1351,9 +1233,9 @@ Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。Proc
 - 触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息更新 `SkillExperience.model_compatibility`；某模型某类任务成功率低于 60% 时生成/更新 Limitation 节点。
 - 注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级）。
 
-> **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 grafeo `offline.rs` 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。自传体记忆的来源收敛为 §3.3 的四条路径（Manifest 派生 / 即时 Tool Call 用户陈述 / 重要事件 / 离线自我评估），Limitation 节点的产生依赖用户或 LLM 显式陈述，不再自动生成。
+> **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 grafeo `offline.rs` 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。ADR-068 2026-09 revision 进一步收敛：自传体记忆来源为 §3.3 的两条生产者（Manifest 权威导入 + EpisodicDistiller 离线识别晋升），Limitation 节点的产生依赖蒸馏器从用户/LLM 显式陈述中识别，不再自动生成。
 
-同时原设计新增 Relationship 节点的自动维护（用户与 Agent 合作超过 30 天自动生成）——该自动触发逻辑同样未落地；当前 Relationship 节点由 `memory_store(category="autobiographical", aspect="Relationship")` 即时写入（manager.rs 含自动维护辅助逻辑，source 标记 `self_evaluation`）。
+同时原设计新增 Relationship 节点的自动维护（用户与 Agent 合作超过 30 天自动生成）——该自动触发逻辑（manager.rs `run_relationship_generation`）已整体删除（2026-09 revision,回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定）；当前 Relationship 节点由 `EpisodicDistiller` 从 `knowledge_subtype=Relation` 的 episode 晋升，无第二生产者。
 
 **Phase 2 验收标准：**
 
@@ -1714,7 +1596,7 @@ impl MemoryManager {
 
     /// 即时巩固（Consolidate 阶段的即时部分）
     /// 检查本轮是否触发了 memory_store tool call
-    /// 如果有，执行知识去重 + 写入沉淀层 + 标记 episode consolidated
+    /// 如果有,组装 Episode(knowledge_subtype) 落经历层（ADR-068:不直写沉淀层）
     pub fn consolidate_immediate(&self, store_call: Option<&MemoryStoreCall>) -> Result<()>;
 
     /// 离线巩固（Consolidate 阶段的离线部分，Phase 3）

@@ -11,7 +11,7 @@
 > 不进入长期记忆；所有写入必须回答「这条信息未来会被检索吗？是否具备复用价值？」；
 > **死代码不保留**——无调用者的写入通道直接删除，避免日后被误用。
 
-## 已废弃通道（本变更删除）
+## 已废弃通道（本变更删除 + 2026-09 ADR-068 revision 追加）
 
 | # | 通道 | 写入目标 | 废弃原因 |
 |---|------|---------|---------|
@@ -19,16 +19,18 @@
 | B2 | `run_self_evaluation` | Autobiographical Limitation（批量） | 统计口径残缺（success_count 恒 0）→ 系统性假阳性；能力边界非工具计数器可推导 |
 | G | `record_turn` / `ConversationRecord`（死代码） | Episodic | 无调用者；留档接口有被误用风险 |
 | H | grafeo `auto_generate_limitation_nodes` | Autobiographical Limitation（批量） | 与 B2 同一逻辑的重复实现 |
+| I（2026-09） | `generalization.rs::detect_simple_patterns` / `run_generalization` | ProceduralNode | 伪规则归纳（字符串全等计数 + action/tool_calls 文本特征 hack）；LLM 端已改由 `EpisodicDistiller::promote_procedures` 承担 |
+| J（2026-09） | `MemoryManager::run_post_compaction_tasks` / `run_relationship_generation` / `run_history_compression` | Autobiographical Relationship / History | Relationship 30 天规则第二生产者违反 single-producer 原则且不经 opt-in；History 自动合并下线（回归测试 `post_compaction_tasks_do_not_write_relationship_nodes` 锁定） |
 
-## 有效写入入口
+## 有效写入入口（ADR-068 2026-09 revision）
 
 | # | 入口 | 写入目标 | 触发方式 |
 |---|------|---------|---------|
-| A | `memory_store` 工具 | Knowledge / Procedural / Autobiographical | LLM 主动调用 |
+| A | `memory_store` 工具 | **Episodic**（Episode + knowledge_subtype，不直写沉淀层） | LLM 主动调用 |
 | C | 会话蒸馏 `write_summary_to_provider` | Episodic | 自动 / compaction |
-| D | manifest 引导 | Autobiographical Identity/Capability | 启动时 |
+| D | manifest 引导（bootstrap） | Autobiographical Identity/Capability（source="manifest"，权威导入） | 启动时 |
 | E | HTTP 管理 API | 任意节点 | 外部客户端 |
-| F | consolidation 后台流水线 | Generalized / Resolved Conflict 节点 | 自动 / idle 或累计阈值 |
+| F | `EpisodicDistiller`（consolidation 后台流水线，opt-in） | Knowledge / Procedural / Autobiographical（含 promotion_metadata 审计） | 后台周期任务，`[memory.distiller].enabled` 门控 |
 
 ## 影响面
 

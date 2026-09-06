@@ -11,6 +11,28 @@
 
 ---
 
+## Revision(2026-09):沉淀方式收敛为两种可信来源,Path C 下线
+
+**决策**:沉淀层(semantic)节点的产生只允许两种可信来源:
+
+1. **LLM 分析归纳的结论**——`EpisodicDistiller`(LLM 结构化提取 + embedding 聚簇 + LLM Judge + 完整证据/审计链)。唯一入口是 LLM 写入端经 `memory_store` 打 `knowledge_subtype` 标记的经历层 Episode。
+2. **图数据库能力驱动的统计归纳**——基于已有节点/边的结构性统计(embedding 相似度聚簇、边权/跨度统计、时间门槛),可产出/更新节点但**不做语义捏造**,且必须配合事件/审计记录(如 `promote_autobio_relationship` 的 30 天协作跨度统计、`promote_event` 的里程碑事件)。
+
+**废除**:rule-based **Experience generalization(Path C)**(`generalization.rs::detect_simple_patterns` 及 compaction/session-end 内联 generalization step)。理由:
+
+- 从"assistant 回复文本首行 + content 内 `"name":` 字符串"提取 `(action, tools)` 特征,再把 `action|tools` **全等字符串计数**当"重复行为模式",属于文本 hack,不是经验归纳;
+- 产物 ProceduralNode 无 `source_episode_ids`/`promotion_metadata` 证据链,消费的 episode 不标 `consolidated`,每轮 consolidation 重复 boost(`success_count` 无限虚增);
+- 与 `EpisodicDistiller::promote_procedures`(LLM 提取 + judge)职责重叠,质量远低。
+
+**代码处置**:
+- `MemoryManager::run_post_compaction_tasks` / `run_generalization_step` / `run_history_compression` 及其 runtime 调用点(compaction 后、session 关闭)整体删除——inline 维护任务不再存在;
+- `GrafeoStore::run_offline_consolidation_with_generalization` 不再执行 generalization(参数保留为 deprecated 兼容,`gen_config` 传 `None`);
+- `ConsolidationBgTask` 循环只跑:EpisodicDistiller step(opt-in)+ offline Pending 生命周期 + episodic cleanup。
+
+**保留的规则用途仅限**:幂等/去重门槛、节点生命周期(retention/decay/Pending 状态机)、权威数据源导入(manifest bootstrap)、事件/时间门槛(History milestone、30 天协作)。
+
+---
+
 ## 0. 一句话总结
 
 当前系统把"记忆分层"与"记忆分类"耦合在沉淀层节点(KnowledgeNode/ProceduralNode/AutobiographicalNode)里,导致 LLM 必须直写沉淀层,污染了数据质量。本 ADR 把两轴解耦:
@@ -53,7 +75,7 @@ AutobiographicalNode (沉淀层)
 |---|---|---|
 | "LLM 在单对话上下文内无法判断 milestone" | ✅ 准确 | 保留 — 关闭 LLM → autobiographical/History 直写 |
 | "AutobiographicalNode 不参与遗忘,污染会自传播" | ✅ 准确 | 保留 — autobiographical 仅由离线归纳器写入 |
-| "LLM 写 Procedural 不可控" | ✅ 准确 | 保留 — ProceduralNode 仅由离线 generalization 晋升 |
+| "LLM 写 Procedural 不可控" | ✅ 准确 | 保留 — ProceduralNode 仅由离线蒸馏晋升(rule-based generalization 已于 2026-09 revision 下线,见头部 Revision) |
 | "Episodic 是账本,Knowledge 是精炼" | ✅ 准确 | 保留 — 但**两者必须通过分类字段桥接**,而不是直写沉淀层 |
 | "memory_store 工具 schema 暴露 autobiographical 让 LLM 写入自我叙事" | ✅ 准确 | 修正 — 应当**完全移除 autobiographical**,autobiographical 只由内部 bootstrap + 离线归纳 |
 
@@ -82,7 +104,7 @@ Episodic                    Semantic (沉淀层)
 | **Fact**       | ✅ LLM 写入,`knowledge_subtype=Fact` | ✅ 离线晋升 |
 | **Preference** | ✅ LLM 写入,`knowledge_subtype=Preference` | ✅ 离线晋升 |
 | **Relation**   | ✅ LLM 写入,`knowledge_subtype=Relation` | ✅ 离线晋升 |
-| **Procedure**  | ✅ LLM 写入,`knowledge_subtype=Procedure` | ✅ 离线晋升(generalization) |
+| **Procedure**  | ✅ LLM 写入,`knowledge_subtype=Procedure` | ✅ EpisodicDistiller 离线晋升(rule-based generalization 已于 2026-09 revision 下线) |
 | **Identity**   | ❌ 不写 | ✅ 仅 manifest bootstrap |
 | **Capability** | ❌ 不写 | ✅ 仅 manifest bootstrap |
 | **Limitation**(自传) | ❌ LLM 不标注(LLM 工具界面无 autobiographical 概念) | ✅ EpisodicDistiller Step 2a 服务端 LLM 自动从 fact/relation/feedback 类 episode 中识别 |
@@ -227,7 +249,7 @@ pub struct Episode {
 | [`memory_store.rs:214-256`](../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L214) autobiographical input 装配 | autobiographical 参数解析 | 删除 |
 | [`memory_store.rs:855-1057`](../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L855) autobiographical 单测 4 个 | schema 行为测试 | 删除 |
 | [`distill.rs:5-12`](../../core/acowork-grafeo/src/consolidation/distill.rs#L5) 注释 | "knowledge updates now flow through memory_store tool / procedural creation paths" | **改写**:明确"LLM 入口仅写 Episodic,沉淀层由 EpisodicDistiller 离线产生" |
-| `generalization.rs::generalize_patterns_with_config` 中扫描 input | 当前从 episodic + (action, tool_calls) 元组提取 | **改造**:扫描 `Episode.knowledge_subtype=Procedure` 的节点,从 `content` 由服务端 LLM 提取 `(trigger_condition, action_pattern)`,**不再**依赖 Episode 上的结构化字段 |
+| `generalization.rs::generalize_patterns_with_config` 中扫描 input | 曾从 episodic + (action, tool_calls) 元组提取 | **下线**(2026-09 revision)— 该函数已无生产调用;`(trigger_condition, action_pattern)` 提取改由 `EpisodicDistiller::promote_procedures` 扫描 `Episode.knowledge_subtype=Procedure` + 服务端 LLM 完成,见 §3.4.4 |
 
 ### 3.4 `EpisodicDistiller` 设计(本 ADR 的核心)
 
@@ -630,8 +652,8 @@ result.facts_promoted += 1;
 ```rust
 // core/acowork-runtime/src/memory/consolidation_bg.rs
 pub enum ConsolidationStep {
-    EpisodicDistiller,    // ← 新增
-    ExperienceGeneralization,  // 现有,保留作为 Procedural 备选路径
+    EpisodicDistiller,    // ← 新增(opt-in)
+    ExperienceGeneralization,  // 已下线(2026-09 revision)— 见头部 Revision
     HistoryCompression,   // 现有,标记 deprecated(本 ADR 后下线)
     RelationshipAutoGen,  // 现有,转交 EpisodicDistiller.promote_autobio_relationship()
     EpisodicCleanup,      // 现有,保留
@@ -643,14 +665,14 @@ pub enum ConsolidationStep {
 - **事件触发**:History 晋升需要外部 hint(MQTT topic `acowork/consolidation/event`)
 - **强制触发**:agent shutdown / 手动 CLI(同 ADR-057)
 
-#### 3.4.4 与现有 generalization 的关系
+#### 3.4.4 与 generalization 的关系(已下线,2026-09 revision)
 
-| 路径 | 输入 | 输出 | 保留? |
+| 路径 | 输入 | 输出 | 处置 |
 |---|---|---|---|
-| `generalization.rs::run_generalization` | 当前:扫描所有 unconsolidated episodes + (action, tool_calls) 元组 | `ProceduralNode` | **改造**:只扫描 `knowledge_subtype=Procedure` 的 episode,服务端 LLM 从 `content` 提取 `(trigger_condition, action_pattern)`(复用 `EpisodicDistiller` 的 Step 2a 逻辑) |
-| `EpisodicDistiller::promote_procedures` | 同上 + LLM Judge | 同上 | **新增**,作为 Procedural 晋升的主路径 |
+| `generalization.rs::run_generalization` | 曾扫描所有 unconsolidated episodes + (action, tool_calls) 元组 | `ProceduralNode` | **下线**(2026-09 revision)— 伪规则归纳(字符串全等计数 + 文本特征 hack),产物无证据链;保留函数仅因单测引用,不再被任何生产路径调用 |
+| `EpisodicDistiller::promote_procedures` | `knowledge_subtype=Procedure` 的 episode + 服务端 LLM 提取 + LLM Judge | `ProceduralNode` | **唯一生产者**(ADR-068 主线) |
 
-**保留 `generalization` 但降级为"LLM 不可用时的回退路径"**。`EpisodicDistiller` 是首选,LLM 缺失时 fallback 到 rule-based `generalization`。
+**不再存在"LLM 不可用时 fallback 到 rule-based generalization"的降级路径**——LLM 不可用时蒸馏 run 直接 no-op(episode 原样保留待重试),见 §3.4.2 Step 2 失败处理。
 
 ### 3.5 Provider 接口微调
 
@@ -708,7 +730,7 @@ pub struct PromotionMetadata {
 | `run_relationship_generation`(manager.rs:1003) | offline 写 Relationship 节点 | **保留** 作为 `EpisodicDistiller.promote_autobio_relationship()` 的实现细节 | offline,符合原则 |
 | `process_memory_store` / `process_knowledge` / `process_procedure` / `process_autobiographical` | LLM 写入 → 沉淀层 | **删除** | LLM 不再直写沉淀层 |
 | `consolidate()` (record_distilled) | compaction → episodic | **保留**,但新增字段全部 None | 被动蒸馏,符合"账本"语义 |
-| `run_generalization` | offline Procedural 晋升 | **改造**,优先从 `knowledge_subtype=Procedure` episode 读结构化输入 | ProceduralNode 唯一来源 |
+| `run_generalization` | offline Procedural 晋升 | **下线**(2026-09 revision)— 伪规则归纳被 `EpisodicDistiller::promote_procedures` 取代 | ProceduralNode 唯一来源 = EpisodicDistiller |
 | `compress_history_nodes` | 10 条 History 自动合并 | **删除** | History 由离线归纳器一次性写入,不需要"合并" |
 
 ---
@@ -725,7 +747,7 @@ pub struct PromotionMetadata {
 | **M4** | `EpisodicDistiller` 挂入 `ConsolidationBgTask`(可配置开关,默认关闭) | 离线运行产生 DistillerResult,审计日志完整 | ✅(开关关即不跑) |
 | **M5** | `memory_store` 工具 schema 重写(移除 autobiographical + 移除 procedure 直写,全转 Episodic) | 工具 e2e 测试覆盖 4 类(category 枚举正确性,字段校验) | ⚠️(破坏性变更,需版本号) |
 | **M6** | `process_memory_store`/`process_knowledge`/`process_procedure`/`process_autobiographical` 删除 + `compress_history_nodes` 删除 + `memory_store` 单测清理 | cargo test 全绿,clippy 0 警告 | ⚠️(API 移除,不可回滚但 git revert 可) |
-| **M7** | `EpisodicDistiller` 默认关闭(**opt-in**:per-agent manifest `[memory.distiller].enabled = true` 显式开启;评审修订——原"默认开启"因全量 agent 后台 LLM 成本与行为变更被否),`generalization` 降级为 fallback | e2e:跑 100 个 episode → 沉淀层节点出现 + 审计完整 | ✅(开关关即不跑) |
+| **M7** | `EpisodicDistiller` 默认关闭(**opt-in**:per-agent manifest `[memory.distiller].enabled = true` 显式开启;评审修订——原"默认开启"因全量 agent 后台 LLM 成本与行为变更被否),`generalization` 已下线(revision,不再作为 fallback) | e2e:跑 100 个 episode → 沉淀层节点出现 + 审计完整 | ✅(开关关即不跑) |
 | **M8** | `bootstrap_autobiographical_from_manifest` 仍保留 Identity/Capability,Relationship 自动生成改为调 `EpisodicDistiller.promote_autobio_relationship()` | agent 启动后 Identity 节点存在;30 天后 Relationship 节点出现 | ✅ |
 
 ### 4.2 数据迁移
@@ -803,7 +825,7 @@ M5-M6 之间允许**双写期**:旧 `process_memory_store` 路径仍然可用,�
 | **R-R1**(本 ADR 二次修正 — 弱化): M5 schema 变更仍是破坏性变更,但工具界面**只剩 `content` + `category` 两个字段**,比上版破坏面更小 | 中 | **低** | (a) 版本号 minor bump;(b) `memory_store` 工具描述给出迁移指引("autobiographical / aspect / candidate_autobio_aspect 已全部移除,如果内容是关于 agent 的,直接写 category=preference/fact 即可");(c) M5-M6 双写期兼容老 schema 调用 |
 | **R-R2**: LLM Judge 输出格式不稳定,导致蒸馏失败 | 高 | 中 | (a) 严格 JSON schema 校验,失败 → Deferred;(b) prompt 模板版本化;(c) 设置 3 次重试上限,仍失败 → Skip 并 warn |
 | **R-R3**: 晋升阈值(min_evidence)设置不合理,导致过度晋升或晋升不足 | 中 | 中 | (a) 默认值保守(fact_min_evidence=2,preference=3);(b) per-agent manifest 可调;(c) `DistillerResult.promotion_evaluations` 提供完整审计,人工可回滚 |
-| **R-R4**: Procedure 晋升 LLM prompt 工程工作量大 | 中 | 低 | (a) M3 阶段先实现 rule-based 路径(rule-based generalization 已有);(b) LLM 增强作为后续迭代 |
+| **R-R4**: Procedure 晋升 LLM prompt 工程工作量大 | 中 | 低 | (a) 2026-09 revision — rule-based generalization 已下线,不再作为兜底实现;现为纯 LLM 路径:Step 2a 结构化 + Step 4 Judge 双层校验;(b) prompt 模板版本化 + golden 集回归;(c) 失败 → Deferred 保留 episode 待重试 |
 | **R-R5**: `EpisodicDistiller` 与现有 `ConsolidationBgTask` 调度冲突(同一批 episode 被多次扫描) | 低 | 低 | (a) 引入 episode 锁字段 `promotion_in_flight: bool`;(b) scheduler 串行化 distillation 步骤 |
 | **R-R6**(本 ADR 二次修正): **Embedding 聚簇边界误判** — 相似度阈值 0.85 可能(a)过低导致不同事实被误聚,或(b)过高导致同义谓词分裂 | 中 | 中 | (a) 阈值 `cluster_threshold` 可 per-agent manifest 调(0.80~0.92);(b) Step 4 LLM Judge 做最后仲裁 — Judge 看 episode 实际语义,合并或拒绝;(c) `DistillerResult.promotion_evaluations` 包含聚簇键字符串,可人工审计回滚;(d) M3 阶段先在黄金测试集(50 条手工标注事实)上调到 ≥ 95% 召回率才放行 |
 | **R-R7**(本 ADR 二次修正): Step 2a LLM 调用成本翻倍 — 蒸馏器每次运行需要 2 次 LLM 调用(Step 2a 结构化 + Step 4 Judge),N 个 episode 仍只 2 次但单次 token 消耗更大(含 autobio_candidate 输出) | 中 | 低 | (a) Step 2a 复用 compact_model(便宜);(b) Step 4 用主模型(质量);(c) M3 阶段先跑 benchmark 确认成本可控再决定是否合并为单次 LLM 调用;(d) `autobio_candidate` 输出本质上是布尔分类 + 4 值 aspect,token 增量可控 |
@@ -816,7 +838,7 @@ M5-M6 之间允许**双写期**:旧 `process_memory_store` 路径仍然可用,�
 | ADR | 关系 |
 |---|---|
 | ADR-051 Runtime 与 Grafeo 解耦 | **依赖** — `EpisodicDistiller` 通过 `MemoryProvider` trait 访问 |
-| ADR-057 compaction 蒸馏入图 | **修正** — 本 ADR 替代 ADR-057 §4.2 step ④ 的"experience generalization"成为 Procedural 唯一来源;ADR-057 §1 的 B4 History 压缩(本 ADR §3.3 删除)被替换为离线归纳 |
+| ADR-057 compaction 蒸馏入图 | **修正** — 本 ADR 替代 ADR-057 §4.2 step ④ 的"experience generalization"成为 Procedural 唯一来源(2026-09 revision:rule-based generalization 整体下线,由 `EpisodicDistiller::promote_procedures` 承接);ADR-057 §1 的 B4 History 压缩(本 ADR §3.3 删除)被替换为离线蒸馏 |
 | ADR-062 记忆质量门禁 | **依赖** — `keyword::sanitize` 在 LLM 边界仍生效(本 ADR 不动) |
 | ADR-060 prompt-cache friendly context | **无关** |
 | ADR-063 package-level prompt override | **依赖** — `EpisodicDistiller` 的 LLM Judge prompt 可被 per-agent package 覆盖 |
