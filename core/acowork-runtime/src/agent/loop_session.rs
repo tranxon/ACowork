@@ -231,12 +231,10 @@ impl super::loop_::AgentLoop {
         if let Some(ref conversation) = self.session.conversation {
             let session_id = conversation.session_id().to_string();
 
-            // ADR-051 P3 / ADR-068 M8: Post-compaction maintenance tasks
-            // (generalization + history compression) at session-end.
-            // Relationship auto-generation is NOT part of this path — it is
-            // owned by the EpisodicDistiller background step (single
-            // producer, gated by [memory.distiller].enabled).
-            self.run_post_compaction_memory_tasks().await;
+            // ADR-051 P3 post-compaction maintenance tasks were removed at
+            // session-close: semantic-layer promotion runs exclusively in the
+            // EpisodicDistiller background step (ADR-068 single-producer
+            // rule, gated by [memory.distiller].enabled).
 
             // Determine tail range: everything after the last compaction marker,
             // or full history (skipping leading system messages) if never compacted.

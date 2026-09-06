@@ -14,12 +14,11 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
 use crate::{
     labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
-use crate::consolidation::{EmbeddingFn, GeneralizationConfig};
+use crate::consolidation::EmbeddingFn;
 use crate::quality::MemoryQualityConfig;
 
 use acowork_core::EmbeddingProvider;
@@ -885,40 +884,6 @@ impl MemoryManager {
         })
     }
 
-    /// Run all post-compaction maintenance tasks.
-    ///
-    /// Executes in sequence:
-    /// 1. Experience generalization (Path C) - extract behavior patterns
-    /// 2. History compression - no-op since ADR-068 (episodic retention
-    ///    `mark_consolidated` + cleanup is the replacement)
-    ///
-    /// Each step is best-effort: failures are logged but do not block
-    /// subsequent steps.
-    ///
-    /// ADR-051 P3: Replaces run_generalization_if_possible(),
-    /// self_evaluate_skill_performance(), and auto_generate_relationship()
-    /// in loop_memory.rs.
-    ///
-    /// ADR-068 M8: 30-day Relationship auto-generation was removed from this
-    /// method. Relationship is a runtime-observed autobiographical category
-    /// whose single producer is the EpisodicDistiller's
-    /// `promote_autobio_relationship` (invoked from the background
-    /// consolidation step, gated by `[memory.distiller].enabled`). The old
-    /// unconditional session-end/compaction direct write here produced
-    /// Relationship nodes outside the distiller and bypassed the audit trail
-    /// (`promotion_metadata` / `PromotionEvaluation`).
-    pub async fn run_post_compaction_tasks(
-        &self,
-        provider: &dyn MemoryProvider,
-        embedding_fn: Option<EmbeddingFn>,
-    ) {
-        // Step 1: Experience generalization (Path C).
-        self.run_generalization_step(provider, embedding_fn).await;
-
-        // Step 2: History compression (no-op since ADR-068).
-        self.run_history_compression(provider);
-    }
-
     /// Activate ProceduralNodes that were retrieved and matched the context.
     ///
     /// For each retrieved memory with label "Procedural", increments the
@@ -945,63 +910,6 @@ impl MemoryManager {
                         "Failed to increment activation_count (non-fatal)"
                     );
                 }
-            }
-        }
-    }
-
-    /// Step 1: Experience generalization (Path C).
-    async fn run_generalization_step(
-        &self,
-        provider: &dyn MemoryProvider,
-        embedding_fn: Option<EmbeddingFn>,
-    ) {
-        let config = GeneralizationConfig {
-            min_observations: 3,
-            max_episodes_scan: 100,
-            confidence_boost: 0.05,
-            max_confidence: 0.98,
-            use_llm: false,
-        };
-
-        // Use provided embedding function, or fallback to zero vector.
-        let zero_fn: EmbeddingFn = Arc::new(|_| vec![0.0f32; 128]);
-        let emb_fn = embedding_fn.unwrap_or(zero_fn);
-
-        match provider.run_generalization(None, &emb_fn, &config).await {
-            Ok(result) => {
-                if result.nodes_created > 0 || result.nodes_boosted > 0 {
-                    tracing::info!(
-                        patterns = result.patterns.len(),
-                        nodes_created = result.nodes_created,
-                        nodes_boosted = result.nodes_boosted,
-                        deduplicated = result.patterns_deduplicated,
-                        "Path C: generalization completed after compaction"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "Generalization failed (non-fatal)");
-            }
-        }
-    }
-
-    /// Step 2 (deprecated, ADR-068): History-node compression is gone —
-    /// the trait method is a no-op stub. Episodic retention
-    /// (mark_consolidated + cleanup) is the replacement.
-    fn run_history_compression(&self, provider: &dyn MemoryProvider) {
-        // Keep the call shape for logging parity, but skip the
-        // compression itself. The trait returns Ok(0).
-        #[allow(deprecated)]
-        match provider.compress_history_nodes(10) {
-            Ok(0) => {
-                // No-op (ADR-068): history compression removed.
-                tracing::debug!("History compression disabled (ADR-068)");
-            }
-            Ok(compressed) => {
-                tracing::debug!(compressed, "History compression produced work (unexpected post-ADR-068)");
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "History compression failed (non-fatal)");
             }
         }
     }

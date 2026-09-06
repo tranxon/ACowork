@@ -11,13 +11,14 @@
 //! - Memory store initialization
 //! - Long-term memory retrieval and context injection (via retrieve_and_inject)
 //! - Document entry persistence to conversation JSONL
-//! - Post-compaction tasks: generalization + history compression + relationship
-//!   (via run_post_compaction_tasks)
 //! - MetricsAggregator wiring + alert logging
 //! - LLM Judge sampling
 //!
-//! Removed: tool-failure recording (Path B) and self-evaluation (Path B2) —
-//! see docs/memory-write-entrypoints.md.
+//! Removed: tool-failure recording (Path B), self-evaluation (Path B2),
+//! and post-compaction maintenance tasks (Path C generalization / history
+//! compression / relationship auto-generation — ADR-068 revision:
+//! semantic-layer promotion runs exclusively in the EpisodicDistiller
+//! background step) — see docs/memory-write-entrypoints.md.
 
 use acowork_memory::judge::{JudgeConfig, should_sample};
 use crate::memory::metrics::MetricsAlertType;
@@ -358,26 +359,5 @@ impl super::loop_::AgentLoop {
             };
             conversation.append_message_with_id("system", &content, metadata, client_id);
         }
-    }
-
-    /// Run all post-compaction maintenance tasks.
-    ///
-    /// ADR-051 P3: Delegates to `MemoryManager::run_post_compaction_tasks()`
-    /// (generalization + history compression).
-    /// Self-evaluation (Limitation nodes) was removed — see
-    /// docs/memory-write-entrypoints.md. Relationship auto-generation was
-    /// also removed from this path (ADR-068 M8 single-producer: owned by the
-    /// EpisodicDistiller background step).
-    pub(crate) async fn run_post_compaction_memory_tasks(&self) {
-        let provider = match self.core.memory_provider() {
-            Some(s) => s,
-            None => return,
-        };
-
-        let manager = self.core.init_memory_manager();
-
-        // No embedding function available in this context;
-        // run_post_compaction_tasks will use a zero-vector fallback.
-        manager.run_post_compaction_tasks(provider.as_ref(), None).await;
     }
 }

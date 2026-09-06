@@ -58,13 +58,17 @@ pub struct ConflictResolutionResult {
 // ---------------------------------------------------------------------------
 
 impl GrafeoStore {
-    /// Run offline consolidation on pending nodes, including full Phase 3 pipeline.
+    /// Run offline consolidation on pending nodes, including the lifecycle
+    /// pipeline.
     ///
     /// Pipeline steps:
     /// 1. Standard offline consolidation (upgrade/downgrade Pending nodes)
     /// 2. ~~Triple extraction from unconsolidated episodes~~ (DELETED in ADR-057 C7)
     /// 3. ~~Conflict resolution via LLM arbitration~~ (DELETED in ADR-057 C7)
-    /// 4. Experience generalization to extract ProceduralNodes
+    /// 4. ~~Experience generalization to extract ProceduralNodes~~ (RETIRED in
+    ///    ADR-068 revision — rule-based text counting over assistant content
+    ///    produced unverifiable ProceduralNodes with no evidence/audit; the
+    ///    EpisodicDistiller's `promote_procedures` is the sole producer)
     /// 5. ~~Compress History nodes~~ (DELETED in ADR-068 — episodic retention)
     /// 6. ~~Auto-generate Relationship nodes~~ (MOVED to EpisodicDistiller
     ///    `promote_autobio_relationship`, ADR-068 M8)
@@ -73,6 +77,11 @@ impl GrafeoStore {
     /// Note: this method does not use `tracing` — the grafeo crate
     /// intentionally avoids that dependency. The caller (runtime)
     /// logs the returned `OfflineConsolidationResult` fields instead.
+    ///
+    /// Deprecated (ADR-068 revision): the `llm` / `embedding_fn` /
+    /// `gen_config` parameters and the `_with_generalization` suffix are
+    /// legacy. The method name and signature are kept for API stability;
+    /// callers should migrate to [`GrafeoStore::run_offline_consolidation`].
     #[allow(clippy::type_complexity)]
     pub async fn run_offline_consolidation_with_generalization(
         &self,
@@ -94,13 +103,13 @@ impl GrafeoStore {
         // kept for serialization compatibility and may be repopulated by
         // future ad-hoc reprocessing jobs.
 
-        // Step 4: Experience generalization (if embedding function provided).
-        if let Some(ref emb_fn) = embedding_fn {
-            let gen_config = gen_config.cloned().unwrap_or_default();
-            let gen_result = self.run_generalization(llm, emb_fn, &gen_config).await?;
-            result.procedural_created = gen_result.nodes_created;
-            result.procedural_boosted = gen_result.nodes_boosted;
-        }
+        // Step 4 (ADR-068 revision): Experience generalization is RETIRED —
+        // this method no longer runs it. Procedural promotion happens
+        // exclusively in the EpisodicDistiller (`promote_procedures`) with
+        // server-side LLM extraction, embedding clustering and a full audit
+        // trail. The legacy parameters are unused; they remain only to keep
+        // the trait/API stable while callers migrate.
+        let _ = (llm, embedding_fn, gen_config);
 
         // Step 5 (ADR-068 removed): History-node compression is gone.
         // Episodic retention (Step 7) handles space reclamation via

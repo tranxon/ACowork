@@ -716,16 +716,16 @@ async fn bootstrap_is_idempotent() {
 // ADR-068 M8 regression — Relationship has exactly ONE producer
 // ============================================================================
 
-/// Regression for review #32 A1: the session-end/compaction path
-/// (`MemoryManager::run_post_compaction_tasks`) must NOT write Relationship
-/// nodes. The old `run_relationship_generation` direct write produced
+/// Regression for review #32 A1 + the post-compaction cleanup: the offline
+/// consolidation loop and the (now removed) session-end maintenance path
+/// must NOT write Relationship nodes. The old producers wrote
 /// `AutobiographicalNode{category=Relationship, key=collaboration_span}`
 /// unconditionally (bypassing the opt-in distiller and its audit trail),
-/// which contradicted the ADR-068 single-producer rule. After the fix the
-/// only producer is `EpisodicDistiller::promote_autobio_relationship`, gated
-/// by `[memory.distiller].enabled`.
+/// which contradicted the ADR-068 single-producer rule. After the fixes the
+/// ONLY producer is `EpisodicDistiller::promote_autobio_relationship`,
+/// gated by `[memory.distiller].enabled`.
 #[tokio::test]
-async fn post_compaction_tasks_do_not_write_relationship_nodes() {
+async fn offline_consolidation_does_not_write_relationship_nodes() {
     let e2e = Adr068E2e::new();
     let provider = e2e.provider();
 
@@ -740,20 +740,28 @@ async fn post_compaction_tasks_do_not_write_relationship_nodes() {
     let before = provider
         .find_autobiographical_by_category(AutobioCategory::Relationship)
         .expect("relationship lookup ok");
-    assert!(before.is_empty(), "no Relationship node before compaction tasks");
+    assert!(before.is_empty(), "no Relationship node before consolidation");
 
-    // Run the exact path compaction + session-close invoke at runtime.
-    let manager = MemoryManager::new(MemoryManagerConfig::default());
-    manager
-        .run_post_compaction_tasks(provider.as_ref(), None)
-        .await;
+    // Run the exact provider call the background consolidation loop makes
+    // when the distiller is disabled (gen_config = None — experience
+    // generalization retired). Compaction/session-close invoke no inline
+    // maintenance tasks anymore, so this is the only periodic path besides
+    // the distiller step.
+    let offline_config = acowork_memory::consolidation::OfflineConsolidationConfig {
+        batch_size: 50,
+        min_pending_age_hours: 1,
+    };
+    provider
+        .run_offline_consolidation(&offline_config, None, None, None)
+        .await
+        .expect("offline consolidation ok");
 
     let after = provider
         .find_autobiographical_by_category(AutobioCategory::Relationship)
         .expect("relationship lookup ok");
     assert!(
         after.is_empty(),
-        "post-compaction tasks must not write Relationship nodes \
+        "offline consolidation must not write Relationship nodes \
          (ADR-068 single producer is the EpisodicDistiller); found: {:?}",
         after
             .iter()

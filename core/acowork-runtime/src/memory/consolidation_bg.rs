@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acowork_memory::consolidation::{
-    GeneralizationConfig, OfflineConsolidationConfig, SchedulerConfig, TripleExtractorLlm,
+    OfflineConsolidationConfig, SchedulerConfig, TripleExtractorLlm,
 };
 use chrono::Utc;
 use tokio::sync::Mutex;
@@ -252,10 +252,18 @@ async fn run_consolidation_loop(
             .await;
         }
 
-        // Run consolidation through the provider trait.
-        let gen_config = GeneralizationConfig::default();
+        // Run offline consolidation through the provider trait.
+        // ADR-068 revision: Experience generalization (Path C) is retired —
+        // no `gen_config` is passed; Procedural promotion is owned by the
+        // EpisodicDistiller (gated above). The offline pass only manages the
+        // node lifecycle (Pending -> Active/Dormant) and episodic retention.
         match provider
-            .run_offline_consolidation(&offline_config, Some(&*llm), Some(embedding_fn), Some(&gen_config))
+            .run_offline_consolidation(
+                &offline_config,
+                Some(&*llm),
+                Some(embedding_fn),
+                None, // gen_config — generalization retired
+            )
             .await
         {
             Ok(result) => {
