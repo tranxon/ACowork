@@ -13,6 +13,8 @@
 
 ## Revision(2026-09):沉淀方式收敛为两种可信来源,Path C 下线
 
+> **后续修订**:本 ADR 的 M4/M7 调度触发接线与运行时配置面由 [ADR-071](./ADR-071-distiller-runtime-config-and-trigger.md) 补全(触发口径与 legacy Pending 解耦、`agent_config.json` 分层配置、手动蒸馏、模型选择、prompt per-agent 覆盖)。
+
 **决策**:沉淀层(semantic)节点的产生只允许两种可信来源:
 
 1. **LLM 分析归纳的结论**——`EpisodicDistiller`(LLM 结构化提取 + embedding 聚簇 + LLM Judge + 完整证据/审计链)。唯一入口是 LLM 写入端经 `memory_store` 打 `knowledge_subtype` 标记的经历层 Episode。
