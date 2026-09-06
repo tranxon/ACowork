@@ -38,7 +38,7 @@ export function HarnessPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-chat-area">
+    <div className="flex flex-1 flex-col bg-page-bg">
       {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
         {tabs.map((tab) => (

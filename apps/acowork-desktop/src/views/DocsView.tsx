@@ -54,7 +54,7 @@ export function DocsView() {
   const offline = healthy === false;
 
   return (
-    <div className="flex h-full overflow-hidden rounded-xl bg-chat-area">
+    <div className="flex h-full overflow-hidden rounded-xl bg-page-bg">
       {/* 左侧目录树（离线也可浏览缓存） */}
       <DocTreeSidebar />
 

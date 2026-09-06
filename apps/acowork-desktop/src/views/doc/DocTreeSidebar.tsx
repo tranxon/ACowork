@@ -91,7 +91,7 @@ export function DocTreeSidebar() {
 
   return (
     <aside
-      className="flex h-full w-60 shrink-0 flex-col border-r border-zinc-200 bg-surface text-xs dark:border-zinc-800 dark:bg-zinc-900/60"
+      className="flex h-full w-60 shrink-0 flex-col border-r border-zinc-200 bg-page-bg text-xs dark:border-zinc-800 dark:bg-zinc-900/60"
       aria-label={t("doc.sidebarLabel")}
     >
       {/* ── 头部：标题 + 新建按钮 ───────────────────────────── */}

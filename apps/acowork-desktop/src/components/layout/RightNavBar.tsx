@@ -34,19 +34,19 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // naïve `fill="currentColor"` on lucide's single self-intersecting
     // path collapses both lids into one solid blob, losing the "open"
     // visual). `icon` is intentionally omitted.
-    { tab: "workspace", i18nKey: "resultsPanel.workspace", show: agentRunning },
+    { tab: "workspace", i18nKey: "rightPanel.workspace", show: agentRunning },
     // status uses the shared FilledGaugeIcon/OutlineGaugeIcon so the
     // filled state preserves the needle via SVG mask. Lucide's Activity
     // (heartbeat zigzag) had almost no body to fill — it just turned
     // into three small filled triangles, giving a weak selected state.
     // Gauge has a solid half-disc body that fills cleanly, and the
     // needle is preserved as a negative-space groove. `icon` omitted.
-    { tab: "status", i18nKey: "resultsPanel.status", show: true },
+    { tab: "status", i18nKey: "rightPanel.status", show: true },
     // memory uses the shared FilledDatabaseIcon/OutlineDatabaseIcon so the
     // middle disk-separator line stays visible on selection; `icon` is
     // intentionally omitted.
-    { tab: "memory", i18nKey: "resultsPanel.memory", show: agentRunning },
-    { tab: "tools", icon: Wrench, i18nKey: "resultsPanel.tools", show: agentRunning },
+    { tab: "memory", i18nKey: "rightPanel.memory", show: agentRunning },
+    { tab: "tools", icon: Wrench, i18nKey: "rightPanel.tools", show: agentRunning },
     // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
     // state preserves the central spine line via SVG mask. Without the
     // mask, the spine (M12 20v-9, fully inside the body) would be
@@ -58,12 +58,12 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // already implies agentRunning, so gating the nav entry on
     // agentRunning preserves the ADR's intent while removing an empty
     // `noAgentDebug` placeholder when nothing is running.
-    { tab: "debug", i18nKey: "resultsPanel.debug", show: agentRunning },
+    { tab: "debug", i18nKey: "rightPanel.debug", show: agentRunning },
     // setup uses the shared FilledSettingsIcon/OutlineSettingsIcon so the
     // center hole is preserved on selection; `icon` is intentionally omitted.
     // Placed last so the settings gear sits at the bottom of the nav rail,
     // visually separated from the content tabs.
-    { tab: "setup", i18nKey: "resultsPanel.setup", show: agentRunning },
+    { tab: "setup", i18nKey: "rightPanel.setup", show: agentRunning },
   ];
 
   return (
@@ -79,7 +79,7 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
               onClick={() => onTabChange(tab)}
               tooltip={t(i18nKey)}
               tooltipPosition="left"
-              // First button's top edge aligns with the SessionTabBar/ResultsPanel border-b (~33px)
+              // First button's top edge aligns with the SessionTabBar/RightPanel border-b (~33px)
               className={index === 0 ? "mt-[25px]" : undefined}
             >
               {tab === "setup" ? (

@@ -181,7 +181,7 @@
     "phaseStreaming": "正在生成回复...",
     "phaseToolExecuting": "正在执行工具...",
     "phaseWaitingApproval": "等待工具授权...",
-    "inputMessage": "",
+    "inputMessage": "输入消息...（Enter 发送，Shift+Enter 换行）",
     "inputMessageConnecting": "输入消息...（正在连接 Agent...）",
     "inputGatewayDisconnected": "Gateway 未连接",
     "ariaLabelChatMessages": "聊天消息",
@@ -614,7 +614,7 @@
     "testConn": "测试",
     "addAnyway": "仍然添加"
   },
-  "resultsPanel": {
+  "rightPanel": {
     "debug": "调试",
     "status": "状态",
     "memory": "记忆",

@@ -86,7 +86,7 @@ import { log } from "../../lib/logger";
 // getSnapshot should be cached" check and produces a "Maximum update depth
 // exceeded" infinite re-render loop during transient states (mount, agent
 // switch, session switch) where the agent's session entry does not yet
-// exist. The same pattern is already used in ResultsPanel.tsx.
+// exist. The same pattern is already used in RightPanel.tsx.
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
 /**
@@ -2089,7 +2089,7 @@ export function ChatPanel() {
         {/* Todo list box — above the message queue, same collapsible style.
           Shows current task list from todo_write tool calls. */}
         {todos.length > 0 && (
-          <div className="mx-5 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="mx-7 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
               className="flex items-center w-full px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
@@ -2169,7 +2169,7 @@ export function ChatPanel() {
           flush against input, slightly narrower for layered depth */}
         {queuedMessages.length > 0 && (
           <div className={cn(
-            "mx-5 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            "mx-7 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
@@ -2212,7 +2212,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-chat-area">
+        <div className="mx-3 mb-3 rounded-xl border border-right-panel bg-right-panel">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
@@ -2335,7 +2335,7 @@ export function ChatPanel() {
                     : t("chatPanel.inputMessage")
             }
             disabled={inputDisabled}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" || e.shiftKey) return;

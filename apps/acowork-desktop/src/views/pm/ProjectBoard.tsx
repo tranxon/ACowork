@@ -37,7 +37,7 @@ export function ProjectBoard({
   // 未选中项目 → 空提示
   if (!project) {
     return (
-      <main className="flex min-w-0 flex-1 items-center justify-center bg-chat-area">
+      <main className="flex min-w-0 flex-1 items-center justify-center bg-page-bg">
         <div className="text-center">
           <div className="text-3xl">📋</div>
           <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
@@ -66,7 +66,7 @@ export function ProjectBoard({
   }
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-chat-area">
+    <main className="flex min-w-0 flex-1 flex-col bg-page-bg">
       <ProjectHeader project={project} onNewTask={newTask} />
       {error && (
         <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:border-zinc-700 dark:bg-amber-950/40 dark:text-amber-300">

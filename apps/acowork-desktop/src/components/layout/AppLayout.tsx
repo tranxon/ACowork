@@ -5,7 +5,7 @@ import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
-import { ResultsPanel } from "../results/ResultsPanel";
+import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
 import { FileEditorPanel } from "../editor/FileEditorPanel";
 import { GatewayBanner } from "./GatewayBanner";
@@ -60,8 +60,8 @@ export function AppLayout() {
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>("gateway");
   const activeTab = useLayoutStore((s) => s.activePanelTab);
   const setActiveTab = useLayoutStore((s) => s.setActivePanelTab);
-  const resultsCollapsed = useLayoutStore((s) => s.resultsCollapsed);
-  const setResultsCollapsed = useLayoutStore((s) => s.setResultsCollapsed);
+  const rightPanelCollapsed = useLayoutStore((s) => s.rightPanelCollapsed);
+  const setRightPanelCollapsed = useLayoutStore((s) => s.setRightPanelCollapsed);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     if (stored) {
@@ -133,15 +133,15 @@ export function AppLayout() {
   sidebarWidthRef.current = sidebarWidth;
   const rightWidthRef = useRef(rightWidth);
   rightWidthRef.current = rightWidth;
-  const resultsCollapsedRef = useRef(resultsCollapsed);
-  resultsCollapsedRef.current = resultsCollapsed;
+  const rightPanelCollapsedRef = useRef(rightPanelCollapsed);
+  rightPanelCollapsedRef.current = rightPanelCollapsed;
 
   // Auto-size file panel to half available area on first open
   useEffect(() => {
     if (hasOpenFiles && !fileWidthInitialized.current) {
       fileWidthInitialized.current = true;
       const navWidth = 48;
-      const actualRightWidth = resultsCollapsed ? 0 : rightWidth;
+      const actualRightWidth = rightPanelCollapsed ? 0 : rightWidth;
       const available = window.innerWidth - sidebarWidth - actualRightWidth - navWidth;
       const halfWidth = Math.min(Math.max(Math.round(available / 2), MIN_FILE_WIDTH), MAX_FILE_WIDTH);
       // Always recalculate on first open to respect current window size,
@@ -152,7 +152,7 @@ export function AppLayout() {
     if (!hasOpenFiles) {
       fileWidthInitialized.current = false;
     }
-  }, [hasOpenFiles, sidebarWidth, rightWidth, resultsCollapsed]);
+  }, [hasOpenFiles, sidebarWidth, rightWidth, rightPanelCollapsed]);
 
   const gatewayStatus = useGatewayStore((s) => s.status);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
@@ -470,7 +470,7 @@ export function AppLayout() {
 
   // ── Reveal workspace panel on locate-in-tree requests ────────────
   // The FileEditorPanel's "locate" button publishes a request via
-  // workspaceStore.requestLocate; here we ensure the right-side results
+  // workspaceStore.requestLocate; here we ensure the right-side
   // panel is expanded and the workspace tab is active so the user can
   // actually see the revealed file.
   const locateRequest = useWorkspaceStore((s) => s.locateRequest);
@@ -479,9 +479,9 @@ export function AppLayout() {
     if (!locateRequest) return;
     if (locateRequest.seq <= consumedLocateSeqRef.current) return;
     consumedLocateSeqRef.current = locateRequest.seq;
-    setResultsCollapsed(false);
+    setRightPanelCollapsed(false);
     setActiveTab("workspace");
-  }, [locateRequest, setResultsCollapsed, setActiveTab]);
+  }, [locateRequest, setRightPanelCollapsed, setActiveTab]);
 
   const isResizing = useRef(false);
   const startX = useRef(0);
@@ -648,14 +648,14 @@ export function AppLayout() {
   // Sidebar and right panel keep their absolute widths; only session & file panels scale.
   // Small manual edge-drags (<5%) are ignored to avoid jitter.
   const NAV_WIDTH = 48;
-  const prevAvailableWidthRef = useRef(window.innerWidth - sidebarWidth - (resultsCollapsed ? 0 : rightWidth) - NAV_WIDTH);
+  const prevAvailableWidthRef = useRef(window.innerWidth - sidebarWidth - (rightPanelCollapsed ? 0 : rightWidth) - NAV_WIDTH);
   useEffect(() => {
     const handleWindowResize = () => {
       // Don't scale during manual panel resize
       if (isResizingFile.current) return;
 
       const newWindowWidth = window.innerWidth;
-      const constantWidths = sidebarWidthRef.current + (resultsCollapsedRef.current ? 0 : rightWidthRef.current) + NAV_WIDTH;
+      const constantWidths = sidebarWidthRef.current + (rightPanelCollapsedRef.current ? 0 : rightWidthRef.current) + NAV_WIDTH;
       const newAvailable = newWindowWidth - constantWidths;
       const prevAvailable = prevAvailableWidthRef.current;
 
@@ -683,8 +683,8 @@ export function AppLayout() {
     return () => window.removeEventListener("resize", handleWindowResize);
   }, []);
 
-  const toggleResults = useCallback(() => {
-    setResultsCollapsed((prev) => !prev);
+  const toggleRightPanel = useCallback(() => {
+    setRightPanelCollapsed((prev) => !prev);
   }, []);
 
   // Navigate to settings with profile tab when avatar is clicked
@@ -811,12 +811,12 @@ export function AppLayout() {
     currentWidthRefFile.current = fileWidth;
     // Calculate dynamic max to ensure ChatPanel retains enough width for the collapsed toolbar
     const navWidth = 48;
-    const actualRightWidth = resultsCollapsed ? 0 : rightWidth;
+    const actualRightWidth = rightPanelCollapsed ? 0 : rightWidth;
     const dynamicMax = Math.max(window.innerWidth - sidebarWidth - actualRightWidth - navWidth - MIN_CHAT_WIDTH, MIN_FILE_WIDTH);
     maxFileWidthRef.current = Math.min(MAX_FILE_WIDTH, dynamicMax);
     document.addEventListener("mousemove", handleMouseMoveFile);
     document.addEventListener("mouseup", handleMouseUpFile);
-  }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightWidth, resultsCollapsed]);
+  }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightWidth, rightPanelCollapsed]);
 
   return (
     <div className="flex h-full w-full flex-col" style={{ backgroundColor: glassBg } as React.CSSProperties}>
@@ -840,7 +840,7 @@ export function AppLayout() {
 
         {/* Content area based on current view */}
         {currentView === "chat" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-chat-area">
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             {/* Agent list — resizable */}
             <AgentList width={sidebarWidth} />
 
@@ -874,9 +874,9 @@ export function AppLayout() {
               </>
             )}
 
-            {/* Results panel — unified tabs, collapsible, resizable */}
-            {!resultsCollapsed && (
-              <ResultsPanel width={rightWidth} onCollapse={toggleResults} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
+            {/* Right panel — unified tabs, collapsible, resizable */}
+            {!rightPanelCollapsed && (
+              <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
             )}
           </div>
         )}
@@ -890,37 +890,37 @@ export function AppLayout() {
           <RightNavBar
             activeTab={activeTab}
             onTabChange={(tab) => {
-              if (!resultsCollapsed && tab === activeTab) {
-                setResultsCollapsed(true);
+              if (!rightPanelCollapsed && tab === activeTab) {
+                setRightPanelCollapsed(true);
               } else {
-                setResultsCollapsed(false);
+                setRightPanelCollapsed(false);
                 setActiveTab(tab);
               }
             }}
             agentRunning={selectedAgent?.running ?? false}
-            collapsed={resultsCollapsed}          />
+            collapsed={rightPanelCollapsed}          />
         )}
 
         {currentView === "settings" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-chat-area">
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <SettingsPage initialTab={settingsInitialTab} />
           </div>
         )}
 
         {currentView === "harness" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-chat-area">
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <HarnessPage />
           </div>
         )}
 
         {currentView === "projects" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-chat-area">
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <ProjectsView />
           </div>
         )}
 
         {currentView === "docs" && (
-          <div className="flex flex-1 overflow-hidden rounded-xl bg-chat-area">
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-page-bg">
             <DocsView />
           </div>
         )}
@@ -978,7 +978,7 @@ export function AppLayout() {
             </button>
           </Tooltip>
         )}
-        {(resultsCollapsed || activeTab !== "status") && selectedAgent?.running && agentDisplayName && (
+        {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.running && agentDisplayName && (
           <span className="flex items-center gap-2 truncate">
             <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
               <Bot className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />

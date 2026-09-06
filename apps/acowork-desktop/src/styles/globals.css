@@ -49,21 +49,39 @@
   --color-editor-canvas: #FFFFFF;
   /* = Monaco `vs` background — file editor / preview surface (light) */
   /* App-wide surface palette — the large empty planes users see first:
-        - chat-area     : main working surface (chat panel, settings/harness
-                          page background, full-screen pages). Light = #FAFAFA
-                          (zinc-50, a hair below pure white to reduce eye
-                          strain in long sessions); dark = zinc-900.
-        - modal-surface : content card inside dialogs, dropdowns, popovers,
+        - page-bg        : unified page background (chat/settings/harness/
+                          pm/doc surfaces). Light = #FAFAFA (zinc-50, a hair
+                          below pure white to reduce eye strain in long
+                          sessions); dark = zinc-950 (#131316). Replaces the
+                          retired --color-chat-area token (same value).
+        - right-panel    : RightPanel surface (the 6 right-side tabs), one
+                          step darker than page-bg so the panel reads as a
+                          distinct raised surface.
+        - panel-block    : the single base fill for embedded card / list /
+                          block surfaces inside the 6 right-side panel tabs
+                          (status/tools/debug/setup/memory/workspace).
+                          Raised one step above right-panel — like
+                          modal-surface, but scoped so dialogs & popovers
+                          keep their own token and stay distinguishable.
+        - modal-surface  : content card inside dialogs, dropdowns, popovers,
                           and the "card inside a page" pattern (Harness /
-                          Settings / Results tabs). Always opaque to clearly
-                          distinguish from the chat-area backdrop.
-        - modal-overlay : the scrim behind modals. Theme-independent —
+                          Settings). Always opaque to clearly distinguish
+                          from the page-bg backdrop. Right-panel embedded
+                          blocks use `panel-block` (above), not this token.
+        - modal-overlay  : the scrim behind modals. Theme-independent —
                           the same `black/50` works in both modes.
-     Both light & dark values are auto-flipped in the .dark block, so
-     consumers just write `bg-chat-area` / `bg-modal-surface` /
-     `bg-modal-overlay` with no `dark:` prefix needed. */
-  --color-chat-area: hsl(0 0% 98%);
-  /* = #FAFAFA, zinc-50 — main working surface (light) */
+        Both light & dark values are auto-flipped in the .dark block, so
+        consumers just write `bg-page-bg` / `bg-right-panel` /
+        `bg-panel-block` / `bg-modal-surface` / `bg-modal-overlay`
+        with no `dark:` prefix needed. */
+  --color-page-bg: hsl(0 0% 98%);
+  /* = #FAFAFA — unified page background (chat/settings/harness/pm/doc) */
+  --color-right-panel: hsl(0 0% 95.3%);
+  /* = #F3F3F3, zinc-100 — right panel surface (light) */
+  --color-panel-block: hsl(0 0% 100%);
+  /* = #FFFFFF — right-panel embedded card/list/block base (light).
+     Formerly scattered across modal-surface / bg-zinc-* fills inside
+     the right-side tabs; this one token now drives them all. */
   --color-modal-surface: hsl(0 0% 100%);
   /* = #FFFFFF — dialog / dropdown / card content surface (light) */
   --color-modal-overlay: hsl(0 0% 0% / 0.5);
@@ -136,7 +154,7 @@
   /* Spacing */
   --spacing-nav: 52px;
   --spacing-agent-list: 240px;
-  --spacing-results: 320px;
+  --spacing-right-panel: 320px;
   --spacing-chat-min: 360px;
 
   /* UI element sizing tokens */
@@ -218,7 +236,7 @@
   --shimmer-mid: hsl(240 5% 80%);
   --shimmer-to: hsl(240 5% 26%);
 
-  /* Tab bar layout — unified across SessionTabBar & ResultsPanel tabs */
+  /* Tab bar layout — unified across SessionTabBar & RightPanel tabs */
   --tab-font-size: 0.75rem;
   --tab-line-height: 1rem;
   --tab-py: 0.375rem;
@@ -300,8 +318,12 @@
   --color-editor-canvas: #1E1E1E;
   /* = Monaco `vs-dark` background — file editor / preview surface (dark) */
   /* App-wide surface palette (dark) — auto-flips the @theme light values. */
-  --color-chat-area: hsl(240 5.9% 10%);
-  /* = zinc-900, #18181b — main working surface (dark) */
+  --color-page-bg: hsl(240 5.9% 6%);
+  /* = zinc-950 附近，#131316 — unified page background (chat/settings/harness/pm/doc) */
+  --color-right-panel: hsl(0 0% 11.7%);
+  /* = #1E1E1E — right panel surface (dark) */
+  --color-panel-block: hsl(240 3.8% 15.7%);
+  /* = zinc-800, #27272a — right-panel embedded card/list/block base (dark) */
   --color-modal-surface: hsl(240 3.8% 15.7%);
   /* = zinc-800, #27272a — dialog / dropdown / card content surface (dark) */
   /* modal-overlay is theme-independent (black/50 in both modes) */

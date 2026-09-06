@@ -422,7 +422,7 @@ export function AgentSetupTab() {
     };
   }, [selectedAgentId]);
 
-  // Sync the new temperature into the chat store so the ResultsPanel
+  // Sync the new temperature into the chat store so the RightPanel
   // status tab shows the updated value right away, without waiting for
   // the next WebSocket session_state event (which may be delayed if the
   // agent is mid-streaming). Lifted out of the old `handleApply` and
@@ -545,7 +545,7 @@ export function AgentSetupTab() {
 
   if (!selectedAgentId || !selectedAgent || !profile) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6">
+      <div className="flex flex-1 items-center justify-center bg-right-panel p-6">
         <span className="text-xs text-zinc-400 dark:text-zinc-500">{t("agentSetup.noAgentSelected")}</span>
       </div>
     );
@@ -561,7 +561,7 @@ export function AgentSetupTab() {
   const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
-    <div className="flex-1 overflow-y-auto p-3">
+    <div className="flex-1 overflow-y-auto bg-right-panel p-3">
       {/* Avatar preview — click to open picker popup */}
       <div className="mb-3 flex items-center gap-3">
         <div className="relative">
@@ -699,7 +699,7 @@ export function AgentSetupTab() {
       </div>
 
       {/* Agent Name */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.agentName")}
         </label>
@@ -710,12 +710,17 @@ export function AgentSetupTab() {
             setProfile(selectedAgentId, { displayName: e.target.value || undefined })
           }
           placeholder={selectedAgent.name ?? "Agent name"}
-          className="rounded-md bg-modal-surface"
+          className="rounded-md bg-panel-block"
         />
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Max Output Tokens */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.maxOutputTokens")}
         </label>
@@ -738,15 +743,20 @@ export function AgentSetupTab() {
             );
           }}
           placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
-          className="rounded-md bg-modal-surface"
+          className="rounded-md bg-panel-block"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.leaveEmptyDefault")}
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Max Iterations */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.maxIterations")}
         </label>
@@ -763,12 +773,17 @@ export function AgentSetupTab() {
             );
           }}
           placeholder={t("agentSetup.defaultIterations")}
-          className="rounded-md bg-modal-surface"
+          className="rounded-md bg-panel-block"
         />
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Max Sessions (ADR-024) */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.maxSessions")}
         </label>
@@ -785,15 +800,20 @@ export function AgentSetupTab() {
             );
           }}
           placeholder="2000 (default)"
-          className="rounded-md bg-modal-surface"
+          className="rounded-md bg-panel-block"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.maxSessionsDesc")}
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Context Window */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.contextWindow")}
         </label>
@@ -817,7 +837,7 @@ export function AgentSetupTab() {
                 }
               }
             }}
-            className="w-32 rounded-md bg-modal-surface"
+            className="w-32 rounded-md bg-panel-block"
           />
           <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
             {t("agentSetup.tokens")}
@@ -828,8 +848,13 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Approval Timeout */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.approvalTimeout")}
         </label>
@@ -847,15 +872,20 @@ export function AgentSetupTab() {
             );
           }}
           placeholder="300 (5 min)"
-          className="rounded-md bg-modal-surface"
+          className="rounded-md bg-panel-block"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.approvalTimeoutDesc")}
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Idle (auto-sleep) Timeout */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.idleTimeout")}
         </label>
@@ -880,8 +910,13 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Shell Command Approval Threshold */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.shellCommandApproval")}
         </label>
@@ -932,8 +967,13 @@ export function AgentSetupTab() {
         </button>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Temperature slider */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.temperature")}
         </label>
@@ -960,8 +1000,13 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating each independent
+          setting (avatar+name are treated as one group above). Matches
+          the workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Compression Ratio Threshold (ADR-061) */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.compressionRatioThreshold")}
         </label>
@@ -991,8 +1036,12 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating the last setting
+          from the footer actions. Matches the divider style above. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
-      <div className="mt-4 border-t border-zinc-200 pt-3 dark:border-zinc-700 flex items-center gap-3">
+      <div className="flex items-center gap-3">
         <span
           className="flex-1 text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500"
           aria-live="polite"

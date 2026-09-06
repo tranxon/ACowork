@@ -224,12 +224,12 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
         {t("prompts.title")}
       </span>
 
-      {/* Card — original style (header + body in one unit with
-          bg-white/60 and border). The header row stays INSIDE the card
+      {/* Card — shared right-panel block surface (bg-panel-block) with a
+          border. The header row stays INSIDE the card
           (chevron + count on the left toggle the body; reload button on
           the right stops propagation so it doesn't toggle). The body
           uses a thin border-t to separate from the header when open. */}
-      <div className="mt-1 rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
+      <div className="mt-1 rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
         <div className="flex w-full items-center gap-2 px-3 py-2">
           <button
             type="button"

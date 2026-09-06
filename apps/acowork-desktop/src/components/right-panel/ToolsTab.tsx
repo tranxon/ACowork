@@ -70,7 +70,7 @@ function McpServerCard({
   const hasExpandableBody = isChecked && tools.length > 0;
   const showBody = open && hasExpandableBody;
   return (
-    <div className="rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
+    <div className="rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
       {/* Header — clickable to toggle collapse; switch stops
           propagation so the activation toggle stays independent. */}
       <button
@@ -214,7 +214,7 @@ export function ToolsTab() {
     // ADR-034 Phase 5: Replaces 3 separate calls (config, mcp-servers, search-providers).
     // Bug B v3 fix: the merged `/tools` endpoint proxies through the
     // Runtime and 503s during the boot window. `with503Retry` rides out
-    // the transient 503 so the Results/Tools panel does not have to
+    // the transient 503 so the RightPanel/Tools tab does not have to
     // gate on `meta.ready` — same root-cause as `fetchWorkspaces` /
     // `fetchTree` / `fetchNodes` / `fetchLatestSession`.
     (async () => {
@@ -472,27 +472,27 @@ export function ToolsTab() {
 
   if (!selectedAgentId || !selectedAgent) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6">
+      <div className="flex flex-1 items-center justify-center bg-right-panel p-6">
         <span className="text-xs text-zinc-400 dark:text-zinc-500">{t("agentSetup.noAgentSelected")}</span>
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-y-auto p-3">
+    <div className="flex-1 overflow-y-auto bg-right-panel p-3">
       {/* ADR-029: Builtin Tools */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.builtinTools")}
         </label>
         {builtinToolsAll.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
+          <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noBuiltinTools")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
               {builtinToolsAll.map((entry) => (
                 <div
@@ -519,19 +519,24 @@ export function ToolsTab() {
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating the functional
+          blocks (Builtin Tools / Web Search / MCP). Matches the
+          workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* Web Search Providers */}
-      <div className="mb-3 space-y-1">
+      <div className="space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.webSearchProviders")}
         </label>
         {searchProviders.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
+          <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noSearchKeys")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
               {searchProviders.map((sp) => {
                 const active = activeSearch.find((p) => p.provider === sp.id);
@@ -602,13 +607,18 @@ export function ToolsTab() {
         </p>
       </div>
 
+      {/* Divider — full panel-width hairline separating the functional
+          blocks (Builtin Tools / Web Search / MCP). Matches the
+          workspace/memory panel divider style. */}
+      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
       {/* MCP Server Activation */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.mcpServers")}
         </label>
         {mcpServerDefs.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
+          <div className="rounded-md border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noMcpInCatalog")}
             </span>

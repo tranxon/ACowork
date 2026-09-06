@@ -158,14 +158,14 @@ export function MemoryPanel() {
   // ── Empty state: no agent selected ──
   if (!selectedAgentId) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6 text-xs text-zinc-400 dark:text-zinc-500">
+      <div className="flex flex-1 items-center justify-center bg-right-panel p-6 text-xs text-zinc-400 dark:text-zinc-500">
         {t("memoryPanel.selectAgent")}
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
       {/* Filters */}
       <div className="flex flex-col gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <StyledInput
@@ -173,7 +173,7 @@ export function MemoryPanel() {
           value={filters.keyword}
           onChange={(e) => setFilters({ keyword: e.target.value })}
           placeholder={t("memoryPanel.searchNodes")}
-          className="rounded-md bg-modal-surface px-2.5 py-1.5"
+          className="rounded-md bg-panel-block px-2.5 py-1.5"
         />
         <div className="flex gap-2">
           <Dropdown
@@ -375,7 +375,7 @@ function StatCard({
   value: string | number;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded border border-zinc-200 p-2 dark:border-zinc-700">
+    <div className="min-w-0 overflow-hidden rounded border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
       <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400" title={label}>{label}</p>
       <p
         className="mt-0.5 truncate text-xs font-semibold text-zinc-700 dark:text-zinc-200"

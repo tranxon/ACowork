@@ -164,7 +164,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
     return (
       <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
         <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-        <aside className="absolute inset-y-0 right-0 w-[480px] bg-chat-area p-6 shadow-xl dark:bg-zinc-900">
+        <aside className="absolute inset-y-0 right-0 w-[480px] bg-page-bg p-6 shadow-xl dark:bg-zinc-900">
           <div className="h-5 w-48 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-4 h-3 w-32 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-6 h-40 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
@@ -177,7 +177,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
     return (
       <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
         <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-        <aside className="absolute inset-y-0 right-0 w-[480px] bg-chat-area p-6 shadow-xl dark:bg-zinc-900">
+        <aside className="absolute inset-y-0 right-0 w-[480px] bg-page-bg p-6 shadow-xl dark:bg-zinc-900">
           <p className="text-xs text-zinc-500">
             {error ?? t("pm.task.taskNotFound")}
           </p>
@@ -202,7 +202,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         role="dialog"
         aria-modal="true"
         aria-label={detail?.title || t("pm.task.details")}
-        className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-chat-area shadow-xl outline-none dark:bg-zinc-900"
+        className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-page-bg shadow-xl outline-none dark:bg-zinc-900"
       >
         {/* 头部：标题 + 徽章 + 关闭 */}
         <header className="shrink-0 border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">

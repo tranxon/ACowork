@@ -99,7 +99,7 @@ export function ProjectsView() {
   // 三态：加载骨架
   if (loadingProjects && projects.length === 0) {
     return (
-      <div className="flex h-full w-full overflow-hidden rounded-xl bg-chat-area">
+      <div className="flex h-full w-full overflow-hidden rounded-xl bg-page-bg">
         <div className="w-60 shrink-0 animate-pulse space-y-2 border-r border-zinc-200 p-3 dark:border-zinc-700">
           {[0, 1, 2, 3, 4].map((i) => (
             <div key={i} className="h-9 rounded-md bg-zinc-100 dark:bg-zinc-800" />
@@ -123,7 +123,7 @@ export function ProjectsView() {
   // 不再依赖脆弱的 `document.getElementById(...)?.click()` DOM 反查。
   if (projects.length === 0 && !loadingProjects) {
     return (
-      <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-chat-area">
+      <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-page-bg">
         <ServiceOfflineBanner />
         <div className="flex min-h-0 flex-1">
           <ProjectSidebar />
@@ -153,7 +153,7 @@ export function ProjectsView() {
   }
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-chat-area">
+    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-page-bg">
       <ServiceOfflineBanner />
       <div className="flex min-h-0 flex-1">
         {/* 左侧项目列表 — 240px 固定宽 */}

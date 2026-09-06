@@ -105,15 +105,15 @@ export function CompressionHistoryCard({
   }, []);
 
   return (
-    <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
+    <div className="rounded-md border border-zinc-200 bg-panel-block p-3 dark:border-zinc-700">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-          {t("resultsPanel.compressionHistory", { count: rows?.length ?? 0 })}
+          {t("rightPanel.compressionHistory", { count: rows?.length ?? 0 })}
         </span>
         <button
           type="button"
           onClick={() => void load()}
-          title={t("resultsPanel.buttonRefresh")}
+          title={t("rightPanel.buttonRefresh")}
           className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
         >
           <RefreshCw className="h-3.5 w-3.5" />
@@ -123,19 +123,19 @@ export function CompressionHistoryCard({
       {rows === null && !error && (
         <div className="flex items-center justify-center gap-2 py-3 text-xs text-zinc-400">
           <Loader className="h-3.5 w-3.5 animate-spin" />
-          {t("resultsPanel.loadingCompressionHistory")}
+          {t("rightPanel.loadingCompressionHistory")}
         </div>
       )}
 
       {error && (
         <div className="py-3 text-center text-xs text-red-500">
-          {t("resultsPanel.compressionHistoryError")}: {error}
+          {t("rightPanel.compressionHistoryError")}: {error}
         </div>
       )}
 
       {rows !== null && !error && rows.length === 0 && (
         <div className="py-3 text-center text-xs text-zinc-400">
-          {t("resultsPanel.noCompressionEvents")}
+          {t("rightPanel.noCompressionEvents")}
         </div>
       )}
 
@@ -183,28 +183,28 @@ export function CompressionHistoryCard({
                 {isOpen && (
                   <div className="mx-2 mb-2 mt-0.5 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-400">
                     <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compTime")}: {time}
+                      {t("rightPanel.compTime")}: {time}
                     </div>
                     <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compLevel")}: {m.level}
+                      {t("rightPanel.compLevel")}: {m.level}
                     </div>
                     <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compTokens")}: {formatTokens(before)} → {formatTokens(after)}
+                      {t("rightPanel.compTokens")}: {formatTokens(before)} → {formatTokens(after)}
                     </div>
                     <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compRatio")}: {ratio}
+                      {t("rightPanel.compRatio")}: {ratio}
                     </div>
                     {m.model && (
                       <div
                         className="whitespace-nowrap leading-4"
                         title={m.model}
                       >
-                        {t("resultsPanel.compModel")}: {m.model}
+                        {t("rightPanel.compModel")}: {m.model}
                       </div>
                     )}
                     {(m.compacted_from_id || m.compacted_to_id) && (
                       <div className="whitespace-nowrap leading-4">
-                        {t("resultsPanel.compRange")}: {shortId(m.compacted_from_id)} → {shortId(m.compacted_to_id)}
+                        {t("rightPanel.compRange")}: {shortId(m.compacted_from_id)} → {shortId(m.compacted_to_id)}
                       </div>
                     )}
                   </div>

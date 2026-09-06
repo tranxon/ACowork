@@ -181,7 +181,7 @@
     "phaseStreaming": "応答を生成中...",
     "phaseToolExecuting": "ツール実行中...",
     "phaseWaitingApproval": "ツール承認待ち...",
-    "inputMessage": "",
+    "inputMessage": "メッセージを入力...（Enterで送信、Shift+Enterで改行）",
     "inputMessageConnecting": "メッセージを入力...（Agentに接続中...）",
     "inputGatewayDisconnected": "Gateway 未接続",
     "ariaLabelChatMessages": "チャットメッセージ",
@@ -602,7 +602,7 @@
     "testConn": "テスト",
     "addAnyway": "それでも追加"
   },
-  "resultsPanel": {
+  "rightPanel": {
     "debug": "デバッグ",
     "status": "ステータス",
     "memory": "メモリ",

@@ -79,7 +79,7 @@ export function ReviewQueue() {
   const pendingCount = requests.length;
 
   return (
-    <div className="shrink-0 border-b border-zinc-200 bg-surface dark:border-zinc-800">
+    <div className="shrink-0 border-b border-zinc-200 bg-page-bg dark:border-zinc-800">
       {/* ── 顶条 ──────────────────────────────────────────── */}
       <button
         type="button"

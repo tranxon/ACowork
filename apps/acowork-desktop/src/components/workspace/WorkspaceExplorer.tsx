@@ -746,7 +746,7 @@ export function WorkspaceExplorer() {
 
     if (!selectedAgent?.running) {
         return (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-right-panel p-6 text-xs text-zinc-500 dark:text-zinc-400">
                 <FolderOpen className="h-6 w-6" />
                 <span>{t("workspace.explorer.agentNotRunning")}</span>
             </div>
@@ -754,7 +754,7 @@ export function WorkspaceExplorer() {
     }
 
     return (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
             {/* Workspace selector + action buttons */}
             <div className="flex items-center gap-0.5 border-b border-zinc-200 px-1.5 py-1.5 dark:border-zinc-800">
                 <WorkspaceSelector dropDirection="down" />

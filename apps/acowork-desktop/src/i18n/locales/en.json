@@ -69,7 +69,7 @@
     "imageUnsupportedDesc": "Please switch to one of these image-capable models:",
     "inputParams": "Enter params... (Enter to send, Shift+Enter for new line)",
     "inputParamsConnecting": "Enter params... (Connecting to agent...)",
-    "inputMessage": "",
+    "inputMessage": "Type a message... (Enter to send, Shift+Enter for new line)",
     "inputMessageConnecting": "Type a message... (Connecting to agent...)",
     "inputGatewayDisconnected": "Gateway not connected",
     "selectModel": "Select model",
@@ -737,7 +737,7 @@
     "testConn": "Test",
     "addAnyway": "Add Anyway"
   },
-  "resultsPanel": {
+  "rightPanel": {
     "debug": "Debug",
     "status": "Status",
     "memory": "Memory",

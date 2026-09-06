@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-/** Right-side results panel tabs — keep in sync with AppLayout.PanelTab. */
+/** Right panel tabs — keep in sync with AppLayout.PanelTab. */
 export type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 
 /**
@@ -22,23 +22,23 @@ export interface FilePanelBounds {
 }
 
 interface LayoutState {
-    /** Currently active tab in the right-side results panel. */
+    /** Currently active tab in the right panel. */
     activePanelTab: PanelTab;
     setActivePanelTab: (tab: PanelTab) => void;
 
-    /** Whether the right-side results panel is collapsed. */
-    resultsCollapsed: boolean;
+    /** Whether the right panel is collapsed. */
+    rightPanelCollapsed: boolean;
     /**
      * Update the collapsed state. Accepts either a boolean or an updater
      * function (mirrors React's `setState(prev => !prev)` API) so call sites
      * can avoid stale-closure bugs.
      */
-    setResultsCollapsed: (collapsed: boolean | ((prev: boolean) => boolean)) => void;
+    setRightPanelCollapsed: (collapsed: boolean | ((prev: boolean) => boolean)) => void;
 
     /**
      * Monotonically-increasing counter for "show me the workspace panel" requests.
      * AppLayout consumes each new value once (via a local ref) to expand the
-     * results panel and switch the active tab to "workspace", even when the
+     * right panel and switch the active tab to "workspace", even when the
      * user clicks the trigger repeatedly for the same file.
      */
     workspacePanelRequestSeq: number;
@@ -61,12 +61,12 @@ export const useLayoutStore = create<LayoutState>((set) => ({
     activePanelTab: "workspace",
     setActivePanelTab: (tab) => set({ activePanelTab: tab }),
 
-    resultsCollapsed: false,
-    setResultsCollapsed: (collapsed) =>
+    rightPanelCollapsed: false,
+    setRightPanelCollapsed: (collapsed) =>
         set((state) => ({
-            resultsCollapsed:
+            rightPanelCollapsed:
                 typeof collapsed === "function"
-                    ? (collapsed as (prev: boolean) => boolean)(state.resultsCollapsed)
+                    ? (collapsed as (prev: boolean) => boolean)(state.rightPanelCollapsed)
                     : collapsed,
         })),
 

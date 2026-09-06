@@ -169,7 +169,7 @@ const handleCompressSummary = () => {
     setOpen(false);
   };
 
-  // Same precision contract as `formatTokenCount` in `ResultsPanel.tsx`:
+  // Same precision contract as `formatTokenCount` in `RightPanel.tsx`:
   // 2 decimals for M (= 10K granularity), 1 decimal for K.  Kept in
   // sync because the two values rendered side by side (e.g.
   // `2.71M / 2.78M` for cache vs. input) must speak the same

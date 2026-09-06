@@ -180,7 +180,7 @@
     "phaseStreaming": "正在產生回覆...",
     "phaseToolExecuting": "正在執行工具...",
     "phaseWaitingApproval": "等待工具授權...",
-    "inputMessage": "",
+    "inputMessage": "輸入訊息...（Enter 傳送，Shift+Enter 換行）",
     "inputMessageConnecting": "輸入訊息...（正在連線至 Agent...）",
     "inputGatewayDisconnected": "Gateway 未連線",
     "ariaLabelChatMessages": "聊天訊息",
@@ -601,7 +601,7 @@
     "testConn": "測試",
     "addAnyway": "仍然新增"
   },
-  "resultsPanel": {
+  "rightPanel": {
     "debug": "除錯",
     "status": "狀態",
     "memory": "記憶",

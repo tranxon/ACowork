@@ -65,7 +65,7 @@ function deriveWatchGroups(): Map<GroupKey, string[]> {
 
     // 2. Visible workspace panel → root + expanded directories.
     const layout = useLayoutStore.getState();
-    if (layout.activePanelTab === "workspace" && !layout.resultsCollapsed) {
+    if (layout.activePanelTab === "workspace" && !layout.rightPanelCollapsed) {
         const agentId = useAgentStore.getState().selectedAgentId;
         if (agentId) {
             const sessionId = useChatStore.getState().getActiveSessionId(agentId);
