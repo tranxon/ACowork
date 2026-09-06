@@ -1327,9 +1327,34 @@ impl SessionTask {
                         "SessionTask: manual compact_context triggered"
                     );
                     let model_name = agent_loop.session.model().unwrap_or("default").to_string();
-                    agent_loop
+                    if let Err(e) = agent_loop
                         .compact_history_if_needed(&model_name, true)
-                        .await;
+                        .await
+                    {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Manual compact_context failed"
+                        );
+                        if let Some(ref tx) = chunk_tx {
+                            let (user_message, detail, error_type) = e.error_info();
+                            let event = SessionChunkEvent {
+                                session_id: session_id.clone(),
+                                event: ChunkEvent::Error {
+                                    user_message,
+                                    detail,
+                                    error_type,
+                                    message_id: String::new(),
+                                },
+                            };
+                            if tx.send(event).await.is_err() {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    "Failed to send Error chunk event (manual compaction)"
+                                );
+                            }
+                        }
+                    }
                 }
                 Some(SessionMessage::CompressAction(action)) => {
                     tracing::info!(
@@ -1340,9 +1365,34 @@ impl SessionTask {
                     match action {
                         crate::agent::loop_::CompressionAction::CompressSummary => {
                             let model_name = agent_loop.session.model().unwrap_or("default").to_string();
-                            agent_loop
+                            if let Err(e) = agent_loop
                                 .compact_history_if_needed(&model_name, true)
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    session_id = %session_id,
+                                    error = %e,
+                                    "Manual compress action failed"
+                                );
+                                if let Some(ref tx) = chunk_tx {
+                                    let (user_message, detail, error_type) = e.error_info();
+                                    let event = SessionChunkEvent {
+                                        session_id: session_id.clone(),
+                                        event: ChunkEvent::Error {
+                                            user_message,
+                                            detail,
+                                    error_type,
+                                    message_id: String::new(),
+                                },
+                            };
+                            if tx.send(event).await.is_err() {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    "Failed to send Error chunk event (manual compress action)"
+                                );
+                            }
+                                }
+                            }
                         }
                     }
                 }

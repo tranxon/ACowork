@@ -122,28 +122,16 @@ pub struct ModelCapabilitiesInfo {
 }
 
 impl ModelCapabilitiesInfo {
-    /// Effective input token budget.
+    /// Output-space reserve derived from this model's caps and the user's
+    /// `max_output_tokens_limit`.
     ///
-    /// Derivation:
-    /// 1. `max_input_tokens` provided — authoritative, use directly.
-    /// 2. `max_input_tokens` missing — reserve output space capped by
-    ///    `max_output_tokens_limit`, then `context_window - output_reserve`.
-    ///
-    /// `max_output_tokens_limit` is the global cap (default 32K, configurable
-    /// by user). Set to 0 to disable capping models.dev values — but when
-    /// models.dev also provides nothing, the system default (32K) is used
-    /// as a safety floor so the model always has output space.
-    pub fn effective_input_budget(&self, max_output_tokens_limit: u64) -> u64 {
-        if let Some(max_input) = self.max_input_tokens {
-            return max_input;
-        }
-
-        // output_reserve derivation:
-        // - models.dev provides output → cap it by limit (if limit > 0),
-        //   otherwise use raw value (user disabled the cap).
-        // - models.dev missing, limit > 0 → use limit as default reserve.
-        // - both missing/0 → fall back to system default (32K).
-        let output_reserve = if self.max_output_tokens > 0 {
+    /// - models.dev provides output → cap it by limit (if limit > 0),
+    ///   otherwise use raw value (user disabled the cap).
+    /// - models.dev missing, limit > 0 → use limit as default reserve.
+    /// - both missing/0 → fall back to the system default (32K) so the
+    ///   model always has output space.
+    pub fn output_reserve(&self, max_output_tokens_limit: u64) -> u64 {
+        if self.max_output_tokens > 0 {
             if max_output_tokens_limit > 0 {
                 self.max_output_tokens.min(max_output_tokens_limit)
             } else {
@@ -153,9 +141,60 @@ impl ModelCapabilitiesInfo {
             max_output_tokens_limit
         } else {
             default_max_output_tokens_limit()
-        };
+        }
+    }
 
-        self.context_window.saturating_sub(output_reserve)
+    /// Effective input token budget when **no** user-imposed context cap is
+    /// in effect.
+    ///
+    /// Derivation:
+    /// 1. `max_input_tokens` provided — authoritative, use directly.
+    /// 2. `max_input_tokens` missing — `context_window - output_reserve`.
+    ///
+    /// `max_output_tokens_limit` is the global cap (default 32K, configurable
+    /// by user). Set to 0 to disable capping models.dev values — but when
+    /// models.dev also provides nothing, the system default (32K) is used
+    /// as a safety floor so the model always has output space.
+    pub fn effective_input_budget(&self, max_output_tokens_limit: u64) -> u64 {
+        if let Some(max_input) = self.max_input_tokens {
+            return max_input;
+        }
+        self.context_window
+            .saturating_sub(self.output_reserve(max_output_tokens_limit))
+    }
+
+    /// Input budget when the user imposes a **total context cap**
+    /// (`Some(cap)`, `Some(0)`/`None` = no cap).
+    ///
+    /// The cap bounds the model window first, then the output reserve is
+    /// subtracted **inside** the cap. Without this ordering a cap below
+    /// `window − reserve` silently swallowed the output reservation and the
+    /// input side could consume the whole cap (a 250K cap + 32K output
+    /// reserve behaved like a 250K *input* budget instead of 218K — the
+    /// mismatch reported in the 2026-09-06 compaction-threshold review).
+    ///
+    /// A provider-declared `max_input_tokens` still binds when it is smaller
+    /// than the capped window (it is an input-only allowance and is NOT
+    /// double-subtracted against the output reserve).
+    pub fn input_budget_with_cap(
+        &self,
+        context_cap: Option<u64>,
+        max_output_tokens_limit: u64,
+    ) -> u64 {
+        match context_cap {
+            Some(0) | None => self.effective_input_budget(max_output_tokens_limit),
+            Some(cap) => {
+                let window = self.context_window;
+                let total = window.min(cap);
+                let provider_input = self
+                    .max_input_tokens
+                    .map(|mi| mi.min(window))
+                    .unwrap_or(window);
+                provider_input
+                    .min(total)
+                    .saturating_sub(self.output_reserve(max_output_tokens_limit))
+            }
+        }
     }
 }
 

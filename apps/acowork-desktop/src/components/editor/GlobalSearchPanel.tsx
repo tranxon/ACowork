@@ -355,7 +355,7 @@ export function GlobalSearchPanel({
                     backgroundColor: colors.widgetBg,
                     borderRadius: 6,
                     boxShadow: colors.shadow,
-                    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+                    fontFamily: '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", Roboto, sans-serif',
                     fontSize: 13,
                     overflow: "hidden",
                     userSelect: "none",

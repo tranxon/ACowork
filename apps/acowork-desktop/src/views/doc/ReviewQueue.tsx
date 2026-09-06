@@ -1,0 +1,215 @@
+/**
+ * ReviewQueue — doc 视图顶部「待审核更新请求」条（设计 §5 PR 式审核流）。
+ *
+ * - 常驻顶条显示 pending 计数 badge；点击展开面板列出请求。
+ * - 请求行：目标文档路径 + 提交者 + base_version + 时间；点击可打开目标文档
+ *   对照内容；inline [批准]；[拒绝] → NoteDialog（可选原因）。
+ * - approve 合并入库（doc version+1，服务端完成）；reject 保留原因。
+ * - 面板底部「刷新」重新拉 pending（Agent 新提交实时可见）。
+ */
+
+import { useEffect, useState } from "react";
+import { Check, ChevronDown, ChevronUp, Inbox, Loader2, RefreshCw, X } from "lucide-react";
+import { useTranslation } from "../../i18n/useTranslation";
+import { useDocRequestStore } from "../../stores/doc/requestStore";
+import { useDocEditorStore } from "../../stores/doc/editorStore";
+import { useDocHealthStore } from "../../stores/doc/healthStore";
+import { useToast } from "../../components/common/ToastProvider";
+import { cn } from "../../lib/utils";
+import type { UpdateRequest } from "../../lib/doc-types";
+
+export function ReviewQueue() {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const healthy = useDocHealthStore((s) => s.healthy);
+  const requests = useDocRequestStore((s) => s.requests);
+  const loading = useDocRequestStore((s) => s.loading);
+  const error = useDocRequestStore((s) => s.error);
+  const loadPending = useDocRequestStore((s) => s.loadPending);
+  const approve = useDocRequestStore((s) => s.approve);
+  const reject = useDocRequestStore((s) => s.reject);
+  const [open, setOpen] = useState(false);
+  const [noteTarget, setNoteTarget] = useState<UpdateRequest | null>(null);
+  const [note, setNote] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  // 首次挂载 + 30s 轮询 pending（Agent 提交后无需手动刷新即出现）
+  useEffect(() => {
+    if (healthy === false) return;
+    void loadPending();
+    const timer = setInterval(() => void loadPending(), 30_000);
+    return () => clearInterval(timer);
+  }, [healthy, loadPending]);
+
+  const handleApprove = async (req: UpdateRequest) => {
+    setBusyId(req.request_id);
+    const ok = await approve(req);
+    setBusyId(null);
+    if (ok) {
+      // 若该文档正在编辑，把合并后的内容推到编辑器（无 dirty 时直接替换）
+      const ed = useDocEditorStore.getState();
+      if (ed.doc?.meta.doc_id === req.doc_id) {
+        ed.applyMergedUpdate(req.doc_id, req.content, ed.doc.meta.version + 1);
+      }
+      toast.addToast({ type: "success", message: t("doc.reviewApproved", { name: req.path }) });
+    } else {
+      toast.addToast({ type: "error", message: error ?? t("doc.reviewFailed") });
+    }
+  };
+
+  const handleRejectConfirm = async () => {
+    if (!noteTarget) return;
+    const req = noteTarget;
+    setBusyId(req.request_id);
+    const ok = await reject(req, note.trim() || undefined);
+    setBusyId(null);
+    setNoteTarget(null);
+    setNote("");
+    if (ok) {
+      toast.addToast({ type: "success", message: t("doc.reviewRejected", { name: req.path }) });
+    } else {
+      toast.addToast({ type: "error", message: error ?? t("doc.reviewFailed") });
+    }
+  };
+
+  const openTarget = (docId: string) => {
+    void useDocEditorStore.getState().requestOpen(docId);
+  };
+
+  const pendingCount = requests.length;
+
+  return (
+    <div className="shrink-0 border-b border-zinc-200 bg-surface dark:border-zinc-800">
+      {/* ── 顶条 ──────────────────────────────────────────── */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={cn(
+          "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition-colors",
+          pendingCount > 0
+            ? "bg-amber-50 text-amber-800 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-200 dark:hover:bg-amber-900/30"
+            : "text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
+        )}
+      >
+        <Inbox className="h-3.5 w-3.5" aria-hidden />
+        <span className="flex-1">
+          {pendingCount > 0 ? t("doc.reviewPendingN", { count: pendingCount }) : t("doc.reviewEmpty")}
+        </span>
+        {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+      </button>
+
+      {/* ── 面板 ──────────────────────────────────────────── */}
+      {open && (
+        <div className="max-h-64 overflow-y-auto border-t border-zinc-100 px-1 py-1 dark:border-zinc-800/60">
+          {loading && (
+            <div className="flex items-center justify-center gap-2 py-3 text-zinc-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            </div>
+          )}
+          {!loading && pendingCount === 0 && (
+            <div className="flex items-center justify-between px-2 py-2 text-[11px] text-zinc-400">
+              <span>{t("doc.reviewQueueEmpty")}</span>
+              <button
+                type="button"
+                onClick={() => void loadPending()}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
+              >
+                <RefreshCw className="h-3 w-3" />
+                {t("common.refresh")}
+              </button>
+            </div>
+          )}
+          {!loading &&
+            requests.map((req) => (
+              <div
+                key={req.request_id}
+                className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+              >
+                <button
+                  type="button"
+                  onClick={() => openTarget(req.doc_id)}
+                  className="min-w-0 flex-1 text-left"
+                  title={t("doc.reviewOpenDoc")}
+                >
+                  <div className="flex items-center gap-1.5 truncate text-xs text-zinc-700 dark:text-zinc-200">
+                    <span className="truncate font-medium">{req.path}</span>
+                    <span className="shrink-0 rounded bg-zinc-100 px-1 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                      base v{req.base_version}
+                    </span>
+                  </div>
+                  <div className="truncate text-[10px] text-zinc-400">
+                    {req.submitted_by} · {new Date(req.created_at).toLocaleString()}
+                  </div>
+                </button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={busyId === req.request_id}
+                    onClick={() => void handleApprove(req)}
+                    className="inline-flex items-center gap-0.5 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+                  >
+                    <Check className="h-2.5 w-2.5" aria-hidden />
+                    {t("doc.approve")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busyId === req.request_id}
+                    onClick={() => {
+                      setNoteTarget(req);
+                      setNote("");
+                    }}
+                    className="inline-flex items-center gap-0.5 rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                  >
+                    <X className="h-2.5 w-2.5" aria-hidden />
+                    {t("doc.reject")}
+                  </button>
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {/* ── 拒绝原因 dialog ───────────────────────────────── */}
+      {noteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setNoteTarget(null)} aria-hidden />
+          <div
+            role="dialog"
+            aria-label={t("doc.reject")}
+            className="relative z-10 w-[400px] rounded-lg border border-zinc-200 bg-surface p-3 shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
+          >
+            <div className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-100">
+              {t("doc.rejectTitle", { name: noteTarget.path })}
+            </div>
+            <textarea
+              autoFocus
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder={t("doc.rejectNotePlaceholder")}
+              rows={3}
+              className="w-full resize-none rounded-md border border-zinc-200 bg-input px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)] dark:border-zinc-700"
+            />
+            <div className="mt-2 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setNoteTarget(null)}
+                className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                disabled={busyId === noteTarget.request_id}
+                onClick={() => void handleRejectConfirm()}
+                className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-40"
+              >
+                {t("doc.rejectConfirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

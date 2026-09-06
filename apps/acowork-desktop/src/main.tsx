@@ -4,6 +4,29 @@ import App from "./App";
 import "./i18n"; // i18n initialization (must run before any useTranslation call)
 import "./styles/globals.css";
 
+// ═══ Bundled fonts (macOS uses -apple-system → SF Pro natively;
+// Win/Linux fall through to Inter / Noto Sans SC below) ═══
+//
+// Inter (Latin) — close visual substitute for SF Pro, OFL-licensed.
+// @fontsource ships woff2 + latin unicode-range subset per weight.
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+
+// Noto Sans SC Simplified Chinese subset (~7400 CJK chars).
+// IMPORTANT: must use `chinese-simplified-XXX.css`, NOT the default
+// `XXX.css` which only covers emoji/symbols and lacks CJK base glyphs.
+// The chinese-simplified entry is a single @font-face per weight with
+// no unicode-range cap, covering the full CJK Unified Ideographs base
+// used by 99%+ of UI text. Source Han Sans CN / Noto Sans CJK SC is the
+// upstream glyph source that PingFang SC was derived from — visually
+// equivalent, legally redistributable (OFL).
+import "@fontsource/noto-sans-sc/chinese-simplified-400.css";
+import "@fontsource/noto-sans-sc/chinese-simplified-500.css";
+import "@fontsource/noto-sans-sc/chinese-simplified-600.css";
+import "@fontsource/noto-sans-sc/chinese-simplified-700.css";
+
 // ═══ Monaco Editor bootstrap — MUST run before any component uses Monaco ═══
 //
 // 1. Tell @monaco-editor/react to use the locally-installed monaco-editor

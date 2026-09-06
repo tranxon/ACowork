@@ -418,6 +418,12 @@ export function ChatPanel() {
     if (!currentSessionId) return null;
     return agent?.sessionStates[currentSessionId] ?? null;
   });
+  // ADR-050 C5 (restored): the backend pushes compacting_started/ended and
+  // flips isCompacting in sessionState; the chat-list bottom tail indicator
+  // was removed together with the VML trailing slots in commit 574f26be.
+  // It is re-added here as an in-flow tail row (like the phase indicators)
+  // so it never couples to the virtualizer's row count.
+  const isCompacting = sessionState?.isCompacting ?? false;
   // ADR-014: iteration-limit / loop-detected pause UX is derived directly
   // from the backend sessionStatus (Paused.detail.reason + message) — no
   // separate store flags from transient events.
@@ -1843,6 +1849,19 @@ export function ChatPanel() {
                 live streaming content into blocks (isLive: true); the trailing
                 live block renders via ExploreBlock / StreamingSourceBlock which
                 provides more information than a static "working..." label. */}
+            {/* Context compaction tail indicator (regression 2026-09-06).
+                Restored as an in-flow row below the last message so it does
+                not couple to the VirtualMessageList row count. During
+                compaction the phase indicators are suppressed so the two
+                never stack. */}
+            {isCompacting && (
+              <div className="mt-1 ml-12 flex items-center gap-1.5" role="status">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                  {t("chatPanel.compacting")}
+                </span>
+              </div>
+            )}
             {/* Debug paused banner — shown when the agent is in dev_mode and
                 the debugger is currently in Stepping/Paused state. Provides
                 F5 (resume) and F10 (step) actions directly from the chat.
@@ -1861,7 +1880,7 @@ export function ChatPanel() {
                 handled here: DebugPausedBanner / RetryWaitBanner / the
                 iteration-limit & loop-detected banners (derived from
                 Paused.detail) cover all paths. */}
-            {phase === "thinking" && (
+            {!isCompacting && phase === "thinking" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-purple-500 animate-pulse" />
                 <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
@@ -1869,7 +1888,7 @@ export function ChatPanel() {
                 </span>
               </div>
             )}
-            {phase === "waiting" && (
+            {!isCompacting && phase === "waiting" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
                 <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
@@ -1877,7 +1896,7 @@ export function ChatPanel() {
                 </span>
               </div>
             )}
-            {phase === "streaming" && (
+            {!isCompacting && phase === "streaming" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                 <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
@@ -1885,7 +1904,7 @@ export function ChatPanel() {
                 </span>
               </div>
             )}
-            {phase === "tool_executing" && (
+            {!isCompacting && phase === "tool_executing" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
                 <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
@@ -1893,7 +1912,7 @@ export function ChatPanel() {
                 </span>
               </div>
             )}
-            {phase === "waiting_approval" && (
+            {!isCompacting && phase === "waiting_approval" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-yellow-500 animate-pulse" />
                 <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>

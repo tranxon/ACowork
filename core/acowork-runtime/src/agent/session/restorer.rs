@@ -91,90 +91,139 @@ impl From<std::io::Error> for RestoreError {
 ///
 /// ADR-024: the file has no metadata header — parsing starts at line 0.
 /// The caller provides `compaction_abs` (absolute byte offset of the last
-/// compaction entry, read from `meta/{session_id}.json`) so we can skip
-/// pre-compaction entries without an O(N) rposition scan.
+/// compaction entry, read from `meta/{session_id}.json`). When present we
+/// seek straight to that byte position, retain only the leading `system`
+/// entries that live before it, and replay the compaction marker plus
+/// everything after it. The restored history is therefore exactly the
+/// post-compaction tail — the raw rounds an earlier compaction summarised
+/// away never re-enter the LLM context.
+///
+/// When `compaction_abs` is `None` (legacy session, or a session that has
+/// never been compacted) we fall back to the original full-scan behaviour
+/// and anchor on the *last* compaction marker via `rposition`.
 ///
 /// See module docs for the full set of replay rules.
 pub fn restore_history_from_jsonl(
     path: &Path,
     compaction_abs: Option<u64>,
 ) -> Result<RestoreOutcome, RestoreError> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
     let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
 
-    // Pass 1: parse data lines.
+    // ── Pass 1: collect the entries that may enter the LLM context ──────
     //
-    // When `compaction_abs` is available we know the exact byte offset of
-    // the compaction entry in the file.  This lets us skip storing pre-
-    // compaction entries that will never enter the LLM context (user /
-    // assistant / thought / tool entries before the last compaction),
-    // saving both memory and the O(N) Pass-2 rposition scan.
+    // Fast path (`compaction_abs` = Some): the offset points at the byte
+    // where the *last* compaction marker starts. Phase A scans the head of
+    // the file only far enough to capture leading `system` entries (agent
+    // identity / workspace context); Phase B seeks to the marker and reads
+    // it plus all following entries.
     //
-    // When `compaction_abs` is None (legacy session or session that has
-    // never been compacted) we fall back to the original behaviour: store
-    // every entry and locate the compaction via rposition.
+    // Legacy path (`compaction_abs` = None): read the whole file; Pass 2
+    // anchors on the last compaction marker.
     let mut entries: Vec<ConversationEntry> = Vec::new();
     let mut skipped = 0usize;
-    // `passed_compaction` starts as `true` when there is no offset hint
-    // (so we store *everything*).  It flips to `true` once we encounter
-    // the compaction entry on the fast path.
-    let mut passed_compaction = compaction_abs.is_none();
 
-    for (line_idx, line) in reader.lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(line_idx, error = %e, "Restore: I/O error reading line, skipping");
-                skipped += 1;
-                continue;
-            }
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        // Metadata line (line 0) was already consumed by read_line above.
-        match serde_json::from_str::<ConversationEntry>(&line) {
-            Ok(entry) => {
-                let is_compaction =
-                    entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION);
-
-                if is_compaction {
-                    passed_compaction = true;
-                    entries.push(entry);
-                } else if passed_compaction {
-                    // After the compaction point: store everything.
-                    entries.push(entry);
-                } else if entry.role == "system" && entry.kind.is_none() {
-                    // Before the compaction point: only keep system entries
-                    // (identity context, workspace description, etc.).
-                    entries.push(entry);
+    match compaction_abs {
+        Some(abs) => {
+            // Phase A: capture leading system entries located strictly
+            // before the marker. Pre-compaction non-system entries are
+            // pre-compaction noise and never enter the LLM context, so they
+            // are consumed without being stored. A cheap substring guard
+            // avoids full JSON parsing of the (possibly huge) pre-marker
+            // body; compaction rows carry their own `"kind":"compaction"`
+            // and are excluded by the same guard.
+            let mut reached_marker = false;
+            loop {
+                let pos = reader.stream_position()?;
+                if pos >= abs {
+                    reached_marker = true;
+                    break;
                 }
-                // else: pre-compaction non-system entry → skip (silently
-                // dropped — it won't enter the LLM context).
+                let mut line = String::new();
+                let n = reader.read_line(&mut line)?;
+                if n == 0 {
+                    // EOF before the hint: the persisted offset is stale
+                    // (file rewritten/truncated). Fall back to a full scan.
+                    break;
+                }
+                if line.trim().is_empty() {
+                    continue;
+                }
+                // Only system-kind-none rows are retained. Everything else
+                // (user / assistant / tool / older compaction rows) is
+                // intentionally dropped without allocation.
+                let looks_like_system = line.contains("\"role\":\"system\"")
+                    && !line.contains("\"kind\":\"compaction\"");
+                if looks_like_system {
+                    match serde_json::from_str::<ConversationEntry>(&line) {
+                        Ok(entry) if entry.role == "system" && entry.kind.is_none() => {
+                            entries.push(entry);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Restore: malformed entry before compaction offset, skipping"
+                            );
+                            skipped += 1;
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!(line_idx, error = %e, "Restore: malformed entry, skipping");
-                skipped += 1;
+
+            if reached_marker {
+                // Phase B: seek to the marker and replay it + the rest of
+                // the file verbatim.
+                reader.seek(SeekFrom::Start(abs))?;
+                let mut line = String::new();
+                let n = reader.read_line(&mut line)?;
+                if n > 0 && !line.trim().is_empty() {
+                    match serde_json::from_str::<ConversationEntry>(line.trim()) {
+                        Ok(entry) if entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION) => {
+                            entries.push(entry);
+                        }
+                        _ => {
+                            tracing::warn!(
+                                abs,
+                                "Restore: line at compaction offset is not a compaction marker"
+                            );
+                        }
+                    }
+                }
+                read_all_entries(&mut reader, &mut entries, &mut skipped)?;
             }
+
+            // The offset hint must end with the anchored marker actually
+            // present. If it could not be verified (stale/corrupt hint, EOF
+            // before the offset), never silently drop the conversation —
+            // fall back to a top-down full scan.
+            let anchored = entries
+                .iter()
+                .any(|e| e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION));
+            if !anchored {
+                tracing::warn!(
+                    abs,
+                    "Restore: compaction offset not verifiable, falling back to full scan"
+                );
+                entries.clear();
+                skipped = 0;
+                reader.seek(SeekFrom::Start(0))?;
+                read_all_entries(&mut reader, &mut entries, &mut skipped)?;
+            }
+        }
+        None => {
+            read_all_entries(&mut reader, &mut entries, &mut skipped)?;
         }
     }
 
-    // Pass 2: locate the most recent compaction marker (legacy path only;
-    // the fast path above already tracked `had_compaction` and reordered
-    // entries so the compaction entry is followed by post-compaction data).
-    let last_compaction_idx = if compaction_abs.is_some() {
-        // On the fast path entries are already [system, compaction, …]
-        // so we can find the idx with a forward scan.
-        entries.iter().position(|e| {
-            e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
-        })
-    } else {
-        entries.iter().rposition(|e| {
-            e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
-        })
-    };
+    // Pass 2: locate the most recent compaction marker. On the fast path
+    // there is exactly one (the anchored one); on the legacy path there may
+    // be several and only the last is honored.
+    let last_compaction_idx = entries.iter().rposition(|e| {
+        e.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
+    });
 
     // Pass 3: build the working entry slice based on whether a compaction
     // exists. With compaction: keep leading System entries + the compaction
@@ -195,14 +244,27 @@ pub fn restore_history_from_jsonl(
 
     // Pass 4: translate entries into ChatMessages, merging adjacent tool_call
     // rows onto their preceding assistant.
+    //
+    // DeepSeek thinking mode requires each assistant turn that carries
+    // `tool_calls` to echo back its `reasoning_content` on subsequent
+    // requests (HTTP 400 otherwise).  In JSONL the reasoning lives on the
+    // `thought` rows that immediately precede the tool-call assistant turn.
+    // Restoring those rows straight into history would pollute the LLM
+    // context (thought text is internal monologue), so instead we carry the
+    // most recent `thought` as `pending_reasoning` and fold it into the
+    // *next assistant message that actually makes tool calls*.  Text-only
+    // assistant turns deliberately keep `reasoning_content: None` to stay
+    // consistent with `handle_text_response`'s runtime behaviour.
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut replayed = 0usize;
+    let mut pending_reasoning: Option<String> = None;
 
-    for entry in &working {
+    for (entry_idx, entry) in working.iter().enumerate() {
         // Compaction event → synthetic assistant marker (only honored once;
         // older compactions inside `working` shouldn't exist by construction,
         // but defensively skip them).
         if entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION) {
+            pending_reasoning = None;
             // Compaction markers live at `User` role in memory (see
             // `HistoryManager::replace_middle_with_summary`).  Using
             // `Assistant` here would recreate the
@@ -220,10 +282,15 @@ pub fn restore_history_from_jsonl(
 
         match entry.role.as_str() {
             "thought" => {
-                // Frontend-only; never enters LLM context.
+                // Reasoning content for the upcoming tool-call assistant
+                // turn. Kept out of `messages` (never a standalone LLM
+                // message) but preserved as `reasoning_content` on the
+                // assistant that actually carries tool_calls.
+                pending_reasoning = Some(entry.content.clone());
                 skipped += 1;
             }
             "system" => {
+                pending_reasoning = None;
                 messages.push(ChatMessage {
                     role: MessageRole::System,
                     content: entry.content.clone(),
@@ -232,11 +299,31 @@ pub fn restore_history_from_jsonl(
                 replayed += 1;
             }
             "user" => {
+                pending_reasoning = None;
                 messages.push(ChatMessage::user(entry.content.clone()));
                 replayed += 1;
             }
             "assistant" => {
-                messages.push(ChatMessage::assistant(entry.content.clone()));
+                // Only a tool-call turn carries its own `thought` back onto
+                // the wire. Text-only turns leave it None (matches the
+                // runtime path and avoids sending `reasoning_content` to
+                // providers that do not accept it).
+                let next_is_tool_call = working
+                    .get(entry_idx + 1)
+                    .map(|e| e.role == "tool_call")
+                    .unwrap_or(false);
+                let reasoning = if next_is_tool_call {
+                    pending_reasoning.take()
+                } else {
+                    pending_reasoning = None;
+                    None
+                };
+                messages.push(ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: entry.content.clone(),
+                    reasoning_content: reasoning,
+                    ..Default::default()
+                });
                 replayed += 1;
             }
             "tool_call" => {
@@ -273,12 +360,18 @@ pub fn restore_history_from_jsonl(
                     },
                 };
 
-                // Merge into the immediately preceding assistant if present;
-                // otherwise synthesize an empty-content assistant.
-                let merged = matches!(
-                    messages.last(),
-                    Some(m) if m.role == MessageRole::Assistant
-                );
+                // A `thought` directly before this tool_call means the model
+                // started a NEW assistant turn (the JSONL writer does not
+                // emit an `assistant` row when that turn's content is empty),
+                // so we must NOT merge into an earlier assistant. Otherwise
+                // merge into the immediately preceding assistant, or
+                // synthesize an empty-content assistant when none precedes.
+                let is_new_round = pending_reasoning.is_some();
+                let merged = !is_new_round
+                    && matches!(
+                        messages.last(),
+                        Some(m) if m.role == MessageRole::Assistant
+                    );
                 if merged {
                     let last = messages.last_mut().unwrap();
                     last.tool_calls
@@ -288,6 +381,7 @@ pub fn restore_history_from_jsonl(
                     messages.push(ChatMessage {
                         role: MessageRole::Assistant,
                         content: String::new(),
+                        reasoning_content: pending_reasoning.take(),
                         tool_calls: Some(vec![new_call]),
                         ..Default::default()
                     });
@@ -351,6 +445,42 @@ pub fn restore_history_from_jsonl(
         replayed_entry_count: replayed,
         skipped_entry_count: skipped,
     })
+}
+
+/// Read every non-empty entry from `reader` at its current position into
+/// `entries`. Corrupt lines are counted in `skipped` and skipped.
+fn read_all_entries<R: std::io::BufRead>(
+    reader: &mut R,
+    entries: &mut Vec<ConversationEntry>,
+    skipped: &mut usize,
+) -> Result<(), RestoreError> {
+    let mut line_idx = 0usize;
+    loop {
+        let mut line = String::new();
+        let n = match reader.read_line(&mut line) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "Restore: I/O error reading line, skipping");
+                *skipped += 1;
+                continue;
+            }
+        };
+        if n == 0 {
+            break; // EOF
+        }
+        line_idx += 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ConversationEntry>(&line) {
+            Ok(entry) => entries.push(entry),
+            Err(e) => {
+                tracing::warn!(line_idx, error = %e, "Restore: malformed entry, skipping");
+                *skipped += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Drop any `Tool` message whose `tool_call_id` cannot be matched to a
@@ -476,6 +606,88 @@ mod tests {
         assert_eq!(outcome.messages.len(), 2, "thought should not enter context");
         assert!(outcome.messages.iter().all(|m| !matches!(m.role, MessageRole::System)));
         assert!(outcome.skipped_entry_count >= 1);
+    }
+
+    #[test]
+    fn restore_folds_reasoning_onto_tool_call_rounds() {
+        // DeepSeek thinking mode: a tool-call assistant turn must echo its
+        // reasoning_content back on the wire (400 otherwise). JSONL stores
+        // that reasoning as `thought` rows. This test locks in that
+        // recovery restores them onto the assistant that carries tool_calls
+        // — for both the "thought + assistant + tool_call" shape and the
+        // "thought + tool_call only (empty assistant content)" shape —
+        // while keeping text-only turns free of reasoning_content.
+        let work = temp_workdir("rc-tool-round");
+        let session_id = "sess-rc-tool";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        session.append_message("user", "q1", None);
+        // Round 1: thought + assistant content + tool_call
+        session.append_message("thought", "rc-one", None);
+        session.append_message("assistant", "listing", None);
+        session.append_message(
+            "tool_call",
+            r#"{"path":"."}"#,
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_1"})),
+        );
+        session.append_message(
+            "tool_result",
+            "a.rs",
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_1"})),
+        );
+        // Round 2: thought + tool_call only (empty assistant content) —
+        // must start a NEW assistant turn, not merge into round 1.
+        session.append_message("thought", "rc-two", None);
+        session.append_message(
+            "tool_call",
+            r#"{"path":"./src"}"#,
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_2"})),
+        );
+        session.append_message(
+            "tool_result",
+            "main.rs",
+            Some(serde_json::json!({"tool_name":"glob_search","tool_call_id":"tc_2"})),
+        );
+        flush();
+
+        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
+
+        // User, Assistant{tc_1, rc-one}, Tool(tc_1),
+        // Assistant{tc_2, rc-two}, Tool(tc_2)
+        assert_eq!(outcome.messages.len(), 5);
+        assert!(matches!(outcome.messages[0].role, MessageRole::User));
+        assert!(matches!(outcome.messages[1].role, MessageRole::Assistant));
+        assert_eq!(
+            outcome.messages[1].reasoning_content.as_deref(),
+            Some("rc-one")
+        );
+        let calls1 = outcome.messages[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls1.len(), 1);
+        assert_eq!(calls1[0].id, "tc_1");
+        assert!(matches!(outcome.messages[2].role, MessageRole::Tool));
+        assert!(matches!(outcome.messages[3].role, MessageRole::Assistant));
+        assert_eq!(
+            outcome.messages[3].reasoning_content.as_deref(),
+            Some("rc-two"),
+            "thought before an empty-content tool round must become that \
+             round's reasoning_content (not merge into the previous round)"
+        );
+        let calls2 = outcome.messages[3].tool_calls.as_ref().unwrap();
+        assert_eq!(calls2.len(), 1);
+        assert_eq!(calls2[0].id, "tc_2");
+        assert!(matches!(outcome.messages[4].role, MessageRole::Tool));
+        assert_eq!(outcome.messages[4].tool_call_id.as_deref(), Some("tc_2"));
     }
 
     #[test]
@@ -661,5 +873,153 @@ mod tests {
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
         assert_eq!(outcome.messages.len(), 2);
         assert!(outcome.skipped_entry_count >= 1);
+    }
+
+    /// Byte offset of the *start* of the last `kind="compaction"` line in a
+    /// JSONL file. Each entry is one physical line (serde escapes embedded
+    /// newlines), so we can accumulate byte offsets line by line.
+    fn last_compaction_offset(path: &std::path::Path) -> u64 {
+        let bytes = std::fs::read(path).unwrap();
+        let mut cursor = 0u64;
+        let mut last_start = None;
+        for line in bytes.split(|&b| b == b'\n') {
+            let content = String::from_utf8_lossy(line);
+            if content.contains("\"kind\":\"compaction\"") {
+                last_start = Some(cursor);
+            }
+            cursor += (line.len() + 1) as u64;
+        }
+        last_start.expect("expected at least one compaction entry")
+    }
+
+    #[test]
+    fn restore_fast_path_honors_last_compaction_offset() {
+        // Regression: the fast path (Some(offset)) used the persisted
+        // offset only as a boolean and anchored on the *first* compaction
+        // entry in the file. For a session compacted more than once this
+        // resurrected every raw round between two compactions (see incident
+        // 2026-09-06 — a cold-started session instantly reached 70% context
+        // and re-compacted). The restored history must be exactly
+        // [leading system…, last compaction marker, post-marker tail].
+        let work = temp_workdir("compact-fastpath");
+        let session_id = "sess-compact-fastpath";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        // Leading system context (must survive restore).
+        session.append_message("system", "identity", None);
+        // Raw rounds before the FIRST compaction (must NOT survive).
+        session.append_message("user", "u1", None);
+        session.append_message("assistant", "a1", None);
+        session.append_compaction_event(
+            "<summary>first compaction</summary>",
+            CompactionEventMeta {
+                compacted_from_id: String::new(),
+                compacted_to_id: String::new(),
+                level: 1,
+                model: "test-model".into(),
+                before_tokens: 1000,
+                after_tokens: 100,
+            },
+        );
+        // Raw rounds BETWEEN compactions (must NOT survive: they were
+        // already folded into the second summary).
+        session.append_message("user", "stale-between", None);
+        session.append_message("assistant", "stale-between-a", None);
+        session.append_compaction_event(
+            "<summary>second compaction</summary>",
+            CompactionEventMeta {
+                compacted_from_id: String::new(),
+                compacted_to_id: String::new(),
+                level: 1,
+                model: "test-model".into(),
+                before_tokens: 500,
+                after_tokens: 80,
+            },
+        );
+        // Post-compaction tail (must survive).
+        session.append_message("user", "u3", None);
+        session.append_message("assistant", "a3", None);
+        flush();
+
+        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        let abs = last_compaction_offset(&path);
+        let outcome = restore_history_from_jsonl(&path, Some(abs)).unwrap();
+
+        assert!(outcome.had_compaction);
+        // [system, second-compaction marker, u3, a3]
+        assert_eq!(outcome.messages.len(), 4);
+        assert!(matches!(outcome.messages[0].role, MessageRole::System));
+        assert_eq!(outcome.messages[0].content, "identity");
+        assert!(matches!(outcome.messages[1].role, MessageRole::User));
+        assert_eq!(
+            outcome.messages[1].name.as_deref(),
+            Some("compaction_summary")
+        );
+        assert!(outcome.messages[1].content.contains("second compaction"));
+        assert_eq!(outcome.messages[2].content, "u3");
+        assert_eq!(outcome.messages[3].content, "a3");
+        // The stale rounds between the two compactions must be gone.
+        assert!(!outcome
+            .messages
+            .iter()
+            .any(|m| m.content.contains("stale-between")));
+        assert!(!outcome
+            .messages
+            .iter()
+            .any(|m| m.content.contains("first compaction")));
+    }
+
+    #[test]
+    fn restore_fast_path_falls_back_when_offset_stale() {
+        // A stale/corrupt offset must never cause silent data loss: fall
+        // back to the legacy full scan (anchored at the last marker).
+        let work = temp_workdir("compact-stale");
+        let session_id = "sess-compact-stale";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        session.append_message("user", "pre", None);
+        session.append_compaction_event(
+            "<summary>only</summary>",
+            CompactionEventMeta {
+                compacted_from_id: String::new(),
+                compacted_to_id: String::new(),
+                level: 1,
+                model: "test-model".into(),
+                before_tokens: 100,
+                after_tokens: 50,
+            },
+        );
+        session.append_message("user", "post", None);
+        flush();
+
+        let path = work.join("conversations").join(format!("{}.jsonl", session_id));
+        // Offset far beyond EOF — stale hint.
+        let huge = std::fs::metadata(&path).unwrap().len() + 4096;
+        let outcome = restore_history_from_jsonl(&path, Some(huge)).unwrap();
+        assert!(outcome.had_compaction);
+        // Legacy semantics: [marker, post]; pre-compaction "pre" is dropped.
+        assert_eq!(outcome.messages.len(), 2);
+        assert_eq!(outcome.messages[0].name.as_deref(), Some("compaction_summary"));
+        assert_eq!(outcome.messages[1].content, "post");
     }
 }

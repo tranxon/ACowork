@@ -177,6 +177,27 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
         });
     }
 
+    // D3-4: 自动注入 doc MCP（设计 §6）。`doc_mcp_url` 在 `Gateway::run`
+    // 启动时设置（`Some` ⇔ doc 服务已启动且 `doc.auto_inject_mcp = true`）。
+    // 注入后 Agent catalog 出现 `name = "doc"` 的 HTTP MCP server，Agent
+    // 启动即可调用 `doc_*` 工具（读写文档 + PR 式审核提交）。
+    if let Some(doc_url) = &gw.doc_mcp_url {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-MCP-Actor".to_string(), "{agent_id}".to_string());
+        servers.push(McpRef {
+            id: "doc".to_string(),
+            name: "doc".to_string(),
+            transport: map_mcp_transport(&McpTransportDef::Http).into(),
+            url: doc_url.clone(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            headers,
+            tool_timeout_secs: 60,
+            auth_token: String::new(),
+        });
+    }
+
     AvailableMcps {
         version: cache.version,
         servers,
@@ -405,6 +426,49 @@ mod tests {
         assert!(
             !payload.servers.iter().any(|s| s.id == "pm"),
             "pm MCP must NOT be injected when pm_mcp_url is None"
+        );
+    }
+
+    /// D3-4: `doc_mcp_url` 存在时，`build_available_mcps` 把 doc MCP 注入
+    /// 全局 mcps 资源（远程/本地 Runtime 均可经 advertise endpoint 调用）。
+    #[test]
+    fn test_build_available_mcps_injects_doc_mcp_when_url_set() {
+        let mut gw = GatewayState::new("/tmp/test-vault");
+        gw.doc_mcp_url = Some("http://192.168.1.50:19876/api/doc/mcp".to_string());
+
+        let payload = build_available_mcps(&gw);
+
+        let doc = payload
+            .servers
+            .iter()
+            .find(|s| s.id == "doc")
+            .expect("doc MCP should be injected when doc_mcp_url is set");
+        assert_eq!(doc.name, "doc");
+        assert_eq!(doc.url, "http://192.168.1.50:19876/api/doc/mcp");
+        assert_eq!(
+            doc.transport,
+            map_mcp_transport(&McpTransportDef::Http) as i32,
+            "doc MCP must use HTTP transport"
+        );
+        assert_eq!(
+            doc.headers.get("X-MCP-Actor").map(|s| s.as_str()),
+            Some("{agent_id}"),
+            "doc MCP must carry X-MCP-Actor identity template"
+        );
+        assert_eq!(doc.tool_timeout_secs, 60);
+    }
+
+    /// D3-4 反向：`doc_mcp_url` 为 None（doc 未启用 / auto_inject_mcp=false）
+    /// 时不注入 doc MCP。
+    #[test]
+    fn test_build_available_mcps_skips_doc_when_url_none() {
+        let gw = GatewayState::new("/tmp/test-vault");
+        assert!(gw.doc_mcp_url.is_none());
+
+        let payload = build_available_mcps(&gw);
+        assert!(
+            !payload.servers.iter().any(|s| s.id == "doc"),
+            "doc MCP must NOT be injected when doc_mcp_url is None"
         );
     }
 }

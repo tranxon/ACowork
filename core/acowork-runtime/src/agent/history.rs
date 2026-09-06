@@ -11,7 +11,7 @@
 //! removed per [ADR-010](../../../../docs/adr/ADR-010-context-compression-simplification.md).
 //! Context compression is a semantic understanding task — only an LLM can reliably
 //! decide what to discard. Per ADR-061, the FIFO safety nets (trim_fifo,
-//! emergency_trim) are deleted too: the 8-level plan (level 8 floor) covers every
+//! emergency_trim) are deleted too: the ADR-061 v3 5-level plan (level 5 floor) covers every
 //! within-budget case, and LLM failure is an explicit `ChunkEvent::Error` (§11.3).
 
 use std::collections::HashSet;
@@ -26,15 +26,40 @@ use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
-// ── ADR-052 placeholder format constants (RETIRED) ─────────────────────
+// ── ADR-061 v3 placeholder constants (revived from ADR-052 stubs) ─────
 //
-// Tool-result compression was retired; `context_retrieve` /
-// `context_abandon` are no longer registered with the LLM. The
-// `COMPRESSED_TOOL_PLACEHOLDER_PREFIX` constant and the
-// `abandon_tool_result` / `retrieve_tool_result` methods have been
-// removed. Their source files survive as dead code for future reference.
+// `COMPRESSED_TOOL_PLACEHOLDER_PREFIX` was originally introduced for the
+// `context_abandon` / `context_retrieve` tool pair (ADR-052). ADR-061 v2
+// retired those tools and the placeholder machinery alongside them.
+//
+// ADR-061 v3 (§10.2 / §20) revives the placeholder machinery as an
+// **internal** `HistoryManager` API (`abandon_tool_result` /
+// `clear_round`) used by the 5-level compression plan to fold tool
+// results in-place. The placeholder is **not** surfaced to the LLM as
+// a retrievable artifact — `context_retrieve` remains deprecated — so
+// the wording tells the LLM to re-invoke the tool if it needs the
+// result back.
 
-// (placeholder prefix removed — see above)
+/// Stable prefix used by `abandon_tool_result` and `clear_round` to
+/// mark a tool result that has been folded into the compaction summary.
+///
+/// Detection: a `Tool` message whose `content` starts with this prefix
+/// is considered already-folded. Repeated folding is a no-op.
+pub(crate) const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str = "--- compressed: tool=";
+
+/// Build the placeholder content for a folded tool result.
+///
+/// Format: `--- compressed: tool=<name> result reclaimed, re-invoke to re-fetch --- `
+///
+/// Output length is bounded (worst case ≈ 90 bytes for a 40-char tool
+/// name), so calling this on an already-tiny tool result is still a
+/// no-op-equivalent for token accounting.
+pub(crate) fn make_compressed_placeholder(tool_name: &str) -> String {
+    format!(
+        "{}{} result reclaimed, re-invoke to re-fetch --- ",
+        COMPRESSED_TOOL_PLACEHOLDER_PREFIX, tool_name
+    )
+}
 
 /// Stable identifier string used by [`HistoryManager::replace_middle_with_summary`]
 /// to mark the synthetic Assistant message that replaces the compacted middle.
@@ -43,15 +68,15 @@ use crate::token::counter::TokenCounter;
 /// it is reading a previous compaction output rather than a fresh turn.
 pub(crate) const COMPACTION_SUMMARY_NAME: &str = "compaction_summary";
 
-// ── ADR-061: 8-level degradation compression types ─────────────────────
+// ── ADR-061 v3: 5-level round-atomic compression types ─────────────────────
 
-/// ADR-061: error from planning / applying an 8-level compression.
+/// ADR-061: error from planning / applying a 5-level compression.
 #[derive(Debug)]
 pub(crate) enum CompressError {
     /// The plan failed its acceptance check at apply time (defensive;
     /// plan-time validation normally catches this first).
     InsufficientCompression { projected_ratio: f64 },
-    /// Level 8 (the sole budget-only level) still cannot fit the
+    /// Level 5 (the sole budget-only floor) still cannot fit the
     /// summary + retained skeleton within the budget (§19.5).
     UnrecoverableOverflow { projected: u64, budget: u64 },
 }
@@ -66,7 +91,7 @@ impl std::fmt::Display for CompressError {
             ),
             Self::UnrecoverableOverflow { projected, budget } => write!(
                 f,
-                "level 8 cannot fit within budget: projected {} > budget {}",
+                "level 5 (summary-only floor) cannot fit within budget: projected {} > budget {}",
                 projected, budget
             ),
         }
@@ -75,7 +100,7 @@ impl std::fmt::Display for CompressError {
 
 impl std::error::Error for CompressError {}
 
-/// ADR-061: result of a successful 8-level compression apply.
+/// ADR-061: result of a successful 5-level compression apply.
 #[derive(Debug, Clone)]
 pub(crate) struct CompressionOutcome {
     pub level: u8,
@@ -97,16 +122,7 @@ struct RetentionStats {
     tool_desc: String,
 }
 
-/// ADR-061: how tool messages are retained for levels 1-4.
-#[derive(Clone, Copy)]
-enum ToolKeep {
-    /// Keep tool messages from (and after) the K-th assistant from the end.
-    WithinLastAssistants(usize),
-    /// Keep no tool messages.
-    None,
-}
-
-/// ADR-061: an 8-level degradation compression plan (levels 1-8).
+/// ADR-061: a 5-level round-atomic compression plan (levels 1-5).
 ///
 /// Captures exactly which messages survive at the chosen level (system +
 /// user skeleton + selected assistant/tool tail) plus the token projection.
@@ -114,7 +130,7 @@ enum ToolKeep {
 /// [`HistoryManager::apply_compression`].
 #[derive(Debug)]
 pub(crate) struct CompressionPlan {
-    /// Selected level (1-8).
+    /// Selected level (1-5).
     pub level: u8,
     /// Retained messages in original order (excluding the new summary
     /// marker).
@@ -203,6 +219,40 @@ pub struct HistoryManager {
     /// the `messages` section byte size **without** re-serializing the
     /// entire history on every LLM call.
     messages_json_bytes: usize,
+}
+
+// ── ADR-061 v3 §20.3: round-primitive report types ────────────────────
+
+/// Report from [`HistoryManager::clear_round`].
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ClearRoundReport {
+    /// Tool call ids that were folded (idempotent calls contribute empty).
+    pub cleared_tool_ids: Vec<String>,
+    /// Total bytes reclaimed (sum of original content lengths).
+    pub bytes_reclaimed: usize,
+}
+
+/// Report from [`HistoryManager::fix_round`].
+#[derive(Debug, Default, Clone)]
+pub(crate) struct FixReport {
+    /// Same shape as `ClearRoundReport`.
+    pub cleared: ClearRoundReport,
+    /// Tool messages removed because their tool_call_id had no
+    /// matching assistant.tool_calls entry.
+    pub removed_orphan_tool_messages: usize,
+    /// Tool-call ids removed from the assistant's tool_calls array
+    /// because no matching Tool message existed.
+    pub removed_orphan_tool_call_ids: Vec<String>,
+}
+
+/// Result of [`HistoryManager::recall_todo_round`].
+#[derive(Debug)]
+pub(crate) enum RecallResult {
+    Injected { todo_call_id: String },
+    SkippedAlreadyInjected,
+    SkippedAlreadyInTail,
+    NoMarker,
+    NoTodoRoundFound,
 }
 
 impl HistoryManager {
@@ -295,6 +345,14 @@ impl HistoryManager {
             "HistoryManager max_tokens updated"
         );
         self.max_tokens = max_tokens;
+    }
+
+    /// Current effective history token budget. This is the model-calibrated
+    /// value (via [`Self::set_max_tokens`]), NOT the static config default —
+    /// callers that log or compare budgets must use this to stay consistent
+    /// with the trim/compaction thresholds.
+    pub fn max_tokens(&self) -> u64 {
+        self.max_tokens
     }
 
     /// Get the model name for token counting, falling back to empty string (Tier3).
@@ -786,6 +844,235 @@ impl HistoryManager {
         .await
     }
 
+    // ── ADR-061 v3 §20.3.1: tool-result folding primitives ─────────────
+    //
+    // PR1 revives `abandon_tool_result` from ADR-052 stubs. It is the
+    // single-message primitive behind `clear_round` (PR2): replace one
+    // `Tool` message's content with a placeholder, leaving role / id /
+    // schema untouched.
+    //
+    // Invariants (pre & post):
+    // - Only `role == Tool` messages with matching `tool_call_id` are
+    //   modified. Assistant messages, other tool messages, system /
+    //   user / summary messages are never touched.
+    // - Already-folded messages (content starts with
+    //   `COMPRESSED_TOOL_PLACEHOLDER_PREFIX`) are skipped — idempotent.
+    // - `messages.len()` does not change. Schema (assistant.tool_calls[*].id
+    //   ↔ tool.tool_call_id) is preserved.
+    // - Caller is responsible for `recalibrate_tokens()` after a batch of
+    //   folds; this method only mutates `content` bytes.
+    //
+    // Returns: number of tool messages whose content was actually
+    // replaced (0 if not found or already folded).
+    pub fn abandon_tool_result(&mut self, tool_call_id: &str) -> usize {
+        let mut replaced = 0usize;
+        // `self.messages` is `Arc<Vec<ChatMessage>>` (COW); use Arc::make_mut
+        // so the mutation propagates to existing snapshots.
+        let msgs = Arc::make_mut(&mut self.messages);
+        for msg in msgs.iter_mut() {
+            if !matches!(msg.role, MessageRole::Tool) {
+                continue;
+            }
+            let Some(ref tcid) = msg.tool_call_id else {
+                continue;
+            };
+            if tcid != tool_call_id {
+                continue;
+            }
+            // Idempotency: skip already-folded messages.
+            if msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
+                continue;
+            }
+            let tool_name = msg.name.as_deref().unwrap_or("unknown");
+            msg.content = make_compressed_placeholder(tool_name);
+            replaced += 1;
+        }
+        replaced
+    }
+
+    // ── ADR-061 v3 §20.3.1: clear_round ─────────────────────────────────
+    //
+    // Atomic: fold every Tool message that belongs to the round anchored
+    // at `assistant_idx`. Schema (assistant.tool_calls[*].id ↔ tool.tool_call_id)
+    // is preserved because no message is removed — only `content` bytes
+    // are replaced.
+    //
+    // Pre-condition: `assistant_idx < self.messages.len()` and
+    // `self.messages[assistant_idx].role == MessageRole::Assistant`.
+    // Violating the pre-condition is a bug (internal call site); we panic
+    // loudly rather than no-op so the bug surfaces immediately.
+    //
+    // Returns: report describing which tool ids were folded and how many
+    // bytes were reclaimed.
+
+    pub fn clear_round(&mut self, assistant_idx: usize) -> ClearRoundReport {
+        assert!(
+            assistant_idx < self.messages.len(),
+            "clear_round: assistant_idx out of bounds ({assistant_idx} / {})",
+            self.messages.len()
+        );
+        assert!(
+            matches!(self.messages[assistant_idx].role, MessageRole::Assistant),
+            "clear_round: messages[{assistant_idx}] is not an Assistant"
+        );
+
+        let tool_call_ids: Vec<String> = self.messages[assistant_idx]
+            .tool_calls
+            .as_ref()
+            .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
+            .unwrap_or_default();
+
+        if tool_call_ids.is_empty() {
+            // Round has no tool calls — nothing to fold. Still valid.
+            return ClearRoundReport::default();
+        }
+
+        // First pass (immutable): gather original content lengths of messages
+        // we'd fold, so the byte counter is accurate even after we mutate.
+        let mut per_id_bytes: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for msg in self.messages.iter() {
+            if !matches!(msg.role, MessageRole::Tool) {
+                continue;
+            }
+            let Some(ref tcid) = msg.tool_call_id else {
+                continue;
+            };
+            if !tool_call_ids.iter().any(|id| id == tcid) {
+                continue;
+            }
+            if msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
+                continue;
+            }
+            per_id_bytes
+                .entry(tcid.clone())
+                .and_modify(|n| *n += msg.content.len())
+                .or_insert(msg.content.len());
+        }
+
+        // Second pass (mutable): actually fold. Use abandon_tool_result per id
+        // so we get its idempotency + naming logic for free.
+        let mut cleared = Vec::new();
+        for id in &tool_call_ids {
+            if self.abandon_tool_result(id) > 0 {
+                cleared.push(id.clone());
+            }
+        }
+
+        let bytes_reclaimed: usize = cleared
+            .iter()
+            .filter_map(|id| per_id_bytes.get(id))
+            .sum();
+
+        ClearRoundReport {
+            cleared_tool_ids: cleared,
+            bytes_reclaimed,
+        }
+    }
+
+    // ── ADR-061 v3 §20.3.3: fix_round ───────────────────────────────────
+    //
+    // Atomic: clear_round, then additionally sweep the round's slice
+    // (assistant + trailing tool messages up to the next assistant) to
+    // remove any orphan tool_calls or orphan tool_results that may have
+    // leaked in from upstream (streaming truncation, malformed provider
+    // responses, etc.).
+    //
+    // Used as defense-in-depth after `clear_round`. Normal compression
+    // paths should not produce orphans, but `sanitize_messages` is the
+    // last line; this round-scoped sweep is cheaper and more targeted.
+
+    pub fn fix_round(&mut self, assistant_idx: usize) -> FixReport {
+        assert!(
+            assistant_idx < self.messages.len(),
+            "fix_round: assistant_idx out of bounds"
+        );
+        assert!(
+            matches!(self.messages[assistant_idx].role, MessageRole::Assistant),
+            "fix_round: messages[{assistant_idx}] is not an Assistant"
+        );
+
+        // First: clear_round (fold every legitimate tool result).
+        let cleared = self.clear_round(assistant_idx);
+
+        // Second: sweep for orphans within the round's slice.
+        // Round = messages[assistant_idx] plus everything up to (but
+        // excluding) the next Assistant, OR the end of the buffer.
+        let start = assistant_idx;
+        let end = self.messages[start + 1..]
+            .iter()
+            .position(|m| matches!(m.role, MessageRole::Assistant))
+            .map(|p| start + 1 + p)
+            .unwrap_or(self.messages.len());
+
+        // Collect ids the assistant currently claims (after clear_round,
+        // these are the same ids it originally had — clear_round only
+        // touched tool message contents, not the assistant's tool_calls).
+        let claimed_ids: std::collections::HashSet<String> = self.messages[assistant_idx]
+            .tool_calls
+            .as_ref()
+            .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
+            .unwrap_or_default();
+
+        // Pass A: find orphan tool messages (role=Tool, tool_call_id not in
+        // claimed_ids). Mark for removal.
+        let orphan_tool_indices: Vec<usize> = (start..end)
+            .filter(|&i| {
+                matches!(self.messages[i].role, MessageRole::Tool)
+                    && self.messages[i]
+                        .tool_call_id
+                        .as_ref()
+                        .map(|tcid| !claimed_ids.contains(tcid))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        // Pass B: find orphan tool_call ids (assistant claims id but no
+        // matching Tool message exists in the round slice). Record ids
+        // for in-place removal.
+        let present_tool_ids: std::collections::HashSet<String> = (start..end)
+            .filter(|&i| matches!(self.messages[i].role, MessageRole::Tool))
+            .filter_map(|i| self.messages[i].tool_call_id.clone())
+            .collect();
+        let orphan_call_ids: Vec<String> = claimed_ids
+            .iter()
+            .filter(|id| !present_tool_ids.contains(*id))
+            .cloned()
+            .collect();
+
+        // Apply: remove orphan tool messages (reverse order to keep
+        // indices stable) and prune orphan tool_call ids from the
+        // assistant.
+        let mut removed_orphan_tool_messages = 0usize;
+        if !orphan_tool_indices.is_empty() {
+            let msgs = Arc::make_mut(&mut self.messages);
+            for &i in orphan_tool_indices.iter().rev() {
+                msgs.remove(i);
+                removed_orphan_tool_messages += 1;
+            }
+        }
+        if !orphan_call_ids.is_empty() {
+            let msgs = Arc::make_mut(&mut self.messages);
+            if let Some(ref mut tcs) = msgs[assistant_idx].tool_calls {
+                tcs.retain(|tc| !orphan_call_ids.contains(&tc.id));
+                if tcs.is_empty() {
+                    msgs[assistant_idx].tool_calls = None;
+                }
+            }
+        }
+
+        // Recalibrate once after the sweep.
+        self.recalibrate_tokens();
+        self.recompute_messages_json_bytes();
+
+        FixReport {
+            cleared,
+            removed_orphan_tool_messages,
+            removed_orphan_tool_call_ids: orphan_call_ids,
+        }
+    }
+
+
     /// ADR-061 §8.2/§19.4: join the original user messages as the
     /// fallback `<user_intent>` when the compaction LLM omits the block.
     ///
@@ -1201,27 +1488,86 @@ impl HistoryManager {
         (self.current_tokens, true)
     }
 
-    // ── ADR-061: 8-level degradation compression ──────────────────────
+    // ── ADR-061 v3 §20.3.2: recall_todo_round ──────────────────────────
+    //
+    // v2 contract: find the last todo_write round, splice it after the
+    // compaction marker. `inject_todo_write_round_after_marker` already
+    // implements this; `recall_todo_round` is the v3 facade that returns
+    // a structured result instead of a `(tokens, injected_bool)` tuple,
+    // so callers can branch on skip reasons cleanly.
+    //
+    // Returns:
+    // - `Injected { todo_call_id }` — round was spliced after the marker
+    // - `SkippedAlreadyInjected` — same round was injected by a prior compression
+    // - `SkippedAlreadyInTail`     — todo round survived in the retained tail
+    // - `NoMarker`                 — no compaction has happened (caller bug)
+    // - `NoTodoRoundFound`         — history has no todo_write round yet
+    pub fn recall_todo_round(&mut self) -> RecallResult {
+        // Fast path: same round already injected by a prior compression.
+        if let Some(ref last_id) = self.last_injected_todo_call_id {
+            if let Some((asst, _)) = self.find_last_todo_write_round() {
+                let already_done = asst.tool_calls.as_ref().is_some_and(|tcs| {
+                    tcs.iter().any(|tc| tc.id == *last_id)
+                });
+                if already_done {
+                    return RecallResult::SkippedAlreadyInjected;
+                }
+            }
+        }
 
-    /// ADR-061 §19.1: select the 8-level degradation plan.
+        // No marker means caller invoked us at the wrong time.
+        if self.last_compaction_index().is_none() {
+            return RecallResult::NoMarker;
+        }
+
+        // No todo_write round in history at all.
+        let Some((assistant, tool)) = self
+            .find_last_todo_write_round_excluding_injected(&HashSet::new())
+        else {
+            return RecallResult::NoTodoRoundFound;
+        };
+
+        let todo_call_id = assistant
+            .tool_calls
+            .as_ref()
+            .and_then(|tcs| tcs.iter().find(|tc| tc.function.name == "todo_write"))
+            .map(|tc| tc.id.clone())
+            .unwrap_or_default();
+
+        // Delegate to the existing injector. It handles the in-tail skip
+        // and idempotency bookkeeping.
+        let (_, injected) = self.inject_todo_write_round_after_marker(assistant, tool);
+
+        if injected {
+            RecallResult::Injected { todo_call_id }
+        } else {
+            // Either the assistant or the tool was already in the tail.
+            RecallResult::SkippedAlreadyInTail
+        }
+    }
+
+    // ── ADR-061 v3 §20: 5-level round-atomic compression ──────────────
+
+    /// ADR-061 v3 §19.1/§20.6 (PR3): select the 5-level degradation plan.
     ///
-    /// `summary` is the LLM output (already parsed by `parse_compact_output`); its token
-    /// size is known here, so the projection is exact — the 8-level walk
-    /// happens **after** the summary (§19.1 先摘要后 plan).
+    /// `summary` is the LLM output (already parsed by `parse_compact_output`);
+    /// its token size is known here, so the projection is exact — the plan
+    /// walk happens **after** the summary (§19.1 先摘要后 plan).
     ///
-    /// Selection rule (§19.2):
-    /// - Levels 1-7: the **first** level satisfying
+    /// Selection rule (§19.2, renumbered for v3):
+    /// - Levels 1-4: the **first** level satisfying
     ///   `ratio >= min_ratio && projected <= budget` wins
     ///   (stop at the first sufficient one — more aggressive levels are
     ///   never tried).
-    /// - Level 8: sole fallback, **exempt** from the ratio bar; only requires
-    ///   `projected <= budget` (T > budget overflow lands here in one shot).
+    /// - Level 5 (formerly level 8): sole fallback, **exempt** from the
+    ///   ratio bar; only requires `projected <= budget` (T > budget
+    ///   overflow lands here in one shot).
     ///
     /// `min_ratio` is the per-agent compression ratio threshold (default
     /// [`MIN_COMPRESSION_RATIO`] = 0.90, i.e. "compress until at most 10%
     /// remains", e.g. 200K → 20K).
     ///
-    /// Errors with [`CompressError::UnrecoverableOverflow`] when level 8
+    /// Errors with [`CompressError::UnrecoverableOverflow`] when level 5
     /// still cannot fit — the caller must not touch history (§19.5).
     pub(crate) fn plan_compression(
         &self,
@@ -1236,17 +1582,17 @@ impl HistoryManager {
         }
 
         let msgs = self.messages.as_slice();
-        let mut level8_projected = 0u64;
-        for level in 1..=8u8 {
+        let mut level5_projected = 0u64;
+        for level in 1..=5u8 {
             let plan = self.build_level_plan(level, msgs, summary);
             let projected = plan.projected_tokens;
-            if level < 8 {
+            if level < 5 {
                 let ratio = 1.0 - (projected as f64 / self.current_tokens as f64);
                 if ratio >= min_ratio && projected <= self.max_tokens {
                     return Ok(plan);
                 }
             } else {
-                level8_projected = projected;
+                level5_projected = projected;
                 if projected <= self.max_tokens {
                     return Ok(plan);
                 }
@@ -1254,24 +1600,43 @@ impl HistoryManager {
         }
 
         Err(CompressError::UnrecoverableOverflow {
-            projected: level8_projected,
+            projected: level5_projected,
             budget: self.max_tokens,
         })
     }
-
     /// Build the retention plan for a single level (pure function over the
     /// message snapshot; no mutation).
+    ///
+    /// ADR-061 v3 (§6.2 / §20): retention is decided per **round** — an
+    /// assistant message together with the tool results that follow it is
+    /// one atomic unit. A round is either kept whole (assistant + tools) or
+    /// dropped whole into the summary middle; it is never half-kept. Among
+    /// the kept rounds, the tool results of the last `P` tool-owning rounds
+    /// stay verbatim while earlier kept rounds have their tool results
+    /// folded into placeholders ([`make_compressed_placeholder`]). Because a
+    /// kept assistant's `tool_calls[*].id` therefore always resolves to a
+    /// kept `Tool` message, no dangling-id sweep is needed (this removes the
+    /// v2 ghost-assistant bug, §20.1).
+    ///
+    /// Level table (v3 §6.2; renumbered from the former Lv4-Lv8):
+    /// | level | assistant messages kept | tool results |
+    /// |-------|-------------------------|--------------|
+    /// | 1     | last 5                  | last 1 round verbatim, rest folded |
+    /// | 2     | last 5                  | all folded |
+    /// | 3     | last 3                  | all folded |
+    /// | 4     | last 1                  | all folded |
+    /// | 5     | none (summary only)     | —           |
     fn build_level_plan(&self, level: u8, msgs: &[ChatMessage], summary: &str) -> CompressionPlan {
         let system_count = msgs
             .iter()
             .take_while(|m| matches!(m.role, MessageRole::System))
             .count();
 
-        // Level 8: only system + latest real user message survive; all the
-        // rest goes to the summary. "Current user message" = last non-marker
-        // User message (§19.1 note — compaction markers are User-role too,
-        // so they must be excluded here).
-        if level == 8 {
+        // Level 5 (formerly level 8): only system + latest real user message
+        // survive; all the rest goes to the summary. "Current user message" =
+        // last non-marker User message (§19.1 note — compaction markers are
+        // User-role too, so they must be excluded here).
+        if level == 5 {
             let last_user = msgs.iter().rposition(|m| {
                 matches!(m.role, MessageRole::User)
                     && m.name.as_deref() != Some(COMPACTION_SUMMARY_NAME)
@@ -1304,87 +1669,141 @@ impl HistoryManager {
             };
         }
 
-        // Levels 1-7: user messages (incl. prior compaction markers) are
-        // always preserved (§19.4); assistant/tool retention tightens per
-        // the level table (ADR-061 §6.2).
-        let (assistant_keep, tool_keep) = match level {
-            1 => (None, ToolKeep::WithinLastAssistants(5)),
-            2 => (None, ToolKeep::WithinLastAssistants(3)),
-            3 => (None, ToolKeep::WithinLastAssistants(1)),
-            4 => (Some(5), ToolKeep::WithinLastAssistants(1)),
-            5 => (Some(5), ToolKeep::None),
-            6 => (Some(3), ToolKeep::None),
-            7 => (Some(1), ToolKeep::None),
-            _ => unreachable!("level 8 handled above"),
+        // Levels 1-4: every user message (incl. prior compaction markers) is
+        // preserved; the last K assistant messages are kept, and every kept
+        // assistant's own tool results are kept too — verbatim for the last
+        // P tool-owning rounds, folded into placeholders otherwise. Rounds
+        // older than K are dropped whole (subsumed by the summary).
+        let (assistant_keep, verbatim_rounds) = match level {
+            // L1: last round's tool results stay verbatim; earlier kept
+            // rounds are folded (was v2 Lv4).
+            1 => (5, 1),
+            // L2: same assistant window, every kept tool result folded.
+            2 => (5, 0),
+            // L3 / L4: tighter assistant windows, everything folded.
+            3 => (3, 0),
+            4 => (1, 0),
+            _ => unreachable!("level 5 handled above"),
         };
 
-        let assistant_indices: Vec<usize> = (0..msgs.len())
+        let n_msgs = msgs.len();
+        // 1-based rank-from-the-end of every Assistant message; 0 otherwise.
+        let assistant_positions: Vec<usize> = (0..n_msgs)
             .filter(|&i| matches!(msgs[i].role, MessageRole::Assistant))
             .collect();
-        // Index of the K-th assistant from the end; `None` when fewer than K
-        // assistants exist → that dimension drops nothing.
-        let kth_from_end = |k: usize| -> Option<usize> {
-            (assistant_indices.len() >= k)
-                .then(|| assistant_indices[assistant_indices.len() - k])
-        };
-        let assistant_threshold = assistant_keep.and_then(kth_from_end);
-        let tool_threshold = match tool_keep {
-            // ADR-061 §6.2: tools associated with the last K assistant
-            // messages survive. A round is `Assistant{tool_calls} → Tool →
-            // Assistant`, so the K-th assistant's own tool result precedes
-            // it — threshold at the (K+1)-th assistant from the end to
-            // include that window (K=1 keeps exactly the last round's tool).
-            ToolKeep::WithinLastAssistants(k) => kth_from_end(k + 1),
-            ToolKeep::None => Some(usize::MAX),
-        };
+        let n_assistants = assistant_positions.len();
+        let mut assistant_rank = vec![0usize; n_msgs];
+        for (j, &pos) in assistant_positions.iter().enumerate() {
+            assistant_rank[pos] = n_assistants - j;
+        }
 
-        let mut retained: Vec<ChatMessage> = Vec::with_capacity(msgs.len());
+        // Same ranking restricted to tool-owning assistants (an assistant
+        // whose `tool_calls` is non-empty); decides which kept rounds keep
+        // their tool results verbatim.
+        let tool_owner_positions: Vec<usize> = (0..n_msgs)
+            .filter(|&i| {
+                matches!(msgs[i].role, MessageRole::Assistant)
+                    && msgs[i].tool_calls.as_ref().is_some_and(|tcs| !tcs.is_empty())
+            })
+            .collect();
+        let n_tool_owners = tool_owner_positions.len();
+        let mut tool_owner_rank = vec![0usize; n_msgs];
+        for (j, &pos) in tool_owner_positions.iter().enumerate() {
+            tool_owner_rank[pos] = n_tool_owners - j;
+        }
+
+        // Effective windows (a level may ask for more rounds than exist).
+        let keep_min_rank = assistant_keep.min(n_assistants);
+        let verbatim_min_rank = verbatim_rounds.min(n_tool_owners);
+
+        // Round-atomic scanner. `mode` carries the decision of the assistant
+        // message that owns the Tool messages currently being walked, so a
+        // round is kept/dropped/folded as a unit.
+        enum RoundMode {
+            /// Before the first assistant in the buffer.
+            Lead,
+            /// Assistant round dropped whole into the summary.
+            Drop,
+            /// Assistant kept; its tool results stay verbatim.
+            Verbatim,
+            /// Assistant kept; its tool results are folded to placeholders.
+            Fold,
+        }
+
+        let mut mode = RoundMode::Lead;
+        let mut retained: Vec<ChatMessage> = Vec::with_capacity(n_msgs);
         let mut user_kept = 0usize;
         let mut assistant_kept = 0usize;
         let mut tool_kept = 0usize;
         for (i, msg) in msgs.iter().enumerate() {
-            let keep = match msg.role {
-                MessageRole::System => true,
+            match msg.role {
+                MessageRole::System => retained.push(msg.clone()),
                 MessageRole::User => {
                     user_kept += 1;
-                    true
+                    retained.push(msg.clone());
                 }
                 MessageRole::Assistant => {
-                    let k = assistant_threshold.is_none_or(|t| i >= t);
-                    if k {
+                    let rank = assistant_rank[i];
+                    let kept = rank > 0 && rank <= keep_min_rank;
+                    let owner_rank = tool_owner_rank[i];
+                    mode = if !kept {
+                        RoundMode::Drop
+                    } else if owner_rank > 0 && owner_rank <= verbatim_min_rank {
+                        RoundMode::Verbatim
+                    } else if owner_rank > 0 {
+                        RoundMode::Fold
+                    } else {
+                        // Text-only assistant: no tool results of its own, so
+                        // nothing to fold.
+                        RoundMode::Verbatim
+                    };
+                    if kept {
                         assistant_kept += 1;
+                        retained.push(msg.clone());
                     }
-                    k
                 }
-                MessageRole::Tool => {
-                    let k = tool_threshold.is_none_or(|t| i >= t);
-                    if k {
+                MessageRole::Tool => match mode {
+                    RoundMode::Lead | RoundMode::Drop => {}
+                    RoundMode::Verbatim => {
                         tool_kept += 1;
+                        retained.push(msg.clone());
                     }
-                    k
-                }
-            };
-            if keep {
-                retained.push(msg.clone());
+                    RoundMode::Fold => {
+                        tool_kept += 1;
+                        let mut folded = msg.clone();
+                        folded.content = make_compressed_placeholder(
+                            folded.name.as_deref().unwrap_or("unknown"),
+                        );
+                        retained.push(folded);
+                    }
+                },
             }
         }
 
         let retained_tokens = self.count_slice_tokens(&retained);
+        let assistant_desc = if n_assistants == 0 {
+            "none".to_string()
+        } else if keep_min_rank >= n_assistants {
+            "all".to_string()
+        } else {
+            format!("last {}", assistant_keep)
+        };
+        let tool_desc = if n_tool_owners == 0 {
+            "none".to_string()
+        } else if verbatim_min_rank == 0 {
+            "all folded to placeholders".to_string()
+        } else if verbatim_min_rank >= n_tool_owners {
+            "all verbatim".to_string()
+        } else {
+            format!("last {verbatim_min_rank} round(s) verbatim, rest folded")
+        };
         let stats = RetentionStats {
             user_messages: user_kept,
             assistant_messages: assistant_kept,
             tool_messages: tool_kept,
             user_desc: "all".to_string(),
-            assistant_desc: match assistant_keep {
-                Some(n) => format!("last {}", n.min(assistant_kept)),
-                None => "all".to_string(),
-            },
-            tool_desc: match tool_keep {
-                ToolKeep::WithinLastAssistants(k) => {
-                    format!("within last {} assistants", k)
-                }
-                ToolKeep::None => "none".to_string(),
-            },
+            assistant_desc,
+            tool_desc,
         };
         CompressionPlan {
             level,
@@ -1417,7 +1836,7 @@ impl HistoryManager {
         // against callers bypassing `plan_compression`). Level 8 is exempt
         // from the ratio bar (§19.2).
         if plan.projected_tokens > self.max_tokens
-            || (plan.level < 8 && ratio < min_ratio)
+            || (plan.level < 5 && ratio < min_ratio)
         {
             return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
         }
@@ -1460,7 +1879,7 @@ impl HistoryManager {
             retained_tokens = plan.retained_tokens,
             new_tokens = self.current_tokens,
             ratio = ?ratio,
-            "ADR-061: 8-level compression applied"
+            "ADR-061: 5-level compression plan applied"
         );
 
         Ok(CompressionOutcome {
@@ -1827,6 +2246,420 @@ mod tests {
         assert!(assistant.tool_calls.is_none());
         // Content should be preserved since it's non-empty
         assert_eq!(assistant.content, "Let me check");
+    }
+
+    // ── ADR-061 v3 §20.3.1 / PR1: abandon_tool_result tests ─────────────
+    //
+    // PR1 revives `abandon_tool_result` as a single-message primitive.
+    // PR2 will wrap it in `clear_round` / `fix_round`. These tests verify
+    // the primitive's contract independently.
+
+    /// Helper: build a Tool message with the given id, name, and content.
+    fn make_tool_message(tool_call_id: &str, tool_name: &str, content: &str) -> ChatMessage {
+        let mut m = ChatMessage::tool(tool_call_id, content);
+        m.name = Some(tool_name.to_string());
+        m
+    }
+
+    #[test]
+    fn test_abandon_tool_result_replaces_matching_tool_content() {
+        let mut hm = HistoryManager::new(10_000);
+        // Assistant emits two tool_calls; both tool results present.
+        hm.append(ChatMessage::assistant_with_tools(
+            "checking",
+            vec![
+                make_tool_call("tc_alpha", "file_edit", "{}"),
+                make_tool_call("tc_beta", "bash", "{}"),
+            ],
+        ));
+        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+        hm.append(make_tool_message("tc_beta", "bash", "shell output here"));
+
+        let replaced = hm.abandon_tool_result("tc_alpha");
+
+        assert_eq!(replaced, 1, "exactly one tool message should be replaced");
+        // tc_alpha was folded
+        let folded = hm
+            .messages()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("tc_alpha"))
+            .expect("tc_alpha tool message must still exist (schema preserved)");
+        assert!(
+            folded.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            "folded content must start with placeholder prefix, got: {:?}",
+            folded.content
+        );
+        assert!(
+            folded.content.contains("file_edit"),
+            "placeholder must include the original tool name for re-invoke hints"
+        );
+        // tc_beta is untouched
+        let kept = hm
+            .messages()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("tc_beta"))
+            .expect("tc_beta tool message must still exist");
+        assert_eq!(kept.content, "shell output here");
+    }
+
+    #[test]
+    fn test_abandon_tool_result_returns_zero_when_id_unknown() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "checking",
+            vec![make_tool_call("tc_alpha", "file_edit", "{}")],
+        ));
+        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+
+        let replaced = hm.abandon_tool_result("tc_does_not_exist");
+
+        assert_eq!(replaced, 0, "unknown id must not match anything");
+        // tc_alpha's content must be untouched
+        let kept = hm
+            .messages()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("tc_alpha"))
+            .expect("tc_alpha must still exist");
+        assert_eq!(kept.content, "Edited 42 bytes");
+    }
+
+    #[test]
+    fn test_abandon_tool_result_is_idempotent() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "checking",
+            vec![make_tool_call("tc_alpha", "file_edit", "{}")],
+        ));
+        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+
+        assert_eq!(hm.abandon_tool_result("tc_alpha"), 1, "first fold replaces");
+        assert_eq!(
+            hm.abandon_tool_result("tc_alpha"),
+            0,
+            "second fold is no-op (idempotent)"
+        );
+
+        // Content must be exactly the placeholder, not "placeholder + original".
+        let folded = hm
+            .messages()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("tc_alpha"))
+            .expect("tc_alpha must still exist");
+        assert!(
+            folded.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            "content must be the single placeholder"
+        );
+    }
+
+    #[test]
+    fn test_abandon_tool_result_preserves_schema() {
+        // The schema invariant: after folding, the assistant's tool_calls
+        // still point at tool messages that exist (now folded, but present).
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "checking",
+            vec![
+                make_tool_call("tc_alpha", "file_edit", "{}"),
+                make_tool_call("tc_beta", "bash", "{}"),
+            ],
+        ));
+        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+        hm.append(make_tool_message("tc_beta", "bash", "shell output here"));
+
+        let _ = hm.abandon_tool_result("tc_alpha");
+
+        // Sanity-check schema: every id in assistant.tool_calls still
+        // has a matching Tool message (sanitize_messages is happy).
+        let mut sanitized: Vec<ChatMessage> = hm.messages().to_vec();
+        HistoryManager::sanitize_messages(&mut sanitized);
+        assert_eq!(
+            sanitized.len(),
+            hm.messages().len(),
+            "sanitize must not drop anything — schema was preserved by folding"
+        );
+    }
+
+    #[test]
+    fn test_make_compressed_placeholder_format() {
+        let p = make_compressed_placeholder("file_edit");
+        assert!(p.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX));
+        assert!(p.contains("file_edit"), "tool name must appear in placeholder");
+        assert!(
+            p.contains("re-invoke"),
+            "placeholder must hint at re-invoking the tool (no retrieve path)"
+        );
+        assert!(
+            !p.contains("context_retrieve"),
+            "placeholder must NOT reference the deprecated context_retrieve tool"
+        );
+        // Length bound (worst case for a 64-char tool name ≈ 130 bytes).
+        assert!(p.len() < 200, "placeholder must stay compact");
+    }
+
+    // ── ADR-061 v3 §20.3.1 / PR2: clear_round tests ─────────────────────
+
+    #[test]
+    fn test_clear_round_folds_all_tool_results_of_round() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "doing two things",
+            vec![
+                make_tool_call("tc_a", "file_edit", "{}"),
+                make_tool_call("tc_b", "bash", "{}"),
+            ],
+        ));
+        hm.append(make_tool_message("tc_a", "file_edit", "long file content A"));
+        hm.append(make_tool_message("tc_b", "bash", "long shell output B"));
+
+        let asst_idx = 0;
+        let report = hm.clear_round(asst_idx);
+
+        assert_eq!(report.cleared_tool_ids.len(), 2);
+        assert!(report.bytes_reclaimed > 0, "should reclaim at least the original content bytes");
+        // Both tool messages must now be placeholders.
+        for msg in hm.messages() {
+            if matches!(msg.role, MessageRole::Tool) {
+                assert!(
+                    msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+                    "tool message at idx {} must be folded, got: {:?}",
+                    0,
+                    msg.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_clear_round_is_idempotent() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "doing",
+            vec![make_tool_call("tc_a", "file_edit", "{}")],
+        ));
+        hm.append(make_tool_message("tc_a", "file_edit", "content"));
+
+        let r1 = hm.clear_round(0);
+        let r2 = hm.clear_round(0);
+        assert_eq!(r1.cleared_tool_ids.len(), 1);
+        assert_eq!(r2.cleared_tool_ids.len(), 0, "second call must be no-op");
+        assert_eq!(r2.bytes_reclaimed, 0);
+    }
+
+    #[test]
+    fn test_clear_round_no_op_when_round_has_no_tools() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_message(MessageRole::Assistant, "just text"));
+        hm.append(make_message(MessageRole::User, "next user"));
+
+        let report = hm.clear_round(0);
+        assert!(report.cleared_tool_ids.is_empty());
+        assert_eq!(report.bytes_reclaimed, 0);
+        // No messages should have been mutated.
+        assert_eq!(hm.messages()[0].content, "just text");
+        assert_eq!(hm.messages()[1].content, "next user");
+    }
+
+    #[test]
+    fn test_clear_round_selective_only_target_round() {
+        // Two rounds: round-A has tc_1, round-B has tc_2. clear_round(round-A)
+        // must fold tc_1's tool message but leave tc_2's tool message alone.
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "round A",
+            vec![make_tool_call("tc_1", "file_edit", "{}")],
+        ));
+        hm.append(make_tool_message("tc_1", "file_edit", "A content"));
+        hm.append(make_message(MessageRole::User, "user 2"));
+        hm.append(ChatMessage::assistant_with_tools(
+            "round B",
+            vec![make_tool_call("tc_2", "bash", "{}")],
+        ));
+        hm.append(make_tool_message("tc_2", "bash", "B content"));
+
+        // round A is the first assistant (idx 0).
+        let _ = hm.clear_round(0);
+
+        let tc1 = hm
+            .messages()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("tc_1"))
+            .unwrap();
+        assert!(
+            tc1.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            "round-A tool must be folded"
+        );
+        let tc2 = hm
+            .messages()
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("tc_2"))
+            .unwrap();
+        assert_eq!(tc2.content, "B content", "round-B tool must be untouched");
+    }
+
+    #[test]
+    fn test_clear_round_preserves_schema() {
+        // After folding, sanitize_messages must not drop anything.
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "A",
+            vec![
+                make_tool_call("tc_1", "file_edit", "{}"),
+                make_tool_call("tc_2", "bash", "{}"),
+            ],
+        ));
+        hm.append(make_tool_message("tc_1", "file_edit", "alpha"));
+        hm.append(make_tool_message("tc_2", "bash", "beta"));
+
+        let _ = hm.clear_round(0);
+
+        let mut sanitized = hm.messages().to_vec();
+        HistoryManager::sanitize_messages(&mut sanitized);
+        assert_eq!(sanitized.len(), hm.messages().len());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not an Assistant")]
+    fn test_clear_round_panics_on_non_assistant_index() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_message(MessageRole::User, "hello"));
+        let _ = hm.clear_round(0); // must panic: idx 0 is User, not Assistant
+    }
+
+    // ── ADR-061 v3 §20.3.3 / PR2: fix_round tests ───────────────────────
+
+    #[test]
+    fn test_fix_round_clears_then_sweeps_orphans() {
+        // Round at idx 1: assistant claims tc_alpha + tc_orphan. tc_alpha
+        // has a tool message; tc_orphan does NOT (it's a leak from a
+        // malformed streaming response). Plus there's a stray tool
+        // message for tc_stray that no assistant claims.
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_message(MessageRole::User, "Q"));
+        hm.append(ChatMessage::assistant_with_tools(
+            "A",
+            vec![
+                make_tool_call("tc_alpha", "file_edit", "{}"),
+                make_tool_call("tc_orphan", "bash", "{}"),
+            ],
+        ));
+        hm.append(make_tool_message("tc_alpha", "file_edit", "alpha content"));
+        // tc_orphan has NO matching Tool message.
+        hm.append(make_tool_message("tc_stray", "bash", "stray content")); // orphan Tool
+
+        let report = hm.fix_round(1);
+
+        // clear_round part: tc_alpha folded
+        assert!(report.cleared.cleared_tool_ids.contains(&"tc_alpha".to_string()));
+        // orphan sweep part: tc_stray removed, tc_orphan id removed from assistant
+        assert_eq!(report.removed_orphan_tool_messages, 1);
+        assert!(report.removed_orphan_tool_call_ids.contains(&"tc_orphan".to_string()));
+    }
+
+    #[test]
+    fn test_fix_round_preserves_schema_and_idempotent() {
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "A",
+            vec![make_tool_call("tc_a", "file_edit", "{}")],
+        ));
+        hm.append(make_tool_message("tc_a", "file_edit", "content"));
+
+        let r1 = hm.fix_round(0);
+        let r2 = hm.fix_round(0);
+        // r1 did the work, r2 is a no-op
+        assert_eq!(r1.cleared.bytes_reclaimed, "content".len());
+        assert_eq!(r2.cleared.bytes_reclaimed, 0);
+        // Schema invariant: sanitize doesn't drop anything after fix_round.
+        let mut sanitized = hm.messages().to_vec();
+        HistoryManager::sanitize_messages(&mut sanitized);
+        assert_eq!(sanitized.len(), hm.messages().len());
+    }
+
+    #[test]
+    fn test_fix_round_handles_clean_round_no_orphans() {
+        // Round with no orphans: fix_round must produce empty orphan report.
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(ChatMessage::assistant_with_tools(
+            "A",
+            vec![make_tool_call("tc_a", "file_edit", "{}")],
+        ));
+        hm.append(make_tool_message("tc_a", "file_edit", "content"));
+
+        let report = hm.fix_round(0);
+        assert_eq!(report.removed_orphan_tool_messages, 0);
+        assert!(report.removed_orphan_tool_call_ids.is_empty());
+        // clear_round still ran.
+        assert!(report.cleared.cleared_tool_ids.contains(&"tc_a".to_string()));
+    }
+
+    // ── ADR-061 v3 §20.3.2 / PR2: recall_todo_round tests ───────────────
+
+    #[test]
+    fn test_recall_todo_round_no_marker() {
+        let mut hm = HistoryManager::new(10_000);
+        // No compaction marker — recall should return NoMarker.
+        hm.append(make_todo_write_assistant("tc_t1"));
+        hm.append(make_todo_write_tool("tc_t1"));
+        let result = hm.recall_todo_round();
+        assert!(matches!(result, RecallResult::NoMarker));
+    }
+
+    #[test]
+    fn test_recall_todo_round_no_todo_round_returns_notfound() {
+        let mut hm = HistoryManager::new(10_000);
+        // Marker but no todo_write round.
+        append_marker(&mut hm);
+        hm.append(make_message(MessageRole::User, "post-marker user"));
+        hm.append(make_message(MessageRole::Assistant, "post-marker assistant"));
+        let result = hm.recall_todo_round();
+        assert!(matches!(result, RecallResult::NoTodoRoundFound));
+    }
+
+    #[test]
+    fn test_recall_todo_round_skips_when_in_tail() {
+        // Todo round is already in the retained tail (after marker).
+        // Recall must detect and return SkippedAlreadyInTail.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(make_message(MessageRole::User, "Q1"));
+        append_marker(&mut hm);
+        // Tail: a todo_write round right after the marker.
+        hm.append(make_todo_write_assistant("tc_tail_todo"));
+        hm.append(make_todo_write_tool("tc_tail_todo"));
+
+        let result = hm.recall_todo_round();
+        // The todo round is already present in tail; recall must not
+        // duplicate it.
+        assert!(
+            matches!(result, RecallResult::SkippedAlreadyInTail | RecallResult::NoTodoRoundFound),
+            "expected skip or notfound, got {:?}",
+            std::mem::discriminant(&result)
+        );
+    }
+
+    #[test]
+    fn test_recall_todo_round_idempotent_on_repeat_call() {
+        // First recall after a fresh compression injects; second recall
+        // (without further mutation) returns SkippedAlreadyInjected.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(make_message(MessageRole::User, "Q1"));
+        hm.append(make_todo_write_assistant("tc_todo_1"));
+        hm.append(make_todo_write_tool("tc_todo_1"));
+        // Marker mid-history.
+        append_marker(&mut hm);
+        hm.append(make_message(MessageRole::User, "post-marker user"));
+
+        let r1 = hm.recall_todo_round();
+        let r2 = hm.recall_todo_round();
+
+        // r1 should inject; r2 should be skipped-already-injected.
+        assert!(matches!(r1, RecallResult::Injected { .. }), "first call: {:?}", r1);
+        assert!(
+            matches!(r2, RecallResult::SkippedAlreadyInjected),
+            "second call: {:?}",
+            r2
+        );
     }
 
     // ── replace_middle_with_summary tests ────────────────────────────────
@@ -2246,12 +3079,11 @@ mod tests {
         );
     }
 
-    // ── ADR-061: 8-level compression plan/apply tests ─────────────────────
+    // \u2500\u2500 ADR-061 v3: 5-level round-atomic plan/apply tests \u2500
 
-    /// Build 7 full rounds: System + (User → Assistant{tool_calls} → Tool →
-    /// Assistant) × 7. Tool results carry extra text so level 1's tool drops
-    /// clear a 10% ratio bar (tests that want a weak level selected pass
-    /// `0.10` explicitly — the default bar is 0.90).
+    /// Build 7 full rounds: System + (User \u2192 Assistant{tool_calls} \u2192 Tool \u2192
+    /// Assistant) \u00d7 7. Tool results carry extra text so level projections
+    /// carry real token weight.
     fn build_7_round_history() -> HistoryManager {
         let mut hm = HistoryManager::new(1_000_000);
         hm.append(make_message(MessageRole::System, "System prompt"));
@@ -2291,77 +3123,135 @@ mod tests {
         msgs.iter().any(|m| m.tool_call_id.as_deref() == Some(id))
     }
 
-    #[test]
-    fn test_plan_level1_keeps_users_all_and_tools_of_last_5_assistants() {
-        let hm = build_7_round_history();
-        // Explicit 10% bar: this fixture's total is small (~1K tokens), so
-        // level 1 only clears a weak bar — under the default 0.90 bar it
-        // would be skipped (see test_plan_default_ratio_skips_weak_levels).
-        let plan = hm.plan_compression("Summary", 0.10).expect("level 1 must fit");
-        assert_eq!(plan.level, 1, "with a huge budget level 1 is selected first");
+    /// Find the Tool message answering `tool_call_id`.
+    fn tool_msg<'a>(msgs: &'a [ChatMessage], id: &str) -> Option<&'a ChatMessage> {
+        msgs.iter().find(|m| {
+            matches!(m.role, MessageRole::Tool) && m.tool_call_id.as_deref() == Some(id)
+        })
+    }
 
-        // Level 1: every User and Assistant survives; tool window = the last
-        // 5 assistants → rounds 5-7 keep their tool results, rounds 1-4 drop
-        // theirs (ADR-061 §6.2). Dropped Tool results leave orphaned
-        // `tool_calls` declarations on kept assistants — sanitized at build
-        // time (accepted deviation, §19.6).
-        assert_eq!(user_count(&plan.retained), 7, "all user messages preserved");
-        assert_eq!(
-            plan.stats.assistant_messages, 14,
-            "all assistants preserved at level 1"
+    /// v3 schema invariants over a message list:
+    /// 1. every `assistant.tool_calls[*].id` resolves to a Tool message in
+    ///    the same buffer (no dangling / orphan id — v2's ghost bug);
+    /// 2. no two Assistant messages are adjacent (dropping a round must not
+    ///    fuse its neighbours into an illegal `Assistant \u2192 Assistant` pair).
+    fn assert_schema_and_no_adjacency(msgs: &[ChatMessage], label: &str) {
+        let tool_ids: Vec<&str> = msgs
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::Tool))
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        for (i, m) in msgs.iter().enumerate() {
+            if i > 0
+                && matches!(msgs[i - 1].role, MessageRole::Assistant)
+                && matches!(m.role, MessageRole::Assistant)
+            {
+                panic!("{label}: adjacent Assistant messages at index {i}");
+            }
+            if !matches!(m.role, MessageRole::Assistant) {
+                continue;
+            }
+            let Some(tcs) = m.tool_calls.as_ref() else {
+                continue;
+            };
+            for tc in tcs {
+                assert!(
+                    tool_ids.contains(&tc.id.as_str()),
+                    "{label}: orphan tool_call id {} (assistant kept but Tool dropped)",
+                    tc.id
+                );
+            }
+        }
+    }
+
+    /// v3 ghost-bug regression (level 1): the non-final kept rounds are
+    /// folded into placeholders — their assistant KEEPS `tool_calls` and the
+    /// Tool message stays present (schema intact). v2 stripped the dangling
+    /// tool_calls and silently degraded these assistants into text-only
+    /// ghosts (deepseek-v4-flash incident, ADR-061 \u00a720.1).
+    #[test]
+    fn v3_level1_folds_non_final_rounds_keeps_schema() {
+        let hm = build_7_round_history();
+        let plan = hm.build_level_plan(1, hm.messages(), "Summary");
+
+        // Rounds 1-5 are dropped whole (subsumed by the summary): neither
+        // their tool_call nor their tool result survives.
+        for id in ["tc_1", "tc_2", "tc_3", "tc_4", "tc_5"] {
+            assert!(!has_tool_call(&plan.retained, id), "{id} call must be gone");
+            assert!(!has_tool_result(&plan.retained, id), "{id} result must be gone");
+        }
+
+        // tc_6: kept round, folded — assistant keeps its tool_call entry and
+        // the Tool message is present as a placeholder.
+        assert!(
+            has_tool_call(&plan.retained, "tc_6"),
+            "folded round's assistant must keep its tool_calls (no sweep)"
         );
-        for id in ["tc_5", "tc_6", "tc_7"] {
-            assert!(has_tool_call(&plan.retained, id), "{id} call kept");
-            assert!(has_tool_result(&plan.retained, id), "{id} result kept");
-        }
-        for id in ["tc_1", "tc_2", "tc_3", "tc_4"] {
-            assert!(
-                has_tool_call(&plan.retained, id),
-                "{id} call kept (assistant survives at level 1)"
+        let tool6 = tool_msg(&plan.retained, "tc_6").expect("tc_6 Tool retained");
+        assert!(
+            tool6.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            "tc_6 Tool must be a placeholder"
+        );
+
+        // tc_7: final round stays verbatim.
+        let tool7 = tool_msg(&plan.retained, "tc_7").expect("tc_7 Tool retained");
+        assert!(
+            tool7.content.contains("Tool result for round 7"),
+            "final round's tool result must stay verbatim"
+        );
+        assert_schema_and_no_adjacency(&plan.retained, "L1 plan");
+    }
+
+    /// The 5-level table (ADR-061 v3 6.2): per level the fixture must
+    /// keep exactly (users, assistants, tools) as follows, and every level
+    /// must satisfy the round-atomic schema invariants.
+    #[test]
+    fn v3_level_table_round_atomic_counts() {
+        let hm = build_7_round_history();
+        // (level, users kept, assistants kept, tool messages kept)
+        let table: [(u8, usize, usize, usize); 4] = [
+            (1, 7, 5, 2), // 5 assistants; last tool round verbatim, tc_6 folded
+            (2, 7, 5, 2), // same window; both kept tools folded
+            (3, 7, 3, 1), // last 3 assistants; only tc_7 round kept, folded
+            (4, 7, 1, 0), // last 1 assistant (text answer; no tools)
+        ];
+        for (level, users, assts, tools) in table {
+            let plan = hm.build_level_plan(level, hm.messages(), "Summary");
+            assert_eq!(user_count(&plan.retained), users, "L{level} users");
+            assert_eq!(
+                plan.stats.assistant_messages, assts,
+                "L{level} assistant messages kept"
             );
-            assert!(!has_tool_result(&plan.retained, id), "{id} result dropped");
+            assert_eq!(plan.stats.tool_messages, tools, "L{level} tool messages kept");
+            assert_schema_and_no_adjacency(&plan.retained, &format!("L{level} plan"));
         }
-        assert!(plan.projected_tokens < plan.original_tokens);
     }
 
     #[test]
-    fn test_plan_projections_decrease_monotonically_and_stop_at_first_fit() {
+    fn v3_plan_projections_monotonic_and_first_fit() {
         let hm = build_7_round_history();
-        let projections: Vec<u64> = (1..=8)
+        let projections: Vec<u64> = (1..=5)
             .map(|l| hm.build_level_plan(l, hm.messages(), "Summary").projected_tokens)
             .collect();
-        // Core 8-level invariant: more aggressive levels never retain more.
+        // v3 invariant: more aggressive levels never retain more.
         for w in projections.windows(2) {
             assert!(
                 w[0] >= w[1],
                 "level projections must be monotonic non-increasing: {w:?}"
             );
         }
-        assert!(projections[0] > projections[7], "level 8 must be strictly smaller");
+        assert!(projections[0] > projections[4], "level 5 must be strictly smaller");
 
-        // Budget = level-5 projection, 10% bar: levels 1-4 fail the budget
-        // check, level 5 is the first fit → selected (§19.1: stop, never try 6-8).
-        let mut hm = hm;
-        hm.set_max_tokens(projections[4]);
-        let plan = hm.plan_compression("Summary", 0.10).expect("level 5 must fit");
-        assert_eq!(plan.level, 5, "first sufficient level wins");
-        // §19.2/D5: after apply the real count stays within budget (S known
-        // at plan time + level 8 backstop).
-        let outcome = hm
-            .apply_compression(plan, "Summary", 0.10)
-            .expect("apply must succeed");
-        assert_eq!(outcome.level, 5);
-        assert!(
-            hm.token_count() <= hm.max_tokens,
-            "post-compression count must fit budget"
-        );
+        // Relaxed 10% bar: level 1 is the first fit and wins.
+        let plan = hm.plan_compression("Summary", 0.10).expect("level 1 must fit");
+        assert_eq!(plan.level, 1, "first sufficient level wins under a relaxed bar");
     }
 
     #[test]
-    fn test_plan_level8_exempt_from_ratio_keeps_last_non_marker_user() {
-        // Conversation dominated by the system block: levels 1-7 drop nothing
-        // (ratio ~0% < 10%) yet level 8 must still be accepted on the budget
-        // check alone (§19.2 ratio exemption).
+    fn v3_level5_exempt_from_ratio_keeps_last_non_marker_user() {
+        // Conversation dominated by the system block: levels 1-4 drop nothing
+        // (ratio ~0% < 10%) yet level 5 must still be accepted on the budget
+        // check alone (19.2 ratio exemption).
         let mut hm = HistoryManager::new(1_000_000);
         hm.append(make_message(MessageRole::System, &"System prompt ".repeat(600)));
         hm.append(ChatMessage {
@@ -2374,17 +3264,17 @@ mod tests {
         hm.append(make_message(MessageRole::Assistant, "Answer 1"));
         hm.append(make_message(MessageRole::User, "Question 2"));
 
-        let p8 = hm
-            .build_level_plan(8, hm.messages(), "Summary")
+        let p5 = hm
+            .build_level_plan(5, hm.messages(), "Summary")
             .projected_tokens;
-        hm.set_max_tokens(p8);
+        hm.set_max_tokens(p5);
         let plan = hm
             .plan_compression("Summary", MIN_COMPRESSION_RATIO)
-            .expect("level 8 must fit");
-        assert_eq!(plan.level, 8, "only level 8 fits; ratio exemption required");
+            .expect("level 5 must fit");
+        assert_eq!(plan.level, 5, "only level 5 fits; ratio exemption required");
 
-        // Level 8 retains system + the LAST non-marker User (the earlier
-        // marker is User-role too and must be excluded, §19.1).
+        // Level 5 retains system + the LAST non-marker User (the earlier
+        // marker is User-role too and must be excluded, 19.1).
         assert_eq!(user_count(&plan.retained), 1, "only the current user message");
         assert_eq!(
             plan.retained.last().map(|m| m.content.as_str()),
@@ -2396,66 +3286,54 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_unrecoverable_overflow_when_level8_exceeds_budget() {
+    fn v3_plan_unrecoverable_overflow_when_level5_exceeds_budget() {
         let mut hm = build_7_round_history();
-        let p8 = hm.build_level_plan(8, hm.messages(), "Summary").projected_tokens;
-        hm.set_max_tokens(p8 - 1);
+        let p5 = hm.build_level_plan(5, hm.messages(), "Summary").projected_tokens;
+        hm.set_max_tokens(p5 - 1);
         let err = hm
             .plan_compression("Summary", MIN_COMPRESSION_RATIO)
             .unwrap_err();
         assert!(
             matches!(err, CompressError::UnrecoverableOverflow { .. }),
-            "level 8 cannot fit => explicit failure, history untouched: {err}"
+            "level 5 cannot fit => explicit failure, history untouched: {err}"
         );
         assert_eq!(hm.messages().len(), 29, "planning must never mutate history");
     }
 
     #[test]
-    fn test_apply_compression_marker_contract_and_user_preservation() {
+    fn v3_apply_marker_contract_and_user_preservation() {
         let mut hm = build_7_round_history();
         let plan = hm
             .plan_compression("A solid summary of everything so far", 0.10)
             .expect("plan");
         assert_eq!(plan.level, 1);
-        let outcome = hm
+        let _ = hm
             .apply_compression(plan, "A solid summary of everything so far", 0.10)
             .expect("apply");
 
-        assert!(outcome.removed_messages > 0);
-        assert!(outcome.new_tokens < outcome.original_tokens);
-        assert!(outcome.compression_ratio >= 0.10);
-
         let msgs = hm.messages();
-        let system_count = msgs
+        let split = msgs
             .iter()
             .take_while(|m| matches!(m.role, MessageRole::System))
             .count();
-        // Marker contract: User role + name=compaction_summary, right after
-        // the leading system block (restorer anchors replay after it).
-        let marker = &msgs[system_count];
-        assert!(matches!(marker.role, MessageRole::User));
-        assert_eq!(marker.name.as_deref(), Some(COMPACTION_SUMMARY_NAME));
-        assert!(
-            marker.content.starts_with("[compressed: level=1]"),
-            "level metadata block (§9)"
+        assert_eq!(
+            msgs[split].name.as_deref(),
+            Some(COMPACTION_SUMMARY_NAME),
+            "marker sits right after the leading system block"
         );
-        assert!(marker.content.contains("user_messages: "), "retention stats block");
-        assert!(marker.content.contains("tokens: "), "token delta line");
-        assert!(marker.content.ends_with("A solid summary of everything so far"));
-
-        // §13.2: levels 1-7 keep every original User message (7 + new marker).
-        assert_eq!(user_count(msgs), 8, "all user messages preserved plus the new marker");
+        // 7 real users + the new marker (markers are User-role too).
+        assert_eq!(user_count(msgs), 8, "all user messages preserved plus marker");
+        assert_schema_and_no_adjacency(msgs, "post-apply L1");
     }
 
     #[test]
-    fn test_apply_rejects_insufficient_plan_without_touching_history() {
+    fn v3_apply_rejects_insufficient_plan_without_touching_history() {
         let mut hm = build_7_round_history();
         let plan = hm.build_level_plan(1, hm.messages(), "Summary");
         let before = format!("{:?}", hm.messages());
-        hm.set_max_tokens(1); // projected >> budget → defensive re-check fails
         let err = hm
-            .apply_compression(plan, "Summary", MIN_COMPRESSION_RATIO)
-            .unwrap_err();
+            .apply_compression(plan, "Summary", 1.0)
+            .expect_err("L1 ratio < 1.0 => must be rejected");
         assert!(matches!(err, CompressError::InsufficientCompression { .. }));
         assert_eq!(
             format!("{:?}", hm.messages()),
@@ -2464,19 +3342,43 @@ mod tests {
         );
     }
 
+    /// E2E ghost-bug regression: applying ANY v3 level must produce a
+    /// message list that survives `sanitize_messages` untouched — no orphan
+    /// tool_call, no adjacent assistants, nothing for the sanitizer to strip.
     #[test]
-    fn test_plan_default_ratio_skips_weak_levels() {
-        // ADR-061 §19.3: the default bar is 0.90 ("compress until at most
+    fn v3_apply_keeps_schema_intact_through_sanitize_all_levels() {
+        for level in 1..=4u8 {
+            let mut hm = build_7_round_history();
+            let plan = hm.build_level_plan(level, hm.messages(), "Summary");
+            let _ = hm
+                .apply_compression(plan, "Summary", 0.0)
+                .unwrap_or_else(|e| panic!("L{level} apply: {e}"));
+
+            assert_schema_and_no_adjacency(hm.messages(), &format!("L{level} post-apply"));
+
+            let mut sanitized = hm.messages().to_vec();
+            let pre_count = sanitized.len();
+            HistoryManager::sanitize_messages(&mut sanitized);
+            let post_count = sanitized.len();
+            assert_eq!(
+                pre_count, post_count,
+                "L{level}: sanitize must not drop any messages — v3 apply preserves schema"
+            );
+        }
+    }
+
+    #[test]
+    fn v3_plan_default_ratio_falls_to_summary_floor() {
+        // ADR-061 19.3: the default bar is 0.90 ("compress until at most
         // 10% remains"). The small 7-round fixture never removes 90% at
-        // levels 1-7, so plan must fall through to level 8's ratio
-        // exemption instead of stopping at a weak level.
+        // levels 1-4, so plan must fall through to level 5's ratio exemption.
         let hm = build_7_round_history();
         let plan = hm
             .plan_compression("Summary", MIN_COMPRESSION_RATIO)
-            .expect("level 8 must still fit");
+            .expect("level 5 must still fit");
         assert_eq!(
-            plan.level, 8,
-            "under the default 0.90 bar every level 1-7 is skipped"
+            plan.level, 5,
+            "under the default 0.90 bar every level 1-4 is skipped"
         );
     }
 

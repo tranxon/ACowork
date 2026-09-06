@@ -35,7 +35,7 @@ function ensureInit() {
       nodeBorder: "#cbd5e1",
       nodeTextColor: "#334155",
       fontSize: "12px",
-      fontFamily: "system-ui, -apple-system, sans-serif",
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif',
       nodeBorderRadius: 12,
     },
     themeCSS: [

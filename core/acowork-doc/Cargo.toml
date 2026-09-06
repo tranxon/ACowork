@@ -1,0 +1,65 @@
+[package]
+name = "acowork-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+description = "Online document library service — directory-tree storage with per-dir library.json, optimistic-version concurrency, PR-style update review flow, REST API + MCP tools"
+
+[lib]
+name = "acowork_doc"
+path = "src/lib.rs"
+
+# Standalone process binary (spawned/supervised by the Gateway, ADR-064 pattern).
+[[bin]]
+name = "acowork-doc"
+path = "src/main.rs"
+
+[dependencies]
+acowork-core.workspace = true
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+tokio-stream.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+reqwest.workspace = true
+
+# Date/time + UUID
+chrono.workspace = true
+uuid.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+
+# Text traversal / search
+regex.workspace = true
+
+# Configuration
+toml.workspace = true
+
+# CLI (standalone process entry, ADR-064)
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

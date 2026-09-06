@@ -38,6 +38,14 @@ pub enum RuntimeError {
     #[error("Context overflow: {0}")]
     ContextOverflow(String),
 
+    /// LLM-based context compaction (5-level plan) failed — every distill
+    /// tier was exhausted or the plan could not fit. The session must NOT
+    /// keep looping afterwards (context would keep growing while the UI
+    /// already showed an error); the agent loop treats this as terminal
+    /// (GiveUp → Idle).
+    #[error("Context compaction failed: {0}")]
+    CompactionFailed(String),
+
     #[error("Unsupported model: {0}")]
     UnsupportedModel(String),
 
@@ -151,6 +159,14 @@ impl RuntimeError {
             RuntimeError::ContextOverflow(msg) => {
                 (
                     "Context too long. History compressed.".to_string(),
+                    msg.clone(),
+                    "ContextOverflow".to_string(),
+                )
+            }
+            RuntimeError::CompactionFailed(msg) => {
+                (
+                    "Context compaction failed. The conversation cannot continue safely — start a new conversation, switch to a larger-context model, or retry compression manually."
+                        .to_string(),
                     msg.clone(),
                     "ContextOverflow".to_string(),
                 )

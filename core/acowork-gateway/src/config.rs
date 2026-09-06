@@ -143,6 +143,16 @@ pub struct GatewayConfig {
     /// 调优参数（max_task_depth 等）由 PM 进程独立解析（env / TOML / default）。
     #[serde(default)]
     pub pm: PmConfig,
+
+    /// Online document library service (acowork-doc, standalone process).
+    ///
+    /// Mirrors the PM pattern (ADR-064): the doc service runs as an
+    /// independent binary supervised by the Gateway, which reverse-proxies
+    /// `/api/doc/*` → `127.0.0.1:{doc.port}/*`. This section only keeps the
+    /// fields the Gateway needs to manage the process; the doc process
+    /// itself parses its tuning parameters independently.
+    #[serde(default)]
+    pub doc: DocConfig,
 }
 
 /// PM 服务配置（Gateway 侧，ADR-064）。
@@ -193,6 +203,72 @@ impl Default for PmConfig {
             port: default_pm_port(),
             auto_inject_mcp: default_true(),
             mcp_http_path: default_pm_mcp_http_path(),
+        }
+    }
+}
+
+/// doc service config (Gateway side).
+///
+/// Only fields the Gateway needs to manage the acowork-doc standalone
+/// process (spawn / port / MCP injection). The doc process resolves its own
+/// full config independently (`$HOME/.acowork/acowork-doc/` defaults);
+/// `data_dir` and `request_ttl_hours` are optional overrides forwarded to
+/// the subprocess via CLI flags when present.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocConfig {
+    /// Whether to spawn the acowork-doc subprocess.
+    ///
+    /// Default `true`. `false` → Gateway does not spawn doc and `/api/doc/*`
+    /// returns 503.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Desired doc listen port.
+    ///
+    /// Default `18081`. The doc process auto-increments on conflict (max
+    /// +20); the actual port is reported via `--port-file` and read into
+    /// `doc_process` by the supervisor.
+    #[serde(default = "default_doc_port")]
+    pub port: u16,
+
+    /// Optional data-directory override forwarded to the subprocess
+    /// (`--data-dir`). `None` → doc resolves `$HOME/.acowork/acowork-doc/`.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+
+    /// Whether to auto-inject the doc MCP HTTP endpoint into every Agent's
+    /// MCP catalog (`auto_inject_mcp`, default `true`).
+    #[serde(default = "default_true")]
+    pub auto_inject_mcp: bool,
+
+    /// Public path of the doc MCP endpoint (via Gateway reverse proxy).
+    /// Default `/api/doc/mcp`.
+    #[serde(default = "default_doc_mcp_http_path")]
+    pub mcp_http_path: String,
+
+    /// Optional update-request TTL override (hours) forwarded to the
+    /// subprocess (`--request-ttl-hours`). `None` → doc default (72h).
+    #[serde(default)]
+    pub request_ttl_hours: Option<u32>,
+}
+
+fn default_doc_port() -> u16 {
+    18081
+}
+
+fn default_doc_mcp_http_path() -> String {
+    "/api/doc/mcp".to_string()
+}
+
+impl Default for DocConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            port: default_doc_port(),
+            data_dir: None,
+            auto_inject_mcp: default_true(),
+            mcp_http_path: default_doc_mcp_http_path(),
+            request_ttl_hours: None,
         }
     }
 }
@@ -575,6 +651,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.pm.clone())
                 .unwrap_or_default(),
+            doc: file_config
+                .as_ref()
+                .map(|c| c.doc.clone())
+                .unwrap_or_default(),
         };
 
         config.validate()?;
@@ -683,6 +763,7 @@ impl Default for GatewayConfig {
             node_proxy_port: None,
             node_lsp_relay_port: None,
             pm: PmConfig::default(),
+            doc: DocConfig::default(),
         }
     }
 }
@@ -986,5 +1067,99 @@ port = 20082
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&tmp_home);
+    }
+
+    #[test]
+    fn test_doc_config_omitted_section_defaults() {
+        // No `[doc]` section at all → all fields take defaults.
+        let toml = r#"
+vault_dir = "/tmp/gw-doc-default-test-vault"
+packages_dir = "/tmp/gw-doc-default-test-packages"
+data_dir = "/tmp/gw-doc-default-test-data"
+"#;
+        let path = write_toml_config("doc-default", toml);
+        let cli = Cli::parse_from(["acowork-gateway", "--config-path", path.to_str().unwrap()]);
+        let config = GatewayConfig::from_cli(&cli).expect("from_cli");
+
+        assert!(config.doc.enabled);
+        assert_eq!(config.doc.port, 18081);
+        assert!(config.doc.data_dir.is_none());
+        assert!(config.doc.auto_inject_mcp);
+        assert_eq!(config.doc.mcp_http_path, "/api/doc/mcp");
+        assert!(config.doc.request_ttl_hours.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_doc_config_partial_section_merges_defaults() {
+        // Partial `[doc]` section → provided fields honored, rest defaulted.
+        let toml = r#"
+vault_dir = "/tmp/gw-doc-partial-test-vault"
+packages_dir = "/tmp/gw-doc-partial-test-packages"
+data_dir = "/tmp/gw-doc-partial-test-data"
+
+[doc]
+port = 20181
+request_ttl_hours = 48
+"#;
+        let path = write_toml_config("doc-partial", toml);
+        let cli = Cli::parse_from(["acowork-gateway", "--config-path", path.to_str().unwrap()]);
+        let config = GatewayConfig::from_cli(&cli).expect("from_cli");
+
+        assert_eq!(config.doc.port, 20181);
+        assert_eq!(config.doc.request_ttl_hours, Some(48));
+        // 其余走默认
+        assert!(config.doc.enabled);
+        assert!(config.doc.auto_inject_mcp);
+        assert_eq!(config.doc.mcp_http_path, "/api/doc/mcp");
+        assert!(config.doc.data_dir.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_doc_config_full_section() {
+        // Fully-specified `[doc]` section round-trips through from_cli.
+        let toml = r#"
+vault_dir = "/tmp/gw-doc-full-test-vault"
+packages_dir = "/tmp/gw-doc-full-test-packages"
+data_dir = "/tmp/gw-doc-full-test-data"
+
+[doc]
+enabled = false
+port = 20281
+data_dir = "D:/tmp/doc-override"
+auto_inject_mcp = false
+mcp_http_path = "/api/doc/mcp-custom"
+request_ttl_hours = 24
+"#;
+        let path = write_toml_config("doc-full", toml);
+        let cli = Cli::parse_from(["acowork-gateway", "--config-path", path.to_str().unwrap()]);
+        let config = GatewayConfig::from_cli(&cli).expect("from_cli");
+
+        assert!(!config.doc.enabled);
+        assert_eq!(config.doc.port, 20281);
+        assert_eq!(
+            config.doc.data_dir,
+            Some(PathBuf::from("D:/tmp/doc-override"))
+        );
+        assert!(!config.doc.auto_inject_mcp);
+        assert_eq!(config.doc.mcp_http_path, "/api/doc/mcp-custom");
+        assert_eq!(config.doc.request_ttl_hours, Some(24));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_doc_config_default_struct() {
+        // Direct Default impl sanity (unit-level, mirrors pm precedent).
+        let doc = DocConfig::default();
+        assert!(doc.enabled);
+        assert_eq!(doc.port, 18081);
+        assert!(doc.data_dir.is_none());
+        assert!(doc.auto_inject_mcp);
+        assert_eq!(doc.mcp_http_path, "/api/doc/mcp");
+        assert!(doc.request_ttl_hours.is_none());
     }
 }
