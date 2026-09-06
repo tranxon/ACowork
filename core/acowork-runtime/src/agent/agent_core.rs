@@ -1011,6 +1011,80 @@ impl AgentCore {
             .and_then(manifest_distiller_to_config)
     }
 
+    /// ADR-071 D2: run one EpisodicDistiller pass on demand (manual trigger).
+    ///
+    /// Force semantics: bypasses the periodic gate (`ConsolidationTimer`
+    /// interval / backlog / idle checks) and runs `run_episodic_distiller_step`
+    /// immediately — the exact same execution path as the background loop.
+    ///
+    /// The scheduler's `distiller_enabled` flag is STILL respected (opt-in,
+    /// ADR-068): a manual trigger on a distiller that is explicitly disabled
+    /// is refused instead of silently producing semantic-layer nodes. The UI
+    /// only exposes the manual button while the distiller is enabled, and the
+    /// endpoint defends the same invariant server-side.
+    ///
+    /// Model resolution follows the current pipeline convention (first model
+    /// in the global provider list); ADR-071 W3 replaces this with the
+    /// `distiller_model` resolution chain.
+    ///
+    /// Returns `Ok(Some(result))` after a grafeo-backed run,
+    /// `Ok(None)` when the `grafeo-backend` feature is off, and `Err(...)`
+    /// when the distiller is disabled or the memory/embedding provider is
+    /// unavailable.
+    pub(crate) async fn run_episodic_distill_once(
+        &self,
+    ) -> Result<Option<acowork_memory::consolidation::DistillerResult>, String> {
+        use crate::memory::consolidation_bg::run_episodic_distiller_step_once;
+        use crate::memory::llm_adapter::ProviderLlmAdapter;
+        use acowork_memory::consolidation::{SchedulerConfig, TripleExtractorLlm};
+
+        if !self.manifest.memory.distiller_enabled() {
+            return Err("distiller is disabled (manifest [memory.distiller].enabled = false)".to_string());
+        }
+        let provider = self
+            .memory_provider
+            .clone()
+            .ok_or_else(|| "memory provider not initialized".to_string())?;
+        let embedding = self
+            .embedding_provider
+            .clone()
+            .ok_or_else(|| "embedding provider not initialized".to_string())?;
+        let model = {
+            let list = self.global_provider_list.read().unwrap();
+            list.iter()
+                .flat_map(|p| p.models.iter())
+                .next()
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| "default".to_string())
+        };
+        let llm: Arc<dyn TripleExtractorLlm> =
+            Arc::new(ProviderLlmAdapter::new(self.provider.clone(), model));
+        // Manual run uses the manifest-declared distiller parameters when
+        // present; defaults otherwise. Enabled is forced true.
+        let scheduler_config = SchedulerConfig {
+            distiller_enabled: true,
+            distiller_config: self.distiller_config(),
+            ..SchedulerConfig::default()
+        };
+        let result = run_episodic_distiller_step_once(provider, llm, embedding, scheduler_config)
+            .await;
+        // Manual runs also reset the interval gate so the periodic scheduler
+        // does not immediately re-trigger right after a manual run, and store
+        // the run summary for the status endpoint (ADR-071 D2).
+        if let Some(ref timer) = self.consolidation_timer {
+            match &result {
+                Some(result) => {
+                    let record = crate::memory::consolidation_bg::DistillRunRecord::from_result(
+                        chrono::Utc::now(),
+                        result,
+                    );
+                    timer.record_distill_result(&record).await;
+                }                None => timer.mark_distill_run().await,
+            }
+        }
+        Ok(result)
+    }
+
     pub fn start_consolidation_pipeline(&mut self) {
         let Some(ref provider) = self.memory_provider else {
             tracing::debug!("Cannot start consolidation: memory provider not initialized");
@@ -1966,6 +2040,67 @@ mod tests {
         if let Some(bg) = core.consolidation_bg_task.take() {
             bg.abort();
         }
+    }
+
+    // ── ADR-071 D2: manual distill trigger (AgentCore-level) ─────────
+
+    /// G1c: A manual distill on a distiller that is explicitly OFF must be
+    /// refused — opt-in invariant (ADR-068 / ADR-071): a disabled distiller
+    /// must never produce semantic-layer nodes, even when force-triggered.
+    #[tokio::test]
+    async fn test_manual_distill_refused_when_disabled() {
+        let core = make_core(Some(8192), None, None, 0);
+        // Default manifest: no `[memory.distiller]` section → disabled.
+        assert!(!core.manifest.memory.distiller_enabled());
+
+        let err = core.run_episodic_distill_once().await.unwrap_err();
+        assert!(
+            err.contains("distiller is disabled"),
+            "disabled distiller must refuse manual runs, got: {err}"
+        );
+    }
+
+    /// G1d: With the distiller enabled and providers wired, a manual run
+    /// completes and returns a real DistillerResult (empty backlog → zero
+    /// promotions, but the pipeline runs).
+    #[cfg(feature = "grafeo-backend")]
+    #[tokio::test]
+    async fn test_manual_distill_runs_when_enabled() {
+        use acowork_core::embedding::EmbeddingProvider;
+        use acowork_grafeo::GrafeoStore;
+
+        let mut core = make_core_with_memory_toml(
+            "[memory.distiller]\nenabled = true\n",
+        );
+        assert!(core.manifest.memory.distiller_enabled());
+
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        core.memory_provider = Some(store);
+
+        struct DummyEmbeddingProvider;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for DummyEmbeddingProvider {
+            fn name(&self) -> &str { "dummy" }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                Ok(vec![0.0; 384])
+            }
+            async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+            }
+            fn dimension(&self) -> usize { 384 }
+            async fn is_available(&self) -> bool { true }
+        }
+        core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
+
+        let result = core
+            .run_episodic_distill_once()
+            .await
+            .expect("manual distill should succeed when enabled");
+        let result = result.expect("grafeo-backend is on → Some(result)");
+        // Empty store: the distiller scans nothing and promotes nothing.
+        assert_eq!(result.episodes_scanned, 0);
+        assert_eq!(result.facts_promoted, 0);
     }
 
     /// G9: Verify that `AgentCore.rag_provider` is None by default

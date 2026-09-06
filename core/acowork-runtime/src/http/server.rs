@@ -566,6 +566,7 @@ impl RuntimeHttpServer {
             )
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/consolidate", post(trigger_consolidate))
+            .route("/memory/distill", post(post_memory_distill))
             .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
@@ -3344,6 +3345,11 @@ async fn put_shell_risk_rules(
 // ── N1: Consolidation status endpoint ──────────────────────────
 
 /// `GET /memory/consolidation/status` - report consolidation timer state.
+///
+/// ADR-071 D2 extension: reports the distiller trigger state (enabled,
+/// episode backlog, seconds since the last run) alongside the legacy
+/// lifecycle state (idle / pending). The UI reads this to render the
+/// "记忆蒸馏" card without polling the manifest.
 async fn get_consolidation_status(
     State(state): State<HttpState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -3355,7 +3361,24 @@ async fn get_consolidation_status(
 
     let idle_secs = timer.idle_secs().await;
     let pending = timer.pending_count().await;
+    let episode_count = timer.episode_count().await;
+    let secs_since_distill = timer.secs_since_distill().await;
+    let last_distill = timer.last_distill_result().await;
     let config = timer.config();
+
+    let last_run = last_distill.as_ref().map(|r| {
+        serde_json::json!({
+            "at": r.at.to_rfc3339(),
+            "episodes_scanned": r.episodes_scanned,
+            "total_promoted": r.total_promoted(),
+            "facts_promoted": r.facts_promoted,
+            "preferences_promoted": r.preferences_promoted,
+            "relations_promoted": r.relations_promoted,
+            "procedures_promoted": r.procedures_promoted,
+            "autobio_promoted": r.autobio_promoted,
+            "episodes_marked_consolidated": r.episodes_marked_consolidated,
+        })
+    });
 
     Ok(Json(serde_json::json!({
         "idle_secs": idle_secs,
@@ -3363,7 +3386,75 @@ async fn get_consolidation_status(
         "idle_timeout_secs": config.idle_timeout_secs,
         "accumulation_threshold": config.accumulation_threshold,
         "bg_task_running": true,
+        // ADR-071 D1/D2: distiller trigger state.
+        "distiller": {
+            "enabled": config.distiller_enabled,
+            "episode_backlog": episode_count,
+            "secs_since_distill": secs_since_distill,
+            "interval_secs": config.distiller_interval_secs,
+            "accumulation_threshold": config.distiller_accumulation,
+            "idle_secs": config.distiller_idle_secs,
+            "last_run": last_run,
+        },
     })))
+}
+
+/// `POST /memory/distill` - trigger one EpisodicDistiller pass immediately.
+///
+/// ADR-071 D2 manual trigger: force semantics — bypasses the periodic gate
+/// (interval / backlog / idle) and runs the same `run_episodic_distiller_step`
+/// that the background loop uses. The response carries the distilled-run
+/// summary when the run produced one.
+///
+/// Status codes:
+/// - `200` run completed (empty episode backlog is still a completed run)
+/// - `409` run not possible (memory/embedding provider unavailable)
+/// - `500` run failed (distiller error)
+/// - `503` AgentCore not ready yet, or the `grafeo-backend` feature is off
+async fn post_memory_distill(
+    State(state): State<HttpState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let core = {
+        let slot = state
+            .agent_core
+            .read()
+            .map_err(|_| err_json(StatusCode::SERVICE_UNAVAILABLE, "agent_core_lock"))?;
+        slot.clone()
+            .ok_or_else(|| err_json(StatusCode::SERVICE_UNAVAILABLE, "agent_core_not_ready"))?
+    };
+    match core.run_episodic_distill_once().await {
+        Ok(Some(result)) => Ok(Json(serde_json::json!({
+            "started": true,
+            "episodes_scanned": result.episodes_scanned,
+            "facts_promoted": result.facts_promoted,
+            "preferences_promoted": result.preferences_promoted,
+            "relations_promoted": result.relations_promoted,
+            "procedures_promoted": result.procedures_promoted,
+            "autobio_promoted": result.autobio_promoted,
+            "episodes_marked_consolidated": result.episodes_marked_consolidated,
+        }))),
+        Ok(None) => Err(err_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "distiller_not_available",
+        )),
+        Err(e) => {
+            tracing::warn!(error = %e, "Manual distiller run failed");
+            if e.contains("memory provider not initialized")
+                || e.contains("embedding provider not initialized")
+                || e.contains("distiller is disabled")
+            {
+                Err(err_json(StatusCode::CONFLICT, &e))
+            } else {
+                Err(err_json(StatusCode::INTERNAL_SERVER_ERROR, &e))
+            }
+        }
+    }
+}
+
+/// Build an error JSON response `{"error": code}` for endpoints that return
+/// `Result<Json<_>, (StatusCode, Json<_>)>`.
+fn err_json(status: StatusCode, code: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({ "error": code })))
 }
 
 // ── N2: RAG status endpoint ────────────────────────────────────
@@ -5876,6 +5967,12 @@ mod tests {
         assert_eq!(body["idle_timeout_secs"], 1800);
         assert_eq!(body["accumulation_threshold"], 50);
         assert_eq!(body["bg_task_running"], true);
+        // ADR-071 D2: distiller trigger state surfaced for the UI card.
+        assert_eq!(body["distiller"]["enabled"], false);
+        assert_eq!(body["distiller"]["episode_backlog"], 0);
+        assert!(body["distiller"]["interval_secs"].is_u64());
+        assert_eq!(body["distiller"]["accumulation_threshold"], 50);
+        assert_eq!(body["distiller"]["idle_secs"], 1800);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -5930,6 +6027,71 @@ mod tests {
         let url = format!("http://127.0.0.1:{}/memory/consolidation/status", server.port);
         let resp = reqwest::get(&url).await.unwrap();
         assert_eq!(resp.status(), 503, "should return 503 when no timer configured");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// N1c: `POST /memory/distill` (ADR-071 D2) degrades to 503 when no
+    /// AgentCore has been constructed yet (Phase B not complete). A full
+    /// end-to-end run (episodes -> promoted nodes) is covered by the
+    /// adr071 memory e2e suite which wires a real AgentCore.
+    #[tokio::test]
+    async fn test_http_memory_distill_no_agent_core() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-http-memory-distill");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
+        let snapshots: SharedSessionSnapshots =
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+        )
+        .await
+        .expect("server should start");
+
+        let url = format!("http://127.0.0.1:{}/memory/distill", server.port);
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            503,
+            "manual distill without AgentCore should be 503"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

@@ -61,6 +61,49 @@ pub struct ConsolidationTimer {
     state: Mutex<TimerState>,
 }
 
+/// Summary of the most recent EpisodicDistiller run (ADR-071 D2). Stored on
+/// the timer so `GET /memory/consolidation/status` can surface "上次运行"
+/// without re-scanning the store.
+#[derive(Debug, Clone, Default)]
+pub struct DistillRunRecord {
+    pub at: chrono::DateTime<Utc>,
+    pub episodes_scanned: usize,
+    pub facts_promoted: usize,
+    pub preferences_promoted: usize,
+    pub relations_promoted: usize,
+    pub procedures_promoted: usize,
+    pub autobio_promoted: usize,
+    pub episodes_marked_consolidated: usize,
+}
+
+impl DistillRunRecord {
+    /// Build a record from a distilled-run result. `at` defaults to now.
+    pub fn from_result(
+        at: chrono::DateTime<Utc>,
+        result: &acowork_memory::consolidation::DistillerResult,
+    ) -> Self {
+        Self {
+            at,
+            episodes_scanned: result.episodes_scanned,
+            facts_promoted: result.facts_promoted,
+            preferences_promoted: result.preferences_promoted,
+            relations_promoted: result.relations_promoted,
+            procedures_promoted: result.procedures_promoted,
+            autobio_promoted: result.autobio_promoted,
+            episodes_marked_consolidated: result.episodes_marked_consolidated,
+        }
+    }
+
+    /// Total promoted nodes across all categories.
+    pub fn total_promoted(&self) -> usize {
+        self.facts_promoted
+            + self.preferences_promoted
+            + self.relations_promoted
+            + self.procedures_promoted
+            + self.autobio_promoted
+    }
+}
+
 #[derive(Debug)]
 struct TimerState {
     last_active_at: chrono::DateTime<Utc>,
@@ -69,6 +112,9 @@ struct TimerState {
     episode_count: usize,
     /// Last time the distiller actually ran (interval gate, ADR-071 D1).
     last_distill_at: chrono::DateTime<Utc>,
+    /// Summary of the most recent distiller run (ADR-071 D2). `None` until
+    /// the first run completes.
+    last_distill: Option<DistillRunRecord>,
 }
 
 impl ConsolidationTimer {
@@ -81,6 +127,7 @@ impl ConsolidationTimer {
                 pending_count: 0,
                 episode_count: 0,
                 last_distill_at: now,
+                last_distill: None,
             }),
         }
     }
@@ -107,6 +154,21 @@ impl ConsolidationTimer {
     pub async fn mark_distill_run(&self) {
         let mut state = self.state.lock().await;
         state.last_distill_at = Utc::now();
+    }
+
+    /// Record that a distiller run just happened, together with its result
+    /// summary (ADR-071 D2). Resets the interval gate and stores the summary
+    /// for the status endpoint.
+    pub async fn record_distill_result(&self, result: &DistillRunRecord) {
+        let mut state = self.state.lock().await;
+        state.last_distill_at = result.at;
+        state.last_distill = Some(result.clone());
+    }
+
+    /// Get the most recent distiller-run summary, if any (ADR-071 D2).
+    pub async fn last_distill_result(&self) -> Option<DistillRunRecord> {
+        let state = self.state.lock().await;
+        state.last_distill.clone()
     }
 
     /// Check whether consolidation should run now.
@@ -316,21 +378,12 @@ async fn run_consolidation_loop(
             tracing::info!(?reason, backlog, "EpisodicDistiller triggered");
         }
 
-        // Build embedding function from the embedding provider.
-        let embedding_fn = {
-            let ep = embedding_provider.clone();
-            let handle = tokio::runtime::Handle::current();
-            Arc::new(move |text: &str| -> Vec<f32> {
-                let text_owned = text.to_string();
-                match handle.block_on(ep.embed(&text_owned)) {
-                    Ok(vec) => vec,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Embedding failed during consolidation, using zero vector");
-                        vec![]
-                    }
-                }
-            }) as DistillerEmbeddingFn
-        };
+        // Build embedding function from the embedding provider. The bridge is
+        // `Option`: on non-multi-thread runtimes we degrade to exact-key
+        // clustering instead of risking a block_on panic inside a tokio
+        // worker (ADR-071 W2 — the distiller calls the bridge synchronously
+        // from async code).
+        let embedding_fn = build_embedding_bridge(embedding_provider.clone());
 
         // Build offline config from scheduler config.
         let offline_config = OfflineConsolidationConfig {
@@ -342,14 +395,21 @@ async fn run_consolidation_loop(
         // its OWN condition — not by the legacy Pending-node trigger. The
         // distiller promotes classified episodes to the semantic layer.
         if distill_trigger.is_some() {
-            run_episodic_distiller_step(
+            let result = run_episodic_distiller_step(
                 provider.as_ref(),
                 &*llm,
-                &embedding_fn,
+                embedding_fn.as_ref(),
                 scheduler.config(),
             )
             .await;
-            scheduler.mark_distill_run().await;
+            // ADR-071 D2: persist the run summary (time + promotion counts)
+            // for the status endpoint, and reset the interval gate.
+            if let Some(result) = result {
+                let record = DistillRunRecord::from_result(Utc::now(), &result);
+                scheduler.record_distill_result(&record).await;
+            } else {
+                scheduler.mark_distill_run().await;
+            }
         }
 
         // Run offline consolidation through the provider trait (legacy
@@ -361,7 +421,7 @@ async fn run_consolidation_loop(
                 .run_offline_consolidation(
                     &offline_config,
                     Some(&*llm),
-                    Some(embedding_fn),
+                    embedding_fn,
                     None, // gen_config — generalization retired
                 )
                 .await
@@ -397,6 +457,41 @@ async fn run_consolidation_loop(
 
 type DistillerEmbeddingFn = Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>;
 
+/// Build an embedding bridge for the distiller / offline consolidation.
+///
+/// The bridge is invoked synchronously from async code (distiller clustering
+/// is a sync call inside an async task). Calling `Handle::block_on` directly
+/// inside a tokio worker thread panics ("Cannot start a runtime from within
+/// a runtime"), so on the multi-thread runtime we hand the call to a blocking
+/// worker via `block_in_place`.
+///
+/// Returns `None` when no safe bridge is possible (current-thread runtime or
+/// no runtime context): callers then degrade to exact-key clustering, which
+/// is the distiller's documented fallback (ADR-068 §3.4.2 Step 2b).
+fn build_embedding_bridge(
+    embedding_provider: Arc<dyn EmbeddingProvider>,
+) -> Option<DistillerEmbeddingFn> {
+    // No runtime context at all (e.g. a pure sync test): cannot await safely.
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        tracing::debug!(
+            flavor = ?handle.runtime_flavor(),
+            "Embedding bridge unavailable on non-multi-thread runtime; distiller will use exact-key clustering"
+        );
+        return None;
+    }
+    Some(Arc::new(move |text: &str| -> Vec<f32> {
+        let text_owned = text.to_string();
+        match tokio::task::block_in_place(|| handle.block_on(embedding_provider.embed(&text_owned))) {
+            Ok(vec) => vec,
+            Err(e) => {
+                tracing::warn!(error = %e, "Embedding failed during consolidation, using zero vector");
+                vec![]
+            }
+        }
+    }))
+}
+
 /// Run one EpisodicDistiller pass inside the background consolidation loop.
 ///
 /// ADR-068 M4: the distiller is the ONLY producer of semantic-layer nodes
@@ -405,15 +500,20 @@ type DistillerEmbeddingFn = Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Syn
 /// Autobiographical nodes. The step is off-by-default (`distiller_enabled`),
 /// so this function is a no-op unless explicitly configured.
 ///
+/// Returns `Some(result)` after a real grafeo-backed run; `None` when the
+/// `grafeo-backend` feature is off or when the run failed. The background
+/// loop ignores the return value; the manual HTTP trigger (`POST
+/// /memory/distill`, ADR-071 D2) surfaces it to the caller.
+///
 /// The distiller lives in `acowork-grafeo`, which is an optional runtime
 /// dependency behind the `grafeo-backend` feature. When that feature is
 /// disabled the step degrades to a logged no-op.
 async fn run_episodic_distiller_step(
     provider: &dyn acowork_memory::MemoryProvider,
     llm: &dyn TripleExtractorLlm,
-    embedding_fn: &DistillerEmbeddingFn,
+    embedding_fn: Option<&DistillerEmbeddingFn>,
     config: &SchedulerConfig,
-) {
+) -> Option<acowork_memory::consolidation::DistillerResult> {
     // When grafeo is not compiled in, nothing to do.
     #[cfg(not(feature = "grafeo-backend"))]
     {
@@ -422,6 +522,7 @@ async fn run_episodic_distiller_step(
             "EpisodicDistiller step requested but acowork-grafeo is not enabled \
              (feature 'grafeo-backend' is off); skipping"
         );
+        None
     }
 
     #[cfg(feature = "grafeo-backend")]
@@ -430,8 +531,8 @@ async fn run_episodic_distiller_step(
 
         let distiller = DefaultEpisodicDistiller;
         let distiller_config = config.distiller_config.clone().unwrap_or_default();
-        match distiller
-            .run(provider, Some(llm), Some(embedding_fn), &distiller_config)
+        let run_result = match distiller
+            .run(provider, Some(llm), embedding_fn, &distiller_config)
             .await
         {
             Ok(result) => {
@@ -457,11 +558,13 @@ async fn run_episodic_distiller_step(
                         "distiller evaluation"
                     );
                 }
+                Some(result)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "EpisodicDistiller run failed (ADR-068)");
+                None
             }
-        }
+        };
 
         // ADR-068 M8: 30-day Relationship promotion. Relationship is a
         // runtime-observed autobiographical category with a single producer
@@ -482,6 +585,8 @@ async fn run_episodic_distiller_step(
                 tracing::warn!(error = %e, "Relationship promotion failed (ADR-068 M8)");
             }
         }
+
+        run_result
     }
 }
 
@@ -524,6 +629,23 @@ pub fn start_consolidation_pipeline(
     );
 
     (scheduler, bg_task)
+}
+
+/// Run a single EpisodicDistiller pass on demand (ADR-071 D2 manual
+/// trigger). Shares the exact same execution path as the background loop
+/// (`run_episodic_distiller_step`), so the manual endpoint and the periodic
+/// scheduler behave identically.
+///
+/// Returns the distilled-run summary (`None` when the `grafeo-backend`
+/// feature is off, so the caller can report "not available").
+pub(crate) async fn run_episodic_distiller_step_once(
+    provider: Arc<dyn acowork_memory::MemoryProvider>,
+    llm: Arc<dyn TripleExtractorLlm>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
+    config: SchedulerConfig,
+) -> Option<acowork_memory::consolidation::DistillerResult> {
+    let embedding_fn = build_embedding_bridge(embedding_provider);
+    run_episodic_distiller_step(provider.as_ref(), &*llm, embedding_fn.as_ref(), &config).await
 }
 
 // ---------------------------------------------------------------------------
