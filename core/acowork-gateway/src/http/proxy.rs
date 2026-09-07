@@ -165,10 +165,6 @@ pub fn proxy_routes() -> Router<AppState> {
                 .put(proxy_update_memory_node),
         )
         .route(
-            "/api/agents/{id}/memory/consolidate",
-            post(proxy_memory_consolidate),
-        )
-        .route(
             "/api/agents/{id}/memory/rebuild-embeddings",
             post(proxy_memory_rebuild_embeddings),
         )
@@ -744,22 +740,6 @@ async fn proxy_update_memory_node(
         &headers,
     )
     .await
-}
-
-/// Reverse-proxy `POST /api/agents/{id}/memory/consolidate` to Runtime's `POST /memory/consolidate`.
-///
-/// Forwards the inbound request body verbatim so the Desktop's `force` /
-/// `retention_days` parameters reach the Runtime. When the client sends
-/// no body we forward an empty payload - the Runtime's `trigger_consolidate`
-/// handler treats this as "use defaults".
-async fn proxy_memory_consolidate(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, "/memory/consolidate", "", reqwest::Method::POST, payload, &headers).await
 }
 
 /// Reverse-proxy `POST /api/agents/{id}/memory/rebuild-embeddings` to

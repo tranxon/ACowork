@@ -5,7 +5,7 @@
 //! This module therefore exposes no HTTP routes of its own — registering any
 //! path here would collide with the proxy and cause `Router::merge()` to
 //! panic at gateway startup (e.g. "Overlapping method route" on
-//! `POST /api/agents/{id}/memory/consolidate`).
+//! `POST /api/agents/{id}/memory/nodes`).
 //!
 //! The request/response types below remain here as the canonical contract
 //! for the gateway↔desktop Memory API and are reused by tests and the
@@ -130,25 +130,6 @@ pub struct DeleteNodeResponse {
     pub message: String,
 }
 
-/// Request body for triggering memory consolidation
-#[derive(Debug, Deserialize)]
-pub struct ConsolidateRequest {
-    /// Force consolidation even if conditions are not met
-    pub force: Option<bool>,
-    /// Retention period in days for episodic cleanup
-    pub retention_days: Option<u32>,
-}
-
-/// Response for memory consolidation trigger
-#[derive(Serialize)]
-pub struct ConsolidateResponse {
-    pub started: bool,
-    pub duration_ms: u64,
-    pub episodes_consolidated: u64,
-    pub knowledge_nodes_generated: u64,
-    pub message: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,22 +181,6 @@ mod tests {
         assert_eq!(q.sub_type.as_deref(), Some("Limitation"));
         assert_eq!(q.effective_page(), 1);
         assert_eq!(q.effective_size(), 20);
-    }
-
-    #[test]
-    fn test_consolidate_request_deserialization() {
-        let json = r#"{"force": true, "retention_days": 30}"#;
-        let req: ConsolidateRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.force, Some(true));
-        assert_eq!(req.retention_days, Some(30));
-    }
-
-    #[test]
-    fn test_consolidate_request_defaults() {
-        let json = r#"{}"#;
-        let req: ConsolidateRequest = serde_json::from_str(json).unwrap();
-        assert!(req.force.is_none());
-        assert!(req.retention_days.is_none());
     }
 
     #[test]

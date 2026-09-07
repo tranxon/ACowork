@@ -1,7 +1,7 @@
 //! MemoryAdminService trait - administrative interface for memory engines.
 //!
 //! This trait provides management/admin operations used by HTTP admin
-//! endpoints (`/memory/nodes`, `/memory/stats`, `/memory/consolidate`)
+//! endpoints (`/memory/nodes`, `/memory/stats`, `/memory/nodes/{nid}`)
 //! and embedding-dimension migration. It is intentionally separate from
 //! [`crate::MemoryProvider`] (which serves the agent loop) to follow
 //! Interface Segregation:

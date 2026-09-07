@@ -6,7 +6,6 @@
 //!   GET  /memory/nodes/{nid}    — node detail view
 //!   GET  /memory/stats          — panel statistics card
 //!   GET  /memory/graph          — memory graph view
-//!   POST /memory/consolidate    — panel "consolidate now" button
 //!
 //! The write path is NOT a test stub: it exercises the real production
 //! compaction landing chain —
@@ -205,25 +204,8 @@ async fn get_json(e2e: &MemoryE2e, path: &str) -> serde_json::Value {
     resp.json().await.expect("valid json body")
 }
 
-async fn post_json(e2e: &MemoryE2e, path: &str, body: serde_json::Value) -> serde_json::Value {
-    let url = format!("http://127.0.0.1:{}{}", e2e.port, path);
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .expect("request succeeds");
-    assert!(
-        resp.status().is_success(),
-        "POST {path} failed with {}",
-        resp.status()
-    );
-    resp.json().await.expect("valid json body")
-}
-
 /// Full desktop-panel flow: empty state → compaction landing → list /
-/// detail / stats / graph → consolidate.
+/// detail / stats / graph.
 #[tokio::test]
 async fn desktop_memory_panel_flow_after_distillation_landing() {
     let e2e = spawn_memory_e2e_server("panel").await;
@@ -291,18 +273,6 @@ async fn desktop_memory_panel_flow_after_distillation_landing() {
     // ── 7. Graph view: the single episode is visible ─────────────────────
     let graph = get_json(&e2e, "/memory/graph").await;
     assert_eq!(graph["node_count"].as_u64(), Some(1));
-
-    // ── 8. "Consolidate now" button (panel action) ───────────────────────
-    let report = post_json(
-        &e2e,
-        "/memory/consolidate",
-        serde_json::json!({"force": false, "retention_days": 30}),
-    )
-    .await;
-    assert_eq!(report["started"].as_bool(), Some(true));
-    // The fresh distilled episode must survive consolidation, not disappear.
-    let after = get_json(&e2e, "/memory/nodes?type=Episodic").await;
-    assert_eq!(after["total"].as_u64(), Some(1));
 
     std::fs::remove_dir_all(&e2e._temp_dir).ok();
 }

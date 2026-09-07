@@ -43,7 +43,7 @@
 | R3 | e2e 走 scripted mock LLM,未接真实 `ProviderLlmAdapter` | 中 | 蒸馏全链路(模型解析→LLM 适配→提取)未在真实 provider 验证 |
 | R4 | autobio `key_hint` 空洞值(如 "the_agent")聚簇质量 | 低 | embedding 合并可缓解,仍建议词表护栏 |
 | R5 | distiller_model 跨 provider 选择未落地 | 低 | `resolve_distiller_model_id` 注释明示:后台管道 LLM 走 agent 活跃 provider;选别家 provider 模型会失败 → UI 候选集来自 vault(实际可用的 provider+model),规避了该坑 |
-| R6 | `POST /memory/consolidate`(legacy)HTTP 路由仍保留 | 低 | 无 UI 入口;建议下个 revision 删除并收敛 episodic cleanup 描述 |
+| R6 | ~~`POST /memory/consolidate`(legacy)HTTP 路由仍保留~~ | ✅ 已删除 | 无 UI 入口;本 revision 已整体删除 legacy 手动合并 HTTP 链(runtime route+handler+usecase trait 方法+gateway proxy+desktop `ConsolidateResponse` 类型),后台生命周期 `run_offline_consolidation` 定时路径不受影响;`MemoryAdminService::consolidate` 作为跨 crate 公共 trait 保留(API 兼容) |
 
 ## 5. 提交清单
 

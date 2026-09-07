@@ -24,7 +24,6 @@
 //! GET    /memory/nodes/{nid}                     // NEW: memory_query::get_node
 //! DELETE /memory/nodes/{nid}                     // retained
 //! GET    /memory/stats                           // retained
-//! POST   /memory/consolidate                     // retained
 //! GET    /files/{id}                             // retained
 //! GET    /workspaces                             // retained
 //! POST   /workspaces                             // NEW
@@ -54,10 +53,10 @@
 //!   ~~POST /sessions/{sid}/continue~~     → routed via MQTT
 //! ```
 //!
-//! The four Grafeo-backed `/memory/*` endpoints (`/memory/nodes`,
-//! `/memory/nodes/{nid}`, `/memory/stats`, `/memory/consolidate`)
-//! share their business logic with the legacy gRPC path through
-//! [`crate::http::memory_query`], so HTTP and gRPC responses stay
+//! The three Grafeo-backed `/memory/*` endpoints (`/memory/nodes`,
+//! `/memory/nodes/{nid}`, `/memory/stats`) share their business logic
+//! with the legacy gRPC path through [`crate::http::memory_query`], so
+//! HTTP and gRPC responses stay
 //! consistent.
 //!
 //! The server binds to `127.0.0.1:0` (random port) and is intended
@@ -565,7 +564,6 @@ impl RuntimeHttpServer {
                     .put(update_memory_node),
             )
             .route("/memory/stats", get(get_memory_stats))
-            .route("/memory/consolidate", post(trigger_consolidate))
             .route("/memory/distill", post(post_memory_distill))
             .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
@@ -1222,36 +1220,6 @@ async fn update_memory_node(
             Json(serde_json::json!({"error": "failed to update memory node"})),
         )),
     }
-}
-
-/// Request body for `POST /memory/consolidate`.
-///
-/// `retention_days` is accepted for API compatibility but currently
-/// has no effect on Phase 2 consolidation (see
-/// [`memory_query::trigger_consolidate`]).
-#[derive(Debug, Default, Deserialize)]
-struct ConsolidateBody {
-    #[serde(default)]
-    force: bool,
-    #[serde(default)]
-    retention_days: u32,
-}
-
-/// `POST /memory/consolidate` — trigger memory consolidation.
-async fn trigger_consolidate(
-    State(state): State<HttpState>,
-    Json(body): Json<ConsolidateBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let report = svc
-        .consolidate(body.force, body.retention_days)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(
-        serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    ))
 }
 
 /// Request body for `POST /memory/rebuild-embeddings`.
@@ -4097,19 +4065,6 @@ mod tests {
         assert_eq!(body["deleted"], true);
         assert_eq!(body["node_id"], 12345);
 
-        // POST /memory/consolidate — store is None, reports 0 consolidated.
-        let url = format!("http://127.0.0.1:{}/memory/consolidate", server.port);
-        let response = reqwest::Client::new()
-            .post(&url)
-            .json(&serde_json::json!({"force": true, "retention_days": 7}))
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["started"], false);
-        assert_eq!(body["episodes_consolidated"], 0);
-
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
@@ -5862,7 +5817,6 @@ mod tests {
     /// - G3: `GET /memory/graph` with populated store (returns nodes array)
     /// - G5: `GET /memory/stats` with real nodes (by_type / by_status non-empty)
     /// - G6: `GET /memory/nodes` with pagination + type filter
-    /// - G4: `POST /memory/consolidate` with real store (returns actual count)
     #[tokio::test]
     async fn test_http_server_memory_endpoints_with_data() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mem-data");
@@ -6015,40 +5969,6 @@ mod tests {
         assert!(
             body["nodes"].is_array(),
             "Knowledge filter should return a nodes array"
-        );
-
-        // ── G4: POST /memory/consolidate with real store ────────────
-        let url = format!("{}/memory/consolidate", base);
-        let resp = client
-            .post(&url)
-            .json(&serde_json::json!({"force": false, "retention_days": 7}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200, "POST /memory/consolidate should be 200");
-        let body: serde_json::Value = resp.json().await.unwrap();
-        // Response must match the ConsolidationReport contract:
-        // {started, duration_ms, episodes_consolidated, knowledge_nodes_generated, message}
-        assert_eq!(body["started"], true);
-        assert!(
-            body["duration_ms"].is_u64(),
-            "duration_ms should be a number, got: {}",
-            body["duration_ms"]
-        );
-        assert!(
-            body["episodes_consolidated"].is_u64(),
-            "episodes_consolidated should be a number, got: {}",
-            body["episodes_consolidated"]
-        );
-        assert!(
-            body["knowledge_nodes_generated"].is_u64(),
-            "knowledge_nodes_generated should be a number, got: {}",
-            body["knowledge_nodes_generated"]
-        );
-        assert!(
-            body["message"].is_string(),
-            "message should be a string, got: {}",
-            body["message"]
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();

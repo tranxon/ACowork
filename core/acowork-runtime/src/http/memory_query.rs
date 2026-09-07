@@ -62,21 +62,6 @@ pub(crate) struct ListNodesOutput {
 /// Result of a stats query.
 pub(crate) type StatsOutput = MemoryStats;
 
-/// Result of a consolidation query.
-///
-/// Mirrors the enriched `AdminConsolidateResult` so the usecase layer
-/// can construct a full `ConsolidationReport` for the frontend.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ConsolidateOutput {
-    pub upgraded: u64,
-    pub kept_pending: u64,
-    pub marked_dormant: u64,
-    pub triples_extracted: u64,
-    pub procedural_created: u64,
-    pub episodic_cleaned: u64,
-    pub started: bool,
-}
-
 /// Result of a single-node GET query.
 #[derive(Debug, Clone)]
 pub(crate) struct GetNodeOutput {
@@ -321,30 +306,6 @@ pub(crate) fn update_node(
         .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
 }
 
-/// Trigger offline memory consolidation.
-pub(crate) fn trigger_consolidate(
-    admin: Option<&Arc<dyn MemoryAdminService>>,
-    force: bool,
-    _retention_days: u32,
-) -> ConsolidateOutput {
-    let svc = match admin {
-        Some(s) => s,
-        None => {
-            return ConsolidateOutput::default();
-        }
-    };
-    let result = svc.consolidate(force);
-    ConsolidateOutput {
-        upgraded: result.upgraded,
-        kept_pending: result.kept_pending,
-        marked_dormant: result.marked_dormant,
-        triples_extracted: result.triples_extracted,
-        procedural_created: result.procedural_created,
-        episodic_cleaned: result.episodic_cleaned,
-        started: result.started,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,13 +356,6 @@ mod tests {
     #[test]
     fn delete_node_reports_unavailable_without_store() {
         assert!(!delete_node(None, 42));
-    }
-
-    #[test]
-    fn trigger_consolidate_reports_unavailable_without_store() {
-        let out = trigger_consolidate(None, true, 30);
-        assert!(!out.started);
-        assert_eq!(out.upgraded, 0);
     }
 
     #[test]

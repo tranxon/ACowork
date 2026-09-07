@@ -488,7 +488,7 @@ pub(crate) async fn phase_b_init_session(
         // still running will get a stable "no store" response until this
         // mutation completes. After this point every memory_* endpoint
         // (/memory/nodes, /memory/stats, /memory/nodes/{nid},
-        // /memory/consolidate) sees the live store.
+        // /memory/distill) sees the live store.
         //
         // ADR-051 P4: publishes `dyn MemoryAdminService` instead of
         // concrete `GrafeoStore`.

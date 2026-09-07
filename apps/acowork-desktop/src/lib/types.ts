@@ -858,15 +858,6 @@ export interface DeleteNodeResponse {
   message: string;
 }
 
-/** Response for memory consolidation trigger */
-export interface ConsolidateResponse {
-  started: boolean;
-  duration_ms: number;
-  episodes_consolidated: number;
-  knowledge_nodes_generated: number;
-  message: string;
-}
-
 /**
  * Response for a manual EpisodicDistiller run — `POST /memory/distill`
  * (ADR-071 D2). The distiller is opt-in (ADR-068): a 409 with `error`

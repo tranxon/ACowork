@@ -101,26 +101,6 @@ pub struct MemoryStats {
     pub model_dim: u64,
 }
 
-/// Result of a consolidation run.
-///
-/// This is the wire-format struct serialized by the HTTP handler and
-/// consumed by the Desktop Memory panel (`ConsolidateResponse` in
-/// `apps/acowork-desktop/src/lib/types.ts`). Field names MUST stay
-/// in sync with the frontend TypeScript type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConsolidationReport {
-    /// Whether consolidation actually started (false if store unavailable).
-    pub started: bool,
-    /// Wall-clock duration of the consolidation run in milliseconds.
-    pub duration_ms: u64,
-    /// Number of pending knowledge nodes processed (upgraded + kept + dormant).
-    pub episodes_consolidated: u64,
-    /// Number of new knowledge nodes created (triples extracted + procedural).
-    pub knowledge_nodes_generated: u64,
-    /// Human-readable summary message for the UI.
-    pub message: String,
-}
-
 /// Result of an embedding-dimension rebuild.
 ///
 /// Mirrors `MemoryAdminService::migrate_embedding_dimension`'s
@@ -153,9 +133,6 @@ pub trait MemoryQueryService: Send + Sync {
 
     /// Get memory store statistics.
     async fn get_stats(&self) -> Result<MemoryStats>;
-
-    /// Trigger a consolidation run.
-    async fn consolidate(&self, force: bool, retention_days: u32) -> Result<ConsolidationReport>;
 
     /// Re-embed all nodes with a new embedding function/dimension.
     ///
