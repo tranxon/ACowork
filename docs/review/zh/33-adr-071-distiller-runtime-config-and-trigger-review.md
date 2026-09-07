@@ -81,7 +81,7 @@
 
 1. **`patch_typed` 语义歧义(预存,非 ADR-071 引入)**:`apply_field_patch` 无条件赋值 `cfg.x = patch_typed(...)`,而 `patch_typed` 对**类型错误的 `Set`** 返回 `None` → 字段被**清空**,与 impl 顶部注释 "leave on-disk alone" 矛盾。所有字段(含 distiller)共用此路径。建议后续 revision:区分 `Clear` 与 `Set-parse-failed`(tri-state),避免错误 JSON 造成数据丢失。P1a 测试按实际语义断言并标注。
 2. **wire 层无显式清空**:`UpdateAgentConfigRequest` 用 `Option<serde_json::Value>`,serde 将 JSON `null` 与字段缺失折叠为同一 `None` → 显式清空需引入 presence-tracking wrapper。当前 UI「空输入=不发送该字段」规避了此坑(P1b 测试验证 partial-PUT 语义)。
-3. **性能观察点(非阻塞)**:`count_unconsolidated_episodes` → `get_unconsolidated_episodes_by_subtype(None, i64::MAX)` 会全量物化 Episodic 层再数数;distiller enabled 时后台每 tick(60s)轮询。受 grafeo-engine 当前 GQL 限制(ORDER BY/WHERE 返回裸 ID),与 distiller Step 1 既有模式一致,但「数数」不应全量加载——建议引擎层提供 COUNT 或降频。
+3. ~~**性能观察点(非阻塞)**~~:~~`count_unconsolidated_episodes` → `get_unconsolidated_episodes_by_subtype(None, i64::MAX)` 会全量物化 Episodic 层再数数;distiller enabled 时后台每 tick(60s)轮询~~。**已修复(A 方案,零引擎改动)**:实测确认上游 grafeo-engine 0.5.42(workspace 实际解析版本)原生支持 `MATCH (e:Episodic) WHERE e.consolidated <> true RETURN count(e)` —— 聚合返回标量 `Int64`,不受 "WHERE/ORDER BY 返回裸 ID" 限制(该限制只影响 `RETURN e` 取完整节点)。`GrafeoStore::count_unconsolidated_episodes` 改用引擎侧聚合,`provider_impl` 转发。语义差异:`distiller_skip` tombstone 在 metadata JSON 内无法下推谓词,被 skip 的 episode 仍计入 backlog 指标(可接受的触发语义,scan 仍排除),已在方法 doc + 测试中注明。
 4. **W5 commit message 偏差**:称按钮 "only exposes while enabled",实际按钮常显、disabled 时 409(行为可接受,反馈更直接;doc 待同步)。
 
 ### 6.4 验证(本机实测)

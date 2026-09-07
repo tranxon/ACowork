@@ -303,12 +303,13 @@ impl MemoryProvider for GrafeoStore {
     }
 
     fn count_unconsolidated_episodes(&self) -> AcoworkResult<usize> {
-        // Same candidate set as the distiller's Step 1 (unconsolidated,
-        // non-skipped; subtype=None keeps every classification).
-        let episodes = self
-            .get_unconsolidated_episodes_by_subtype(None, i64::MAX as usize)
-            .map_err(err_to_acowork)?;
-        Ok(episodes.len())
+        // ADR-071 performance follow-up (A-plan): engine-side aggregate
+        // instead of materializing the whole Episodic layer in Rust.
+        // `distiller_skip` tombstones are not filterable at the engine
+        // predicate level (they live inside the metadata JSON string), so
+        // the count may include skipped episodes — acceptable for the
+        // backlog trigger metric (see GrafeoStore::count_unconsolidated_episodes).
+        GrafeoStore::count_unconsolidated_episodes(self).map_err(err_to_acowork)
     }
 
     fn collaboration_span(&self) -> AcoworkResult<Option<CollaborationSpan>> {

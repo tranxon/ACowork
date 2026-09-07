@@ -131,6 +131,40 @@ impl GrafeoStore {
         Ok(episodes)
     }
 
+    /// Count unconsolidated episodes (backlog metric) without
+    /// materializing the full Episodic layer (ADR-071 performance follow-up).
+    ///
+    /// Uses an engine-side aggregate (`count(e)`) with a negated-property
+    /// predicate. Unlike `RETURN e` (where the current grafeo-engine
+    /// version returns bare Int64 IDs for WHERE queries — see
+    /// [`get_unconsolidated_episodes`]), an aggregate returns a scalar, so
+    /// no full node maps are fetched or parsed on the Rust side.
+    ///
+    /// Semantic note: `e.consolidated` is only set (to `true`) on
+    /// consolidated episodes, so `<> true` matches nodes that lack the
+    /// property entirely (verified against grafeo-engine 0.5.42). The
+    /// `distiller_skip` tombstone lives inside the `metadata` JSON string
+    /// and cannot be pushed into the predicate; a skipped episode is
+    /// therefore still counted here. That is acceptable for the backlog
+    /// trigger metric (a fully-skipped backlog degrades to one no-op
+    /// distill run), and the distiller's Step 1 scan
+    /// ([`get_unconsolidated_episodes_by_subtype`]) still excludes
+    /// skipped episodes.
+    pub fn count_unconsolidated_episodes(&self) -> Result<usize> {
+        let session = self.db.session();
+        let gql = "MATCH (e:Episodic) WHERE e.consolidated <> true RETURN count(e)";
+        let result = session.execute(gql)?;
+        let rows = result.rows();
+        let value = rows
+            .first()
+            .and_then(|row| row.first())
+            .ok_or_else(|| crate::error::GrafeoError::Memory("count(e) returned no row".into()))?;
+        let n = value
+            .as_int64()
+            .ok_or_else(|| crate::error::GrafeoError::Memory("count(e) returned non-integer".into()))?;
+        Ok(n.max(0) as usize)
+    }
+
     /// Remove old consolidated episodes beyond the retention period.
     ///
     /// Returns the number of deleted episodes.
@@ -314,5 +348,46 @@ mod tests {
 
         let remaining = store.search_episodes_by_session("s1", 10).unwrap();
         assert_eq!(remaining.len(), 2);
+    }
+    #[test]
+    fn count_unconsolidated_episodes_excludes_consolidated() {
+        // ADR-071 performance follow-up (A-plan): the engine-side COUNT
+        // aggregate must match the Rust-side filter semantics of
+        // `get_unconsolidated_episodes` — episodes carrying the
+        // `consolidated = true` property are excluded, episodes lacking
+        // the property are counted. Verified against grafeo-engine 0.5.42
+        // (the workspace-resolved version): `WHERE e.consolidated <> true`
+        // matches nodes without the property, and `count(e)` returns a
+        // scalar Int64 without materializing node maps.
+        let store = test_store();
+        let mut ep1 = make_episode("s1", "keep me", test_dt());
+        ep1.knowledge_subtype = Some(crate::types::KnowledgeSubType::Fact);
+        let id1 = store.store_episode(&ep1).unwrap();
+
+        let mut ep2 = make_episode("s1", "consolidated one", test_dt() + TimeDelta::minutes(1));
+        ep2.knowledge_subtype = Some(crate::types::KnowledgeSubType::Fact);
+        let id2 = store.store_episode(&ep2).unwrap();
+        store.mark_episode_consolidated(id2).unwrap();
+
+        let mut ep3 = make_episode("s1", "consolidated two", test_dt() + TimeDelta::minutes(2));
+        ep3.knowledge_subtype = Some(crate::types::KnowledgeSubType::Fact);
+        let id3 = store.store_episode(&ep3).unwrap();
+        store.mark_episode_consolidated(id3).unwrap();
+
+        assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
+
+        // Cross-check against the Rust-side scan (same candidate set).
+        let scanned = store.get_unconsolidated_episodes_by_subtype(None, i64::MAX as usize).unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].content, "keep me");
+
+        // Skipped episodes are counted by the aggregate but excluded by
+        // the distiller scan — documented divergence for the backlog
+        // metric (see count_unconsolidated_episodes doc).
+        store.mark_episodes_skipped(&[id1], "cluster", "contradictory").unwrap();
+        assert_eq!(store.count_unconsolidated_episodes().unwrap(), 1);
+        let scanned2 = store.get_unconsolidated_episodes_by_subtype(None, i64::MAX as usize).unwrap();
+        assert_eq!(scanned2.len(), 0);
+        let _ = id3;
     }
 }
