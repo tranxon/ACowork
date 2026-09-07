@@ -4,7 +4,9 @@ import type {
   MemoryNodesListResponse,
   MemoryStatsResponse,
   DeleteNodeResponse,
-  ConsolidateResponse,
+  ConsolidationStatusResponse,
+  DistillResponse,
+  DistillerStatus,
 } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import {
@@ -48,6 +50,14 @@ interface MemoryStore {
   consolidateMessage: string | null;
 
   /**
+   * Runtime distiller trigger state (ADR-071) — `GET /memory/consolidation/
+   * status` `distiller` payload. `null` until the first successful fetch.
+   * Drives the "记忆蒸馏" card (enabled switch reflects the runtime state;
+   * the card also shows backlog / last-run summary).
+   */
+  distillerStatus: DistillerStatus | null;
+
+  /**
    * Set while a "Rebuild Index" migration is in flight for the currently
    * selected agent. Driven by the same harness /api/embedding-models/{id}/
    * start-migration endpoint the Harness tab already uses — we just call it
@@ -62,7 +72,23 @@ interface MemoryStore {
   fetchNodes: (agentId: string) => Promise<void>;
   fetchStats: (agentId: string) => Promise<void>;
   deleteNode: (agentId: string, nodeId: number) => Promise<void>;
-  consolidate: (agentId: string, force?: boolean) => Promise<void>;
+  /**
+   * Trigger one manual EpisodicDistiller pass — `POST /memory/distill`
+   * (ADR-071 D2). Replaces the retired "合并节点" (legacy `consolidate`)
+   * button in the memory panel.
+   *
+   * Returns the `DistillResponse` on a completed run, `null` when the
+   * run could not start (distiller disabled / providers missing / HTTP
+   * error). On success the node list, stats and distiller status are
+   * refreshed so the panel reflects promoted nodes immediately.
+   */
+  distill: (agentId: string) => Promise<DistillResponse | null>;
+  /**
+   * Fetch the runtime distiller trigger state — `GET /memory/
+   * consolidation/status`. Best-effort: failures leave the previous
+   * status in place (the card falls back to agent_config-driven state).
+   */
+  fetchDistillerStatus: (agentId: string) => Promise<void>;
   /**
    * Rebuild the Grafeo HNSW vector index for `agentId` using the currently
    * active embedding model. Re-embeds every node so that mismatched-dim stores
@@ -95,6 +121,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   loading: false,
   error: null,
   consolidateMessage: null,
+  distillerStatus: null,
   migrationInProgress: false,
 
   fetchNodes: async (agentId) => {
@@ -164,30 +191,60 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     }
   },
 
-  consolidate: async (agentId, force = false) => {
+  distill: async (agentId) => {
     set({ loading: true, error: null, consolidateMessage: null });
     try {
-      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/consolidate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: ConsolidateResponse = await res.json();
-      if (!data.started) {
-        set({ loading: false, consolidateMessage: data.message || "Consolidation could not start" });
-        return;
+      const res = await with503Retry(
+        () =>
+          fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/distill`, {
+            method: "POST",
+          }),
+        { tag: `MemoryStore.distill(${agentId})`, logger: log },
+      );
+      if (!res.ok) {
+        // 409 "distiller is disabled" / 503 "not ready" — surface the
+        // runtime error string so the user knows why the run didn't go.
+        const body = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        set({
+          loading: false,
+          consolidateMessage: body?.error ?? `Distill failed (HTTP ${res.status})`,
+        });
+        return null;
       }
-      // Refresh after consolidation
+      const data: DistillResponse = await res.json();
+      // Refresh everything the run may have changed: node list (promoted
+      // nodes), stats (episode → node counts) and the distiller status
+      // (last_run / secs_since_distill reset).
       await get().fetchNodes(agentId);
       await get().fetchStats(agentId);
-      const msg =
-        data.episodes_consolidated > 0 || data.knowledge_nodes_generated > 0
-          ? data.message
-          : "No pending memories to consolidate";
-      set({ consolidateMessage: msg });
+      await get().fetchDistillerStatus(agentId);
+      set({ loading: false });
+      return data;
     } catch (e) {
-      set({ loading: false, error: e instanceof Error ? e.message : "Consolidation failed" });
+      set({
+        loading: false,
+        error: e instanceof Error ? e.message : "Distill failed",
+      });
+      return null;
+    }
+  },
+
+  fetchDistillerStatus: async (agentId) => {
+    try {
+      const res = await with503Retry(
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/memory/consolidation/status`,
+          ),
+        { tag: `MemoryStore.fetchDistillerStatus(${agentId})`, logger: log },
+      );
+      if (!res.ok) return;
+      const data: ConsolidationStatusResponse = await res.json();
+      set({ distillerStatus: data.distiller });
+    } catch {
+      // Best-effort — the card still works from agent_config alone.
     }
   },
 
@@ -280,6 +337,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       page: 1,
       error: null,
       consolidateMessage: null,
+      distillerStatus: null,
       migrationInProgress: false,
     });
   },

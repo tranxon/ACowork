@@ -5,6 +5,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
+import { MemoryDistillSettings } from "./MemoryDistillSettings";
 import { AlertTriangle, Info } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
@@ -40,9 +41,11 @@ export function MemoryPanel() {
     error,
     consolidateMessage,
     migrationInProgress,
+    distillerStatus,
     fetchNodes,
     fetchStats,
-    consolidate,
+    distill,
+    fetchDistillerStatus,
     rebuildIndex,
     setFilters,
     setPage,
@@ -74,7 +77,15 @@ export function MemoryPanel() {
     clearMemory();
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
-  }, [selectedAgentId, isAgentRunning, clearMemory, fetchNodes, fetchStats]);
+    void fetchDistillerStatus(selectedAgentId);
+  }, [
+    selectedAgentId,
+    isAgentRunning,
+    clearMemory,
+    fetchNodes,
+    fetchStats,
+    fetchDistillerStatus,
+  ]);
 
   // Re-fetch when filters or pagination change
   useEffect(() => {
@@ -90,7 +101,15 @@ export function MemoryPanel() {
     if (activePanelTab !== "memory") return;
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
-  }, [activePanelTab, selectedAgentId, isAgentRunning, fetchNodes, fetchStats]);
+    void fetchDistillerStatus(selectedAgentId);
+  }, [
+    activePanelTab,
+    selectedAgentId,
+    isAgentRunning,
+    fetchNodes,
+    fetchStats,
+    fetchDistillerStatus,
+  ]);
 
   // Auto-dismiss consolidate message after 6 seconds
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -105,9 +124,28 @@ export function MemoryPanel() {
     };
   }, [consolidateMessage]);
 
-  const handleConsolidate = () => {
+  const handleDistill = async () => {
     if (!selectedAgentId) return;
-    void consolidate(selectedAgentId);
+    // ADR-071 D2: "立即蒸馏" replaces the retired "合并节点" action.
+    // The distiller is opt-in — a disabled distiller returns 409 and the
+    // store surfaces the runtime error string in the feedback banner.
+    const data = await distill(selectedAgentId);
+    if (!data) return; // store already set the error/banner message
+    const promoted =
+      data.facts_promoted +
+      data.preferences_promoted +
+      data.relations_promoted +
+      data.procedures_promoted +
+      data.autobio_promoted;
+    useMemoryStore.setState({
+      consolidateMessage:
+        data.episodes_scanned > 0
+          ? t("memoryPanel.distillDone", {
+              scanned: data.episodes_scanned,
+              promoted,
+            })
+          : t("memoryPanel.distillEmpty"),
+    });
   };
 
   const handleRefresh = () => {
@@ -166,6 +204,15 @@ export function MemoryPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* ADR-071 D3/D5: memory distiller settings card (enabled switch,
+          model pick, periodic trigger tuning). Reads/writes
+          agent_config.json via GET/PUT /agents/{id}/config. */}
+      <MemoryDistillSettings
+        agentId={selectedAgentId}
+        running={isAgentRunning}
+        distillerStatus={distillerStatus}
+      />
+
       {/* Filters */}
       <div className="flex flex-col gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <StyledInput
@@ -349,11 +396,12 @@ export function MemoryPanel() {
       {/* Bottom actions */}
       <div className="flex gap-3 border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <button
-          onClick={handleConsolidate}
+          onClick={handleDistill}
           disabled={loading}
+          data-testid="distill-now-button"
           className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
         >
-          {t("memoryPanel.consolidate")}
+          {t("memoryPanel.distillNow")}
         </button>
         <button
           onClick={handleRefresh}

@@ -867,6 +867,60 @@ export interface ConsolidateResponse {
   message: string;
 }
 
+/**
+ * Response for a manual EpisodicDistiller run — `POST /memory/distill`
+ * (ADR-071 D2). The distiller is opt-in (ADR-068): a 409 with `error`
+ * "distiller is disabled" is returned when the switch is off.
+ */
+export interface DistillResponse {
+  started: boolean;
+  episodes_scanned: number;
+  facts_promoted: number;
+  preferences_promoted: number;
+  relations_promoted: number;
+  procedures_promoted: number;
+  autobio_promoted: number;
+  episodes_marked_consolidated: number;
+}
+
+/** Last distiller run summary from the runtime status endpoint. */
+export interface DistillerLastRun {
+  at: string;
+  episodes_scanned: number;
+  total_promoted: number;
+  facts_promoted: number;
+  preferences_promoted: number;
+  relations_promoted: number;
+  procedures_promoted: number;
+  autobio_promoted: number;
+  episodes_marked_consolidated: number;
+}
+
+/**
+ * Distiller trigger state reported by `GET /memory/consolidation/status`
+ * (ADR-071 D1/D2) — the UI "记忆蒸馏" card renders this without polling
+ * the manifest.
+ */
+export interface DistillerStatus {
+  enabled: boolean;
+  episode_backlog: number;
+  secs_since_distill: number;
+  interval_secs: number;
+  accumulation_threshold: number;
+  idle_secs: number;
+  last_run: DistillerLastRun | null;
+}
+
+/** Response envelope of `GET /memory/consolidation/status`. */
+export interface ConsolidationStatusResponse {
+  idle_secs: number;
+  pending_count: number;
+  idle_timeout_secs: number;
+  accumulation_threshold: number;
+  bg_task_running: boolean;
+  distiller: DistillerStatus;
+}
+
 // ── Skill types ───────────────────────────────────────────────────────
 
 /** A single skill entry in the list response */
