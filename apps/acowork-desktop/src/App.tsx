@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { AppLayout } from "./components/layout/AppLayout";
 import { SplashScreen } from "./components/layout/SplashScreen";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
@@ -38,6 +39,20 @@ function App() {
       initWorkspaceFsListener().catch((e) =>
         log.warn("[App] initWorkspaceFsListener failed on recovery reload:", e)
       );
+      // Post-wake renderer recovery: report the first painted frame to
+      // the Rust backend. requestAnimationFrame is driven by the GPU
+      // compositor — it only fires once a frame was actually composited,
+      // so this is the page's own "the UI is truly visible again" signal
+      // that `recover_from_wake` verifies against (heartbeat-based
+      // verification was a false positive: a thawed old page's catch-up
+      // heartbeat landed right after the async reload call). If the
+      // compositor is still coming back, the rAF callback is deferred
+      // until it recovers, and the backend's verify window catches it.
+      requestAnimationFrame(() => {
+        invoke("desktop_recovery_visible").catch((e) =>
+          log.warn("[App] desktop_recovery_visible invoke failed:", e)
+        );
+      });
     }
   }, [isRecoveryReload]);
 

@@ -57,6 +57,35 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 # unwinds across a Rust `catch_unwind` boundary triggers
 # `__rust_foreign_exception` → `abort()`.
 objc2 = { version = "0.6", features = ["exception"] }
+# block2: stack-allocated Objective-C blocks for
+# `NSNotificationCenter.addObserverForName:object:queue:usingBlock:`.
+# The block is invoked on the thread Foundation picks for the
+# notification (typically main thread for NSWorkspace), and only
+# `copy()`-retained blocks survive the observer registration; this
+# matches the block2 idiom of `ConcreteBlock::new(...).copy()`.
+# Version already pinned in Cargo.lock by Tauri's transitive
+# dependencies (tauri → tao → block2), so declaring it directly does
+# not change the resolution. We do NOT depend on the high-level
+# `objc2-app-kit` / `objc2-foundation` safe wrappers here — the
+# observer path is a small handful of `msg_send!` calls (`NSWorkspace`,
+# `notificationCenter`, `NSString stringWithUTF8String:`,
+# `addObserverForName:…`), all of which are already available
+# through objc2's runtime macros, and pulling in the high-level
+# crates would force a wide feature matrix we do not need.
+block2 = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# zbus: subscribe to systemd-logind's `PrepareForSleep(b)` signal on
+# the system bus. The false edge of that signal is the OS-broadcast
+# "system just woke from sleep" event that we feed into
+# `wake_recovery::signal_display_ready()`. Using zbus 5 (already pinned
+# by tauri) keeps the resolver happy without bumping the lockfile.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# tokio-stream: `MessageStream::for_match_rule` returns a futures
+# `Stream`; tokio-stream re-exports `StreamExt` with a stable
+# signature across zbus / tokio upgrades, and its `next()` is the
+# smallest surface that does not pull in all of `futures-util`.
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [features]
 default = ["custom-protocol"]

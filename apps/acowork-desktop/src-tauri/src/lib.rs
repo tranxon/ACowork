@@ -29,6 +29,10 @@ mod state;
 mod tray;
 #[cfg(target_os = "windows")]
 mod win_wndproc;
+#[cfg(target_os = "macos")]
+mod macos_workspace;
+#[cfg(target_os = "linux")]
+mod linux_logind;
 use state::AppState;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -231,30 +235,61 @@ pub mod win_job {
 ///    was the historical excuse for removing the reload; ordering
 ///    eliminates the race instead of removing the recovery.
 ///
-/// 3. **Reload the webview** – REQUIRED, never remove. System sleep
-///    routinely freezes or kills the WebView2 renderer / GPU compositor
-///    (Chromium resume bug): JS timers stop firing, the IPC channel
-///    breaks silently, the compositor stops submitting frames and the
-///    window shows only its transparent/blurred background. MQTT recovery
-///    (steps 1–2) does nothing for a frozen renderer, and any "frontend
-///    converges in place" logic only works while the webview JS is alive
-///    — after a wake it may not be. The reload is the only deterministic
-///    recovery for the renderer and is the programmatic equivalent of the
-///    user pressing F5 (which always recovers). It is issued through the
+/// 3. **Wait for the display stack, then reload the webview** –
+///    REQUIRED, never remove. System sleep routinely freezes or kills
+///    the WebView2 renderer / GPU compositor (Chromium resume bug): JS
+///    timers stop firing, the IPC channel breaks silently, the
+///    compositor stops submitting frames and the window shows only its
+///    transparent/blurred background. MQTT recovery (steps 1–2) does
+///    nothing for a frozen renderer, and any "frontend converges in
+///    place" logic only works while the webview JS is alive — after a
+///    wake it may not be. The reload is the only deterministic recovery
+///    for the renderer and is the programmatic equivalent of the user
+///    pressing F5 (which always recovers). It is issued through the
 ///    native browser-process API `WebviewWindow::reload()` rather than a
 ///    JS `eval`-only reload, because eval requires a live JS context
 ///    while the native call forces a fresh renderer even when the old one
-///    is frozen. Immediately before reloading, a best-effort eval sets
+///    is frozen.
+///
+///    The reload is **event-driven, but OS display events are only the
+///    first trigger** — they arrive while the WebView2 compositor is
+///    still coming back (2026-09-06 real-world wake: a reload issued on
+///    the display event executed, yet the window stayed acrylic-only
+///    until a manual F5 seconds later). So each attempt waits for the
+///    display event (`GUID_MONITOR_POWER_ON` / `WM_DISPLAYCHANGE` via
+///    the Windows WndProc subclass, window focus on any platform; 5 s
+///    timeout fallback when no event arrives) and then lets step 4
+///    decide, empirically, whether that reload really displayed. See
+///    [`wake_recovery`] for the full event semantics.
+///
+///    Immediately before reloading, a best-effort eval sets
 ///    the `acowork_recovery_reload` sessionStorage flag (with a short
 ///    grace period so the eval can run inside a thawing renderer).
 ///    `App.tsx` reads that flag to skip the Splash screen and —
 ///    critically — re-register the Tauri event listeners destroyed by
 ///    the reload (`initMqttListener`, `initWorkspaceFsListener`); without
 ///    them the frontend `mqttConnected` flag stays false and the UI would
-///    hang on "Connecting to agent". Losing the flag (the eval never
-///    runs on a frozen renderer) is a safe degradation: the normal boot
-///    path registers the same listeners after the Splash gateway check,
-///    which passes instantly because the Gateway survived the wake.
+///    hang on "Connecting to agent". The flag also arms the first-frame
+///    verification of step 4 (only flag-carrying pages fire it). Losing
+///    the flag (the eval never runs on a frozen renderer) is a safe
+///    degradation: the normal boot path registers the same listeners
+///    after the Splash gateway check, which passes instantly because the
+///    Gateway survived the wake.
+///
+/// 4. **Verify the reload actually displayed, then retry on failure** —
+///    after each reload the recovery task waits up to 10 s for the page
+///    to report its first painted frame: `App.tsx` fires the
+///    `desktop_recovery_visible` command from a `requestAnimationFrame`
+///    callback, which the GPU compositor drives. It fires only when a
+///    frame was genuinely composited after this reload, so neither a
+///    thawed old page nor a mounted-but-not-composited page can fake it
+///    (heartbeat-based verification was removed on 2026-09-06 for
+///    exactly that false positive). If the signal does not arrive — the
+///    page never mounted or the compositor is still down — the reload
+///    is re-attempted (up to 3 times; the reload cooldown is checked
+///    once up front, so failed attempts retry every ~10 s); each retry
+///    lands later, so recovery converges once the compositor is
+///    genuinely usable, no matter how long that takes.
 ///
 /// **Concurrency guard**: `RECOVERY_IN_PROGRESS` prevents overlapping
 /// calls.  Although `detect_resume()` atomically updates the clock
@@ -313,6 +348,156 @@ mod reload_cooldown {
     }
 }
 
+/// Renderer-recovery event plumbing: "display stack is usable again"
+/// signals plus frontend-liveness tracking for the post-wake reload.
+///
+/// # Why events instead of a hardcoded delay
+///
+/// A wake reload issued immediately after `detect_resume()` fails in
+/// practice (2026-09-06): the OS notifies processes that the system is
+/// resuming, but the display/GPU stack takes longer to come back, and a
+/// renderer spawned in that window never composites — the window keeps
+/// showing only its acrylic/vibrancy background while the JS side may
+/// even keep running (heartbeats continue). Sleeping a fixed amount
+/// before the reload would guess at hardware/driver recovery time;
+/// instead we wait for events whose semantics are "the user can see the
+/// window again":
+///
+/// - **Windows**: `GUID_MONITOR_POWER_ON` power-setting broadcast and
+///   `WM_DISPLAYCHANGE`, observed by the WndProc subclass
+///   (`win_wndproc.rs`). The display has been powered back on / the
+///   mode rebuilt — exactly when a manual F5 starts working.
+/// - **macOS**: `NSWorkspaceDidWakeNotification` posted to
+///   `[NSWorkspace sharedWorkspace].notificationCenter` on every
+///   system wake, observed by the long-lived block-based observer
+///   installed in `macos_workspace.rs` at process startup. The
+///   observer runs on the main thread and feeds the same
+///   `signal_display_ready()` entry point. AppKit has no
+///   `NSApplicationDidWakeNotification`; NSWorkspace is the only
+///   programmatic hook.
+/// - **Linux**: `org.freedesktop.login1.Manager.PrepareForSleep(b)`
+///   on the system D-Bus, with the boolean argument set to `false`
+///   on the wake edge. Subscribed in `linux_logind.rs` over zbus
+///   (`MessageStream::for_match_rule`); the long-lived drain task
+///   feeds `signal_display_ready()` on every false edge.
+/// - **All platforms**: the main window gaining focus
+///   (`Focused(true)`). The user is interacting with the app, so the
+///   system is fully usable.
+///
+/// If no signal arrives (an external monitor that never powered off,
+/// a driver that does not broadcast, the OS-level observer failed to
+/// install at startup, or the user has not yet touched the window),
+/// a bounded 5 s timeout still forces the reload so recovery never
+/// stalls. The timeout is the fallback, NOT the primary trigger —
+/// and because the caller verifies the reload and retries, a
+/// too-early reload self-heals on the next attempt.
+///
+/// # First-frame verification
+///
+/// `recover_from_wake` needs to know whether a reload actually brought
+/// a DISPLAYING page back. Heartbeats cannot prove that (2026-09-06
+/// real-world wake): `WebviewWindow::reload()` is async, so the dying
+/// pre-reload page's catch-up heartbeat arrived ~25 ms after the reload
+/// call and falsely completed recovery while no new page ever showed.
+/// The reliable signal is the page itself reporting its first painted
+/// frame — `App.tsx` fires `desktop_recovery_visible` from a
+/// `requestAnimationFrame` callback on the recovery-reload boot path
+/// only. `requestAnimationFrame` is driven by the GPU compositor: it
+/// cannot fire while the compositor is still coming back after a wake,
+/// so its firing is the renderer's own "I can draw now" event — the
+/// exact moment a manual F5 starts working. Old (thawed) pages never
+/// fire it: their boot had no `acowork_recovery_reload` flag, and the
+/// flag-set eval runs at most 50 ms before the reload tears that JS
+/// context down.
+mod wake_recovery {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// A display-ready event older than this no longer proves the
+    /// display is usable. Must exceed the wake-detection latency (one
+    /// 2 s probe tick + scheduling jitter) so a recovery started right
+    /// after `detect_resume()` still sees the event that fired while
+    /// the system was finishing its resume.
+    const DISPLAY_READY_FRESH_WINDOW: Duration = Duration::from_secs(30);
+
+    static LAST_DISPLAY_READY: Mutex<Option<Instant>> = Mutex::new(None);
+
+    fn ready_notify() -> &'static tokio::sync::Notify {
+        static NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+        NOTIFY.get_or_init(tokio::sync::Notify::new)
+    }
+
+    /// Records that the display stack is usable again. Called by the
+    /// platform signal sources (Windows WndProc messages, the
+    /// `Focused(true)` window-event handler). Safe from any thread.
+    ///
+    /// `notify_one` (not `notify_waiters`) is deliberate: it keeps one
+    /// permit when no waiter is registered yet, so a signal that lands
+    /// between a waiter's freshness check and its registration is not
+    /// lost — the waiter consumes the permit and re-checks freshness.
+    pub(crate) fn signal_display_ready() {
+        if let Ok(mut last) = LAST_DISPLAY_READY.lock() {
+            *last = Some(Instant::now());
+        }
+        ready_notify().notify_one();
+    }
+
+    /// Resolves when a display-ready event is fresh, or when `timeout`
+    /// elapses with none. Returns `true` if an event was observed
+    /// (event-driven reload) and `false` on the timeout fallback.
+    pub(crate) async fn wait_display_ready_or_timeout(timeout: Duration) -> bool {
+        let wait = async {
+            loop {
+                let fresh = LAST_DISPLAY_READY
+                    .lock()
+                    .map(|last| match *last {
+                        Some(t) => t.elapsed() < DISPLAY_READY_FRESH_WINDOW,
+                        None => false,
+                    })
+                    .unwrap_or(false);
+                if fresh {
+                    return;
+                }
+                ready_notify().notified().await;
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.is_ok()
+    }
+
+    static LAST_FRONTEND_VISIBLE: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Records that a page reported its first painted frame — the
+    /// `desktop_recovery_visible` command fired from a
+    /// `requestAnimationFrame` callback. `requestAnimationFrame` is
+    /// driven by the GPU compositor, so it only fires once a frame was
+    /// genuinely composited; its firing is the renderer's own "I can
+    /// draw now" signal — the exact moment a manual F5 starts working
+    /// (see module docs for why OS display events alone are too early).
+    pub(crate) fn mark_frontend_visible() {
+        if let Ok(mut last) = LAST_FRONTEND_VISIBLE.lock() {
+            *last = Some(Instant::now());
+        }
+    }
+
+    /// `true` when a page reported a first painted frame strictly after
+    /// `after` (i.e. after this recovery's reload).
+    pub(crate) fn frontend_visible_since(after: Instant) -> bool {
+        LAST_FRONTEND_VISIBLE
+            .lock()
+            .map(|last| matches!(*last, Some(t) if t > after))
+            .unwrap_or(false)
+    }
+}
+
+/// Frontend → backend "first frame painted" signal for post-wake
+/// renderer recovery. `App.tsx` fires it from a `requestAnimationFrame`
+/// callback on the recovery-reload boot path only (the path armed by
+/// the `acowork_recovery_reload` flag). See the `wake_recovery` docs.
+#[tauri::command]
+fn desktop_recovery_visible() {
+    wake_recovery::mark_frontend_visible();
+}
+
 fn recover_from_wake(app_handle: &tauri::AppHandle) {
     // Concurrency guard: only one recovery task at a time.
     if RECOVERY_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -367,44 +552,128 @@ fn recover_from_wake(app_handle: &tauri::AppHandle) {
             );
         }
 
-        // 3. Renderer recovery: reload the webview (REQUIRED — see the
-        //    function docs and the regression warning there). Gated by
-        //    the 15 s cooldown so rapid sleep/wake cycles cannot
-        //    accumulate renderer/GPU processes.
-        if reload_cooldown::allowed() {
-            if let Some(window) = window {
-                // Best-effort recovery flag consumed by `App.tsx` (skip
-                // Splash + re-register the Tauri event listeners that the
-                // reload destroys). The short grace period lets the eval
-                // execute inside a thawing renderer before the native
-                // reload tears the JS context down; on a frozen renderer
-                // the eval never runs and the flag is lost — a safe
-                // degradation (normal boot registers the same listeners).
-                if window
-                    .eval("sessionStorage.setItem('acowork_recovery_reload', '1');")
-                    .is_ok()
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
+        // 3. Renderer recovery — event-triggered, verified by the page's
+        //    own first-frame signal, with retry. A reload issued right
+        //    after `detect_resume()` lands while the display/GPU stack is
+        //    still coming back and the fresh renderer never composites
+        //    (real-world wakes on 2026-09-06: the reload executed, yet
+        //    the window stayed acrylic-only until a manual F5). Each
+        //    attempt waits for a display-ready *event* (`wake_recovery`)
+        //    with a 5 s timeout fallback, reloads, then waits for the new
+        //    page to report its first painted frame before declaring
+        //    success; a failed verification retries — each retry lands
+        //    later, so recovery converges once the compositor is
+        //    genuinely usable. See the function docs above.
+        const RELOAD_MAX_ATTEMPTS: u32 = 3;
+        const DISPLAY_READY_TIMEOUT: Duration = Duration::from_secs(5);
+        const FRONTEND_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
-                // Native reload issued by the browser process — forces a
-                // fresh renderer even when the old one is frozen; the
-                // programmatic equivalent of the user pressing F5.
-                match window.reload() {
-                    Ok(()) => {
-                        reload_cooldown::mark();
-                        tracing::info!("Webview reloaded after wake (renderer recovery)");
-                    }
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "Native webview reload failed after wake - renderer may stay frozen until a manual F5"
-                    ),
-                }
-            } else {
+        let window = match window {
+            Some(w) => w,
+            None => {
                 tracing::warn!(
                     "No main webview window available after wake - renderer recovery skipped"
                 );
+                return;
             }
+        };
+
+        // The 15 s reload cooldown gates the renderer-recovery phase up
+        // front (NOT per attempt): it prevents renderer/GPU process
+        // stacking on rapid sleep/wake cycles. A rejection here means a
+        // reload already happened very recently (previous wake) — skip
+        // recovery. Failed-attempt retries inside this recovery bypass
+        // the gate deliberately: their reloads stack nothing (the
+        // previous page never displayed) and each retry must land as
+        // soon as possible to converge before the user reaches for F5.
+        if !reload_cooldown::allowed() {
+            tracing::warn!(
+                "[wake] reload cooldown active - renderer recovery skipped (recent reload should still be live)"
+            );
+            return;
+        }
+
+        let mut verified = false;
+        for attempt in 1..=RELOAD_MAX_ATTEMPTS {
+            // 3a. Wait for the display-stack signal (the event-driven
+            //     trigger) or the bounded timeout fallback.
+            if wake_recovery::wait_display_ready_or_timeout(DISPLAY_READY_TIMEOUT).await {
+                tracing::info!(
+                    attempt,
+                    "[wake] display-ready event observed - reloading webview (renderer recovery)"
+                );
+            } else {
+                tracing::warn!(
+                    attempt,
+                    "[wake] no display-ready event within {DISPLAY_READY_TIMEOUT:?} - reloading on timeout fallback"
+                );
+            }
+
+            // 3b. Best-effort recovery flag consumed by `App.tsx` (skip
+            //     Splash + re-register the Tauri event listeners that
+            //     the reload destroys). The short grace period lets the
+            //     eval execute inside a thawing renderer before the
+            //     native reload tears the JS context down; on a frozen
+            //     renderer the eval never runs and the flag is lost — a
+            //     safe degradation (normal boot registers the same
+            //     listeners).
+            if window
+                .eval("sessionStorage.setItem('acowork_recovery_reload', '1');")
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // Native reload issued by the browser process — forces a
+            // fresh renderer even when the old one is frozen; the
+            // programmatic equivalent of the user pressing F5.
+            let reloaded_at = std::time::Instant::now();
+            if let Err(e) = window.reload() {
+                tracing::error!(
+                    error = %e,
+                    "[wake] native webview reload failed (attempt {attempt}) - renderer may stay frozen until a manual F5"
+                );
+                return;
+            }
+            reload_cooldown::mark();
+            tracing::info!(
+                attempt,
+                "[wake] webview reloaded - verifying frontend liveness for {FRONTEND_VERIFY_TIMEOUT:?}"
+            );
+
+            // 3c. Verification: the reloaded page must prove it actually
+            //     displayed — App.tsx (recovery-reload boot path) fires
+            //     `desktop_recovery_visible` from a requestAnimationFrame
+            //     callback. rAF is driven by the GPU compositor, so it
+            //     only fires once a frame was composited after this
+            //     reload; thawed old pages and mounted-but-not-composited
+            //     pages cannot fake it (see `wake_recovery` docs — the
+            //     heartbeat signal it replaced was a false positive).
+            let verify_deadline = std::time::Instant::now() + FRONTEND_VERIFY_TIMEOUT;
+            while std::time::Instant::now() < verify_deadline {
+                if wake_recovery::frontend_visible_since(reloaded_at) {
+                    verified = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+
+            if verified {
+                tracing::info!(
+                    "[wake] first frame reported after reload - renderer recovery complete"
+                );
+                break;
+            }
+            tracing::warn!(
+                attempt,
+                "[wake] no first-frame signal within {FRONTEND_VERIFY_TIMEOUT:?} after reload - retrying (attempt {attempt}/{RELOAD_MAX_ATTEMPTS})"
+            );
+        }
+
+        if !verified {
+            tracing::error!(
+                "[wake] renderer recovery unverified after {RELOAD_MAX_ATTEMPTS} attempts - a manual reload (F5) may be required"
+            );
         }
     });
 }
@@ -573,6 +842,9 @@ pub fn run() {
             // oversized attachments (≥ 50 MiB runtime cap) BEFORE the
             // multipart roundtrip. See `commands::chat::get_file_size`.
             commands::chat::get_file_size,
+            // Post-wake renderer recovery: page reports its first
+            // painted frame (rAF-driven). See `wake_recovery` docs.
+            desktop_recovery_visible,
         ])
         .setup(|app| {
             tray::setup(app)?;
@@ -707,6 +979,48 @@ pub fn run() {
                 }
             }
 
+            // ── macOS: NSWorkspace wake notification observer ───────────
+            // The macOS analogue of Windows' GUID_MONITOR_POWER_ON:
+            // NSWorkspace posts `NSWorkspaceDidWakeNotification` to its
+            // notification center on every system wake, and we feed
+            // that into the same `wake_recovery::signal_display_ready()`
+            // trigger so the post-wake webview reload converges on the
+            // same code path as Windows. Installed synchronously here
+            // (Tauri's setup hook runs on the main thread, which is
+            // where NSWorkspace / NSNotificationCenter expect to be
+            // accessed). See `macos_workspace` for the threading
+            // contract and failure-mode semantics.
+            #[cfg(target_os = "macos")]
+            {
+                crate::macos_workspace::install();
+            }
+
+            // ── Linux: logind PrepareForSleep(false) edge observer ─────
+            // The Linux analogue of the same event: systemd-logind
+            // broadcasts `PrepareForSleep(b)` on the system bus, with
+            // the boolean set to false right after a wake. We
+            // subscribe via zbus on the global tokio runtime (the
+            // same one the power probe loop and the MQTT client
+            // already use) and feed the false edge into
+            // `wake_recovery::signal_display_ready()`. Spawned in its
+            // own task so the synchronous setup hook does not block
+            // on D-Bus connect; failure logs and falls through to
+            // the `Focused(true)` + 5 s timeout path that already
+            // exists for every platform. See `linux_logind` for the
+            // D-Bus path / signal / message body details.
+            #[cfg(target_os = "linux")]
+            {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::linux_logind::install().await {
+                        tracing::warn!(
+                            "Linux logind wake observer not installed: {e} - post-wake display \
+                             signal falls back to Focused(true) + 5s timeout (recover_from_wake \
+                             still converges)"
+                        );
+                    }
+                });
+            }
+
             // Spawn async task for automatic sleep detection.
 
             // Polls biased/unbiased monotonic clocks every 2 s via the
@@ -744,6 +1058,19 @@ pub fn run() {
                 // (ADR-065 Step 1); see the module docs above for platform
                 // details.
                 tauri::WindowEvent::Focused(true) => {
+                    // The main window gained focus — the user sees and can
+                    // interact with the window, so the display stack is
+                    // usable again. Feed this into wake recovery as the
+                    // cross-platform display-ready signal (Windows also
+                    // has GUID_MONITOR_POWER_ON / WM_DISPLAYCHANGE via
+                    // win_wndproc). After a wake, Windows restores focus
+                    // to the previously focused window exactly when the
+                    // display comes back, which is the moment a manual F5
+                    // starts working — the same semantic on macOS/Linux.
+                    // See `wake_recovery` docs for why the signal is
+                    // freshness-checked, so ordinary clicks outside a
+                    // recovery window are harmless.
+                    crate::wake_recovery::signal_display_ready();
                     if acowork_mqtt_session::power::detect_resume() {
                         recover_from_wake(window.app_handle());
                     }
