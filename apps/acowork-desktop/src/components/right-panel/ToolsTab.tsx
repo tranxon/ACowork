@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useMcpStore } from "../../stores/mcpStore";
 import { getGatewayUrl } from "../../lib/config";
@@ -11,6 +12,12 @@ import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/li
 import type { SearchProviderListItem, AgentSearchProvider, McpServerView, AgentMcpToolItem } from "../../lib/types";
 
 const EMPTY_ARRAY: string[] = [];
+// Stable empty-object reference for Zustand selectors (see line ~178 below).
+// Returning a fresh `{}` from a selector on every render trips
+// `useSyncExternalStore`'s Object.is equality check → infinite re-render →
+// "Maximum update depth exceeded". Module-level constants are the canonical
+// Zustand workaround and mirror the EMPTY_ARRAY pattern above.
+const EMPTY_OBJECT: Record<string, never> = {};
 
 interface BuiltinToolEntry {
   name: string;
@@ -27,6 +34,11 @@ interface McpServerCardProps {
    *  from the backend `GET /agents/{id}/mcp-tools` response — the
    *  frontend never maintains its own tool list or defaults. */
   tools: AgentMcpToolItem[];
+  /** True between the Switch flip and the moment the per-server tool
+   *  list (reconciled via the post-toggle `/mcp-tools` re-fetch) has
+   *  settled. Drives the inline spinner so a 5s `playwright` reconnect
+   *  does not look like a stuck UI. */
+  loading: boolean;
   onToggleTool: (toolName: string) => void;
   onToggleServer: () => void;
   switchDisabled: boolean;
@@ -53,6 +65,7 @@ function McpServerCard({
   server,
   isChecked,
   tools,
+  loading,
   onToggleTool,
   onToggleServer,
   switchDisabled,
@@ -78,7 +91,23 @@ function McpServerCard({
       onToggle={() => setOpen((v) => !v)}
       disabled={!hasExpandableBody}
       title={`${server.name}${tools.length > 0 ? ` (${tools.length})` : ""}`}
-      meta={<Badge>{server.transport}</Badge>}
+      meta={
+        // Inline spinner on the right of the title — visible from the
+        // moment the user flips the Switch until the post-reconcile
+        // `/mcp-tools` reload settles, so a multi-second third-party
+        // MCP reconnect (e.g. `playwright` ~5s) does not look like a
+        // stuck UI. The spinner replaces the transport badge while
+        // loading to keep the meta slot single-width and avoid a
+        // layout shift when it disappears.
+        loading ? (
+          <Loader2
+            className="h-3 w-3 animate-spin text-zinc-400 dark:text-zinc-500"
+            aria-label={`Connecting ${server.name}`}
+          />
+        ) : (
+          <Badge>{server.transport}</Badge>
+        )
+      }
       description={server.command || server.url || ""}
       trailing={
         // The Switch component owns its own click handler; we stop
@@ -149,8 +178,13 @@ export function ToolsTab() {
   // entries. Checked state comes from `activeServers` (active_names).
   const activeServers = useMcpStore((s) => selectedAgentId ? (s.activeServers[selectedAgentId] ?? EMPTY_ARRAY) : EMPTY_ARRAY);
   const activationLoading = useMcpStore((s) => selectedAgentId ? (s.activationLoading[selectedAgentId] ?? false) : false);
+  // Per-server reconcile-pending flags keyed by the current agent.
+  // Re-evaluated on every store change so a flip in any server's flag
+  // re-renders the matching card and shows/hides its spinner.
+  const perServerLoading = useMcpStore((s) => selectedAgentId ? (s.perServerLoading[selectedAgentId] ?? EMPTY_OBJECT) : EMPTY_OBJECT);
   const mcpError = useMcpStore((s) => s.error);
   const toggleServer = useMcpStore((s) => s.toggleServer);
+  const clearServerLoading = useMcpStore((s) => s.clearServerLoading);
 
   // Per-agent MCP server definitions (catalog ∪ local) from merged /tools.
   const [mcpServerDefs, setMcpServerDefs] = useState<McpServerView[]>([]);
@@ -296,7 +330,35 @@ export function ToolsTab() {
           if (mcpToolsResp.ok) {
             const mcpToolsData = await mcpToolsResp.json();
             if (mcpToolsData.servers && typeof mcpToolsData.servers === "object") {
-              setMcpToolsConfig(mcpToolsData.servers as Record<string, AgentMcpToolItem[]>);
+              const fresh = mcpToolsData.servers as Record<string, AgentMcpToolItem[]>;
+              setMcpToolsConfig(fresh);
+              // After the new tool list lands, drop the per-server
+              // spinner for any server whose reconcile is observably
+              // settled. The "settled" condition is keyed off the
+              // server's current `activeServers` membership:
+              //   - on + fresh.tools has entries  → reconcile wrote tools, done
+              //   - off                             → user explicitly wants
+              //                                       it off; no reconcile
+              //                                       indicator should linger
+              // Servers still loading on+empty (e.g. third-party MCP
+              // still connecting) keep the spinner until the next
+              // event / poll settles them.
+              const liveActive = useMcpStore
+                .getState()
+                .activeServers[selectedAgentId] ?? EMPTY_ARRAY;
+              const pending = useMcpStore
+                .getState()
+                .perServerLoading[selectedAgentId];
+              if (pending) {
+                for (const serverName of Object.keys(pending)) {
+                  if (!pending[serverName]) continue;
+                  const isOn = liveActive.includes(serverName);
+                  const hasTools = (fresh[serverName] ?? []).length > 0;
+                  if (isOn ? hasTools : true) {
+                    clearServerLoading(selectedAgentId, serverName);
+                  }
+                }
+              }
             }
           }
         } catch { /* ignore */ }
@@ -619,6 +681,7 @@ export function ToolsTab() {
                       server={server}
                       isChecked={isChecked}
                       tools={tools}
+                      loading={!!perServerLoading[server.name]}
                       onToggleTool={(tool) => toggleMcpTool(server.name, tool)}
                       onToggleServer={() =>
                         selectedAgentId && toggleServer(selectedAgentId, server.name)

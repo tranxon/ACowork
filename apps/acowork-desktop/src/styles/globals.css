@@ -375,11 +375,11 @@
   /* = #1E1E1E — right panel surface (dark) */
   --color-panel-block: hsl(240 3.8% 15.7%);
   /* = zinc-800, #27272a — right-panel embedded card/list/block base (dark) */
-  --color-panel-inset: #1C1C1C;
+  --color-panel-inset: hsl(240 3.8% 13%);
   /* = zinc-900 @ 60% alpha over the zinc-800 card ≈ #1e1e22 — expanded
      list sub-surface (dark). Previously hardcoded per-file as
      `bg-zinc-200 dark:bg-zinc-900/60`; now a single token. */
-  --color-panel-inset-2: #161616;
+  --color-panel-inset-2: hsl(240 3.8% 11%);
   /* = zinc-950 附近 — LEVEL-2 nested list surface (dark), clearly one
      step darker than `panel-inset` (≈#1e1e22): e.g. MCP server ->
      its tool list, snapshot Iteration -> its sections area. */

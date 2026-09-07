@@ -248,7 +248,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const agent = useChatStore((s) => s.agentStates[agentId]);
   const openSessionIds = agent?.openSessionIds ?? [];
   const activeSessionId = agent?.activeSessionId;
-  const sessions = useAgentStore((s) => s.agents[agentId]?.sessions ?? []);
+  const sessions = useAgentStore((s) => s.agents[agentId]?.sessions ?? EMPTY_ARRAY);
   const { createSession, closeSession, renameSession } = useAgentStore();
   const setActiveTab = useChatStore((s) => s.setActiveTab);
   const openSession = useChatStore((s) => s.openSession);
