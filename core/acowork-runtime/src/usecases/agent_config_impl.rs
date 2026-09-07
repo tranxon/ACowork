@@ -151,6 +151,23 @@ fn apply_field_patch(cfg: &mut AgentConfig, field: ConfigField, op: &FieldPatch<
         ConfigField::CompressionRatioThreshold => {
             cfg.compression_ratio_threshold = patch_typed::<f64>(field, op);
         }
+        ConfigField::DistillerEnabled => {
+            cfg.distiller_enabled = patch_typed::<bool>(field, op);
+        }
+        ConfigField::DistillerModel => {
+            cfg.distiller_model =
+                patch_typed::<acowork_core::protocol::CompactModelRef>(field, op);
+        }
+        ConfigField::DistillerIntervalMinutes => {
+            cfg.distiller_interval_minutes = patch_typed::<u64>(field, op);
+        }
+        ConfigField::DistillerAccumulationThreshold => {
+            cfg.distiller_accumulation_threshold =
+                patch_typed::<u64>(field, op).map(|v| v as usize);
+        }
+        ConfigField::DistillerIdleMinutes => {
+            cfg.distiller_idle_minutes = patch_typed::<u64>(field, op);
+        }
     }
 }
 

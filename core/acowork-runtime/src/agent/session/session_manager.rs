@@ -161,6 +161,16 @@ pub struct RuntimeConfigOverrides {
     /// "compress until at most 10% remains"). `None` = use the built-in
     /// default. See [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`].
     pub compression_ratio_threshold: Option<f64>,
+    /// ADR-071 D4: EpisodicDistiller runtime switch (`agent_config.json`).
+    pub distiller_enabled: Option<bool>,
+    /// ADR-071 D4/D5: distiller model reference (`agent_config.json`).
+    pub distiller_model: Option<acowork_core::protocol::CompactModelRef>,
+    /// ADR-071 D4: distiller interval (minutes).
+    pub distiller_interval_minutes: Option<u64>,
+    /// ADR-071 D4: distiller accumulation threshold.
+    pub distiller_accumulation_threshold: Option<usize>,
+    /// ADR-071 D4: distiller idle threshold (minutes).
+    pub distiller_idle_minutes: Option<u64>,
 }
 
 impl RuntimeConfigOverrides {
@@ -174,6 +184,11 @@ impl RuntimeConfigOverrides {
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
             && self.compression_ratio_threshold.is_none()
+            && self.distiller_enabled.is_none()
+            && self.distiller_model.is_none()
+            && self.distiller_interval_minutes.is_none()
+            && self.distiller_accumulation_threshold.is_none()
+            && self.distiller_idle_minutes.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -202,6 +217,21 @@ impl RuntimeConfigOverrides {
         }
         if other.compression_ratio_threshold.is_some() {
             self.compression_ratio_threshold = other.compression_ratio_threshold;
+        }
+        if other.distiller_enabled.is_some() {
+            self.distiller_enabled = other.distiller_enabled;
+        }
+        if other.distiller_model.is_some() {
+            self.distiller_model = other.distiller_model.clone();
+        }
+        if other.distiller_interval_minutes.is_some() {
+            self.distiller_interval_minutes = other.distiller_interval_minutes;
+        }
+        if other.distiller_accumulation_threshold.is_some() {
+            self.distiller_accumulation_threshold = other.distiller_accumulation_threshold;
+        }
+        if other.distiller_idle_minutes.is_some() {
+            self.distiller_idle_minutes = other.distiller_idle_minutes;
         }
     }
 
@@ -240,6 +270,21 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.compression_ratio_threshold {
             cfg.compression_ratio_threshold = Some(v);
         }
+        if let Some(v) = self.distiller_enabled {
+            cfg.distiller_enabled = Some(v);
+        }
+        if let Some(v) = &self.distiller_model {
+            cfg.distiller_model = Some(v.clone());
+        }
+        if let Some(v) = self.distiller_interval_minutes {
+            cfg.distiller_interval_minutes = Some(v);
+        }
+        if let Some(v) = self.distiller_accumulation_threshold {
+            cfg.distiller_accumulation_threshold = Some(v);
+        }
+        if let Some(v) = self.distiller_idle_minutes {
+            cfg.distiller_idle_minutes = Some(v);
+        }
     }
 }
 
@@ -259,6 +304,11 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
             compression_ratio_threshold: cfg.compression_ratio_threshold,
+            distiller_enabled: cfg.distiller_enabled,
+            distiller_model: cfg.distiller_model.clone(),
+            distiller_interval_minutes: cfg.distiller_interval_minutes,
+            distiller_accumulation_threshold: cfg.distiller_accumulation_threshold,
+            distiller_idle_minutes: cfg.distiller_idle_minutes,
         }
     }
 }

@@ -2217,6 +2217,11 @@ async fn put_agent_config(
         req.approval_timeout_secs,
         req.idle_timeout_secs,
         req.compression_ratio_threshold,
+        req.distiller_enabled,
+        req.distiller_model,
+        req.distiller_interval_minutes,
+        req.distiller_accumulation_threshold,
+        req.distiller_idle_minutes,
     );
     let svc = state
         .agent_config
@@ -2374,6 +2379,22 @@ struct UpdateAgentConfigRequest {
     /// leave the on-disk value alone (partial PUT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compression_ratio_threshold: Option<serde_json::Value>,
+    /// ADR-071 D4: distiller runtime switch (记忆蒸馏 card). Absent =
+    /// leave the on-disk value alone (partial PUT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distiller_enabled: Option<serde_json::Value>,
+    /// ADR-071 D4/D5: distiller model ref `{"provider_id":…,"model_id":…}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distiller_model: Option<serde_json::Value>,
+    /// ADR-071 D4: distiller periodic interval (minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distiller_interval_minutes: Option<serde_json::Value>,
+    /// ADR-071 D4: distiller accumulation threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distiller_accumulation_threshold: Option<serde_json::Value>,
+    /// ADR-071 D4: distiller idle threshold (minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    distiller_idle_minutes: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {

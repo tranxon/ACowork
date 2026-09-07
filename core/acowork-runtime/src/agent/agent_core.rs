@@ -146,6 +146,12 @@ pub struct AgentCore {
     /// [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`] (0.90
     /// default = "compress until at most 10% remains").
     pub(crate) compression_ratio_threshold: Option<f64>,
+    /// ADR-071 D4/D6: runtime distiller settings (`agent_config.json`).
+    /// Layer 1 of the distiller config chain, above the manifest
+    /// `[memory.distiller]` section. Written by the memory-panel PUT
+    /// (`distiller_enabled` / `distiller_model` / …) and applied when the
+    /// consolidation pipeline starts or is rebuilt.
+    pub(crate) distiller_runtime: DistillerRuntimeSettings,
     /// Context window cap from manifest.toml [llm].context_window (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
@@ -288,6 +294,29 @@ pub struct AgentCore {
     pub(crate) agent_total_cache_write_tokens: AtomicU64,
 }
 
+/// ADR-071 D4/D6: runtime distiller settings, layered over the manifest
+/// `[memory.distiller]` section.
+///
+/// These fields are the `agent_config.json` projection (the Desktop
+/// memory panel writes them). `None` = "not set at runtime → fall
+/// through to the manifest default". They feed the consolidation
+/// pipeline's `SchedulerConfig` + model resolution chain.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DistillerRuntimeSettings {
+    /// Master switch (overrides `[memory.distiller].enabled`).
+    pub enabled: Option<bool>,
+    /// Distiller model ref `{provider_id, model_id}` (overrides the
+    /// manifest pair). `None` → manifest pair → global
+    /// `default_compact_model` → provider compact_model → chat model.
+    pub model: Option<acowork_core::protocol::CompactModelRef>,
+    /// Periodic trigger interval in minutes (overrides manifest).
+    pub interval_minutes: Option<u64>,
+    /// Unconsolidated-episode backlog threshold (overrides manifest).
+    pub accumulation_threshold: Option<usize>,
+    /// Idle threshold in minutes (overrides manifest).
+    pub idle_minutes: Option<u64>,
+}
+
 /// Map a manifest `[memory.distiller]` section to a [`DistillerConfig`].
 ///
 /// ADR-068 M4/M7: fields that are absent keep the `DistillerConfig` defaults;
@@ -413,6 +442,7 @@ impl AgentCore {
             manifest_temperature,
             context_window_override: None,
             compression_ratio_threshold: None,
+            distiller_runtime: DistillerRuntimeSettings::default(),
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
@@ -843,6 +873,55 @@ impl AgentCore {
             );
             self.compression_ratio_threshold = Some(threshold);
         }
+        // ADR-071 D4/D6: distiller runtime settings. Each `Some` overwrites
+        // the stored value; `None` (field absent on the wire) leaves the
+        // previous runtime value alone — matching the global agent_config.json
+        // partial-PUT semantics used by every other live-editable field.
+        // When anything changed and the consolidation pipeline is already
+        // running, tear it down and rebuild with the new scheduler config
+        // (decision D6 in ADR-071).
+        let mut distiller_changed = false;
+        if let Some(v) = overrides.distiller_enabled
+            && self.distiller_runtime.enabled != Some(v)
+        {
+            self.distiller_runtime.enabled = Some(v);
+            distiller_changed = true;
+        }
+        if let Some(ref v) = overrides.distiller_model
+            && self.distiller_runtime.model.as_ref() != Some(v)
+        {
+            self.distiller_runtime.model = Some(v.clone());
+            distiller_changed = true;
+        }
+        if let Some(v) = overrides.distiller_interval_minutes
+            && self.distiller_runtime.interval_minutes != Some(v)
+        {
+            self.distiller_runtime.interval_minutes = Some(v);
+            distiller_changed = true;
+        }
+        if let Some(v) = overrides.distiller_accumulation_threshold
+            && self.distiller_runtime.accumulation_threshold != Some(v)
+        {
+            self.distiller_runtime.accumulation_threshold = Some(v);
+            distiller_changed = true;
+        }
+        if let Some(v) = overrides.distiller_idle_minutes
+            && self.distiller_runtime.idle_minutes != Some(v)
+        {
+            self.distiller_runtime.idle_minutes = Some(v);
+            distiller_changed = true;
+        }
+        if distiller_changed {
+            tracing::info!(
+                enabled = ?self.distiller_runtime.enabled,
+                model = ?self.distiller_runtime.model,
+                interval_minutes = ?self.distiller_runtime.interval_minutes,
+                accumulation_threshold = ?self.distiller_runtime.accumulation_threshold,
+                idle_minutes = ?self.distiller_runtime.idle_minutes,
+                "runtime config: distiller settings updated (ADR-071 D6) — rebuilding consolidation pipeline if running"
+            );
+            self.rebuild_consolidation_pipeline_if_running();
+        }
     }
 
     pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
@@ -1011,21 +1090,108 @@ impl AgentCore {
             .and_then(manifest_distiller_to_config)
     }
 
+    /// ADR-071 D4/D6: build the effective distiller scheduler policy from
+    /// the runtime `agent_config.json` layer (Layer 1) over the manifest
+    /// `[memory.distiller]` section (Layer 2), falling back to
+    /// [`SchedulerConfig`] defaults for any field both layers leave unset.
+    ///
+    /// The `[memory.distiller]` manifest section already supplies
+    /// interval / accumulation / idle fields (ADR-071 D1 additions), so the
+    /// merge keeps the per-agent package defaults while letting the Desktop
+    /// memory panel override them at runtime without an agent restart.
+    fn distiller_scheduler_config(&self) -> SchedulerConfig {
+        let manifest = self.manifest.memory.distiller.as_ref();
+        // Minutes → seconds (SchedulerConfig uses seconds internally).
+        let minutes_to_secs = |v: Option<u64>| v.map(|m| m.saturating_mul(60));
+        let default = SchedulerConfig::default();
+        SchedulerConfig {
+            distiller_enabled: self
+                .distiller_runtime
+                .enabled
+                .unwrap_or_else(|| self.manifest.memory.distiller_enabled()),
+            distiller_config: self.distiller_config(),
+            distiller_interval_secs: minutes_to_secs(self.distiller_runtime.interval_minutes)
+                .or_else(|| manifest.and_then(|m| m.interval_minutes.map(|v| v.saturating_mul(60))))
+                .unwrap_or(default.distiller_interval_secs),
+            distiller_accumulation: self
+                .distiller_runtime
+                .accumulation_threshold
+                .or_else(|| manifest.and_then(|m| m.accumulation_threshold))
+                .unwrap_or(default.distiller_accumulation),
+            distiller_idle_secs: minutes_to_secs(self.distiller_runtime.idle_minutes)
+                .or_else(|| manifest.and_then(|m| m.idle_minutes.map(|v| v.saturating_mul(60))))
+                .unwrap_or(default.distiller_idle_secs),
+            ..default
+        }
+    }
+
+    /// ADR-071 D6: apply a live distiller config change to the running
+    /// consolidation pipeline without restarting the background task.
+    ///
+    /// The shared `ConsolidationTimer` holds the scheduler policy in an
+    /// internal `RwLock`; swapping the value takes effect on the next loop
+    /// tick (≤60s). The timer's idle/backlog/last-run state is preserved, so
+    /// a config change never spuriously fires (or delays) a distillation.
+    pub(crate) fn rebuild_consolidation_pipeline_if_running(&self) {
+        let Some(timer) = self.consolidation_timer.as_ref() else {
+            tracing::debug!(
+                "Distiller config changed but consolidation timer not running (pipeline not started yet)"
+            );
+            return;
+        };
+        timer.update_config(self.distiller_scheduler_config());
+    }
+
+    /// ADR-071 D4/D5: resolve the LLM model used by the EpisodicDistiller.
+    ///
+    /// Chain (mirrors the summary/distill model selection used by
+    /// `resolve_distill_model` in the session layer):
+    ///   1. `agent_config.json` `distiller_model` (runtime, Layer 1)
+    ///   2. manifest `[memory.distiller].model_*` (Layer 2)
+    ///   3. global `default_compact_model` (ADR-056)
+    ///   4. first model in the provider list (legacy fallback)
+    ///
+    /// The distiller's LLM adapter (`ProviderLlmAdapter`) runs against the
+    /// agent's active provider, so the chosen `model_id` must be servable by
+    /// that provider; provider switching for a cross-provider distiller
+    /// model is out of scope for the background pipeline (the session-layer
+    /// summary path can rebuild providers because it owns a session core).
+    pub(crate) fn resolve_distiller_model_id(&self) -> String {
+        // Layer 1: agent_config.json (runtime memory-panel choice).
+        if let Some(m) = &self.distiller_runtime.model {
+            return m.model_id.clone();
+        }
+        // Layer 2: manifest [memory.distiller].
+        if let Some(d) = self.manifest.memory.distiller.as_ref()
+            && let Some(mid) = d.model_id.as_ref()
+        {
+            return mid.clone();
+        }
+        // Layer 3: global default compact model.
+        if let Some((_, mid)) = self.default_compact_model.as_ref() {
+            return mid.clone();
+        }
+        // Layer 4: first model in the provider list (legacy convention).
+        let list = self.global_provider_list.read().unwrap();
+        list.iter()
+            .flat_map(|p| p.models.iter())
+            .next()
+            .map(|m| m.id.clone())
+            .unwrap_or_else(|| "default".to_string())
+    }
+
     /// ADR-071 D2: run one EpisodicDistiller pass on demand (manual trigger).
     ///
     /// Force semantics: bypasses the periodic gate (`ConsolidationTimer`
     /// interval / backlog / idle checks) and runs `run_episodic_distiller_step`
     /// immediately — the exact same execution path as the background loop.
     ///
-    /// The scheduler's `distiller_enabled` flag is STILL respected (opt-in,
-    /// ADR-068): a manual trigger on a distiller that is explicitly disabled
-    /// is refused instead of silently producing semantic-layer nodes. The UI
-    /// only exposes the manual button while the distiller is enabled, and the
-    /// endpoint defends the same invariant server-side.
-    ///
-    /// Model resolution follows the current pipeline convention (first model
-    /// in the global provider list); ADR-071 W3 replaces this with the
-    /// `distiller_model` resolution chain.
+    /// The effective `distiller_enabled` switch is STILL respected (opt-in,
+    /// ADR-068 + ADR-071 D4 runtime layer): a manual trigger on a distiller
+    /// that is explicitly disabled is refused instead of silently producing
+    /// semantic-layer nodes. The UI only exposes the manual button while the
+    /// distiller is enabled, and the endpoint defends the same invariant
+    /// server-side.
     ///
     /// Returns `Ok(Some(result))` after a grafeo-backed run,
     /// `Ok(None)` when the `grafeo-backend` feature is off, and `Err(...)`
@@ -1038,8 +1204,11 @@ impl AgentCore {
         use crate::memory::llm_adapter::ProviderLlmAdapter;
         use acowork_memory::consolidation::{SchedulerConfig, TripleExtractorLlm};
 
-        if !self.manifest.memory.distiller_enabled() {
-            return Err("distiller is disabled (manifest [memory.distiller].enabled = false)".to_string());
+        if !self.distiller_scheduler_config().distiller_enabled {
+            return Err(
+                "distiller is disabled (agent_config.json / manifest [memory.distiller].enabled = false)"
+                    .to_string(),
+            );
         }
         let provider = self
             .memory_provider
@@ -1049,22 +1218,16 @@ impl AgentCore {
             .embedding_provider
             .clone()
             .ok_or_else(|| "embedding provider not initialized".to_string())?;
-        let model = {
-            let list = self.global_provider_list.read().unwrap();
-            list.iter()
-                .flat_map(|p| p.models.iter())
-                .next()
-                .map(|m| m.id.clone())
-                .unwrap_or_else(|| "default".to_string())
-        };
-        let llm: Arc<dyn TripleExtractorLlm> =
-            Arc::new(ProviderLlmAdapter::new(self.provider.clone(), model));
-        // Manual run uses the manifest-declared distiller parameters when
-        // present; defaults otherwise. Enabled is forced true.
+        let llm: Arc<dyn TripleExtractorLlm> = Arc::new(ProviderLlmAdapter::new(
+            self.provider.clone(),
+            self.resolve_distiller_model_id(),
+        ));
+        // Manual run uses the effective runtime-over-manifest distiller
+        // parameters when present; defaults otherwise. Enabled is forced
+        // true (the gate above already checked the effective switch).
         let scheduler_config = SchedulerConfig {
             distiller_enabled: true,
-            distiller_config: self.distiller_config(),
-            ..SchedulerConfig::default()
+            ..self.distiller_scheduler_config()
         };
         let result = run_episodic_distiller_step_once(provider, llm, embedding, scheduler_config)
             .await;
@@ -1100,23 +1263,13 @@ impl AgentCore {
         }
         use crate::memory::consolidation_bg::{ConsolidationParams, start_consolidation_pipeline};
         use std::time::Duration;
-        let model = {
-            let list = self.global_provider_list.read().unwrap();
-            list.iter().flat_map(|p| p.models.iter()).next().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string())
-        };
-        // ADR-068 M4/M7: resolve the distiller switch from the agent manifest
-        // `[memory.distiller]` section. Off-by-default (opt-in): an absent
-        // section, an empty section, or `enabled = false` all keep the
-        // distiller disabled; only explicit `enabled = true` turns it on.
-        // The decision lives in `MemoryConfig::distiller_enabled` so the
-        // manifest tests and the runtime share one source of truth.
-        let distiller_enabled = self.manifest.memory.distiller_enabled();
-        let distiller_config = self.distiller_config();
-        let scheduler_config = SchedulerConfig {
-            distiller_enabled,
-            distiller_config,
-            ..SchedulerConfig::default()
-        };
+        let model = self.resolve_distiller_model_id();
+        // ADR-068 M4/M7 + ADR-071 D4/D6: resolve the distiller switch and
+        // scheduler parameters from the runtime `agent_config.json` layer
+        // (memory-panel) over the manifest `[memory.distiller]` section.
+        // Off-by-default (opt-in): an absent section / `enabled = false`
+        // keeps the distiller disabled unless the runtime layer turns it on.
+        let scheduler_config = self.distiller_scheduler_config();
         let params = ConsolidationParams {
             provider: provider.clone(), llm_provider: self.provider.clone(), model,
             embedding_provider: embedding.clone(), scheduler_config,
@@ -1392,6 +1545,7 @@ impl Clone for AgentCore {
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
             compression_ratio_threshold: self.compression_ratio_threshold,
+            distiller_runtime: self.distiller_runtime.clone(),
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),

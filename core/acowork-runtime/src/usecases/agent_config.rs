@@ -115,6 +115,18 @@ pub enum ConfigField {
     /// ADR-061 compression ratio bar for levels 1-7 (0.90 default =
     /// "compress until at most 10% remains").
     CompressionRatioThreshold,
+    /// `AgentConfig::distiller_enabled` — `Option<bool>`.
+    /// ADR-071 D4 runtime switch for the EpisodicDistiller.
+    DistillerEnabled,
+    /// `AgentConfig::distiller_model` — `Option<CompactModelRef>`.
+    /// ADR-071 D4/D5 runtime-chosen distiller model.
+    DistillerModel,
+    /// `AgentConfig::distiller_interval_minutes` — `Option<u64>`.
+    DistillerIntervalMinutes,
+    /// `AgentConfig::distiller_accumulation_threshold` — `Option<usize>`.
+    DistillerAccumulationThreshold,
+    /// `AgentConfig::distiller_idle_minutes` — `Option<u64>`.
+    DistillerIdleMinutes,
 }
 
 impl ConfigField {
@@ -132,6 +144,13 @@ impl ConfigField {
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
             ConfigField::IdleTimeoutSecs => "idle_timeout_secs",
             ConfigField::CompressionRatioThreshold => "compression_ratio_threshold",
+            ConfigField::DistillerEnabled => "distiller_enabled",
+            ConfigField::DistillerModel => "distiller_model",
+            ConfigField::DistillerIntervalMinutes => "distiller_interval_minutes",
+            ConfigField::DistillerAccumulationThreshold => {
+                "distiller_accumulation_threshold"
+            }
+            ConfigField::DistillerIdleMinutes => "distiller_idle_minutes",
         }
     }
 }
@@ -197,6 +216,11 @@ impl PutAgentConfigBody {
         approval_timeout_secs: Option<serde_json::Value>,
         idle_timeout_secs: Option<serde_json::Value>,
         compression_ratio_threshold: Option<serde_json::Value>,
+        distiller_enabled: Option<serde_json::Value>,
+        distiller_model: Option<serde_json::Value>,
+        distiller_interval_minutes: Option<serde_json::Value>,
+        distiller_accumulation_threshold: Option<serde_json::Value>,
+        distiller_idle_minutes: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -250,6 +274,36 @@ impl PutAgentConfigBody {
         if let Some(v) = compression_ratio_threshold {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::CompressionRatioThreshold,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = distiller_enabled {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::DistillerEnabled,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = distiller_model {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::DistillerModel,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = distiller_interval_minutes {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::DistillerIntervalMinutes,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = distiller_accumulation_threshold {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::DistillerAccumulationThreshold,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = distiller_idle_minutes {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::DistillerIdleMinutes,
                 op: value_to_patch(&v),
             });
         }

@@ -14,7 +14,7 @@
 //! The actual consolidation execution goes through `dyn MemoryProvider`,
 //! so any provider backend can be used.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use acowork_memory::consolidation::{
@@ -57,7 +57,12 @@ pub enum TriggerReason {
 /// Does NOT hold a store reference - the background loop calls
 /// `dyn MemoryProvider` for all data operations.
 pub struct ConsolidationTimer {
-    config: SchedulerConfig,
+    /// Scheduler policy. Wrapped in `RwLock` so a live config change
+    /// (ADR-071 D6 — memory-panel PUT) can swap the distiller switch /
+    /// interval / thresholds without tearing down the background task.
+    /// The loop re-reads `config()` every tick (60s), so the new policy
+    /// takes effect on the next poll at the latest.
+    config: RwLock<SchedulerConfig>,
     state: Mutex<TimerState>,
 }
 
@@ -121,7 +126,7 @@ impl ConsolidationTimer {
     pub fn new(config: SchedulerConfig) -> Self {
         let now = Utc::now();
         Self {
-            config,
+            config: RwLock::new(config),
             state: Mutex::new(TimerState {
                 last_active_at: now,
                 pending_count: 0,
@@ -174,17 +179,18 @@ impl ConsolidationTimer {
     /// Check whether consolidation should run now.
     pub async fn should_run(&self) -> Option<TriggerReason> {
         let state = self.state.lock().await;
+        let cfg = self.config.read().unwrap();
         let now = Utc::now();
 
         // Check accumulation threshold
-        if state.pending_count >= self.config.accumulation_threshold {
+        if state.pending_count >= cfg.accumulation_threshold {
             return Some(TriggerReason::Accumulation);
         }
 
         // Check idle timeout
         let idle_duration = now - state.last_active_at;
         let idle_secs = idle_duration.num_seconds();
-        if idle_secs >= self.config.idle_timeout_secs as i64 && state.pending_count > 0 {
+        if idle_secs >= cfg.idle_timeout_secs as i64 && state.pending_count > 0 {
             return Some(TriggerReason::IdleTimeout);
         }
 
@@ -203,32 +209,50 @@ impl ConsolidationTimer {
     /// non-empty backlog.
     pub async fn should_run_distill(&self) -> Option<TriggerReason> {
         let state = self.state.lock().await;
-        if !self.config.distiller_enabled {
+        let cfg = self.config.read().unwrap();
+        if !cfg.distiller_enabled {
             return None;
         }
         let now = Utc::now();
 
         // Interval gate (outer): at most one run per configured period.
         let since_last = now - state.last_distill_at;
-        if since_last.num_seconds() < self.config.distiller_interval_secs as i64 {
+        if since_last.num_seconds() < cfg.distiller_interval_secs as i64 {
             return None;
         }
 
         // Inner gate: backlog accumulation or idle with a non-empty backlog.
-        if state.episode_count >= self.config.distiller_accumulation {
+        if state.episode_count >= cfg.distiller_accumulation {
             return Some(TriggerReason::DistillerAccumulation);
         }
         let idle_secs = (now - state.last_active_at).num_seconds();
-        if idle_secs >= self.config.distiller_idle_secs as i64 && state.episode_count > 0 {
+        if idle_secs >= cfg.distiller_idle_secs as i64 && state.episode_count > 0 {
             return Some(TriggerReason::DistillerIdle);
         }
 
         None
     }
 
-    /// Get the scheduler config (used for batch_size / min_pending_age_hours).
-    pub fn config(&self) -> &SchedulerConfig {
-        &self.config
+    /// Snapshot the current scheduler config (ADR-071 D6: may differ from
+    /// the config the timer was constructed with after a live update).
+    pub fn config(&self) -> SchedulerConfig {
+        self.config.read().unwrap().clone()
+    }
+
+    /// Swap the scheduler policy at runtime (ADR-071 D6). The background
+    /// loop re-reads `config()` every tick, so the new distiller switch /
+    /// interval / thresholds take effect on the next poll without tearing
+    /// down the task. Idle/backlog state (last run, last active) is
+    /// deliberately preserved across the swap.
+    pub fn update_config(&self, new_config: SchedulerConfig) {
+        tracing::info!(
+            distiller_enabled = new_config.distiller_enabled,
+            distiller_interval_secs = new_config.distiller_interval_secs,
+            distiller_accumulation = new_config.distiller_accumulation,
+            distiller_idle_secs = new_config.distiller_idle_secs,
+            "ConsolidationTimer: runtime scheduler config updated (ADR-071 D6)"
+        );
+        *self.config.write().unwrap() = new_config;
     }
 
     /// Get the current idle duration in seconds (since last `notify_active`).
@@ -395,11 +419,12 @@ async fn run_consolidation_loop(
         // its OWN condition — not by the legacy Pending-node trigger. The
         // distiller promotes classified episodes to the semantic layer.
         if distill_trigger.is_some() {
+            let scheduler_cfg = scheduler.config();
             let result = run_episodic_distiller_step(
                 provider.as_ref(),
                 &*llm,
                 embedding_fn.as_ref(),
-                scheduler.config(),
+                &scheduler_cfg,
             )
             .await;
             // ADR-071 D2: persist the run summary (time + promotion counts)
@@ -717,6 +742,53 @@ mod tests {
         assert_eq!(timer.should_run_distill().await, None);
         // Even after a mark, still gated.
         timer.mark_distill_run().await;
+        assert_eq!(timer.should_run_distill().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_distiller_trigger_live_config_update_d6() {
+        // ADR-071 D6: a runtime config swap (memory-panel PUT) must take
+        // effect on the next tick without tearing down the task. Start with
+        // the distiller DISABLED → nothing fires even with a full backlog.
+        let config = SchedulerConfig {
+            distiller_enabled: false,
+            distiller_accumulation: 5,
+            distiller_interval_secs: 3600,
+            distiller_idle_secs: 1800,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        timer.update_episode_count(10).await;
+        assert_eq!(timer.should_run_distill().await, None);
+
+        // Swap the switch ON via update_config (what AgentCore::rebuild_
+        // consolidation_pipeline_if_running does). Same timer object, no
+        // task restart. A fresh timer's last_distill_at = now, so the
+        // interval gate still applies — verify the policy is live by
+        // lowering the interval to 0.
+        timer.update_config(SchedulerConfig {
+            distiller_enabled: true,
+            distiller_accumulation: 5,
+            distiller_interval_secs: 0,
+            distiller_idle_secs: 1800,
+            ..Default::default()
+        });
+        // Enabled + interval elapsed + backlog ≥ threshold → fires.
+        assert_eq!(
+            timer.should_run_distill().await,
+            Some(TriggerReason::DistillerAccumulation)
+        );
+        // The snapshot accessor must reflect the swapped policy too.
+        assert!(timer.config().distiller_enabled);
+
+        // Swap back OFF → immediately gated again (no spurious run).
+        timer.update_config(SchedulerConfig {
+            distiller_enabled: false,
+            distiller_accumulation: 5,
+            distiller_interval_secs: 0,
+            distiller_idle_secs: 1800,
+            ..Default::default()
+        });
         assert_eq!(timer.should_run_distill().await, None);
     }
 

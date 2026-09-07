@@ -389,6 +389,20 @@ pub struct ManifestDistillerConfig {
     /// Master switch for the EpisodicDistiller step (ADR-068 M7).
     /// Default: false (OFF — opt-in; set `true` to enable).
     pub enabled: bool,
+    /// Distiller model reference (ADR-071 D4/D5): package-author initial
+    /// value for `agent_config.json` `distiller_model`. `None` falls through
+    /// to the global `default_compact_model` and finally the first provider
+    /// model. Stored as a (provider_id, model_id) pair mirroring
+    /// `protocol::CompactModelRef`.
+    pub model_provider_id: Option<String>,
+    pub model_id: Option<String>,
+    /// Distiller periodic trigger interval in minutes (ADR-071 D1/D4).
+    /// Default: 60.
+    pub interval_minutes: Option<u64>,
+    /// Unconsolidated-episode backlog threshold (ADR-071 D1/D4). Default: 50.
+    pub accumulation_threshold: Option<usize>,
+    /// Idle threshold in minutes (ADR-071 D1/D4). Default: 30.
+    pub idle_minutes: Option<u64>,
     /// Max episodes scanned per distillation run (DistillerConfig.batch_size).
     pub batch_size: Option<usize>,
     /// Embedding cosine threshold for cluster merging (DistillerConfig.cluster_threshold).

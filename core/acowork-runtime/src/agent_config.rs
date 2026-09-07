@@ -206,6 +206,34 @@ pub struct AgentConfig {
     /// default). Configured via the Agent Setup panel; valid range 0.05–0.95.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_ratio_threshold: Option<f64>,
+
+    // ── EpisodicDistiller runtime config (ADR-071 D3/D4) ─────────────
+    //
+    // Layer 1 (highest priority) of the distiller config chain. The Desktop
+    // "记忆蒸馏" card reads/writes these fields; `None` = fall through to
+    // manifest `[memory.distiller]` → system defaults (same convention as
+    // temperature / context_window above).
+
+    /// Runtime switch for the EpisodicDistiller. `None` = use the manifest
+    /// `[memory.distiller].enabled` initial value (default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller_enabled: Option<bool>,
+    /// Runtime-chosen distiller model. `None` = fall through to manifest
+    /// model → global `default_compact_model` → first provider model
+    /// (ADR-071 D5 resolution chain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller_model: Option<acowork_core::protocol::CompactModelRef>,
+    /// Distiller periodic trigger interval (minutes). `None` = manifest /
+    /// default (60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller_interval_minutes: Option<u64>,
+    /// Distiller backlog accumulation threshold. `None` = manifest / default
+    /// (50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller_accumulation_threshold: Option<usize>,
+    /// Distiller idle threshold (minutes). `None` = manifest / default (30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distiller_idle_minutes: Option<u64>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.

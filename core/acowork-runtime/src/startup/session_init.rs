@@ -460,6 +460,17 @@ pub(crate) async fn phase_b_init_session(
         c.memory_session = Some(ctx.memory_session.clone());
         c.embedding_provider = ctx.emb_provider.clone();
         c.rag_provider = ctx.rag_provider.take();
+        // ADR-071 D4/D6: seed the AgentCore runtime distiller layer from
+        // `agent_config.json` BEFORE the consolidation pipeline starts
+        // (init_memory_provider → start_consolidation_pipeline reads
+        // `distiller_scheduler_config()`). `None` fields fall through to the
+        // manifest `[memory.distiller]` section inside the scheduler-config
+        // merge, so an absent runtime layer keeps the package defaults.
+        c.distiller_runtime.enabled = agent_cfg.distiller_enabled;
+        c.distiller_runtime.model = agent_cfg.distiller_model.clone();
+        c.distiller_runtime.interval_minutes = agent_cfg.distiller_interval_minutes;
+        c.distiller_runtime.accumulation_threshold = agent_cfg.distiller_accumulation_threshold;
+        c.distiller_runtime.idle_minutes = agent_cfg.distiller_idle_minutes;
         c.init_memory_provider(work_dir_path);
 
         // ADR-033 (Phase 2): Publish the late-bound memory admin service
@@ -656,6 +667,69 @@ pub(crate) async fn phase_b_init_session(
             if updated.idle_timeout_secs.is_none() {
                 updated.idle_timeout_secs = Some(effective_idle_timeout_secs);
                 dirty = true;
+            }
+
+            // ── ADR-071 D4: distiller runtime fields — first-boot seed ──
+            // Global semantics: `agent_config.json` is the single runtime
+            // source of truth for the memory-panel controls. On first boot
+            // (no distiller fields in agent_config.json yet) we seed the
+            // manifest `[memory.distiller]` initial values so the Desktop
+            // memory panel restores them from disk, exactly like the other
+            // agent_config.json fields above. After that only
+            // agent_config.json is read/written (PUT /agents/{id}/config).
+            // The AgentCore runtime layer (`distiller_runtime`) was already
+            // seeded from `agent_cfg` before `init_memory_provider` above;
+            // this block only persists the manifest defaults when absent.
+            {
+                let manifest_distiller = ctx.loaded.manifest.memory.distiller.clone();
+                if updated.distiller_enabled.is_none() {
+                    updated.distiller_enabled = Some(
+                        manifest_distiller
+                            .as_ref()
+                            .map(|d| d.enabled)
+                            .unwrap_or(false),
+                    );
+                    dirty = true;
+                }
+                if updated.distiller_model.is_none()
+                    && let Some(d) = manifest_distiller.as_ref()
+                    && (d.model_provider_id.is_some() || d.model_id.is_some())
+                {
+                    updated.distiller_model = Some(
+                        acowork_core::protocol::CompactModelRef {
+                            provider_id: d.model_provider_id.clone().unwrap_or_default(),
+                            model_id: d.model_id.clone().unwrap_or_default(),
+                        },
+                    );
+                    dirty = true;
+                }
+                if updated.distiller_interval_minutes.is_none() {
+                    updated.distiller_interval_minutes = Some(
+                        manifest_distiller
+                            .as_ref()
+                            .and_then(|d| d.interval_minutes)
+                            .unwrap_or(60),
+                    );
+                    dirty = true;
+                }
+                if updated.distiller_accumulation_threshold.is_none() {
+                    updated.distiller_accumulation_threshold = Some(
+                        manifest_distiller
+                            .as_ref()
+                            .and_then(|d| d.accumulation_threshold)
+                            .unwrap_or(50),
+                    );
+                    dirty = true;
+                }
+                if updated.distiller_idle_minutes.is_none() {
+                    updated.distiller_idle_minutes = Some(
+                        manifest_distiller
+                            .as_ref()
+                            .and_then(|d| d.idle_minutes)
+                            .unwrap_or(30),
+                    );
+                    dirty = true;
+                }
             }
 
             if dirty {
