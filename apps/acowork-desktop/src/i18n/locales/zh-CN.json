@@ -889,6 +889,7 @@
   },
   "memoryPanel": {
     "memoryList": "记忆节点（{{count}}）",
+    "searchSectionTitle": "记忆搜索",
     "emptyNodes": "暂无记忆节点",
     "consolidate": "合并节点",
     "refresh": "刷新",
@@ -927,8 +928,6 @@
     "rebuildIndex": "重建索引",
     "rebuildIndexInProgress": "重建中…",
     "distillerTitle": "记忆蒸馏",
-    "distillerOn": "已开启",
-    "distillerOff": "已关闭",
     "distillerEnabled": "启用记忆蒸馏",
     "distillerModel": "蒸馏模型",
     "distillerModelPlaceholder": "跟随默认摘要模型（自动）",
@@ -942,7 +941,8 @@
     "distillerSaveFailed": "保存失败（HTTP {{status}}）",
     "distillNow": "立即蒸馏",
     "distillDone": "已蒸馏 {{scanned}} 条经历，晋升 {{promoted}} 条记忆",
-    "distillEmpty": "没有待蒸馏的新经历"
+    "distillEmpty": "没有待蒸馏的新经历",
+    "pagerOf": "第 {{current}} / {{total}} 页"
   },
   "skillsPanel": {
     "selectSkill": "选择技能",

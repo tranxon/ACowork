@@ -873,6 +873,7 @@
   },
   "memoryPanel": {
     "memoryList": "메모리 노드（{{count}}）",
+    "searchSectionTitle": "메모리 검색",
     "emptyNodes": "메모리 노드가 없습니다",
     "consolidate": "노드 통합",
     "refresh": "새로고침",
@@ -911,8 +912,6 @@
     "rebuildIndex": "인덱스 재구축",
     "rebuildIndexInProgress": "재구축 중…",
     "distillerTitle": "메모리 증류",
-    "distillerOn": "켜짐",
-    "distillerOff": "꺼짐",
     "distillerEnabled": "메모리 증류 활성화",
     "distillerModel": "증류 모델",
     "distillerModelPlaceholder": "기본 요약 모델 따르기(자동)",
@@ -926,7 +925,8 @@
     "distillerSaveFailed": "저장 실패(HTTP {{status}})",
     "distillNow": "지금 증류",
     "distillDone": "{{scanned}}건 증류, {{promoted}}건 승격",
-    "distillEmpty": "증류할 새 에피소드가 없습니다"
+    "distillEmpty": "증류할 새 에피소드가 없습니다",
+    "pagerOf": "{{current}} / {{total}} 페이지"
   },
   "skillsPanel": {
     "selectSkill": "기술 선택",

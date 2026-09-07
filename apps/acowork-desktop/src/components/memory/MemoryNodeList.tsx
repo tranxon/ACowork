@@ -1,17 +1,22 @@
-//! Memory node master list — level-1 collapsible card in the same
-//! grammar as the Debug-panel "Context Snapshots" list: a box card whose
-//! header (chevron + title + count Badge + page controls on the empty
-//! right side) toggles the whole list, which sits on the level-1 inset
-//! surface (`bg-panel-inset`). Clicking a row drills into the
-//! MemoryNodeDetail view (master-detail; intentionally NOT an inline
-//! expansion — the detail pane carries edit/delete controls).
-import { useState } from "react";
+//! Memory node master list — bare scroll container for the rows that the
+//! "记忆搜索" (Memory Search) card renders in its body. The chrome
+//! (ListBox + ExpandableRow title row) used to live here in v1, but
+//! nesting it inside the new "Memory Search" card body produced a
+//! card-within-a-card layout — the two chevrons fought each other and
+//! the inner title was redundant with the outer one. This component
+//! now owns only: the inner ListBox of ListRow, the loading/empty
+//! states, and the pager strip at the bottom. The outer card (title,
+//! collapse, surface) is owned by MemoryPanel.
+//!
+//! Clicking a row drills into the MemoryNodeDetail view (master-detail;
+//! intentionally NOT an inline expansion — the detail pane carries
+//! edit/delete controls).
 import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useNodeTypeLabel, useSubTypeLabel } from "./nodeTypeI18n";
-import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/list";
+import { ListBox, ListRow, Badge, EmptyState } from "../common/list";
 
 interface MemoryNodeListProps {
   nodes: MemoryNodeResponse[];
@@ -48,82 +53,67 @@ export function MemoryNodeList({
   onSelectNode,
   onPageChange,
 }: MemoryNodeListProps) {
-  // Level-1 collapse of the whole list card — same interaction as the
-  // Context Snapshots card. Default open.
-  const [listOpen, setListOpen] = useState(true);
   const labelOf = useNodeTypeLabel();
   const subLabelOf = useSubTypeLabel();
   const { t } = useTranslation();
 
-  // Page controls live in the empty right side of the card header.
-  // Clicking them must not toggle the collapse, and flips the card open
-  // when it was collapsed (mirrors the snapshot pager behaviour).
+  // `total` is not rendered directly: the surrounding "记忆搜索" card
+  // owns the result-count badge (the parent already passes the same
+  // total into the top stats strip). It stays in the prop signature so
+  // the parent call site does not need to change — we just mark the
+  // destructured binding as intentionally consumed.
+  void total;
+
+  // Pager strip lives at the bottom of the body — the surrounding
+  // "记忆搜索" card now owns the title/collapse chrome, so there is no
+  // header trailing slot to drop these into. Layout mirrors the
+  // Session-tab pager at SessionTabBar.tsx:215 (justify-between, three
+  // slot — prev / "Page X of Y" / next) so the two bottom pagers feel
+  // consistent across the right panel. Shown only when there is more
+  // than one page; single-page result sets stay clean.
   const pager =
     totalPages > 1 ? (
-      <span
-        className="flex items-center gap-1"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="flex shrink-0 items-center justify-between border-t border-zinc-200 px-1 py-1.5 dark:border-zinc-700">
         <button
           type="button"
           aria-label="Previous memory page"
           disabled={page <= 1}
-          onClick={() => {
-            setListOpen(true);
-            onPageChange(page - 1);
-          }}
-          className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+          onClick={() => onPageChange(page - 1)}
+          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
         >
           <ChevronLeft className="h-3.5 w-3.5" />
         </button>
-        <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500">
-          {page}/{totalPages}
+        <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          {t("memoryPanel.pagerOf", { current: page, total: totalPages })}
         </span>
         <button
           type="button"
           aria-label="Next memory page"
           disabled={page >= totalPages}
-          onClick={() => {
-            setListOpen(true);
-            onPageChange(page + 1);
-          }}
-          className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+          onClick={() => onPageChange(page + 1)}
+          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
         >
           <ChevronRight className="h-3.5 w-3.5" />
         </button>
-      </span>
-    ) : undefined;
+      </div>
+    ) : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <ListBox
-        dividers={false}
-        className={cn(
-          "overflow-hidden",
-          listOpen && "flex min-h-0 flex-1 flex-col",
-        )}
-      >
-        <ExpandableRow
-          open={listOpen}
-          onToggle={() => setListOpen((v) => !v)}
-          title={t("memoryPanel.memoryList", { count: total })}
-          ariaLabel={t("memoryPanel.memoryList", { count: total })}
-          trailing={pager}
-          bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
-        >
-          {loading && nodes.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center py-10">
-              <Loader2 className="h-5 w-5 animate-spin text-zinc-400 dark:text-zinc-500" />
-            </div>
-          ) : !loading && nodes.length === 0 ? (
-            <EmptyState
-              message={t("memoryPanel.emptyNodes")}
-              className="flex-1 items-center justify-center"
-            />
-          ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <ListBox variant="plain">
-                {nodes.map((node) => {
+      {loading && nodes.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center py-10">
+          <Loader2 className="h-5 w-5 animate-spin text-zinc-400 dark:text-zinc-500" />
+        </div>
+      ) : !loading && nodes.length === 0 ? (
+        <EmptyState
+          message={t("memoryPanel.emptyNodes")}
+          className="flex-1 items-center justify-center"
+        />
+      ) : (
+        <>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <ListBox variant="plain">
+              {nodes.map((node) => {
                   const isSelected = node.node_id === selectedNodeId;
 
                   return (
@@ -194,9 +184,9 @@ export function MemoryNodeList({
                 })}
               </ListBox>
             </div>
-          )}
-        </ExpandableRow>
-      </ListBox>
+          {pager}
+        </>
+      )}
     </div>
   );
 }

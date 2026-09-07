@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLayoutStore } from "../../stores/layoutStore";
@@ -6,11 +6,12 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
 import { MemoryDistillSettings } from "./MemoryDistillSettings";
-import { AlertTriangle, Info } from "lucide-react";
+import { AlertTriangle, Info, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
 import { Dropdown } from "../common/Dropdown";
+import { ListBox, ExpandableRow } from "../common/list";
 import { subTypeOptions } from "./nodeTypeI18n";
 
 export function MemoryPanel() {
@@ -52,6 +53,17 @@ export function MemoryPanel() {
     setSelectedNodeId,
     clearMemory,
   } = useMemoryStore();
+
+  // Collapse state for the "记忆搜索" (Memory Search) card body. The
+  // card itself is the master-detail region: when collapsed, both the
+  // filter row and the list / detail body vanish together (the user is
+  // saying "I'm done browsing for now"). We re-open it automatically
+  // when a node is selected, otherwise selecting a row from a collapsed
+  // card would silently drop the user into a blank detail view.
+  const [searchOpen, setSearchOpen] = useState(true);
+  useEffect(() => {
+    if (selectedNodeId !== null) setSearchOpen(true);
+  }, [selectedNodeId]);
 
   // Sub-filter dropdown is only meaningful for Knowledge and
   // Autobiographical nodes — those are the labels that carry a sub_type.
@@ -204,88 +216,10 @@ export function MemoryPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
-      {/* ADR-071 D3/D5: memory distiller settings card (enabled switch,
-          model pick, periodic trigger tuning). Reads/writes
-          agent_config.json via GET/PUT /agents/{id}/config. */}
-      <MemoryDistillSettings
-        agentId={selectedAgentId}
-        running={isAgentRunning}
-        distillerStatus={distillerStatus}
-      />
-
-      {/* Filters */}
-      <div className="flex flex-col gap-2 border-b border-zinc-200 px-panel-gutter py-2 dark:border-zinc-800">
-        <StyledInput
-          type="text"
-          value={filters.keyword}
-          onChange={(e) => setFilters({ keyword: e.target.value })}
-          placeholder={t("memoryPanel.searchNodes")}
-          className="rounded-md bg-panel-block px-2.5 py-1.5"
-        />
-        <div className="flex gap-2">
-          <Dropdown
-            className="min-w-0 flex-1"
-            value={filters.type}
-            onChange={(v) => {
-              const nextType = v as
-                | "All"
-                | "Knowledge"
-                | "Episodic"
-                | "Procedural"
-                | "Autobiographical";
-              // When the user moves off a label that supports sub_type, the
-              // previous sub-filter becomes meaningless. Clearing it here
-              // keeps the URL state honest and avoids sending a stale
-              // `sub_type=` param on subsequent fetches.
-              setFilters({
-                type: nextType,
-                subType:
-                  nextType === "Knowledge" || nextType === "Autobiographical"
-                    ? filters.subType
-                    : "",
-              });
-            }}
-            options={[
-              { value: "All", label: t("memoryPanel.allTypes") },
-              { value: "Knowledge", label: t("memoryPanel.typeKnowledge") },
-              { value: "Episodic", label: t("memoryPanel.typeEpisodic") },
-              { value: "Procedural", label: t("memoryPanel.typeProcedural") },
-              { value: "Autobiographical", label: t("memoryPanel.typeAutobiographical") },
-            ]}
-          />
-          <Dropdown
-            className="min-w-0 flex-1"
-            value={filters.timeRange}
-            onChange={(v) =>
-              setFilters({
-                timeRange: v as "1h" | "1d" | "7d" | "30d" | "all",
-              })
-            }
-            options={[
-              { value: "all", label: t("memoryPanel.allTime") },
-              { value: "1h", label: t("memoryPanel.lastHour") },
-              { value: "1d", label: t("memoryPanel.lastDay") },
-              { value: "7d", label: t("memoryPanel.last7Days") },
-              { value: "30d", label: t("memoryPanel.last30Days") },
-            ]}
-          />
-        </div>
-        {subFilterVisible && subTypeChoices.length > 0 && (
-          <Dropdown
-            className="w-full"
-            value={filters.subType}
-            onChange={(v) => setFilters({ subType: v })}
-            aria-label={t("memoryPanel.subTypeAriaLabel")}
-            data-testid="memory-sub-type-filter"
-            options={[
-              { value: "", label: t("memoryPanel.allSubTypes") },
-              ...subTypeChoices.map((opt) => ({ value: opt.value, label: opt.label })),
-            ]}
-          />
-        )}
-      </div>
-
-      {/* Stats cards */}
+      {/* 1. Stats cards — moved to the top of the panel so the four
+          status indicators are the first thing the user sees on entry.
+          They are part of the overview strip, paired with the
+          health-degradation banner immediately below. */}
       {stats && (
         <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 px-panel-gutter py-2 sm:grid-cols-4 dark:border-zinc-800">
           <StatCard label={t("memoryPanel.totalNodes")} value={stats.total_nodes} />
@@ -352,6 +286,18 @@ export function MemoryPanel() {
         </div>
       )}
 
+      {/* ADR-071 D3/D5: memory distiller settings card (enabled switch,
+          model pick, periodic trigger tuning). Reads/writes
+          agent_config.json via GET/PUT /agents/{id}/config.
+          Sits between the overview strip (stats + health banner) and the
+          main search workflow — the distiller is a control surface, not
+          part of the search row. */}
+      <MemoryDistillSettings
+        agentId={selectedAgentId}
+        running={isAgentRunning}
+        distillerStatus={distillerStatus}
+      />
+
       {/* Error banner */}
       {error && (
         <div className="border-b border-red-200 dark:border-red-900">
@@ -367,33 +313,139 @@ export function MemoryPanel() {
         </div>
       )}
 
-      {/* Main content: master-detail toggle */}
-      {/* Main content: master-detail toggle. The gutter on all four
-          sides keeps the list/detail card from touching the hairline
-          dividers above (stats/banner) and below (bottom actions). */}
-      <div className="flex min-h-0 flex-1 overflow-hidden px-panel-gutter py-panel-gutter">
-        {!selectedNode ? (
-          <MemoryNodeList
-            nodes={nodes}
-            total={total}
-            page={page}
-            pageSize={pageSize}
-            totalPages={totalPages}
-            loading={loading}
-            selectedNodeId={selectedNodeId}
-            onSelectNode={setSelectedNodeId}
-            onPageChange={setPage}
-          />
-        ) : (
-          <MemoryNodeDetail
-            node={selectedNode}
-            onClose={() => setSelectedNodeId(null)}
-            onDelete={(nodeId) => {
-              if (!selectedAgentId) return;
-              void useMemoryStore.getState().deleteNode(selectedAgentId, nodeId);
-            }}
-          />
-        )}
+      {/* Memory Search card — wraps the search row, the type / time /
+          sub_type filters, and the master-detail body in a single
+          level-1 collapsible card. The card collapses as one (same
+          grammar as Snapshot / Distill cards). A useEffect at the top
+          of this component re-opens the card automatically when a node
+          is selected, so collapsing the search row never strands the
+          user with a hidden detail view. */}
+      <div className="flex min-h-0 flex-1 flex-col p-3">
+        <ListBox
+          dividers={false}
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
+          <ExpandableRow
+            open={searchOpen}
+            onToggle={() => setSearchOpen((v) => !v)}
+            title={t("memoryPanel.searchSectionTitle")}
+            ariaLabel={t("memoryPanel.searchSectionTitle")}
+            bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          >
+            {/* Search row + filters. shrink-0 so the flex-1 master-detail
+                below always claims the remaining height regardless of how
+                many filter controls are visible (sub_type only shows for
+                Knowledge / Autobiographical). border-b separates the
+                control strip from the list region below so the two
+                surfaces read as distinct blocks on the inset body. */}
+            <div className="flex shrink-0 flex-col gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
+              {/* Search input — Search icon pinned to the left edge,
+                  input gets `pl-7` so the placeholder text never sits
+                  under the icon. Mirrors the Session-tab search row at
+                  SessionTabBar.tsx:127 so all search inputs share the
+                  same affordance. */}
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
+                <StyledInput
+                  type="text"
+                  value={filters.keyword}
+                  onChange={(e) => setFilters({ keyword: e.target.value })}
+                  placeholder={t("memoryPanel.searchNodes")}
+                  className="rounded-md bg-panel-block py-1.5 pl-7 pr-2.5"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Dropdown
+                  className="min-w-0 flex-1"
+                  value={filters.type}
+                  onChange={(v) => {
+                    const nextType = v as
+                      | "All"
+                      | "Knowledge"
+                      | "Episodic"
+                      | "Procedural"
+                      | "Autobiographical";
+                    // When the user moves off a label that supports sub_type, the
+                    // previous sub-filter becomes meaningless. Clearing it here
+                    // keeps the URL state honest and avoids sending a stale
+                    // `sub_type=` param on subsequent fetches.
+                    setFilters({
+                      type: nextType,
+                      subType:
+                        nextType === "Knowledge" || nextType === "Autobiographical"
+                          ? filters.subType
+                          : "",
+                    });
+                  }}
+                  options={[
+                    { value: "All", label: t("memoryPanel.allTypes") },
+                    { value: "Knowledge", label: t("memoryPanel.typeKnowledge") },
+                    { value: "Episodic", label: t("memoryPanel.typeEpisodic") },
+                    { value: "Procedural", label: t("memoryPanel.typeProcedural") },
+                    { value: "Autobiographical", label: t("memoryPanel.typeAutobiographical") },
+                  ]}
+                />
+                <Dropdown
+                  className="min-w-0 flex-1"
+                  value={filters.timeRange}
+                  onChange={(v) =>
+                    setFilters({
+                      timeRange: v as "1h" | "1d" | "7d" | "30d" | "all",
+                    })
+                  }
+                  options={[
+                    { value: "all", label: t("memoryPanel.allTime") },
+                    { value: "1h", label: t("memoryPanel.lastHour") },
+                    { value: "1d", label: t("memoryPanel.lastDay") },
+                    { value: "7d", label: t("memoryPanel.last7Days") },
+                    { value: "30d", label: t("memoryPanel.last30Days") },
+                  ]}
+                />
+              </div>
+              {subFilterVisible && subTypeChoices.length > 0 && (
+                <Dropdown
+                  className="w-full"
+                  value={filters.subType}
+                  onChange={(v) => setFilters({ subType: v })}
+                  aria-label={t("memoryPanel.subTypeAriaLabel")}
+                  data-testid="memory-sub-type-filter"
+                  options={[
+                    { value: "", label: t("memoryPanel.allSubTypes") },
+                    ...subTypeChoices.map((opt) => ({ value: opt.value, label: opt.label })),
+                  ]}
+                />
+              )}
+            </div>
+
+            {/* Master-detail body: list when no node is selected, detail
+                otherwise. Both children live inside the same expand
+                region so the collapse animation stays consistent. */}
+            <div className="flex min-h-0 flex-1 overflow-hidden">
+              {!selectedNode ? (
+                <MemoryNodeList
+                  nodes={nodes}
+                  total={total}
+                  page={page}
+                  pageSize={pageSize}
+                  totalPages={totalPages}
+                  loading={loading}
+                  selectedNodeId={selectedNodeId}
+                  onSelectNode={setSelectedNodeId}
+                  onPageChange={setPage}
+                />
+              ) : (
+                <MemoryNodeDetail
+                  node={selectedNode}
+                  onClose={() => setSelectedNodeId(null)}
+                  onDelete={(nodeId) => {
+                    if (!selectedAgentId) return;
+                    void useMemoryStore.getState().deleteNode(selectedAgentId, nodeId);
+                  }}
+                />
+              )}
+            </div>
+          </ExpandableRow>
+        </ListBox>
       </div>
 
       {/* Bottom actions */}

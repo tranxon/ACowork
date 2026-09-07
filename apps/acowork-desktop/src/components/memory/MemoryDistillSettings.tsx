@@ -8,7 +8,7 @@ import { useToast } from "../common/ToastProvider";
 import { Switch } from "../common/Switch";
 import { Dropdown } from "../common/Dropdown";
 import { StyledInput } from "../common/StyledInput";
-import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
+import { ListBox, ExpandableRow } from "../common/list";
 import { log } from "../../lib/logger";
 import { with503Retry } from "../../lib/httpRetry";
 
@@ -29,6 +29,16 @@ import { with503Retry } from "../../lib/httpRetry";
  * Empty number inputs mean "no runtime opinion" — the field is not sent
  * (fallback: manifest → system default). Blur saves the numeric fields;
  * the switch and model pick save immediately on change.
+ *
+ * Visual grammar: level-1 collapsible card (same shell as the Status-tab
+ * Session Status / Tools-tab Builtin Tools / Debug-tab Context Snapshots
+ * / Memory tab node list). The header is chevron + title + trailing
+ * Switch — nothing else, so the row matches every other level-1 card
+ * visually. The Switch owns the enable bit AND auto-expands the body
+ * when enabled / auto-collapses when disabled (`handleToggle`), so the
+ * user never has to first flip the switch then click the title row.
+ * The backlog / last-run hint is intentionally rendered INSIDE the
+ * expanded body — it is runtime status, not card chrome.
  */
 export function MemoryDistillSettings({
   agentId,
@@ -156,6 +166,12 @@ export function MemoryDistillSettings({
 
   const handleToggle = (v: boolean) => {
     setEnabled(v);
+    // Switch owns the enable bit, so it should also own the affordance
+    // of showing / hiding the configuration body: enabling auto-expands
+    // so the user lands on the controls they just turned on; disabling
+    // auto-collapses because the body becomes inert (all inputs are
+    // disabled when `!enabled` anyway).
+    setExpanded(v);
     void putField("distiller_enabled", v);
   };
 
@@ -193,172 +209,169 @@ export function MemoryDistillSettings({
   };
 
   // ── Render ────────────────────────────────────────────────────────────
-  const statusEnabled = distillerStatus?.enabled ?? enabled;
   const numInputCls =
     "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200";
 
-  return (
-    <div className="border-b border-zinc-200 dark:border-zinc-800">
-      <div className="flex items-center gap-2 px-3 py-1.5">
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-        >
-          {expanded ? (
-            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-          )}
-          <Cpu className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-          <span className="truncate text-[11px] font-medium">
-            {t("memoryPanel.distillerTitle")}
+  // Backlog / last-run hint lives INSIDE the expanded body — it is
+  // status info about the runtime, not metadata about the card itself,
+  // and only meaningful once the user has opted in to the distiller.
+  // Showing it in the title row made the header feel busier than its
+  // peers (Session Status, Builtin Tools, Context Snapshots, Memory
+  // Nodes), which keep the title row to chevron + title + trailing.
+  const runtimeHint =
+    loaded && distillerStatus ? (
+      <p className="flex items-center gap-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+        <span>
+          {t("memoryPanel.distillerBacklog", {
+            count: distillerStatus.episode_backlog,
+          })}
+        </span>
+        <span aria-hidden>·</span>
+        {distillerStatus.last_run ? (
+          <span>
+            {t("memoryPanel.distillerLastRun", {
+              scanned: distillerStatus.last_run.episodes_scanned,
+              promoted: distillerStatus.last_run.total_promoted,
+            })}
           </span>
-          {statusEnabled && (
-            <span className="rounded-full bg-emerald-500/10 px-1.5 py-px text-[10px] text-emerald-600 dark:text-emerald-400">
-              {t("memoryPanel.distillerOn")}
-            </span>
-          )}
-          {distillerStatus && !distillerStatus.enabled && (
-            <span className="rounded-full bg-zinc-500/10 px-1.5 py-px text-[10px] text-zinc-500 dark:text-zinc-400">
-              {t("memoryPanel.distillerOff")}
-            </span>
-          )}
-        </button>
-        <Switch
-          checked={enabled}
-          onChange={handleToggle}
-          disabled={!running || savingField === "distiller_enabled"}
-          size="sm"
-          aria-label={t("memoryPanel.distillerEnabled")}
-        />
-      </div>
+        ) : (
+          <span>{t("memoryPanel.distillerNeverRun")}</span>
+        )}
+      </p>
+    ) : null;
 
-      {/* Runtime hint line (backlog / last run), visible whenever loaded */}
-      {loaded && (distillerStatus || enabled) && (
-        <div className="flex items-center gap-2 px-3 pb-1 text-[10px] text-zinc-400 dark:text-zinc-500">
-          {distillerStatus && (
-            <>
-              <span>
-                {t("memoryPanel.distillerBacklog", {
-                  count: distillerStatus.episode_backlog,
-                })}
+  return (
+    // Level-1 collapsible card in the same grammar as Session Status /
+    // Builtin Tools / Context Snapshots / Memory Nodes: `ListBox` shell
+    // + `ExpandableRow`. The title row stays clean (chevron + title +
+    // trailing Switch) so it visually matches every other level-1
+    // card on the right panel. The trailing Switch owns enable AND the
+    // auto expand/collapse (see `handleToggle`), so the user never has
+    // to first enable then click the title row.
+    <div className="p-3">
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={expanded}
+          onToggle={() => setExpanded((v) => !v)}
+          title={t("memoryPanel.distillerTitle")}
+          ariaLabel={t("memoryPanel.distillerTitle")}
+          trailing={
+            // The Switch component does not stop propagation itself;
+            // ExpandableRow's contract requires trailing interactive
+            // elements to swallow the click so toggling does not also
+            // collapse/expand the card.
+            <span onClick={(e) => e.stopPropagation()}>
+              <Switch
+                checked={enabled}
+                onChange={handleToggle}
+                disabled={!running || savingField === "distiller_enabled"}
+                size="sm"
+                aria-label={t("memoryPanel.distillerEnabled")}
+              />
+            </span>
+          }
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 dark:border-zinc-700"
+        >
+          <div className="flex flex-col gap-2">
+            {runtimeHint}
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                {t("memoryPanel.distillerModel")}
               </span>
-              <span>·</span>
-              {distillerStatus.last_run ? (
-                <span>
-                  {t("memoryPanel.distillerLastRun", {
-                    scanned: distillerStatus.last_run.episodes_scanned,
-                    promoted: distillerStatus.last_run.total_promoted,
-                  })}
+              <Dropdown
+                className="!py-1 text-[11px]"
+                value={modelKey}
+                onChange={handleModelChange}
+                disabled={!running || !enabled || savingField === "distiller_model"}
+                placeholder={{
+                  value: "",
+                  label: t("memoryPanel.distillerModelPlaceholder"),
+                  selectable: true,
+                }}
+                options={[
+                  ...modelDropdownOptions,
+                  ...(selectedModelStale && modelKey
+                    ? [
+                        {
+                          value: modelKey,
+                          label: `${modelKey.split("::")[1]} · ${modelKey.split("::")[0]}`,
+                        },
+                      ]
+                    : []),
+                ]}
+              />
+            </label>
+
+            <div className="grid grid-cols-3 gap-2">
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {t("memoryPanel.distillerInterval")}
                 </span>
-              ) : (
-                <span>{t("memoryPanel.distillerNeverRun")}</span>
-              )}
-            </>
-          )}
-        </div>
-      )}
+                <StyledInput
+                  type="number"
+                  min={1}
+                  value={intervalInput}
+                  placeholder={String(60)}
+                  onChange={(e) => setIntervalInput(e.target.value)}
+                  onBlur={(e) =>
+                    saveNumber(
+                      "distiller_interval_minutes",
+                      e.target.value,
+                      setIntervalInput,
+                    )
+                  }
+                  disabled={!running || !enabled}
+                  className={numInputCls}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {t("memoryPanel.distillerAccumulation")}
+                </span>
+                <StyledInput
+                  type="number"
+                  min={1}
+                  value={accInput}
+                  placeholder={String(50)}
+                  onChange={(e) => setAccInput(e.target.value)}
+                  onBlur={(e) =>
+                    saveNumber(
+                      "distiller_accumulation_threshold",
+                      e.target.value,
+                      setAccInput,
+                    )
+                  }
+                  disabled={!running || !enabled}
+                  className={numInputCls}
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {t("memoryPanel.distillerIdle")}
+                </span>
+                <StyledInput
+                  type="number"
+                  min={1}
+                  value={idleInput}
+                  placeholder={String(30)}
+                  onChange={(e) => setIdleInput(e.target.value)}
+                  onBlur={(e) =>
+                    saveNumber("distiller_idle_minutes", e.target.value, setIdleInput)
+                  }
+                  disabled={!running || !enabled}
+                  className={numInputCls}
+                />
+              </label>
+            </div>
 
-      {expanded && (
-        <div className="flex flex-col gap-2 border-t border-zinc-200/70 px-3 py-2 dark:border-zinc-800/70">
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-              {t("memoryPanel.distillerModel")}
-            </span>
-            <Dropdown
-              className="!py-1 text-[11px]"
-              value={modelKey}
-              onChange={handleModelChange}
-              disabled={!running || !enabled || savingField === "distiller_model"}
-              placeholder={{
-                value: "",
-                label: t("memoryPanel.distillerModelPlaceholder"),
-                selectable: true,
-              }}
-              options={[
-                ...modelDropdownOptions,
-                ...(selectedModelStale && modelKey
-                  ? [
-                      {
-                        value: modelKey,
-                        label: `${modelKey.split("::")[1]} · ${modelKey.split("::")[0]}`,
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          </label>
-
-          <div className="grid grid-cols-3 gap-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                {t("memoryPanel.distillerInterval")}
-              </span>
-              <StyledInput
-                type="number"
-                min={1}
-                value={intervalInput}
-                placeholder={String(60)}
-                onChange={(e) => setIntervalInput(e.target.value)}
-                onBlur={(e) =>
-                  saveNumber(
-                    "distiller_interval_minutes",
-                    e.target.value,
-                    setIntervalInput,
-                  )
-                }
-                disabled={!running || !enabled}
-                className={numInputCls}
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                {t("memoryPanel.distillerAccumulation")}
-              </span>
-              <StyledInput
-                type="number"
-                min={1}
-                value={accInput}
-                placeholder={String(50)}
-                onChange={(e) => setAccInput(e.target.value)}
-                onBlur={(e) =>
-                  saveNumber(
-                    "distiller_accumulation_threshold",
-                    e.target.value,
-                    setAccInput,
-                  )
-                }
-                disabled={!running || !enabled}
-                className={numInputCls}
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                {t("memoryPanel.distillerIdle")}
-              </span>
-              <StyledInput
-                type="number"
-                min={1}
-                value={idleInput}
-                placeholder={String(30)}
-                onChange={(e) => setIdleInput(e.target.value)}
-                onBlur={(e) =>
-                  saveNumber("distiller_idle_minutes", e.target.value, setIdleInput)
-                }
-                disabled={!running || !enabled}
-                className={numInputCls}
-              />
-            </label>
+            {!enabled && (
+              <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
+                {t("memoryPanel.distillerDisabledHint")}
+              </p>
+            )}
           </div>
-
-          {!enabled && (
-            <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
-              {t("memoryPanel.distillerDisabledHint")}
-            </p>
-          )}
-        </div>
-      )}
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }

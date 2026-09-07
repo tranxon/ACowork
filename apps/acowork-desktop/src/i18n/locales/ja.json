@@ -872,6 +872,7 @@
   },
   "memoryPanel": {
     "memoryList": "メモリノード（{{count}}）",
+    "searchSectionTitle": "メモリ検索",
     "emptyNodes": "メモリノードがありません",
     "consolidate": "ノードを統合",
     "refresh": "更新",
@@ -910,8 +911,6 @@
     "rebuildIndex": "インデックスを再構築",
     "rebuildIndexInProgress": "再構築中…",
     "distillerTitle": "記憶蒸留",
-    "distillerOn": "オン",
-    "distillerOff": "オフ",
     "distillerEnabled": "記憶蒸留を有効化",
     "distillerModel": "蒸留モデル",
     "distillerModelPlaceholder": "既定の要約モデルに従う（自動）",
@@ -925,7 +924,8 @@
     "distillerSaveFailed": "保存失敗（HTTP {{status}}）",
     "distillNow": "今すぐ蒸留",
     "distillDone": "{{scanned}} 件のエピソードを蒸留し、{{promoted}} 件の記憶を昇格しました",
-    "distillEmpty": "蒸留する新しいエピソードはありません"
+    "distillEmpty": "蒸留する新しいエピソードはありません",
+    "pagerOf": "{{current}} / {{total}} ページ"
   },
   "skillsPanel": {
     "selectSkill": "スキルを選択",

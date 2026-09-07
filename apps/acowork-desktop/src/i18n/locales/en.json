@@ -970,6 +970,7 @@
   },
   "memoryPanel": {
     "memoryList": "Memory Nodes ({{count}})",
+    "searchSectionTitle": "Memory Search",
     "emptyNodes": "No memory nodes found",
     "consolidate": "Consolidate",
     "refresh": "Refresh",
@@ -1008,8 +1009,6 @@
     "rebuildIndex": "Rebuild Index",
     "rebuildIndexInProgress": "Rebuilding…",
     "distillerTitle": "Memory Distiller",
-    "distillerOn": "On",
-    "distillerOff": "Off",
     "distillerEnabled": "Enable memory distiller",
     "distillerModel": "Distiller model",
     "distillerModelPlaceholder": "Follow global default (auto)",
@@ -1023,7 +1022,8 @@
     "distillerSaveFailed": "Save failed (HTTP {{status}})",
     "distillNow": "Distill now",
     "distillDone": "Distilled {{scanned}} episodes; promoted {{promoted}} memories",
-    "distillEmpty": "No new episodes to distill"
+    "distillEmpty": "No new episodes to distill",
+    "pagerOf": "Page {{current}} of {{total}}"
   },
   "statusBar": {
     "agent": "agent",

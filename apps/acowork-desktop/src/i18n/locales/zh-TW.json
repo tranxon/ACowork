@@ -871,6 +871,7 @@
   },
   "memoryPanel": {
     "memoryList": "記憶節點（{{count}}）",
+    "searchSectionTitle": "記憶搜尋",
     "emptyNodes": "暫無記憶節點",
     "consolidate": "合併節點",
     "refresh": "重新整理",
@@ -909,8 +910,6 @@
     "rebuildIndex": "重建索引",
     "rebuildIndexInProgress": "重建中…",
     "distillerTitle": "記憶蒸餾",
-    "distillerOn": "已開啟",
-    "distillerOff": "已關閉",
     "distillerEnabled": "啟用記憶蒸餾",
     "distillerModel": "蒸餾模型",
     "distillerModelPlaceholder": "跟隨預設摘要模型（自動）",
@@ -924,7 +923,8 @@
     "distillerSaveFailed": "儲存失敗（HTTP {{status}}）",
     "distillNow": "立即蒸餾",
     "distillDone": "已蒸餾 {{scanned}} 條經歷，晉升 {{promoted}} 條記憶",
-    "distillEmpty": "沒有待蒸餾的新經歷"
+    "distillEmpty": "沒有待蒸餾的新經歷",
+    "pagerOf": "第 {{current}} / {{total}} 頁"
   },
   "skillsPanel": {
     "selectSkill": "選擇技能",
