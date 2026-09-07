@@ -260,10 +260,17 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
         .installed_agents
         .values()
         .map(|info| {
-            // Verify the process is actually alive (not just in running_agents)
+            // Verify the process is actually alive (not just in running_agents).
+            // pid=0 marks an ADR-055 node-hosted Runtime auto-tracked from its
+            // MQTT ready signal — there is no local Gateway-side process to
+            // probe, and `is_process_alive(0)` is false on Linux (/proc/0
+            // does not exist), so it must be exempted: liveness is guaranteed
+            // by the MQTT LWT registry (`acowork/agents/{id}/status`), and a
+            // dead Runtime flips to `offline`, which clears the entry via
+            // `remove_running` in dispatch.rs.
             let running_info = gw.running_agents.get(&info.agent_id);
             let actually_running = running_info
-                .map(|r| is_process_alive(r.pid))
+                .map(|r| r.pid == 0 || is_process_alive(r.pid))
                 .unwrap_or(false);
             // `connected` is the broker-level "Runtime's MQTT client is
             // reachable" signal. Pull it from the AgentRegistry (which
@@ -1938,6 +1945,34 @@ pub async fn start_agent(
         }
     }
 
+    // ADR-055 idempotent fast-path: when the Runtime is already online
+    // per the MQTT LWT registry (`acowork/agents/{id}/status = online`),
+    // a `control/start` round-trip to the Node is redundant — the Node
+    // would reply "already running" anyway, but the HTTP request can
+    // hang up to COMMAND_TIMEOUT (30s) while the Node recovers (e.g.
+    // after a host suspend/resume; 2026-09-07 incident: repeated clicks
+    // each blocked 3-34s with zero UI feedback). Return an idempotent
+    // 200 immediately instead.
+    //
+    // Auto-sleep (`sleeping`) keeps the process alive but suspends the
+    // session, so a start must still reach the Node to wake it — only a
+    // live (non-sleeping) online state short-circuits.
+    if let Some(ref reg) = state.agent_registry {
+        let live_online = {
+            let reg = reg.read().await;
+            reg.is_online(&agent_id) && reg.sleeping_at(&agent_id).is_none()
+        };
+        if live_online {
+            tracing::info!(
+                agent_id,
+                "POST /start short-circuited: agent already online (idempotent)"
+            );
+            return Ok(Json(MessageResponse {
+                message: format!("Agent already running: {}", agent_id),
+            }));
+        }
+    }
+
     // ADR-055 §6.2: delegate start to the local node via the control
     // plane instead of spawning the Runtime directly.
     let node_control = state.node_control.clone().ok_or_else(|| {
@@ -1947,7 +1982,15 @@ pub async fn start_agent(
     let event = node_control
         .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, req.dev_mode)
         .await
-        .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
+        .map_err(|e| match e {
+            crate::mqtt::node_control::NodeControlError::Timeout { request_id } => {
+                ApiError::gateway_timeout(&format!(
+                    "Start timed out waiting for node reply (request_id {})",
+                    request_id
+                ))
+            }
+            other => ApiError::internal(&format!("Start failed: {}", other)),
+        })?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
 
@@ -2363,9 +2406,206 @@ pub async fn get_agent_search_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::state::{AgentInfo, GatewayState};
+    use crate::http::auth::HttpAuth;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {
+        acowork_core::AgentManifest {
+            agent_id: agent_id.to_string(),
+            version: "1.0.0".to_string(),
+            name: "Test Agent".to_string(),
+            display_name: None,
+            role: None,
+            avatar: None,
+            builtin_avatar: None,
+            description: "test".to_string(),
+            author: "test".to_string(),
+            runtime_version: "0.1.0".to_string(),
+            permissions: vec![],
+            triggers: vec![],
+            llm: Default::default(),
+            memory: Default::default(),
+            identity_deps: vec![],
+            tools: vec![],
+            capabilities: Default::default(),
+            resources: Default::default(),
+            sandbox: Default::default(),
+            system: false,
+            dev: false,
+            skills: Default::default(),
+        }
+    }
+
+    /// Build an AppState with `agent_id` installed and the MQTT agent
+    /// registry seeded with the given status payload. `node_control` is
+    /// left `None` so a handler that fails to short-circuit errors with
+    /// "Node control plane unavailable" — proving the fast-path was hit.
+    async fn state_with_registry_status(agent_id: &str, status: &[u8]) -> AppState {
+        let gw = Arc::new(RwLock::new(GatewayState::new(
+            "/tmp/acowork-start-test-vault",
+        )));
+        {
+            let mut g = gw.write().await;
+            g.installed_agents.insert(
+                agent_id.to_string(),
+                AgentInfo {
+                    agent_id: agent_id.to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "Test Agent".to_string(),
+                    install_path: format!("/tmp/pkg/{}", agent_id),
+                    manifest: test_manifest(agent_id),
+                    node_id: "local".to_string(),
+                },
+            );
+        }
+        let reg = crate::mqtt::agent_registry::new_shared_registry();
+        reg.write()
+            .await
+            .update_from_mqtt(&format!("acowork/agents/{}/status", agent_id), status);
+
+        let mut state = AppState::new(gw, Arc::new(HttpAuth::new(false)));
+        state.agent_registry = Some(reg);
+        state
+    }
+
+    #[tokio::test]
+    async fn start_agent_short_circuits_when_already_online() {
+        // ADR-055 idempotent fast-path: a node-hosted Runtime that is
+        // already online (MQTT LWT) must return immediately instead of
+        // paying a control/start round-trip that can hang up to
+        // COMMAND_TIMEOUT (30s) while the Node recovers.
+        let state = state_with_registry_status(
+            "com.acowork.senior-engineer",
+            b"online",
+        ).await;
+        let result = start_agent(
+            State(state),
+            Path("com.acowork.senior-engineer".to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Ok(resp) => {
+                assert!(
+                    resp.message.contains("already running"),
+                    "message should say the agent is already running; got: {}",
+                    resp.message
+                );
+            }
+            Err(e) => panic!("expected idempotent 200, got error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_agent_does_not_short_circuit_when_sleeping() {
+        // Auto-sleep keeps the process alive but suspends the session —
+        // a start must still reach the Node to wake it. With
+        // node_control disabled the handler must error on the node path
+        // rather than returning the idempotent 200.
+        let state = state_with_registry_status(
+            "com.acowork.senior-engineer",
+            b"sleeping",
+        ).await;
+        let result = start_agent(
+            State(state),
+            Path("com.acowork.senior-engineer".to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Err(e) => {
+                assert!(
+                    e.error.contains("Node control plane"),
+                    "expected node-control path error; got: {}",
+                    e.error
+                );
+            }
+            Ok(resp) => panic!(
+                "sleeping agent must NOT short-circuit; got idempotent 200: {}",
+                resp.message
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_agent_not_short_circuited_when_offline() {
+        // An offline agent has no online short-circuit either — the
+        // node-control path must run.
+        let state = state_with_registry_status(
+            "com.acowork.senior-engineer",
+            b"offline",
+        ).await;
+        let result = start_agent(
+            State(state),
+            Path("com.acowork.senior-engineer".to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Err(e) => {
+                assert!(
+                    e.error.contains("Node control plane"),
+                    "expected node-control path error; got: {}",
+                    e.error
+                );
+            }
+            Ok(resp) => panic!(
+                "offline agent must NOT short-circuit; got idempotent 200: {}",
+                resp.message
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_agents_reports_node_hosted_runtime_as_running() {
+        // ADR-055: a node-hosted Runtime auto-tracked from its MQTT ready
+        // signal has pid=0 (no local Gateway-side process). The list
+        // serializer must NOT consult `is_process_alive(0)` — on Linux
+        // /proc/0 does not exist and would report the Runtime as stopped
+        // even though the MQTT LWT registry says it is online. Liveness
+        // for pid=0 is guaranteed by the registry instead.
+        let state =
+            state_with_registry_status("com.acowork.senior-engineer", b"online").await;
+        {
+            let mut gw = state.gateway_state.write().await;
+            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                agent_id: "com.acowork.senior-engineer".to_string(),
+                pid: 0,
+                started_at: chrono::Utc::now(),
+                workspace: String::new(),
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                connected: true,
+                ready: true,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+        }
+
+        let Json(resp) = list_agents(State(state)).await;
+        let entry = resp
+            .iter()
+            .find(|a| a.agent_id == "com.acowork.senior-engineer")
+            .expect("senior-engineer must be listed");
+        assert!(
+            entry.running,
+            "pid=0 node-hosted Runtime must report running=true"
+        );
+        assert!(entry.ready, "ready must mirror the tracked state");
+        assert!(
+            entry.connected,
+            "connected must mirror the tracked state"
+        );
+    }
 
     #[test]
     fn test_agent_list_response_serialization() {
+
         let resp = AgentListResponse {
             agent_id: "com.example.weather".to_string(),
             name: "Weather Agent".to_string(),

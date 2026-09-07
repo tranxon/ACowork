@@ -467,6 +467,18 @@ impl ApiError {
         }
     }
 
+    /// 504 Gateway Timeout — the request depended on a downstream
+    /// round-trip (e.g. a Node control-plane command) that exceeded its
+    /// deadline. Distinct from 500 so clients can surface "the node did
+    /// not answer in time" without treating it as a server crash.
+    pub fn gateway_timeout(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 504,
+            structured: None,
+        }
+    }
+
     /// ADR-059 §2.3: conflict — the request depends on a resource that
     /// is not ready yet (e.g. installing onto a Node whose control
     /// plane has not announced `NodeReady`). The client should retry
