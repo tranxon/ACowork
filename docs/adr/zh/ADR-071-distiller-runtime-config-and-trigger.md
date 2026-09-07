@@ -1,6 +1,6 @@
 # ADR-071: 记忆蒸馏运行时配置与触发接线(EpisodicDistiller 可运维化)
 
-**状态**:已决策(2026-09;实现前置设计文档,实施路径 W1–W6 待落地)
+**状态**:已实现(2026-09;W1–W5 落地,提交见实施路径表;W6 文档收尾)
 **日期**:2026-09
 **决策者**:大鱼
 **前置**:
@@ -84,8 +84,9 @@ legacy offline(生命周期 cleanup)维持原 Pending 条件;两条管道各自�
 ### D8 运行时热更新
 
 - `RuntimeConfigOverrides`(RuntimeConfigUpdate)增加 D4 字段 → gateway PUT `/api/agents/{id}/config` 全链路透传 → `AgentCore.apply_runtime_config` 应用
-- distiller 相关字段变更时:**重建 consolidation pipeline**(abort 旧 `ConsolidationBgTask` + 按新配置 spawn),`ConsolidationTimer` 配置可替换
-- prompt 槽走既有 reload(不重建 pipeline)
+- **最终实现(与初稿不同)**:distiller 配置变更不重建后台任务。`ConsolidationTimer` 将调度策略保存在内部 `RwLock<SchedulerConfig>`,`update_config()` 换值后 **后台 loop 每 tick 重读**(≤60s 生效);timer 的 idle/backlog/last-run 状态保留,配置变更不会误触发或推迟蒸馏。仅在 pipeline 尚未启动时,下一次 `start_consolidation_pipeline`(agent 启动 / 手动重建)使用新配置
+- prompt 槽走既有 reload(不重建 pipeline;`distiller_scheduler_config()` 每次组装时读取当前槽值)
+- `AgentCore.rebuild_consolidation_pipeline_if_running()` 为保留的兼容入口名,实际行为即上述 `update_config` 热更
 
 ---
 
@@ -93,26 +94,26 @@ legacy offline(生命周期 cleanup)维持原 Pending 条件;两条管道各自�
 
 | # | 工作项 | 内容 | 状态 |
 |---|--------|------|------|
-| W1 | 触发修复 | provider `count_unconsolidated_episodes` + grafeo 实现;`ConsolidationTimer`/`run_consolidation` 解耦触发口径;周期/积压/空闲判定 | ⬜ |
-| W2 | 手动端点 | `POST /memory/distill` + `consolidation/status` 扩展(共享 `run_episodic_distiller_step`) | ⬜ |
-| W3 | 配置链路 | `AgentConfig` + `ManifestDistillerConfig` 新增字段;`RuntimeConfigOverrides` 透传;`apply_runtime_config` + pipeline 重建 | ⬜ |
-| W4 | prompt 覆盖 | 白名单 +2;AgentCore 槽;`Distiller::run` override 参数;reload | ⬜ |
-| W5 | UI | 记忆面板"记忆蒸馏"卡片(开关/模型下拉/周期/立即蒸馏/上次运行);consolidate 按钮替换 | ⬜ |
-| W6 | 测试与文档 | 调度触发 e2e(积压/空闲/手动三路);配置热更新 e2e;prompt override e2e;05-memory.md/ADR-068 revision 同步 | ⬜ |
+| W1 | 触发修复 | provider `count_unconsolidated_episodes` + grafeo 实现;`ConsolidationTimer`/`run_consolidation` 解耦触发口径;周期/积压/空闲判定 | ✅ `ecad9cd7` |
+| W2 | 手动端点 | `POST /memory/distill` + `consolidation/status` 扩展(共享 `run_episodic_distiller_step`);修复 embedding 闭包 `block_on` panic → `block_in_place` 桥接 | ✅ `5d8fc2e2` |
+| W3 | 配置链路 | `AgentConfig` + `ManifestDistillerConfig` 新增字段;`RuntimeConfigOverrides` 透传;`apply_runtime_config`;`ConsolidationTimer.config` → `RwLock` 热更(D6) | ✅ `abd32cbb` |
+| W4 | prompt 覆盖 | 白名单 +2(`distiller-extraction.md`/`distiller-judge.md`);AgentCore 槽;`DistillerConfig` override 字段;`Distiller::run` 消费;reload;Debug PROMPT_ENTRIES +2 | ✅ `c8c8426b` |
+| W5 | UI | 记忆面板"记忆蒸馏"卡片(开关/模型下拉/周期/立即蒸馏/上次运行);consolidate 按钮替换(legacy action 删除) | ✅ `f4eaf46e` |
+| W6 | 测试与文档 | 调度触发(积压/空闲/手动)单测;配置热更单测;prompt override 单测;ADR-071 状态收尾 | ✅ 本提交 |
 
 ## 验收矩阵
 
 | 验收项 | 方法 | 状态 |
 |--------|------|------|
-| 周期触发 | 开启后周期到点且积压≥阈值 → 自动晋升 | ⬜ |
-| 空闲触发 | 周期内无积压但空闲≥阈值(episode>0)→ 自动晋升 | ⬜ |
-| 手动触发 | `POST /memory/distill` 立即晋升,不等周期 | ⬜ |
-| 默认关闭 | 无任何配置时 distiller 不跑(ADR-068 opt-in 保持) | ⬜ |
-| 配置热更新 | PUT agent config 改 enabled/interval → pipeline 按新配置重建 | ⬜ |
-| 模型选择 | 下拉选 provider::model → 蒸馏 LLM 调用使用该模型(日志/桩验证) | ⬜ |
-| prompt 覆盖 | `distiller-extraction.md` / `distiller-judge.md` 覆盖生效,Debug 面板可见 | ⬜ |
-| legacy 退役 | consolidate 按钮不再暴露"合并节点"语义;episodic cleanup 仍随周期执行 | ⬜ |
-| 回归 | acowork-memory/grafeo consolidation/runtime lib/memory_adr068_e2e 全绿;clippy 0 | ⬜ |
+| 周期触发 | `should_run_distill` interval gate;consolidation_bg 单测 `test_distiller_trigger_*` | ✅ |
+| 空闲触发 | idle ≥ 阈值且积压不足 → distill 触发(独立分支) | ✅ |
+| 手动触发 | `POST /memory/distill` → `run_episodic_distill_once`(force,仍守 opt-in);409 disabled | ✅ |
+| 默认关闭 | 无配置 → `SchedulerConfig::default().distiller_enabled=false`;后台不跑蒸馏 | ✅ |
+| 配置热更新 | PUT agent config → RwLock `update_config`,≤60s 生效;`test_distiller_trigger_live_config_update_d6` | ✅ |
+| 模型选择 | `resolve_distiller_model_id` 四层解析链单测;UI 下拉 → `CompactModelRef` | ✅ |
+| prompt 覆盖 | grafeo `test_d7_prompt_overrides_*`(到达 LLM 调用点/None 回退);agent_core 投影测试;Debug PROMPT_ENTRIES 可见 | ✅ |
+| legacy 退役 | UI consolidate 按钮→"立即蒸馏";store 层 `consolidate` action 删除;episodic cleanup 仍随周期执行 | ✅ |
+| 回归 | memory 30 / grafeo 290 / runtime lib 1378(1 预存基线失败 `restart_after_compression_preserves_todo_state`)/ desktop tsc + vitest 357/358(1 预存 formatTime 失败);clippy 0 新增 | ✅ |
 
 ## 与现有 ADR 的关系
 

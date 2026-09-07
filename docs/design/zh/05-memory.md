@@ -554,7 +554,7 @@ LLM 生成回复（含 tool call 判断）
 
 ### 4.2 离线蒸馏（ADR-068，EpisodicDistiller）
 
-> **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已决策待实现）**：离线巩固由 `EpisodicDistiller`（`core/acowork-grafeo/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-agent 覆盖。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
+> **实现状态（ADR-068 M1-M8 落地；ADR-071 触发/配置接线 2026-09 已实现 W1–W5）**：离线巩固由 `EpisodicDistiller`（`core/acowork-grafeo/src/consolidation/distiller.rs`）承载。后台调度与运行时配置按 [ADR-071](../../adr/zh/ADR-071-distiller-runtime-config-and-trigger.md)：触发口径与 legacy Pending 解耦（基于 unconsolidated episode 积压/空闲）、配置分层（manifest 初值 → `agent_config.json` 运行时层）、手动蒸馏端点、模型选择复用摘要模型 UI、蒸馏 prompt 纳入 ADR-063 per-agent 覆盖、记忆面板"记忆蒸馏"卡片与"立即蒸馏"按钮已上线。旧 Phase 3 规划中的 PendingKnowledgeNode 升级制、rule-based generalization、自动自我评估、History 压缩均已下线。
 
 **蒸馏输入/输出**：
 
@@ -584,9 +584,10 @@ LLM 生成回复（含 tool call 判断）
 
 - **配置分层**：`manifest [memory.distiller]` = 包作者初值（enabled/参数/模型/周期）；`agent_config.json` = 运行时层，首次运行无参数时按 manifest 初始化一次，此后界面只读写 `agent_config.json`（与 temperature/context_window 等既有参数同构）。字段全 Option，None = 回落 manifest → 系统默认
 - **后台触发（与 legacy Pending 计数解耦）**：周期到点（`distiller_interval_minutes`，默认 60）∧（unconsolidated episode 积压 ≥ `distiller_accumulation_threshold`(默认 50) ∨ 空闲 ≥ `distiller_idle_minutes`(默认 30)）→ 跑 `run_episodic_distiller_step`；受 `distiller_enabled` 门控（默认 false，opt-in 保持）
-- **手动触发**：`POST /memory/distill` 立即跑一次（绕过周期，与后台共用同一实现）；`consolidation/status` 返回蒸馏配置与上次运行结果
-- **蒸馏模型**：独立字段 `distiller_model`（provider_id/model_id），UI 复用摘要模型下拉逻辑；解析链 agent_config → manifest → `default_compact_model` → provider 第一模型（现状保底）
-- **prompt per-agent**：`distiller-extraction.md` / `distiller-judge.md` 进 ADR-063 覆盖白名单，Debug 界面 PromptList 可见可编辑，reload 生效；grafeo 内置常量保留为默认
+- **手动触发**：`POST /memory/distill` 立即跑一次（绕过周期，与后台共用同一实现；仍守 opt-in，关闭时返回 409）；`consolidation/status` 返回蒸馏配置与上次运行结果。记忆面板底部"合并节点"按钮已退役，替换为"立即蒸馏"（legacy consolidate action 删除，episodic cleanup 随周期 consolidation 自动执行）
+- **蒸馏模型**：独立字段 `distiller_model`（provider_id/model_id），UI 复用摘要模型下拉逻辑（vault keys + provider 名，与 Harness compact-model 卡片同源）；解析链 agent_config → manifest → `default_compact_model` → provider 第一模型（现状保底）
+- **prompt per-agent**：`distiller-extraction.md` / `distiller-judge.md` 进 ADR-063 覆盖白名单，Debug 界面 PromptList 可见可编辑，reload 生效；`DistillerConfig.extraction_prompt_override`/`judge_prompt_override` 在 `distiller_scheduler_config()` 组装时注入；grafeo 内置常量保留为默认
+- **配置热更新**：`ConsolidationTimer` 持有 `RwLock<SchedulerConfig>`，PUT agent config 后 `update_config()` 换值、后台 loop 每 tick 重读（≤60s 生效），不重建后台任务
 - 失败/证据不足的 episode 原样保留，下轮重试；不存在降级到规则路径的 fallback
 
 **与即时提取的区别：**
