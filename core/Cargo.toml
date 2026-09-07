@@ -142,6 +142,7 @@ secrecy = "0.10"
 # Testing
 tempfile = "3.0"
 mockito = "1"
+expect-test = "1.5"
 
 # System
 libc = "0.2"

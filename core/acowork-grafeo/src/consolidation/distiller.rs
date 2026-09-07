@@ -1856,6 +1856,80 @@ mod tests {
     // Tests
     // ========================================================================
 
+    // ── Golden snapshots (ADR-071 R1) ──────────────────────────────────
+    //
+    // The two built-in distiller prompts are pinned verbatim with
+    // expect-test so an unintentional edit (typo, rewording, whitespace)
+    // fails the build and forces an explicit review. These are the
+    // fallback constants every package without `distiller-extraction.md`
+    // / `distiller-judge.md` runs with (ADR-071 D7/D9). To update after
+    // an intentional change: `UPDATE_EXPECT=1 cargo test -p acowork-grafeo
+    // golden_` then review the diff.
+    #[test]
+    fn golden_extraction_system_prompt() {
+        expect_test::expect![[r#"
+            You are a memory consolidation extractor.
+            You are given dialogue episodes that were classified by the writing LLM as
+            <fact|preference|relation|procedure>. For each episode, output TWO independent
+            fields:
+
+            1. "structure": a normalized knowledge structure, or null.
+               - For fact/preference/relation episodes: a triple
+                 {"kind": "triple", "subject": "...", "predicate": "...", "object": "..."}.
+                 The predicate is FREE-FORM — you are NOT restricted to any vocabulary.
+                 Use plain, stable phrasing (e.g. "lives_in", "prefers", "works_at").
+               - For procedure episodes: {"kind": "procedure", "trigger": "...",
+                 "action": "..."} describing "when X happens, do Y".
+               - Use null when the episode carries no structured knowledge.
+
+            2. "autobio_candidate": whether this episode contains feedback about the AGENT
+               itself (the assistant), or null.
+               - The subject MUST be the agent, NOT the user.
+               - "User prefers concise replies" is about the user -> null.
+               - "You're too verbose, give shorter answers" is about the agent -> candidate.
+               - aspect: limitation | preference | relationship | history
+                 - limitation: feedback about the agent's capability boundary
+                 - preference: feedback about the agent's style/behavior (self-preference)
+                 - relationship: feedback about the agent's relationship with the user
+                 - history: significant events in the agent's trajectory (rare)
+               - key_hint: a short canonical hint for the key (e.g. "verbose_response",
+                 "forgetfulness", "style").
+
+            Output STRICT JSON (no markdown, no prose):
+            [
+              {
+                "episode_id": <int>,
+                "structure": {...} | null,
+                "autobio_candidate": {"aspect": "...", "key_hint": "..."} | null
+              }
+            ]
+        "#]].assert_eq(EXTRACTION_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn golden_judge_system_prompt() {
+        expect_test::expect![[r#"
+            You are a memory consolidation judge.
+            Given these episodes (raw dialogue fragments classified by the LLM that
+            produced them), decide whether they warrant promotion to a single semantic
+            memory node.
+
+            Rules:
+            - "promote": the episodes agree on a durable, non-obvious fact/preference/
+              relation/procedure worth remembering.
+            - "defer": possibly true but needs more evidence — retry on a future run.
+            - "skip": contradictory, ephemeral, or not worth promoting — reject.
+
+            Output STRICT JSON (no markdown, no prose):
+            {
+              "decision": "promote" | "skip" | "defer",
+              "confidence": 0.0-1.0,
+              "reasoning": "short explanation",
+              "merged_content": "canonical merged statement (required when promote)"
+            }
+        "#]].assert_eq(JUDGE_SYSTEM_PROMPT);
+    }
+
     #[tokio::test]
     async fn test_d7_prompt_overrides_reach_llm_call_sites() {
         // ADR-071 D7: `DistillerConfig.extraction_prompt_override` /
