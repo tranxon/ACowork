@@ -38,7 +38,7 @@
 
 | # | 风险 | 级别 | 备注 |
 |---|---|---|---|
-| R1 | distiller prompt 无 golden 快照测试 | 高(R-R2) | 建议 `insta`/`expect-test` 钉住内置 `EXTRACTION_SYSTEM_PROMPT`/`JUDGE_SYSTEM_PROMPT` 与 override 拼接结果,防无意识改写 |
+| R1 | ~~distiller prompt 无 golden 快照测试~~ | ✅ 已处理 | 用 `expect-test` 钉住内置 `EXTRACTION_SYSTEM_PROMPT`/`JUDGE_SYSTEM_PROMPT` 原文(golden_* 测试);override 拼接逻辑已由 D7 测试 + agent_core 投影测试覆盖,无转换故不再加 runtime golden |
 | R2 | MQTT `acowork/consolidation/event` 无订阅入口 | 中 | History 晋升/事件驱动缺触发面 |
 | R3 | e2e 走 scripted mock LLM,未接真实 `ProviderLlmAdapter` | 中 | 蒸馏全链路(模型解析→LLM 适配→提取)未在真实 provider 验证 |
 | R4 | autobio `key_hint` 空洞值(如 "the_agent")聚簇质量 | 低 | embedding 合并可缓解,仍建议词表护栏 |
