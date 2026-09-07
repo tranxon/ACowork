@@ -1681,6 +1681,10 @@ pub struct McpServerConfigDef {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub tool_timeout_secs: Option<u64>,
+    /// Optional install context (ADR-072). Present for preset-added servers;
+    /// absent (None) for user-custom servers. Runtime ignores this field.
+    #[serde(default)]
+    pub install: Option<McpInstallSpec>,
 }
 
 /// MCP transport type (wire format).
@@ -1691,6 +1695,108 @@ pub enum McpTransportDef {
     Stdio,
     Http,
     Sse,
+}
+
+/// MCP package distribution kind (ADR-072) — decides install command derivation
+/// and dependency detection strategy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageKind {
+    /// npm / npx ecosystem (`npx -y <spec>`).
+    Npm,
+    /// PyPI ecosystem (`uvx` / `pipx` / `pip <spec>`).
+    Pypi,
+    /// Cargo ecosystem (`cargo install <crate>`).
+    Cargo,
+    /// Go toolchain (`go install <pkg>@latest`).
+    Go,
+    /// Container image (`docker run -i --rm <image>`).
+    Docker,
+    /// Direct binary download (URL → extract → PATH).
+    Binary,
+    /// Escape hatch: preset ships an explicit install script (.ps1/.sh).
+    Script,
+}
+
+/// PyPI runner selection (ADR-072) — affects install and spawn derivation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PypiRunner {
+    /// `uvx --from <spec> <entry_point>` — isolated ephemeral env.
+    Uvx,
+    /// `pipx install <spec>` — persistent env, command on PATH.
+    Pipx,
+    /// `pip install <spec>` — system/user site-packages.
+    Pip,
+}
+
+/// Full spawn override (command + args) for MCP servers that cannot be derived.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecOverride {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Declarative MCP install spec (ADR-072) — three orthogonal axes:
+/// package manager (kind) × package id (spec) × spawn shape (entry_point/spawn_args).
+///
+/// The installer framework derives install & spawn commands from this spec,
+/// so presets declare facts instead of writing procedural scripts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpPackageSpec {
+    /// Distribution kind — decides install command derivation & dependency probe.
+    pub kind: PackageKind,
+    /// Package id: npm name / pypi name / cargo crate / docker image / binary URL.
+    pub spec: String,
+    /// PyPI-only: uvx / pipx / pip runner.
+    #[serde(default)]
+    pub runner: Option<PypiRunner>,
+    /// Spawn command name override (defaults to `spec`).
+    /// e.g. docling: package "docling-mcp" → entry_point "docling-mcp-server".
+    #[serde(default)]
+    pub entry_point: Option<String>,
+    /// Extra args appended to the spawn command.
+    /// e.g. docling needs ["--transport", "stdio"].
+    #[serde(default)]
+    pub spawn_args: Vec<String>,
+    /// Full spawn override (takes precedence over derivation + entry_point).
+    #[serde(default)]
+    pub exec_override: Option<ExecOverride>,
+    /// Script kind only: filename (without extension) under `assets/mcp_install/`.
+    #[serde(default)]
+    pub install_script: Option<String>,
+    /// Extra HTTP MCP probe ports (ADR-072 decision 5), appended to the default
+    /// fallback list when stdio fails with "invalid JSON-RPC response" and the
+    /// server likely runs in HTTP mode. e.g. docling defaults to 8000.
+    #[serde(default)]
+    pub http_probe_ports: Vec<u16>,
+}
+
+/// Install lifecycle state — drives the frontend Install/Repair button.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum InstallState {
+    /// No install record / unknown.
+    #[default]
+    Unknown,
+    /// Runtime dependencies present, server not yet installed.
+    Detected,
+    /// Install in progress.
+    Installing,
+    /// Successfully installed & health-checked.
+    Installed,
+    /// Install failed (frontend shows stderr + guidance).
+    Failed,
+}
+
+/// Optional install context attached to a catalog entry (ADR-072).
+/// Present for preset-added servers; absent for user-custom servers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpInstallSpec {
+    pub package: McpPackageSpec,
+    #[serde(default)]
+    pub state: InstallState,
 }
 
 /// Session info DTO for gRPC responses (S1.14)

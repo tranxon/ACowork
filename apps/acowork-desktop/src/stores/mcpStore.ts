@@ -12,8 +12,22 @@ import type {
   McpServerConfigDef,
   McpProbeResponse,
   McpHealthStatus,
+  McpInstallSpec,
   OperationAck,
 } from "../lib/types";
+
+/** ADR-072: install run response — mirrors McpInstallRunResponse in the Gateway */
+export interface McpInstallRunResponse {
+  name: string;
+  success: boolean;
+  exit_code?: number | null;
+  stdout: string;
+  stderr: string;
+  install_duration_ms: number;
+  tool_count?: number | null;
+  health_error?: string | null;
+  spawn?: McpServerConfigDef | null;
+}
 
 /**
  * Per-agent in-flight `PUT /mcp-servers` controllers.
@@ -47,6 +61,16 @@ interface McpCatalogActions {
   removeServer: (name: string) => Promise<void>;
   /** Replace the entire catalog */
   replaceCatalog: (servers: McpServerConfigDef[]) => Promise<void>;
+  /**
+   * ADR-072: install a preset MCP server via the Gateway install pipeline
+   * (runtime check → install → health check → write catalog). Resolves with
+   * the run response; caller surfaces stdout/stderr in the install dialog.
+   */
+  installMcp: (
+    name: string,
+    install: McpInstallSpec,
+    env?: Record<string, string>,
+  ) => Promise<McpInstallRunResponse>;
 }
 
 // ── Per-agent activation types ───────────────────────────────────────
@@ -229,6 +253,44 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       set({ error: message, loading: false });
+    }
+  },
+
+  // ── Install actions (ADR-072) ──
+
+  installMcp: async (name: string, install: McpInstallSpec, env = {}) => {
+    set({ loading: true, error: null });
+    try {
+      const resp = await fetch(`${getGatewayUrl()}/api/mcp-catalog/install`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, install, env }),
+      });
+      if (!resp.ok) {
+        // 409 from the runtime check carries the structured guidance
+        // ("Missing runtime 'uvx' ...") — surface it verbatim.
+        const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+        throw new Error(err.error || `HTTP ${resp.status}`);
+      }
+      const data = (await resp.json()) as McpInstallRunResponse;
+      if (data.success) {
+        // Catalog + per-agent wiring refreshed server-side; reload here so
+        // the "Install" button hides (entry now has install.state=installed).
+        await get().loadCatalog();
+        emitAgentConfigRefresh();
+      }
+      set({ loading: false });
+      return data;
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      set({ error: message, loading: false });
+      return {
+        name,
+        success: false,
+        stdout: "",
+        stderr: message,
+        install_duration_ms: 0,
+      };
     }
   },
 

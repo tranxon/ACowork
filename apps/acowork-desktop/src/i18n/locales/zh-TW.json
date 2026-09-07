@@ -601,7 +601,13 @@
     "connected": "已連線 — {{count}} 個工具可用",
     "connFailed": "連線失敗",
     "testConn": "測試",
-    "addAnyway": "仍然新增"
+    "addAnyway": "仍然新增",
+    "install": "安裝",
+    "installing": "安裝中...",
+    "installFirstRunHint": "首次執行可能需要較長時間（下載依賴 / ML 模型）。",
+    "installSuccess": "安裝成功 — {{count}} 個工具可用",
+    "installFailed": "安裝失敗",
+    "installMissingRuntime": "缺少執行環境 {{runtime}}。{{hint}} — 請先安裝再重試。"
   },
   "rightPanel": {
     "debug": "除錯",

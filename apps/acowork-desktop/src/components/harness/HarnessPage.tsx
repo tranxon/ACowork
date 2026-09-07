@@ -8,8 +8,8 @@ import { Dropdown } from "../common/Dropdown";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2 } from "lucide-react";
-import { useMcpStore } from "../../stores/mcpStore";
+import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2 } from "lucide-react";
+import { useMcpStore, type McpInstallRunResponse } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
@@ -484,6 +484,7 @@ const MCP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> 
 function McpTab() {
   const { t } = useTranslation();
   const { catalog, loading, error, loadCatalog, addServer, removeServer, probeServer, probeByName,
+    installMcp,
     healthStatus, healthErrors, healthToolCounts } = useMcpStore();
   const [showAddForm, setShowAddForm] = useState(false);
   // Tools-tab style level-1 collapsible groups (default open)
@@ -493,6 +494,10 @@ function McpTab() {
   // Probe-before-add state
   const [pendingConfig, setPendingConfig] = useState<McpServerConfigDef | null>(null);
   const [probeResult, setProbeResult] = useState<{ success: boolean; tool_count: number; tools: string[]; error: string | null; duration_ms: number } | null>(null);
+
+  // ADR-072 install dialog state
+  const [installRunning, setInstallRunning] = useState(false);
+  const [installResult, setInstallResult] = useState<McpInstallRunResponse | null>(null);
 
   const presetIconMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -520,6 +525,16 @@ function McpTab() {
 
   const catalogNames = useMemo(() => new Set(catalog.map((s) => s.name)), [catalog]);
 
+  /** ADR-072: run the install pipeline for a preset (install-then-add). */
+  const runPresetInstall = async (preset: McpPresetDef, env: Record<string, string>) => {
+    if (!preset.install) return;
+    setInstallRunning(true);
+    setInstallResult(null);
+    const result = await installMcp(preset.id, preset.install, env);
+    setInstallRunning(false);
+    setInstallResult(result);
+  };
+
   const handleAddFromPreset = async (preset: McpPresetDef) => {
     if (preset.requiredEnv.length > 0) {
       // Show env form for API keys
@@ -527,27 +542,38 @@ function McpTab() {
       setPresetEnvForm(
         preset.requiredEnv.reduce((acc, key) => ({ ...acc, [key]: "" }), {})
       );
-    } else {
-      // No API key needed, probe first then add
-      const config = presetToServerConfig(preset);
-      setPendingConfig(config);
-      setProbeResult(null);
-      const result = await probeServer(config);
-      setProbeResult(result);
-      if (result.success) {
-        addServer(config);
-        setPendingConfig(null);
-      }
+      return;
+    }
+    // No API key needed — install presets go through the install pipeline
+    // (ADR-072), everything else keeps the probe-then-add flow.
+    if (preset.install) {
+      await runPresetInstall(preset, { ...preset.optionalEnv });
+      return;
+    }
+    const config = presetToServerConfig(preset);
+    setPendingConfig(config);
+    setProbeResult(null);
+    const result = await probeServer(config);
+    setProbeResult(result);
+    if (result.success) {
+      addServer(config);
+      setPendingConfig(null);
     }
   };
 
   const handlePresetEnvSubmit = async () => {
     if (!activePreset) return;
-    const config = presetToServerConfig(activePreset, presetEnvForm);
-    setPendingConfig(config);
-    setProbeResult(null);
+    const env = { ...activePreset.optionalEnv, ...presetEnvForm };
+    const preset = activePreset;
     setActivePreset(null);
     setPresetEnvForm({});
+    if (preset.install) {
+      await runPresetInstall(preset, env);
+      return;
+    }
+    const config = presetToServerConfig(preset, env);
+    setPendingConfig(config);
+    setProbeResult(null);
     const result = await probeServer(config);
     setProbeResult(result);
     if (result.success) {
@@ -753,8 +779,17 @@ function McpTab() {
                         onClick={() => handleAddFromPreset(preset)}
                         className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
                       >
-                        <Plus className="h-3 w-3" />
-                        {t("harnessMcp.add")}
+                        {preset.install ? (
+                          <>
+                            <Download className="h-3 w-3" />
+                            {t("harnessMcp.install")}
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="h-3 w-3" />
+                            {t("harnessMcp.add")}
+                          </>
+                        )}
                       </button>
                     )
                   }
@@ -975,6 +1010,67 @@ function McpTab() {
             <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-[var(--color-accent)]" />
             <p className="text-xs text-zinc-500">{t("harnessMcp.testing")}</p>
             <p className="mt-1 text-[10px] text-zinc-400">{pendingConfig.name}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ADR-072 install dialog (running / result / guidance) */}
+      {(installRunning || installResult) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="w-[520px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
+            {installRunning ? (
+              <>
+                <div className="flex items-center gap-2 mb-3">
+                  <Loader2 className="h-4 w-4 animate-spin text-[var(--color-accent)]" />
+                  <h3 className="text-sm font-semibold">{t("harnessMcp.installing")}</h3>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  {t("harnessMcp.installFirstRunHint")}
+                </p>
+              </>
+            ) : installResult?.success ? (
+              <>
+                <div className="flex items-center gap-2 mb-3">
+                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                  <h3 className="text-sm font-semibold text-green-600 dark:text-green-400">
+                    {t("harnessMcp.installSuccess", { count: installResult.tool_count ?? 0 })}
+                  </h3>
+                </div>
+                {installResult.stdout && (
+                  <pre className="mb-3 max-h-48 overflow-y-auto rounded bg-zinc-50 p-2 text-[10px] text-zinc-600 dark:bg-zinc-700/50 dark:text-zinc-300">
+                    {installResult.stdout}
+                  </pre>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 mb-3">
+                  <XCircle className="h-4 w-4 text-red-500" />
+                  <h3 className="text-sm font-semibold text-red-600 dark:text-red-400">
+                    {t("harnessMcp.installFailed")}
+                  </h3>
+                </div>
+                <ErrorBox
+                  message={t("harnessMcp.installFailed")}
+                  details={installResult?.stderr || installResult?.health_error || undefined}
+                />
+                {(installResult?.stderr || installResult?.health_error) && (
+                  <pre className="mt-3 max-h-48 overflow-y-auto rounded bg-zinc-50 p-2 text-[10px] text-red-500 dark:bg-zinc-700/50 dark:text-red-400">
+                    {installResult?.health_error
+                      ? `${installResult.stderr}\n\n[health check] ${installResult.health_error}`
+                      : installResult?.stderr}
+                  </pre>
+                )}
+              </>
+            )}
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => { setInstallResult(null); setInstallRunning(false); }}
+                className="inline-flex items-center gap-1 rounded btn-accent px-3 py-1.5 text-xs font-medium"
+              >
+                OK
+              </button>
+            </div>
           </div>
         </div>
       )}

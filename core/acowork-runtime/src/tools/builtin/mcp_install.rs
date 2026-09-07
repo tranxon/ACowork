@@ -207,6 +207,7 @@ impl Tool for McpInstallTool {
             env,
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
+            install: None,
         };
 
         let mut updated_config = current_config;
