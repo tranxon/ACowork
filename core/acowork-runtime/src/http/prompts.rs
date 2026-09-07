@@ -51,7 +51,7 @@
 //!
 //! ## Reload semantics
 //!
-//! `POST /agents/{id}/prompts/reload` reads all 8 canonical
+//! `POST /agents/{id}/prompts/reload` reads all 7 canonical
 //! `prompts/<file>.md` override files from `package_dir` and writes them
 //! back into the matching `Arc<RwLock<Option<String>>>` slot on the live
 //! `AgentCore` via [`reload_prompts_into_core`]. This is a
@@ -211,6 +211,25 @@ const PROMPT_ENTRIES: &[PromptEntry] = &[
         purpose: "Refuse to answer when memory confidence is too low (memory RAG).",
         // Mirrors `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`.
         fallback_constant: "When you are not confident about the information from memory, respond with 'I'm not sure about this' rather than guessing.",
+        required: false,
+    },
+    PromptEntry {
+        name: "distiller-extraction",
+        file: "distiller-extraction.md",
+        purpose: "Offline memory distiller Step 2a — extract structured facts/preferences/relations from episodes (ADR-071).",
+        // The real fallback is `acowork-grafeo::consolidation::distiller::EXTRACTION_SYSTEM_PROMPT`
+        // (~3 KiB, private const). acowork-grafeo is feature-gated in the
+        // runtime build, so the canonical text cannot be referenced here
+        // without duplicating it; keep the reference note instead of a
+        // drifting copy (see module docs: long built-ins are not mirrored).
+        fallback_constant: "(built-in grafeo EXTRACTION_SYSTEM_PROMPT, ~3 KiB — see acowork-grafeo/src/consolidation/distiller.rs)",
+        required: false,
+    },
+    PromptEntry {
+        name: "distiller-judge",
+        file: "distiller-judge.md",
+        purpose: "Offline memory distiller Step 4 — judge whether a clustered candidate promotes/skips/defers (ADR-071).",
+        fallback_constant: "(built-in grafeo JUDGE_SYSTEM_PROMPT — see acowork-grafeo/src/consolidation/distiller.rs)",
         required: false,
     },
 ];
@@ -479,7 +498,7 @@ fn err_response(status: StatusCode, code: &str, message: String) -> Response {
 /// the rest of the prompts family and works unconditionally.
 ///
 /// Status codes:
-/// - `200 OK` — reload succeeded (8 prompts reloaded).
+/// - `200 OK` — reload succeeded (7 prompts reloaded).
 /// - `404 Not Found` — `{id}` does not match `state.agent_id` (same guard
 ///   as every other handler in this module — see ADR-034 "tolerate
 ///   misconfigured Gateway" pattern).
@@ -532,7 +551,7 @@ async fn post_reload_prompts(
         );
     }
 
-    // ADR-063 §3.7.6: after the 8 overrides, also rebuild the main-dialog
+    // ADR-063 §3.7.6: after the 7 overrides, also rebuild the main-dialog
     // system prompt (system.md + all prompt sections) and push it to live
     // sessions — best-effort, see `rebuild_and_dispatch_system_prompt`.
     let system_prompt_reloaded = rebuild_and_dispatch_system_prompt(&state).await;
@@ -552,7 +571,7 @@ async fn post_reload_prompts(
 /// the required `system.md`) and push it to every live session.
 ///
 /// ADR-063 §3.7.6 hot-reload: `system.md` is a normal dialog section, NOT
-/// one of the 8 `OVERRIDABLE_PROMPTS`, so `reload_prompts_into_core` never
+/// one of the 7 `OVERRIDABLE_PROMPTS`, so `reload_prompts_into_core` never
 /// touches it. To make edits take effect without an agent restart we
 /// re-assemble the full prompt here (same inputs as Phase A:
 /// `build_system_prompt_with_mode` + the resolved skill mode) and dispatch
@@ -561,7 +580,7 @@ async fn post_reload_prompts(
 /// `ContextBuilder::set_system_prompt`).
 ///
 /// Best-effort: a failure (e.g. unreadable manifest) is logged and
-/// reported via `system_prompt_reloaded = false` — the 8 overrides above
+/// reported via `system_prompt_reloaded = false` — the 7 overrides above
 /// still apply, and the on-disk file remains authoritative for the next
 /// boot.
 async fn rebuild_and_dispatch_system_prompt(state: &HttpState) -> bool {
@@ -607,13 +626,13 @@ async fn rebuild_and_dispatch_system_prompt(state: &HttpState) -> bool {
 #[derive(Debug, Clone, Serialize)]
 struct ReloadPromptsResponse {
     pub agent_id: String,
-    /// Always equals `OVERRIDABLE_PROMPTS.len()` (= 8 as of ADR-063).
+    /// Always equals `OVERRIDABLE_PROMPTS.len()` (= 7 as of ADR-071).
     /// Returned so the Debug panel can render a "8 / 8 已重载" hint
     /// without re-fetching the list.
     pub reloaded_count: usize,
     /// True iff the main-dialog system prompt (system.md + all prompt
     /// sections) was also rebuilt and pushed to live sessions. False when
-    /// the rebuild failed (e.g. unreadable manifest) — the 8 overrides
+    /// the rebuild failed (e.g. unreadable manifest) — the 7 overrides
     /// still applied, but system.md changes need a restart.
     pub system_prompt_reloaded: bool,
 }
@@ -720,7 +739,7 @@ mod tests {
                 "PROMPT_ENTRIES missing entry for file `{file}`"
             );
         }
-        // PROMPT_ENTRIES = 8 overridable overrides + the required
+        // PROMPT_ENTRIES = 7 overridable overrides + the required
         // `system.md` dialog section (which is deliberately NOT in
         // OVERRIDABLE_PROMPTS — it is a normal dialog section, not a
         // task-instruction override).

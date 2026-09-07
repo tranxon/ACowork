@@ -541,6 +541,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
     let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
 
+    // ADR-071 D7/D9: two distiller prompt overrides. The grafeo offline
+    // distiller owns its own built-in prompt constants
+    // (`EXTRACTION_SYSTEM_PROMPT` / `JUDGE_SYSTEM_PROMPT`); when a package
+    // ships `prompts/distiller-extraction.md` or `prompts/distiller-judge.md`,
+    // they replace the built-ins per-agent. Loaded in Phase A like the
+    // ADR-063 overrides above so Gateway and Standalone modes agree.
+    let distiller_extraction_prompt =
+        load_or_trace("distiller-extraction.md", "distiller Step 2a extraction prompt");
+    let distiller_judge_prompt =
+        load_or_trace("distiller-judge.md", "distiller Step 4 judge prompt");
+
     // ── Step 3.5: Load skill registry ───────────────────────────────
     let skills_dir = loaded.package_dir.join("skills");
     let _skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
@@ -1164,6 +1175,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         compact_template,
         title_prompt,
         abstention_prompt,
+        // ADR-071 D7/D9: two distiller prompt overrides (see load_or_trace
+        // above). They ride the same `AgentBootContext` → `AgentCore`
+        // injection chain as the ADR-063 fields.
+        distiller_extraction_prompt,
+        distiller_judge_prompt,
         memory_session,
         mcp_notifier,
         workspace_resolver,

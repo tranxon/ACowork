@@ -217,6 +217,30 @@ pub struct AgentCore {
     /// intra-crate caller.
     pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
+    // ── ADR-071 D7/D9: per-agent EpisodicDistiller prompt overrides ──
+    //
+    // Follows the same `Arc<RwLock<Option<String>>>` pattern as the
+    // ADR-063 fields above. The ADR-068 revision removed three
+    // grafeo-specific overrides (`extraction.md`,
+    // `conflict-classification.md`, `generalization.md`) because the
+    // LLM→memory boundary was rewritten to be Episode-only; ADR-071
+    // re-adds two distiller overrides because the offline
+    // `EpisodicDistiller` pipeline now needs per-agent prompt control
+    // (independent of the compaction/search/title prompts). Consumers
+    // are the grafeo distiller Steps 2a / 4 — resolved via
+    // `distiller_scheduler_config()` which projects these slots onto
+    // `DistillerConfig.{extraction_prompt_override,judge_prompt_override}`.
+
+    /// Override for the built-in `EXTRACTION_SYSTEM_PROMPT` in
+    /// `acowork-grafeo` (distiller Step 2a, `prompts/distiller-extraction.md`).
+    /// Inner `None` = use the built-in constant.
+    pub(crate) distiller_extraction_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Override for the built-in `JUDGE_SYSTEM_PROMPT` in
+    /// `acowork-grafeo` (distiller Step 4, `prompts/distiller-judge.md`).
+    /// Inner `None` = use the built-in constant.
+    pub(crate) distiller_judge_prompt: Arc<std::sync::RwLock<Option<String>>>,
+
     /// Grafeo memory store (shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
     /// `memory_admin` is the admin interface for HTTP endpoints and
@@ -342,6 +366,11 @@ fn manifest_distiller_to_config(
             .promotion_confidence_threshold
             .unwrap_or(base.promotion_confidence_threshold),
         max_cluster_size: base.max_cluster_size,
+        // ADR-071 D7: prompt overrides are layered on top of the
+        // manifest-derived config in `distiller_scheduler_config()`
+        // (AgentCore slots → DistillerConfig), so they stay `None` here.
+        extraction_prompt_override: None,
+        judge_prompt_override: None,
     })
 }
 
@@ -393,6 +422,20 @@ impl AgentCore {
     /// See ADR-063 §6.1.
     pub fn abstention_prompt(&self) -> Option<String> {
         self.abstention_prompt.read().unwrap().clone()
+    }
+
+    /// ADR-071 D7/D9: override accessor — `prompts/distiller-extraction.md`.
+    /// Consumed by `distiller_scheduler_config()` when assembling the
+    /// `DistillerConfig` handed to the grafeo EpisodicDistiller Step 2a.
+    pub fn distiller_extraction_prompt(&self) -> Option<String> {
+        self.distiller_extraction_prompt.read().unwrap().clone()
+    }
+
+    /// ADR-071 D7/D9: override accessor — `prompts/distiller-judge.md`.
+    /// Consumed by `distiller_scheduler_config()` when assembling the
+    /// `DistillerConfig` handed to the grafeo EpisodicDistiller Step 4.
+    pub fn distiller_judge_prompt(&self) -> Option<String> {
+        self.distiller_judge_prompt.read().unwrap().clone()
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_observer(
@@ -462,6 +505,11 @@ impl AgentCore {
             compact_template: Arc::new(std::sync::RwLock::new(None)),
             title_prompt: Arc::new(std::sync::RwLock::new(None)),
             abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
+            // ADR-071 D7: distiller prompt overrides — same lazy-fill
+            // pattern, populated in Phase B / cli.rs standalone path and
+            // hot-reloadable via `reload_prompts_into_core`.
+            distiller_extraction_prompt: Arc::new(std::sync::RwLock::new(None)),
+            distiller_judge_prompt: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
             rag_provider: None,
@@ -1104,12 +1152,28 @@ impl AgentCore {
         // Minutes → seconds (SchedulerConfig uses seconds internally).
         let minutes_to_secs = |v: Option<u64>| v.map(|m| m.saturating_mul(60));
         let default = SchedulerConfig::default();
+        // ADR-071 D7: the manifest-derived DistillerConfig carries the
+        // evidence thresholds; the two per-agent prompt overrides
+        // (distiller-extraction.md / distiller-judge.md) are layered on
+        // top. A package without the `[memory.distiller]` section still
+        // gets a `Some(config)` when an override file exists, so the
+        // distiller never silently uses built-in prompts the package
+        // author explicitly replaced.
+        let mut distiller_config = self.distiller_config();
+        let extraction_override = self.distiller_extraction_prompt();
+        let judge_override = self.distiller_judge_prompt();
+        if extraction_override.is_some() || judge_override.is_some() {
+            let mut cfg = distiller_config.take().unwrap_or_default();
+            cfg.extraction_prompt_override = extraction_override;
+            cfg.judge_prompt_override = judge_override;
+            distiller_config = Some(cfg);
+        }
         SchedulerConfig {
             distiller_enabled: self
                 .distiller_runtime
                 .enabled
                 .unwrap_or_else(|| self.manifest.memory.distiller_enabled()),
-            distiller_config: self.distiller_config(),
+            distiller_config,
             distiller_interval_secs: minutes_to_secs(self.distiller_runtime.interval_minutes)
                 .or_else(|| manifest.and_then(|m| m.interval_minutes.map(|v| v.saturating_mul(60))))
                 .unwrap_or(default.distiller_interval_secs),
@@ -1560,6 +1624,8 @@ impl Clone for AgentCore {
             compact_template: Arc::clone(&self.compact_template),
             title_prompt: Arc::clone(&self.title_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
+            distiller_extraction_prompt: Arc::clone(&self.distiller_extraction_prompt),
+            distiller_judge_prompt: Arc::clone(&self.distiller_judge_prompt),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
             rag_provider: self.rag_provider.clone(),
@@ -2194,6 +2260,62 @@ mod tests {
         if let Some(bg) = core.consolidation_bg_task.take() {
             bg.abort();
         }
+    }
+
+    // ── ADR-071 D7: distiller prompt override projection ─────────────
+
+    /// D7a: per-agent prompt overrides (AgentCore slots) are layered on
+    /// top of the manifest-derived `DistillerConfig` — manifest fields
+    /// survive the overlay.
+    #[test]
+    fn test_distiller_scheduler_config_projects_prompt_overrides() {
+        let mut core = make_core_with_memory_toml(
+            "[memory.distiller]\nenabled = true\nbatch_size = 20\n",
+        );
+        // Without override files the slots are `None` → manifest values.
+        let cfg = core.distiller_scheduler_config();
+        assert!(cfg.distiller_enabled);
+        let dc = cfg.distiller_config.expect("manifest section present");
+        assert_eq!(dc.batch_size, 20);
+        assert!(dc.extraction_prompt_override.is_none());
+        assert!(dc.judge_prompt_override.is_none());
+
+        // Write the two distiller prompt overrides (as
+        // `reload_prompts_into_core` would after a Debug panel save).
+        *core.distiller_extraction_prompt.write().unwrap() = Some("EX_OVERRIDE".to_string());
+        *core.distiller_judge_prompt.write().unwrap() = Some("JU_OVERRIDE".to_string());
+
+        let cfg2 = core.distiller_scheduler_config();
+        let dc2 = cfg2.distiller_config.expect("manifest section present");
+        assert_eq!(dc2.extraction_prompt_override.as_deref(), Some("EX_OVERRIDE"));
+        assert_eq!(dc2.judge_prompt_override.as_deref(), Some("JU_OVERRIDE"));
+        assert_eq!(
+            dc2.batch_size, 20,
+            "manifest-derived fields must survive the prompt overlay"
+        );
+    }
+
+    /// D7b: even without a `[memory.distiller]` manifest section, a
+    /// package that ships distiller prompt overrides must still surface a
+    /// `Some(DistillerConfig)` (so the overrides reach the distiller) —
+    /// while the opt-in `distiller_enabled` stays OFF.
+    #[test]
+    fn test_distiller_scheduler_config_override_without_manifest_section() {
+        let mut core = make_core_with_memory_toml("");
+        assert!(!core.manifest.memory.distiller_enabled());
+
+        *core.distiller_extraction_prompt.write().unwrap() = Some("EX_OVERRIDE".to_string());
+
+        let cfg = core.distiller_scheduler_config();
+        assert!(!cfg.distiller_enabled, "opt-in invariant must hold");
+        let dc = cfg.distiller_config.expect("override must force Some(config)");
+        assert_eq!(dc.extraction_prompt_override.as_deref(), Some("EX_OVERRIDE"));
+        assert!(dc.judge_prompt_override.is_none());
+        // No manifest fields → defaults for the rest.
+        assert_eq!(
+            dc.batch_size,
+            acowork_memory::consolidation::DistillerConfig::default().batch_size
+        );
     }
 
     // ── ADR-071 D2: manual distill trigger (AgentCore-level) ─────────

@@ -344,7 +344,15 @@ impl EpisodicDistiller for DefaultEpisodicDistiller {
             return Ok(result);
         };
 
-        let extracted = extract_structures(&candidates, llm).await?;
+        let extracted = extract_structures(
+            &candidates,
+            llm,
+            config
+                .extraction_prompt_override
+                .as_deref()
+                .unwrap_or(EXTRACTION_SYSTEM_PROMPT),
+        )
+        .await?;
 
         // ---- Step 2b: clustering -------------------------------------------
         let (knowledge_clusters, autobio_clusters) =
@@ -443,9 +451,15 @@ struct RawAutobioCandidate {
 }
 
 /// Call the server-side LLM once for the whole batch, then parse the result.
+///
+/// `system_prompt` is the Step 2a extraction directive: the built-in
+/// [`EXTRACTION_SYSTEM_PROMPT`] unless the agent overrides it via
+/// `DistillerConfig.extraction_prompt_override` (ADR-071 D7/D9 —
+/// `prompts/distiller-extraction.md`).
 async fn extract_structures(
     candidates: &[(u64, Episode)],
     llm: &dyn TripleExtractorLlm,
+    system_prompt: &str,
 ) -> Result<Vec<ExtractedStructure>> {
     let combined: String = candidates
         .iter()
@@ -466,7 +480,7 @@ async fn extract_structures(
     let messages = vec![
         LlmMessage {
             role: "system".to_string(),
-            content: EXTRACTION_SYSTEM_PROMPT.to_string(),
+            content: system_prompt.to_string(),
         },
         LlmMessage {
             role: "user".to_string(),
@@ -969,7 +983,11 @@ struct RawJudge {
     merged_content: Option<String>,
 }
 
-fn judge_messages(cluster_label: &str, members: &[ClusterMember]) -> Vec<LlmMessage> {
+fn judge_messages(
+    cluster_label: &str,
+    members: &[ClusterMember],
+    system_prompt: &str,
+) -> Vec<LlmMessage> {
     let episodes: Vec<String> = members
         .iter()
         .map(|m| {
@@ -990,7 +1008,7 @@ fn judge_messages(cluster_label: &str, members: &[ClusterMember]) -> Vec<LlmMess
     vec![
         LlmMessage {
             role: "system".to_string(),
-            content: JUDGE_SYSTEM_PROMPT.to_string(),
+            content: system_prompt.to_string(),
         },
         LlmMessage {
             role: "user".to_string(),
@@ -1002,15 +1020,19 @@ fn judge_messages(cluster_label: &str, members: &[ClusterMember]) -> Vec<LlmMess
 async fn judge_cluster(
     cluster: &Cluster,
     llm: &dyn TripleExtractorLlm,
-    _config: &DistillerConfig,
+    config: &DistillerConfig,
 ) -> Result<JudgeOutput> {
     let label = format!(
         "KnowledgeNode({}) key=\"{}\"",
         cluster.subtype.as_str(),
         cluster.key_string()
     );
+    let judge_prompt = config
+        .judge_prompt_override
+        .as_deref()
+        .unwrap_or(JUDGE_SYSTEM_PROMPT);
     let response = llm
-        .chat(judge_messages(&label, &cluster.members))
+        .chat(judge_messages(&label, &cluster.members, judge_prompt))
         .await
         .map_err(|e| GrafeoError::Memory(format!("Step 4 judge LLM call failed: {e}")))?;
     parse_judge(&response.content)
@@ -1019,14 +1041,18 @@ async fn judge_cluster(
 async fn judge_autobio_cluster(
     cluster: &AutobioCluster,
     llm: &dyn TripleExtractorLlm,
-    _config: &DistillerConfig,
+    config: &DistillerConfig,
 ) -> Result<JudgeOutput> {
     let label = format!(
         "AutobiographicalNode({:?}) key=\"{}\"",
         cluster.aspect, cluster.key_hint
     );
+    let judge_prompt = config
+        .judge_prompt_override
+        .as_deref()
+        .unwrap_or(JUDGE_SYSTEM_PROMPT);
     let response = llm
-        .chat(judge_messages(&label, &cluster.members))
+        .chat(judge_messages(&label, &cluster.members, judge_prompt))
         .await
         .map_err(|e| GrafeoError::Memory(format!("Step 4 judge LLM call failed: {e}")))?;
     parse_judge(&response.content)
@@ -1789,9 +1815,127 @@ mod tests {
         )
     }
 
+    /// A fake LLM that records the `role == "system"` messages it was sent,
+    /// so tests can assert which prompt actually reached the LLM call site
+    /// (ADR-071 D7 — per-agent distiller prompt overrides).
+    struct RecordingLlm {
+        system_prompts: Arc<Mutex<Vec<String>>>,
+        inner: MockLlm,
+    }
+
+    impl RecordingLlm {
+        fn new(responses: Vec<String>) -> Self {
+            Self {
+                system_prompts: Arc::new(Mutex::new(Vec::new())),
+                inner: MockLlm::new(responses),
+            }
+        }
+
+        fn system_prompts(&self) -> Vec<String> {
+            self.system_prompts.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TripleExtractorLlm for RecordingLlm {
+        async fn chat(
+            &self,
+            messages: Vec<LlmMessage>,
+        ) -> std::result::Result<LlmResponse, String> {
+            let system = messages
+                .iter()
+                .find(|m| m.role == "system")
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            self.system_prompts.lock().unwrap().push(system);
+            self.inner.chat(messages).await
+        }
+    }
+
     // ========================================================================
     // Tests
     // ========================================================================
+
+    #[tokio::test]
+    async fn test_d7_prompt_overrides_reach_llm_call_sites() {
+        // ADR-071 D7: `DistillerConfig.extraction_prompt_override` /
+        // `judge_prompt_override` must replace the built-in constants at
+        // the Step 2a extraction and Step 4 judge call sites.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..5 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "User lives in Shanghai",
+                KnowledgeSubType::Fact,
+                now - chrono::Duration::days(i as i64),
+            )));
+        }
+        let extract_items: Vec<(u64, &str, &str, &str)> = ids
+            .iter()
+            .map(|id| (*id, "triple", "lives_in", "Shanghai"))
+            .collect();
+
+        let llm = RecordingLlm::new(vec![
+            extraction_response(&extract_items),
+            judge_response("promote", 0.95, "user lives_in Shanghai"),
+        ]);
+
+        let mut config = default_config();
+        config.extraction_prompt_override = Some("CUSTOM_EXTRACT_OVERRIDE".to_string());
+        config.judge_prompt_override = Some("CUSTOM_JUDGE_OVERRIDE".to_string());
+
+        let distiller = DefaultEpisodicDistiller;
+        let result = distiller
+            .run(&provider, Some(&llm), None, &config)
+            .await
+            .unwrap();
+
+        // The run itself is unaffected (still promotes the merged cluster).
+        assert_eq!(result.facts_promoted, 1);
+        // Extraction (1) + judge (1): every system prompt is the override.
+        let prompts = llm.system_prompts();
+        assert_eq!(prompts, vec!["CUSTOM_EXTRACT_OVERRIDE", "CUSTOM_JUDGE_OVERRIDE"]);
+    }
+
+    #[tokio::test]
+    async fn test_d7_prompt_overrides_none_falls_back_to_builtin() {
+        // ADR-071 D7: `None` overrides must leave the built-in constants
+        // in place — the default config is the "no per-agent prompt"
+        // state every existing package runs with.
+        let provider = TestProvider::default();
+        let now = Utc::now();
+        let mut ids = vec![];
+        for i in 0..3 {
+            ids.push(provider.add_episode(mk_episode(
+                &format!("sess-{i}"),
+                "User prefers concise replies",
+                KnowledgeSubType::Preference,
+                now - chrono::Duration::days(i as i64),
+            )));
+        }
+        let extract_items: Vec<(u64, &str, &str, &str)> = ids
+            .iter()
+            .map(|id| (*id, "triple", "prefers", "concise_replies"))
+            .collect();
+        let llm = RecordingLlm::new(vec![
+            extraction_response(&extract_items),
+            judge_response("promote", 0.95, "user prefers concise_replies"),
+        ]);
+
+        let distiller = DefaultEpisodicDistiller;
+        let result = distiller
+            .run(&provider, Some(&llm), None, &default_config())
+            .await
+            .unwrap();
+
+        assert_eq!(result.preferences_promoted, 1);
+        let prompts = llm.system_prompts();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0], EXTRACTION_SYSTEM_PROMPT);
+        assert_eq!(prompts[1], JUDGE_SYSTEM_PROMPT);
+    }
 
     #[tokio::test]
     async fn test_d1_promotes_facts_with_evidence() {

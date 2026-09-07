@@ -630,6 +630,15 @@ pub struct DistillerConfig {
     pub autobio_min_span_days: i64,
     /// Min LLM judge confidence for promotion. Default: 0.85.
     pub promotion_confidence_threshold: f32,
+    /// Per-agent override for the Step 2a extraction system prompt
+    /// (ADR-071 D7). `None` = the built-in `EXTRACTION_SYSTEM_PROMPT`
+    /// in `acowork-grafeo` is used. Sourced from the package-level
+    /// `prompts/distiller-extraction.md` override.
+    pub extraction_prompt_override: Option<String>,
+    /// Per-agent override for the Step 4 judge system prompt (ADR-071 D7).
+    /// `None` = the built-in `JUDGE_SYSTEM_PROMPT` in `acowork-grafeo` is
+    /// used. Sourced from the package-level `prompts/distiller-judge.md`.
+    pub judge_prompt_override: Option<String>,
 }
 
 impl Default for DistillerConfig {
@@ -645,6 +654,8 @@ impl Default for DistillerConfig {
             autobio_min_evidence: 3,
             autobio_min_span_days: 14,
             promotion_confidence_threshold: 0.85,
+            extraction_prompt_override: None,
+            judge_prompt_override: None,
         }
     }
 }

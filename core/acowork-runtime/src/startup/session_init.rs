@@ -356,6 +356,14 @@ pub(crate) async fn phase_b_init_session(
         *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
         *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
 
+        // ADR-071 D7/D9: mirror the same Phase B injection for the two
+        // distiller prompt overrides (distiller-extraction.md /
+        // distiller-judge.md). These are consumed later by
+        // `distiller_scheduler_config()` when the consolidation pipeline
+        // starts (see `start_consolidation_pipeline` / `apply_runtime_config`).
+        *c.distiller_extraction_prompt.write().unwrap() = ctx.distiller_extraction_prompt.clone();
+        *c.distiller_judge_prompt.write().unwrap() = ctx.distiller_judge_prompt.clone();
+
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).
         let providers_for_init = ctx.provider_config.as_ref().map(|c| &c.providers);

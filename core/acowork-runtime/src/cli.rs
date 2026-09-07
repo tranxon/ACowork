@@ -337,6 +337,13 @@ async fn async_main(
         *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
         *agent_loop.core.abstention_prompt.write().unwrap() =
             agent_ctx.abstention_prompt.clone();
+
+        // ADR-071 D7/D9: mirror the two distiller prompt overrides for the
+        // standalone path (see session_init.rs Phase B for Gateway mode).
+        *agent_loop.core.distiller_extraction_prompt.write().unwrap() =
+            agent_ctx.distiller_extraction_prompt.clone();
+        *agent_loop.core.distiller_judge_prompt.write().unwrap() =
+            agent_ctx.distiller_judge_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 
