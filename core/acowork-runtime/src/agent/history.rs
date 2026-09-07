@@ -510,8 +510,20 @@ impl HistoryManager {
     /// Unlike [`Self::append`], this is intended for trusted, already-sanitized
     /// input (the restorer guarantees tool_call/tool_result pairing and
     /// system/compaction-marker ordering invariants).
-    pub fn load_restored(&mut self, messages: Vec<ChatMessage>) {
+    ///
+    /// `last_injected_todo_call_id` is the tool_call_id of the most recent
+    /// *synthetic* todo_write round found in the JSONL (see
+    /// [`RestoreOutcome::last_injected_todo_call_id`]). It restores the
+    /// ADR-060 v2 §5.4 idempotency key across process restarts: without it a
+    /// second compression after restart would re-inject a round that a prior
+    /// compaction already persisted, duplicating synthetic rows on disk.
+    pub fn load_restored(
+        &mut self,
+        messages: Vec<ChatMessage>,
+        last_injected_todo_call_id: Option<String>,
+    ) {
         self.messages = Arc::new(messages);
+        self.last_injected_todo_call_id = last_injected_todo_call_id;
         self.current_tokens = self
             .messages
             .iter()
@@ -524,6 +536,7 @@ impl HistoryManager {
         tracing::info!(
             count = self.messages.len(),
             tokens = self.current_tokens,
+            injected_todo_call_id = ?self.last_injected_todo_call_id,
             "HistoryManager: loaded restored history"
         );
     }
@@ -2094,7 +2107,7 @@ mod tests {
             make_message(MessageRole::User, "fresh"),
             make_message(MessageRole::Assistant, "fresh reply"),
         ];
-        hm.load_restored(new_msgs);
+        hm.load_restored(new_msgs, None);
         assert_eq!(hm.len(), 3);
         assert!(matches!(hm.messages()[0].role, MessageRole::System));
         // Token count must be recomputed (not stale "old data" + new).

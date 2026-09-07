@@ -1032,7 +1032,10 @@ impl SessionManager {
         // budget. Trim is the safety net for the "resumed under a smaller
         // model" case — it never invokes an LLM.
         if let Some(outcome) = restored {
-            session_state.history_mut().load_restored(outcome.messages);
+            session_state.history_mut().load_restored(
+                outcome.messages,
+                outcome.last_injected_todo_call_id,
+            );
 
             // NOTE: restore does not perform placeholder compression.
             //

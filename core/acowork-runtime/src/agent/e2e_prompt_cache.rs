@@ -284,6 +284,66 @@ impl E2eHarness {
             }
         }
     }
+
+    /// Send `CompactContext` and wait until the compaction round has fully
+    /// completed (not merely started).
+    ///
+    /// The session task emits `CompactingStarted` *before* the LLM summary
+    /// call, so a wait on that event alone can race the writer: the
+    /// `append_compaction_event` + injected-round persistence that follow it
+    /// run asynchronously and may not be on disk when this returns. Waiting
+    /// for `CompactingEnded` (emitted after the injected round is flushed,
+    /// `loop_context.rs`) guarantees the restart test's Generation 2 sees the
+    /// fully-persisted post-compaction JSONL.
+    async fn compact(&mut self) {
+        {
+            let mut guard = self.sm.lock().await;
+            guard
+                .send_to_session(&self.sid, SessionMessage::CompactContext)
+                .expect("session task accepts CompactContext");
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut started = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let evt = tokio::time::timeout(remaining, self.chunk_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("compact did not finish within 60s"))
+                .expect("chunk channel stays open");
+            match evt.event {
+                ChunkEvent::CompactingStarted => started = true,
+                ChunkEvent::CompactingEnded => {
+                    assert!(started, "CompactingEnded before CompactingStarted");
+                    return;
+                }
+                ChunkEvent::Error { user_message, .. } => {
+                    panic!("compact failed: {user_message}")
+                }
+                // Background events (TitleGenerated, ContextUsage, …) are
+                // ignored; keep draining until the round terminates.
+                _ => {}
+            }
+        }
+    }
+
+    /// Shut the session task down gracefully and await its termination.
+    ///
+    /// Simulates a clean process exit: sends `Close`, then awaits the
+    /// session task's `JoinHandle`. Without the await, the single-process
+    /// restart tests (`restart_after_compression_preserves_todo_state`)
+    /// could race Generation 1's still-running writer thread against
+    /// Generation 2's `ConversationSession::resume` — the residual writer
+    /// holding an `Arc<ConversationSession>` could overwrite meta.json after
+    /// Generation 2 has read it. Awaiting the join makes the process boundary
+    /// deterministic.
+    async fn shutdown(&mut self) {
+        self.sm
+            .lock()
+            .await
+            .close_session(&self.sid)
+            .await
+            .unwrap_or_else(|e| panic!("close_session failed: {e}"));
+    }
 }
 
 /// Assemble the REAL production chain for one "process generation":
@@ -572,11 +632,11 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
         "Block B history must be append-only (u1 verbatim in turn 3)"
     );
 
-    // ── "Process restart": drop generation 1, rebuild from disk ──
-    // Dropping the harness closes the session task's sender; the session
-    // task terminates. Todos were already persisted by set_todos; the
-    // todo_write tool result is restored from JSONL via session restore.
-    drop(h1);
+    // ── "Process restart": shut down generation 1, rebuild from disk ──
+    // Graceful shutdown + await ensures the writer thread is fully stopped
+    // before Generation 2 resumes the same JSONL — a bare `drop` could race
+    // the still-running session task against Generation 2's resume.
+    h1.shutdown().await;
 
     let provider2 = Arc::new(ScriptedProvider::new(
         vec![text_step("Turn 4 response")],
@@ -620,38 +680,6 @@ fn summary_step() -> ScriptedStep {
         content: "<summary>本次会话围绕 ADR-060 v2 压缩路径进行端到端验证，覆盖压缩注入、重启恢复、连续压缩、无 todo 历史等场景，确保 todo 状态在压缩与恢复后仍可被 LLM 正确识别与继续操作。</summary>"
             .to_string(),
         tool_calls: None,
-    }
-}
-
-impl E2eHarness {
-    /// Force a compaction round via the session-task control plane.
-    ///
-    /// The session task emits `ChunkEvent::CompactingStarted` immediately
-    /// upon receiving `CompactContext` (loop_context.rs:582 — before the LLM
-    /// summary call). We wait for that signal so the next `send()` is
-    /// guaranteed to see the post-compression state — FIFO channel ordering
-    /// alone already guarantees this, but the explicit wait makes the test
-    /// sequencing obvious from the test source.
-    async fn compact(&mut self) {
-        {
-            let mut guard = self.sm.lock().await;
-            guard
-                .send_to_session(&self.sid, SessionMessage::CompactContext)
-                .expect("session task accepts CompactContext");
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let evt = tokio::time::timeout(remaining, self.chunk_rx.recv())
-                .await
-                .unwrap_or_else(|_| panic!("compact did not start within 60s"))
-                .expect("chunk channel stays open");
-            if matches!(evt.event, ChunkEvent::CompactingStarted) {
-                return;
-            }
-            // Background events (TitleGenerated, etc.) are ignored; keep
-            // draining until CompactingStarted arrives.
-        }
     }
 }
 
@@ -913,7 +941,7 @@ async fn block_c_never_in_any_request_output_full_flow() {
     h.send("u3", "m3").await;
     h.compact().await;
     h.send("u4", "m4").await;
-    drop(h);
+    h.shutdown().await;
 
     // Generation 2: restart, send another turn. The persisted (post-
     // compression) history must NOT have gained a Block C either.
@@ -969,7 +997,7 @@ async fn restart_after_compression_preserves_todo_state() {
     h.send("u2", "m2").await;
     h.send("u3", "m3").await;
     h.compact().await;
-    drop(h);
+    h.shutdown().await;
 
     // Generation 2: resume from disk. Send one turn. Verify Block B
     // contains both the marker AND the todo round — restored from JSONL,
@@ -1395,6 +1423,10 @@ async fn v3_full_chain_keeps_tool_rounds_valid_across_compact_and_restart() {
     );
 
     // ── Generation 2: process restart, resume from disk ────────────────
+    // Shut down Generation 1 before spawning Generation 2 so the two session
+    // tasks never touch the same JSONL concurrently (same race as
+    // `restart_after_compression_preserves_todo_state`).
+    h1.shutdown().await;
     let provider2 = Arc::new(ScriptedProvider::new(
         vec![text_step("Post-restart response")],
         vec![text_step("v3 invariant restart")],

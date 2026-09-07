@@ -1154,6 +1154,17 @@ impl ConversationSession {
                 e
             ),
         }
+
+        // ADR-024 / ADR-060 v2 §5.4: persist the freshly-recorded
+        // `last_compaction_offset` to meta.json **now**. The writer has
+        // already updated the shared Arc (synchronously, via the handshake
+        // above); the next `write_meta()` on the high-frequency append path
+        // (`append_message_with_id`) may be suppressed by the 3 s cooldown,
+        // so relying on it would leave meta.json with `None` and force the
+        // next restore to fall back to the O(N) rposition scan — or worse,
+        // lose the injected todo round entirely. Compaction is rare, so the
+        // extra meta write here is negligible.
+        self.write_meta();
     }
 
     /// ADR-060 v2 §5.4: synchronous flush — block until all previously
