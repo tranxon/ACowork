@@ -76,7 +76,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 
 # Database
 rusqlite = { version = "0.37", features = ["bundled"] }
-grafeo-engine = { version = "0.5.39", default-features = false, features = [
+grafeo-engine = { version = "0.5.42", default-features = false, features = [
     "lpg",
     "gql",
     "vector-index",
@@ -89,8 +89,8 @@ grafeo-engine = { version = "0.5.39", default-features = false, features = [
     "parallel",
     "regex",
 ] }
-grafeo-common = "0.5.40"
-grafeo-core = "0.5.40"
+grafeo-common = "0.5.42"
+grafeo-core = "0.5.42"
 
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
