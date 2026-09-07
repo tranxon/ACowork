@@ -32,6 +32,27 @@ export const MCP_PRESETS: McpPresetDef[] = [
     },
   },
 
+  // ── Desktop Automation ─────────────────────────────────────────────────────
+  {
+    id: "computer-use",
+    name: "Computer Use",
+    description:
+      "OS-level desktop automation: take screenshots, control mouse and keyboard, click UI elements by coordinates. Useful for driving GUI applications that have no API or MCP integration.",
+    category: "browser",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "computer-use-mcp"],
+    requiredEnv: [],
+    optionalEnv: {},
+    installHint:
+      "npx auto-installs. Requires OS-level input-control permissions (macOS: Accessibility + Screen Recording; Linux: X11/Wayland; Windows: UAC prompts). No API key required.",
+    icon: "MousePointer",
+    install: {
+      package: { kind: "npm", spec: "computer-use-mcp" },
+      state: "unknown",
+    },
+  },
+
   // ── Web Search ─────────────────────────────────────────────────────
   {
     id: "brave-search",

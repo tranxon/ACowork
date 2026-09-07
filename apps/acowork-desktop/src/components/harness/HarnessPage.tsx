@@ -8,7 +8,7 @@ import { Dropdown } from "../common/Dropdown";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2 } from "lucide-react";
+import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2, Download, XCircle, Loader2 } from "lucide-react";
 import { useMcpStore, type McpInstallRunResponse } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
@@ -478,8 +478,9 @@ function ProvidersTab() {
 
 /** MCP tab — placeholder, content TBD */
 const MCP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
-  Monitor, Search, Globe, BookOpen, FileText, PenTool,
+  Monitor, MousePointer, Search, Globe, BookOpen, FileText, PenTool,
 };
+const MCP_FALLBACK_ICON = Package;
 
 function McpTab() {
   const { t } = useTranslation();
@@ -711,8 +712,8 @@ function McpTab() {
                       </span>
                       {(() => {
                         const iconName = presetIconMap[server.name];
-                        const Icon = iconName ? MCP_ICON_MAP[iconName] : undefined;
-                        return Icon ? <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" /> : null;
+                        const Icon = (iconName && MCP_ICON_MAP[iconName]) || MCP_FALLBACK_ICON;
+                        return <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />;
                       })()}
                       <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{server.name}</span>
                       {server.has_secrets && (
@@ -761,10 +762,10 @@ function McpTab() {
                   surface="inset"
                   leading={
                     (() => {
-                      const Icon = MCP_ICON_MAP[preset.icon ?? ""];
-                      return Icon ? (
+                      const Icon = MCP_ICON_MAP[preset.icon ?? ""] || MCP_FALLBACK_ICON;
+                      return (
                         <Icon className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                      ) : null;
+                      );
                     })()
                   }
                   trailing={
