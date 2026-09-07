@@ -3196,7 +3196,7 @@ export function handleMessageEvent(
           // immediately after PUT /api/agents/{id}/config.  However the
           // live contextUsage push (via session_state / messages/context_usage)
           // only fires when the agent loop runs.  Without this local sync,
-          // the ContextUsageIcon, status bar, and ResultsPanel keep showing
+          // the ContextUsageIcon, status bar, and RightPanel keep showing
           // the old context_window until the user sends a message and
           // triggers the loop.
           //

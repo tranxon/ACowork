@@ -56,6 +56,18 @@ interface McpActivationState {
   activeServers: Record<string, string[]>;
   /** Loading state per agent */
   activationLoading: Record<string, boolean>;
+  /**
+   * Per-server reconcile-pending flag: agentId → serverName → true when
+   * the user toggled that server but the backend has not yet finished
+   * reconnect+reconcile (`agent_mcp_tools.json` not yet refreshed) or
+   * the subsequent `/mcp-tools` re-fetch has not returned. Cleared by
+   * `clearServerLoading` once the Tools panel reload handler observes
+   * that the per-server tool list matches the user's intent
+   * (on+non-empty / off+empty). Used to drive the in-card spinner so
+   * third-party MCP reconnects (e.g. `playwright` ~5s) do not look like
+   * a stuck UI.
+   */
+  perServerLoading: Record<string, Record<string, boolean>>;
 }
 
 interface McpHealthState {
@@ -81,6 +93,13 @@ interface McpActivationActions {
   setActiveServers: (agentId: string, serverNames: string[]) => Promise<void>;
   /** Toggle a single MCP server on/off for an agent */
   toggleServer: (agentId: string, serverName: string) => Promise<void>;
+  /**
+   * Drop the reconcile-pending flag for one server. Called by the
+   * Tools panel after a successful `/mcp-tools` re-fetch observes
+   * the server state has settled (on+tools present / off+tools
+   * cleared). Idempotent.
+   */
+  clearServerLoading: (agentId: string, serverName: string) => void;
 }
 
 // ── Combined store ───────────────────────────────────────────────────
@@ -101,6 +120,7 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   // ── Activation state ──
   activeServers: {},
   activationLoading: {},
+  perServerLoading: {},
 
   // ── Health state ──
   healthStatus: {},
@@ -289,12 +309,29 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         inflightMcpPuts.delete(agentId);
       }
       const message = e instanceof Error ? e.message : String(e);
-      set((s) => ({
-        error: message,
-        // Roll back to the snapshot taken before the optimistic write.
-        activeServers: { ...s.activeServers, [agentId]: previous },
-        activationLoading: { ...s.activationLoading, [agentId]: false },
-      }));
+      set((s) => {
+        // PUT failed → roll back the active list AND clear any
+        // per-server reconcile-pending flags that were set for this
+        // toggle. The user will see the Switch snap back to its
+        // previous state; a stuck spinner would otherwise imply
+        // reconciliation is still in flight when in fact the request
+        // never succeeded.
+        const pending = s.perServerLoading[agentId];
+        const clearedPending = pending
+          ? Object.fromEntries(
+                Object.entries(pending).map(([k]) => [k, false]),
+              )
+          : undefined;
+        return {
+          error: message,
+          // Roll back to the snapshot taken before the optimistic write.
+          activeServers: { ...s.activeServers, [agentId]: previous },
+          activationLoading: { ...s.activationLoading, [agentId]: false },
+          perServerLoading: clearedPending
+            ? { ...s.perServerLoading, [agentId]: clearedPending }
+            : s.perServerLoading,
+        };
+      });
     }
   },
 
@@ -305,7 +342,46 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       ? currentActive.filter((s) => s !== serverName)
       : [...currentActive, serverName];
 
+    // Mark this server as reconcile-pending BEFORE the PUT so the
+    // spinner starts on the same frame as the optimistic Switch
+    // flip. `clearServerLoading` will be called by the Tools panel
+    // reload handler once the per-server tool list settles (see
+    // `acowork:refresh-agent-config` in ToolsTab). We do not gate
+    // the loading flag on the PUT outcome — if the PUT fails the
+    // store rolls back `activeServers` and the user toggles again,
+    // which will overwrite this entry naturally.
+    set((s) => ({
+      perServerLoading: {
+        ...s.perServerLoading,
+        [agentId]: {
+          ...(s.perServerLoading[agentId] ?? {}),
+          [serverName]: true,
+        },
+      },
+    }));
+
     await get().setActiveServers(agentId, newServers);
+  },
+
+  clearServerLoading: (agentId: string, serverName: string) => {
+    // Idempotent — does nothing if the flag is already false/absent
+    // (the user may have toggled twice and the second call replaced
+    // the flag). Zustand will only notify subscribers if the slice
+    // reference actually changes, so we guard with a same-reference
+    // early return when the value is already settled.
+    set((s) => {
+      const agentLoads = s.perServerLoading[agentId];
+      if (!agentLoads?.[serverName]) return s;
+      return {
+        perServerLoading: {
+          ...s.perServerLoading,
+          [agentId]: {
+            ...agentLoads,
+            [serverName]: false,
+          },
+        },
+      };
+    });
   },
 
   // ── Health actions ──

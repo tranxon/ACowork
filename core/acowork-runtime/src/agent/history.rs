@@ -224,6 +224,9 @@ pub struct HistoryManager {
 // ── ADR-061 v3 §20.3: round-primitive report types ────────────────────
 
 /// Report from [`HistoryManager::clear_round`].
+// ADR-061 v3 §20.3 report contract: exercised by the unit suite;
+// the compression-plan consumer is not wired in yet.
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ClearRoundReport {
     /// Tool call ids that were folded (idempotent calls contribute empty).
@@ -233,6 +236,9 @@ pub(crate) struct ClearRoundReport {
 }
 
 /// Report from [`HistoryManager::fix_round`].
+// ADR-061 v3 §20.3 report contract: exercised by the unit suite;
+// the compression-plan consumer is not wired in yet.
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct FixReport {
     /// Same shape as `ClearRoundReport`.
@@ -246,6 +252,9 @@ pub(crate) struct FixReport {
 }
 
 /// Result of [`HistoryManager::recall_todo_round`].
+// ADR-061 v3 §20.3 report contract: exercised by the unit suite;
+// the compression-plan consumer is not wired in yet.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum RecallResult {
     Injected { todo_call_id: String },
@@ -905,7 +914,11 @@ impl HistoryManager {
     // Returns: report describing which tool ids were folded and how many
     // bytes were reclaimed.
 
-    pub fn clear_round(&mut self, assistant_idx: usize) -> ClearRoundReport {
+    // ADR-061 v3 §20.3 round primitive: implemented and unit-tested,
+    // awaiting wiring into the 5-level compression plan (dead in
+    // non-test builds until then).
+    #[allow(dead_code)]
+    pub(crate) fn clear_round(&mut self, assistant_idx: usize) -> ClearRoundReport {
         assert!(
             assistant_idx < self.messages.len(),
             "clear_round: assistant_idx out of bounds ({assistant_idx} / {})",
@@ -982,7 +995,11 @@ impl HistoryManager {
     // paths should not produce orphans, but `sanitize_messages` is the
     // last line; this round-scoped sweep is cheaper and more targeted.
 
-    pub fn fix_round(&mut self, assistant_idx: usize) -> FixReport {
+    // ADR-061 v3 §20.3 round primitive: implemented and unit-tested,
+    // awaiting wiring into the 5-level compression plan (dead in
+    // non-test builds until then).
+    #[allow(dead_code)]
+    pub(crate) fn fix_round(&mut self, assistant_idx: usize) -> FixReport {
         assert!(
             assistant_idx < self.messages.len(),
             "fix_round: assistant_idx out of bounds"
@@ -1502,7 +1519,11 @@ impl HistoryManager {
     // - `SkippedAlreadyInTail`     — todo round survived in the retained tail
     // - `NoMarker`                 — no compaction has happened (caller bug)
     // - `NoTodoRoundFound`         — history has no todo_write round yet
-    pub fn recall_todo_round(&mut self) -> RecallResult {
+    // ADR-061 v3 §20.3 round primitive: implemented and unit-tested,
+    // awaiting wiring into the 5-level compression plan (dead in
+    // non-test builds until then).
+    #[allow(dead_code)]
+    pub(crate) fn recall_todo_round(&mut self) -> RecallResult {
         // Fast path: same round already injected by a prior compression.
         if let Some(ref last_id) = self.last_injected_todo_call_id {
             if let Some((asst, _)) = self.find_last_todo_write_round() {

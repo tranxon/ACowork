@@ -1196,11 +1196,11 @@ export function FileEditorPanel({ width }: { width: number }) {
     return (
         <div
             ref={rootRef}
-            className="relative flex flex-col shrink-0 bg-chat-area dark:border-zinc-800 rounded-xl overflow-hidden"
+            className="relative flex flex-col shrink-0 bg-page-bg dark:border-zinc-800 rounded-xl overflow-hidden"
             style={{ width }}
         >
             {/* Tab bar */}
-            <div className="flex bg-chat-area select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
+            <div className="flex bg-page-bg select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}
@@ -1484,7 +1484,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </button>
                         )}
                         {activeFile.loading && (
-                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-chat-area/80 text-xs text-zinc-400">
+                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-page-bg/80 text-xs text-zinc-400">
                                 <Loader2 className="h-4 w-4 animate-spin" />
                                 Loading...
                             </div>

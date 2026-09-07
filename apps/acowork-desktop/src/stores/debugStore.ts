@@ -197,7 +197,7 @@ interface DebugStore {
   /**
    * Tear down DevMode for the currently-attached agent. Symmetric
    * counterpart to the "Enable Debug" button wired in
-   * `ResultsPanel.tsx` (which calls the Tauri command directly +
+   * `RightPanel.tsx` (which calls the Tauri command directly +
    * then `connect()`s). Idempotent: if DevMode is already off this
    * is a no-op apart from a single `fetchAgents()` round-trip to
    * confirm the state.
@@ -342,7 +342,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   // list so the UI sees the new `debug_state = "disabled"`, and
   // detaches locally. Together with the existing
   // `enable_agent_debug` Tauri command invoked from
-  // `ResultsPanel.tsx`, these two actions form the symmetric
+  // `RightPanel.tsx`, these two actions form the symmetric
   // enable/disable pair the "Exit Debug" button needs.
 
   disableDebugMode: async () => {
@@ -394,7 +394,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       // `proxy_debug_rpc` hook already flipped `debug_state` to
       // `Disabled` when step 1's 2xx response landed. A failed
       // `fetchAgents` only means the agentStore cache is stale, so
-      // patch it locally: `ResultsPanel`'s auto-connect effect runs
+      // patch it locally: `RightPanel`'s auto-connect effect runs
       // off `debug_state === "enabled"` and would otherwise see the
       // stale value, re-attach the Debug Panel to an agent whose
       // DevMode is already gone, and leave the user with a panel

@@ -2231,39 +2231,17 @@ async fn put_agent_config(
     //    (and the Desktop's own ConfigSnapshot listener) sees the new
     //    values immediately. Best-effort: if the broker isn't
     //    reachable yet, the on-disk file is still authoritative.
+    //
+    // The publisher is constructed locally from the late-bound MQTT
+    // client slot — no `HttpState` field added, so the state struct
+    // stays focused on persistence/dispatch concerns.
     if let Some(mqtt) = state.mqtt_client.lock().await.clone() {
         // ADR-040: use the config_json returned by the UseCase impl
         // instead of re-reading the file from disk.
-        let config_json = result.config_json.clone();
-        let envelope = acowork_core::mqtt_proto::DataEnvelope {
-            version: 1,
-            payload: Some(
-                acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(
-                    acowork_core::mqtt_proto::AgentConfig {
-                        agent_id: state.agent_id.clone(),
-                        config_json,
-                    },
-                ),
-            ),
-        };
-        let topic = format!("acowork/agents/{}/config", state.agent_id);
-        if let Err(e) = mqtt
-            .lock()
-            .await
-            .publish_envelope(
-                &topic,
-                &envelope,
-                crate::mqtt::client::MqttQoS::AtLeastOnce,
-                true, // Retained — `mqtt.md` §3.5 contract
-            )
-            .await
-        {
-            tracing::warn!(
-                agent_id = %state.agent_id,
-                error = %e,
-                "PUT /agents/{id}/config: failed to re-PUBLISH retained config snapshot"
-            );
-        }
+        let runtime = mqtt.lock().await;
+        crate::mqtt::MqttAgentConfigPublisher::from_runtime_client(&runtime)
+            .publish(result.config_json.clone())
+            .await;
     }
 
     Ok(Json(serde_json::json!({
@@ -4389,6 +4367,198 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Regression test for the MCP-toggle-refresh bug fix (ADR-069
+    /// follow-up). After `put_agent_config` was DRY-refactored to use
+    /// [`crate::mqtt::MqttAgentConfigPublisher`], the retained
+    /// `acowork/agents/{id}/config` publish path must still fire when
+    /// the runtime has a live MQTT client. The Desktop Tools panel
+    /// listens for that topic to refresh `/mcp-tools`.
+    ///
+    /// Test wires up:
+    ///   1. embedded broker (rumqttd, real on loopback)
+    ///   2. `RuntimeMqttClient` connected to the broker (so the
+    ///      late-bind slot has a live publisher)
+    ///   3. independent `AsyncClient` subscriber on the canonical topic
+    ///   4. `RuntimeHttpServer` with the MQTT slot populated
+    ///
+    /// Then PUTs `/api/agents/{id}/config` and asserts the subscriber
+    /// receives a retained `DataEnvelope::AgentConfig` whose payload
+    /// contains the just-persisted field.
+    #[tokio::test]
+    async fn test_put_agent_config_publishes_retained_agent_config_snapshot() {
+        use crate::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
+        use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+
+        // 1. Unique broker port to avoid cross-talk with parallel tests.
+        static BROKER_PORT: std::sync::atomic::AtomicU16 =
+            std::sync::atomic::AtomicU16::new(39975);
+        let port = BROKER_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let broker = acowork_gateway::mqtt::start_broker("127.0.0.1", port).expect("broker start");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "acowork-test-runtime-http-put-config-publish-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+        crate::agent_config::save_agent_config(
+            std::path::Path::new(&temp_dir),
+            &crate::agent_config::AgentConfig::default(),
+        )
+        .unwrap();
+
+        // 2. Connect runtime against the broker.
+        let cache = new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            avatar: None,
+            builtin_avatar: None,
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            work_dir: temp_dir.clone(),
+            username: None,
+            password: None,
+        })
+        .await
+        .expect("RuntimeMqttClient connect");
+        // SharedMqttClientSlot = Arc<Mutex<Option<Arc<Mutex<RuntimeMqttClient>>>>>
+        let runtime_slot: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(std::sync::Arc::new(
+                tokio::sync::Mutex::new(runtime),
+            ))));
+
+        // 3. Independent subscriber on the canonical topic.
+        let mut sub_opts = MqttOptions::new("test:handler-sub", "127.0.0.1", port);
+        sub_opts.set_keep_alive(std::time::Duration::from_secs(5));
+        let (sub_client, mut eventloop) = AsyncClient::new(sub_opts, 10);
+        let target = "acowork/agents/com.test.agent/config".to_string();
+        sub_client
+            .subscribe(&target, QoS::AtLeastOnce)
+            .await
+            .expect("subscribe");
+
+        // Give the broker a beat to register the subscription before
+        // we trigger the publish — otherwise the retained message can
+        // arrive before the SubAck and look like a normal publish.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // 4. Start HTTP server with the MQTT slot populated.
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let session_manager_slot: SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim,
+            degraded_reasons,
+            runtime_slot,
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_session_metadata(
+                &temp_dir,
+                std::sync::Arc::new(std::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                std::sync::Arc::new(std::sync::RwLock::new(None)),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+        )
+        .await
+        .expect("server start");
+
+        // 5. PUT /agents/{id}/config — must trigger publish via the
+        //    refactored MqttAgentConfigPublisher path.
+        let url = format!("http://127.0.0.1:{}/agents/com.test.agent/config", server.port);
+        let response = reqwest::Client::new()
+            .put(&url)
+            .json(&serde_json::json!({"temperature": 0.42}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "PUT /config should succeed");
+
+        // 6. Subscriber must receive the retained snapshot with the
+        //    just-pushed temperature. This is the contract the Desktop
+        //    Tools panel listens to via `case "agent_config"`.
+        use prost::Message as _;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut received_config_json: Option<String> = None;
+        while std::time::Instant::now() < deadline && received_config_json.is_none() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_millis(100)),
+                eventloop.poll(),
+            )
+            .await
+            {
+                Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                    if p.topic != target {
+                        continue;
+                    }
+                    let env =
+                        acowork_core::mqtt_proto::DataEnvelope::decode(p.payload.as_ref())
+                            .expect("DataEnvelope decode");
+                    if let Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(
+                        ac,
+                    )) = env.payload
+                    {
+                        received_config_json = Some(ac.config_json.clone());
+                    }
+                }
+                Ok(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(_) => {}
+            }
+        }
+        let json = received_config_json
+            .expect("subscriber must receive retained agent_config after PUT /config");
+        assert!(
+            json.contains("0.42"),
+            "retained payload should carry the just-persisted temperature 0.42; got: {}",
+            json
+        );
+
+        // Cleanup
+        drop(sub_client);
+        std::fs::remove_dir_all(&temp_dir).ok();
+        drop(broker);
     }
 
     /// Win11-MCP-ToolsBugFix round-trip regression test.

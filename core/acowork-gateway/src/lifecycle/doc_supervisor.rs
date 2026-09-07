@@ -222,9 +222,10 @@ async fn spawn_doc(cfg: &DocSupervisorConfig) -> Result<(tokio::process::Child, 
 
     // On Unix, create a new process group so a Gateway shutdown does not
     // cascade a SIGHUP to doc (doc self-exits via the ADR-018 watchdog).
+    // `Command::process_group` is an inherent method (stable since 1.64),
+    // so no `std::os::unix::process::CommandExt` import is needed.
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
 

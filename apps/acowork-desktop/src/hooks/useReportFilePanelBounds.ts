@@ -32,7 +32,7 @@ import { useLayoutStore } from "../stores/layoutStore";
  * Right-panel visibility: ResizeObserver only fires on *size* changes, but
  * the FileEditorPanel's viewport position shifts in the flex layout when
  * the right panel is shown/hidden even though its own size stays the same
- * (fixed fileWidth + shrink-0).  We subscribe to `resultsCollapsed` and
+ * (fixed fileWidth + shrink-0).  We subscribe to `rightPanelCollapsed` and
  * re-measure via a separate `useLayoutEffect` + `requestAnimationFrame` to
  * guarantee the DOM reflow has settled before reading the rect.
  */
@@ -40,7 +40,7 @@ export function useReportFilePanelBounds(
     ref: RefObject<HTMLElement | null>,
 ): void {
     const setFilePanelBounds = useLayoutStore((s) => s.setFilePanelBounds);
-    const resultsCollapsed = useLayoutStore((s) => s.resultsCollapsed);
+    const rightPanelCollapsed = useLayoutStore((s) => s.rightPanelCollapsed);
 
     // ── ResizeObserver — catches size-driven layout changes ────────────
     useEffect(() => {
@@ -96,7 +96,7 @@ export function useReportFilePanelBounds(
     // ResizeObserver only fires on *size* changes.  When the right panel is
     // shown/hidden the FileEditorPanel's viewport position shifts but its
     // own size stays the same (fixed fileWidth + shrink-0).  We use a
-    // separate useLayoutEffect keyed on resultsCollapsed so the re-measure
+    // separate useLayoutEffect keyed on rightPanelCollapsed so the re-measure
     // is guaranteed to run before the next paint.
     useLayoutEffect(() => {
         const el = ref.current;
@@ -108,5 +108,5 @@ export function useReportFilePanelBounds(
             right: rect.right,
             mounted: true,
         });
-    }, [resultsCollapsed, setFilePanelBounds, ref]);
+    }, [rightPanelCollapsed, setFilePanelBounds, ref]);
 }

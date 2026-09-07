@@ -27,18 +27,15 @@
 #![cfg(test)]
 
 use std::collections::VecDeque;
-use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
+use acowork_core::providers::traits::{ChatMessage, ChatRequest, Provider};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::providers::compat::{
-    CompatCache, COMPAT_PROFILE_TTL_SECS, ErrorClass, StripProfile,
-};
+use crate::providers::compat::{CompatCache, COMPAT_PROFILE_TTL_SECS};
 use crate::providers::openai::OpenAIProvider;
 
 const MODEL: &str = "test-model";

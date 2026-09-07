@@ -1210,6 +1210,19 @@ impl RuntimeMqttClient {
     pub async fn inner(&self) -> AsyncClient {
         self.client().await
     }
+
+    /// Borrow a clone of the shared MQTT client handle.
+    ///
+    /// Companion to [`RuntimeMqttClient::inner`]: returns the
+    /// underlying `Arc<Mutex<AsyncClient>>` so companion publishers
+    /// (e.g. [`crate::mqtt::agent_config_publisher::MqttAgentConfigPublisher`])
+    /// can be constructed in their own modules without coupling to
+    /// `RuntimeMqttClient`'s private layout. `pub(crate)` because the
+    /// handle must not leak past the `acowork-runtime` crate — every
+    /// outside publish goes through a typed publisher.
+    pub(crate) fn shared_handle(&self) -> Arc<Mutex<AsyncClient>> {
+        Arc::clone(&self.shared_client)
+    }
 }
 
 impl RuntimeMqttClient {

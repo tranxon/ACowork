@@ -45,7 +45,7 @@ type DeleteTarget =
   | { kind: "dir"; dir: DirMeta; parentDirId: string }
   | null;
 
-export function DocTreeSidebar() {
+export function DocTreeSidebar({ width }: { width?: number }) {
   const { t } = useTranslation();
   const toast = useToast();
   const healthy = useDocHealthStore((s) => s.healthy);
@@ -91,7 +91,8 @@ export function DocTreeSidebar() {
 
   return (
     <aside
-      className="flex h-full w-60 shrink-0 flex-col border-r border-zinc-200 bg-surface text-xs dark:border-zinc-800 dark:bg-zinc-900/60"
+      className="flex h-full shrink-0 flex-col rounded-xl bg-nav-surface text-xs"
+      style={{ width: width ?? 240 }}
       aria-label={t("doc.sidebarLabel")}
     >
       {/* ── 头部：标题 + 新建按钮 ───────────────────────────── */}
@@ -147,7 +148,7 @@ export function DocTreeSidebar() {
           type="button"
           onClick={() => setTrashOpen(true)}
           disabled={healthy === false}
-          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-700 disabled:opacity-40 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-zinc-500 transition-colors hover:bg-nav-item-hover hover:text-zinc-700 disabled:opacity-40 dark:hover:text-zinc-200"
         >
           <Trash2 className="h-3.5 w-3.5" aria-hidden />
           <span>{t("doc.trash")}</span>
@@ -219,7 +220,7 @@ function IconBtn({
         e.stopPropagation();
         onClick();
       }}
-      className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 focus-visible:bg-zinc-200 focus-visible:text-zinc-700 disabled:opacity-30 dark:hover:bg-zinc-700 dark:hover:text-zinc-100 dark:focus-visible:bg-zinc-700"
+      className="rounded p-1 text-zinc-400 transition-colors hover:bg-nav-item-hover hover:text-zinc-700 focus-visible:bg-nav-item-hover focus-visible:text-zinc-700 disabled:opacity-30 dark:hover:text-zinc-100 dark:focus-visible:text-zinc-100"
     >
       {children}
     </button>
@@ -375,7 +376,7 @@ function DirRow({
     <div role="treeitem" aria-expanded={isOpen} aria-selected={false}>
       <div
         className={cn(
-          "group flex cursor-pointer items-center gap-0.5 rounded-md py-1 pr-1 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800",
+          "group flex cursor-pointer items-center gap-0.5 rounded-md py-1 pr-1 text-zinc-600 hover:bg-nav-item-hover dark:text-zinc-300",
         )}
         style={{ paddingLeft: depth * 14 + 4 }}
       >
@@ -525,7 +526,7 @@ function DocRow({
     <div role="treeitem" aria-selected={selected}>
       <div
         className={cn(
-          "group flex items-center gap-1 rounded-md py-1 pr-1 text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800",
+          "group flex items-center gap-1 rounded-md py-1 pr-1 text-zinc-600 hover:bg-nav-item-hover dark:text-zinc-300",
           selected &&
             "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20",
         )}

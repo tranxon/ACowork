@@ -2620,7 +2620,7 @@ mod tests {
             });
         }
 
-        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let _ = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
 
         let log = call_log.lock().unwrap();
         assert!(
@@ -2669,7 +2669,7 @@ mod tests {
         }
 
         let tokens_before = loop_.session.history.token_count();
-        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let _ = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
         let tokens_after = loop_.session.history.token_count();
 
         // No compaction marker — the trim path was taken instead.
@@ -2735,7 +2735,7 @@ mod tests {
             });
         }
 
-        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let _ = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
 
         // Only ONE LLM call: LowQuality breaks the chain instead of
         // stepping down to a weaker model.

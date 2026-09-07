@@ -6,6 +6,8 @@ import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspIns
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
+import { ExpandableRow, ListBox, ListRow } from "../common/list";
+import { Tooltip } from "../common/Tooltip";
 
 /**
  * Module-level cache of LSP install-status results, keyed by relay URL.
@@ -72,21 +74,6 @@ const LANGUAGE_LABELS: Record<string, string> = {
   java: "Java",
 };
 
-/** Language icon colors */
-const LANGUAGE_COLORS: Record<string, string> = {
-  rust: "#DEA584",
-  python: "#3572A5",
-  typescript: "#3178C6",
-  go: "#00ADD8",
-  c: "#555555",
-  json: "#292929",
-  yaml: "#CB171E",
-  html: "#E34F26",
-  css: "#563D7C",
-  markdown: "#083FA1",
-  java: "#B07219",
-};
-
 export function LspTab() {
   const { t } = useTranslation();
   const status = useGatewayStore((s) => s.status);
@@ -105,6 +92,8 @@ export function LspTab() {
   const [scriptLoading, setScriptLoading] = useState(false);
   /** LSP Relay base URL (e.g. "http://127.0.0.1:19878"), null when not available */
   const [relayUrl, setRelayUrl] = useState<string | null>(null);
+  /** LSP list — Tools-tab level-1 collapsible group, default open. */
+  const [serversOpen, setServersOpen] = useState(true);
 
   // Discover LSP Relay endpoint when Gateway is connected
   useEffect(() => {
@@ -344,62 +333,78 @@ export function LspTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      {/* Header */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xs font-medium">{t("harnessLsp.lspServerManagement")}</h2>
-          <button
-            onClick={() => void loadAll({ force: true })}
-            disabled={refreshing}
-            className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
-          >
-            {refreshing ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3 w-3" />
-            )}
-            {refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
-          </button>
-        </div>
+      {/* LSP Servers — Tools-tab level-1 collapsible card: chevron + title +
+          count badge. The Refresh action sits in the header trailing slot
+          (wrapped in stopPropagation so it never toggles the fold). */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={serversOpen}
+          onToggle={() => setServersOpen((v) => !v)}
+          title={t("harnessLsp.lspServerManagement", { count: serverEntries.length })}
+          ariaLabel={t("harnessLsp.lspServerManagement", { count: serverEntries.length })}
+          trailing={
+            <span onClick={(e) => e.stopPropagation()}>
+              <Tooltip
+                content={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
+                variant="plain"
+              >
+                <button
+                  aria-label={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
+                  onClick={() => void loadAll({ force: true })}
+                  disabled={refreshing}
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                >
+                  {refreshing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </Tooltip>
+            </span>
+          }
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          {/* Error message */}
+          {error && (
+            <div className="px-3 pt-2">
+              <ErrorBox message={error} onClose={() => setError(null)} />
+            </div>
+          )}
 
-        {/* Error message */}
-        {error && (
-          <div className="mb-3">
-            <ErrorBox message={error} onClose={() => setError(null)} />
-          </div>
-        )}
+          {/* Loading state */}
+          {refreshing && serverEntries.length === 0 && (
+            <div className="px-3 py-3 text-xs text-zinc-400">{t("harnessLsp.loadingServers")}</div>
+          )}
 
-        {/* Loading state */}
-        {refreshing && serverEntries.length === 0 && (
-          <p className="text-xs text-zinc-400">{t("harnessLsp.loadingServers")}</p>
-        )}
+          {/* Empty state */}
+          {!refreshing && serverEntries.length === 0 && (
+            <div className="px-3 py-3 text-xs text-zinc-400">{t("harnessLsp.noLspServers")}</div>
+          )}
 
-        {/* Empty state */}
-        {!refreshing && serverEntries.length === 0 && (
-          <p className="text-xs text-zinc-400">{t("harnessLsp.noLspServers")}</p>
-        )}
-
-        {/* Server list */}
-        {serverEntries.length > 0 && (
-          <div className="space-y-2">
-            {serverEntries.map(([language, entry]) => (
-              <LspServerCard
-                key={language}
-                language={language}
-                entry={entry}
-                healthStatus={healthStatus[language] ?? "unknown"}
-                healthError={healthErrors[language] ?? null}
-                isChecking={checkingLangs.has(language)}
-                isInstalling={installingLangs.has(language)}
-                installResult={installResults[language] ?? null}
-                onCheck={() => handleCheck(language)}
-                onViewScript={() => handleViewScript(language)}
-                onInstall={() => handleInstall(language)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+          {/* Server list — unified ListRow rows (hairline separators, inset
+              hover), one per language. */}
+          {serverEntries.length > 0 && (
+            <ListBox variant="plain">
+              {serverEntries.map(([language, entry]) => (
+                <LspServerCard
+                  key={language}
+                  language={language}
+                  entry={entry}
+                  healthStatus={healthStatus[language] ?? "unknown"}
+                  healthError={healthErrors[language] ?? null}
+                  isChecking={checkingLangs.has(language)}
+                  isInstalling={installingLangs.has(language)}
+                  installResult={installResults[language] ?? null}
+                  onCheck={() => handleCheck(language)}
+                  onViewScript={() => handleViewScript(language)}
+                  onInstall={() => handleInstall(language)}
+                />
+              ))}
+            </ListBox>
+          )}
+        </ExpandableRow>
+      </ListBox>
 
       {/* Install script dialog */}
       {scriptDialog && (
@@ -467,75 +472,13 @@ function LspServerCard({
 }) {
   const { t } = useTranslation();
   const [showOutput, setShowOutput] = useState(false);
-  const langColor = LANGUAGE_COLORS[language] ?? "#888";
   const langLabel = LANGUAGE_LABELS[language] ?? language;
 
   return (
-    <div className="rounded-md border border-zinc-100 bg-modal-surface p-3 dark:border-zinc-600/50">
-      {/* Header row */}
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          {/* Language icon */}
-          <div
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white"
-            style={{ backgroundColor: langColor }}
-          >
-            {language.slice(0, 2).toUpperCase()}
-          </div>
-
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold">{langLabel}</span>
-              {/* Health indicator — order matters:
-                  - "unknown": status hasn't been resolved yet (defensive
-                    fallback when the backend returns fewer status entries
-                    than server entries). Renders a neutral pending badge
-                    so the row is never empty.
-                  - "checking": a probe is in flight (either the auto probe
-                    triggered by loadAll / Refresh, or a manual per-row
-                    Check). Amber distinguishes user-initiated probes from
-                    the neutral pending state.
-                  - "installed" / "not_installed": terminal states from
-                    the most recent successful probe.
-                  - "error": error message is rendered below. */}
-              {healthStatus === "unknown" && (
-                <span
-                  data-testid="lsp-pending-badge"
-                  className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400"
-                >
-                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                  {t("harnessLsp.pendingCheck")}
-                </span>
-              )}
-              {healthStatus === "checking" && (
-                <span
-                  data-testid="lsp-checking-badge"
-                  className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                >
-                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                  {t("harnessLsp.checking")}
-                </span>
-              )}
-              {healthStatus === "installed" && (
-                <span className="inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/30 dark:text-green-400">
-                  <CheckCircle2 className="h-2.5 w-2.5" />
-                  {t("harnessLsp.installed")}
-                </span>
-              )}
-              {healthStatus === "not_installed" && (
-                <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/30 dark:text-red-400">
-                  <XCircle className="h-2.5 w-2.5" />
-                  {t("harnessLsp.notInstalled")}
-                </span>
-              )}
-            </div>
-            <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400 line-clamp-1">
-              {entry.description}
-            </p>
-          </div>
-        </div>
-
-        {/* Action buttons */}
+    <ListRow
+      surface="inset"
+      trailing={
+        /* Action cluster — mirrors the MCP row grammar */
         <div className="flex shrink-0 items-center gap-1.5">
           {/* Check button */}
           <button
@@ -591,7 +534,60 @@ function LspServerCard({
             </span>
           )}
         </div>
+      }
+    >
+      {/* Header line — label + health indicator. Order matters:
+          - "unknown": status hasn't been resolved yet (defensive fallback
+            when the backend returns fewer status entries than server
+            entries). Renders a neutral pending badge so the row is never
+            empty.
+          - "checking": a probe is in flight (either the auto probe
+            triggered by loadAll / Refresh, or a manual per-row Check).
+            Amber distinguishes user-initiated probes from the neutral
+            pending state.
+          - "installed" / "not_installed": terminal states from the most
+            recent successful probe.
+          - "error": error message is rendered below. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold">{langLabel}</span>
+        {healthStatus === "unknown" && (
+          <span
+            data-testid="lsp-pending-badge"
+            className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400"
+          >
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            {t("harnessLsp.pendingCheck")}
+          </span>
+        )}
+        {healthStatus === "checking" && (
+          <span
+            data-testid="lsp-checking-badge"
+            className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+          >
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            {t("harnessLsp.checking")}
+          </span>
+        )}
+        {healthStatus === "installed" && (
+          <span className="inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-700 dark:bg-green-900/30 dark:text-green-400">
+            <CheckCircle2 className="h-2.5 w-2.5" />
+            {t("harnessLsp.installed")}
+          </span>
+        )}
+        {healthStatus === "not_installed" && (
+          <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-[10px] text-red-700 dark:bg-red-900/30 dark:text-red-400">
+            <XCircle className="h-2.5 w-2.5" />
+            {t("harnessLsp.notInstalled")}
+          </span>
+        )}
       </div>
+
+      {/* Description */}
+      {entry.description && (
+        <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400 line-clamp-1">
+          {entry.description}
+        </p>
+      )}
 
       {/* Health error */}
       {healthStatus === "not_installed" && healthError && (
@@ -625,7 +621,7 @@ function LspServerCard({
 
       {/* Install result output */}
       {installResult && (
-        <div className="mt-2">
+        <div className="mt-1.5">
           <div className="flex items-center gap-2 mb-1">
             {installResult.success ? (
               <span className="inline-flex items-center gap-1 text-[10px] text-green-600 dark:text-green-400">
@@ -652,6 +648,6 @@ function LspServerCard({
           )}
         </div>
       )}
-    </div>
+    </ListRow>
   );
 }

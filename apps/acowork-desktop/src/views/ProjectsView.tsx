@@ -1,7 +1,7 @@
 /**
  * ProjectsView — 顶级项目管理视图（T2-1 布局壳）。
  *
- * 对齐 UX 设计 §2.1/§3.1：左侧 ProjectSidebar（240px）+ 右侧 ProjectBoard。
+ * 对齐 UX 设计 §2.1/§3.1：左侧 ProjectSidebar（可拖动宽度，默认 240px）+ 右侧 ProjectBoard。
  * 职责：
  * - 进入视图时加载项目列表 + 健康检查
  * - 组合 Sidebar / Board / TaskDetailDrawer / TaskEditDialog
@@ -12,6 +12,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDragResize } from "../hooks/useDragResize";
+import { SplitHandle } from "../components/common/SplitHandle";
 import { usePmProjectStore } from "../stores/pm/projectStore";
 import { usePmBoardStore } from "../stores/pm/boardStore";
 import { usePmTaskDetailStore } from "../stores/pm/taskDetailStore";
@@ -33,6 +35,13 @@ type EditDialogState =
 export function ProjectsView() {
   const { t } = useTranslation();
   const [editDialog, setEditDialog] = useState<EditDialogState>(null);
+  // 与聊天 AgentList 一致的左侧分栏宽度（可拖动 + localStorage 持久化）
+  const sidebar = useDragResize({
+    storageKey: "acowork-pm-list-width",
+    defaultWidth: 240,
+    minWidth: 160,
+    maxWidth: 400,
+  });
   const projects = usePmProjectStore((s) => s.projects);
   const selected = usePmProjectStore((s) => s.selected);
   const loadingProjects = usePmProjectStore((s) => s.loading);
@@ -99,8 +108,11 @@ export function ProjectsView() {
   // 三态：加载骨架
   if (loadingProjects && projects.length === 0) {
     return (
-      <div className="flex h-full w-full overflow-hidden rounded-xl bg-chat-area">
-        <div className="w-60 shrink-0 animate-pulse space-y-2 border-r border-zinc-200 p-3 dark:border-zinc-700">
+      <div className="flex h-full w-full overflow-hidden rounded-xl bg-page-bg">
+        <div
+          className="shrink-0 animate-pulse space-y-2 rounded-xl bg-nav-surface p-3"
+          style={{ width: sidebar.width }}
+        >
           {[0, 1, 2, 3, 4].map((i) => (
             <div key={i} className="h-9 rounded-md bg-zinc-100 dark:bg-zinc-800" />
           ))}
@@ -123,10 +135,14 @@ export function ProjectsView() {
   // 不再依赖脆弱的 `document.getElementById(...)?.click()` DOM 反查。
   if (projects.length === 0 && !loadingProjects) {
     return (
-      <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-chat-area">
+      <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-page-bg">
         <ServiceOfflineBanner />
         <div className="flex min-h-0 flex-1">
-          <ProjectSidebar />
+          <ProjectSidebar width={sidebar.width} />
+          <SplitHandle
+            onMouseDown={sidebar.onHandleMouseDown}
+            ariaLabel={t("appLayout.ariaLabelResizeSidebar")}
+          />
           <main className="flex min-w-0 flex-1 items-center justify-center">
             <div className="flex flex-col items-center justify-center gap-4 p-8">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-3xl dark:bg-zinc-800">
@@ -153,11 +169,15 @@ export function ProjectsView() {
   }
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-chat-area">
+    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl bg-page-bg">
       <ServiceOfflineBanner />
       <div className="flex min-h-0 flex-1">
-        {/* 左侧项目列表 — 240px 固定宽 */}
-        <ProjectSidebar />
+        {/* 左侧项目列表 — 宽度与聊天 AgentList 一致、可拖动 */}
+        <ProjectSidebar width={sidebar.width} />
+        <SplitHandle
+          onMouseDown={sidebar.onHandleMouseDown}
+          ariaLabel={t("appLayout.ariaLabelResizeSidebar")}
+        />
         {/* 右侧看板 — flex-1 */}
         <ProjectBoard
           project={selected}

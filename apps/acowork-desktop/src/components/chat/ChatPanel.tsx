@@ -86,7 +86,7 @@ import { log } from "../../lib/logger";
 // getSnapshot should be cached" check and produces a "Maximum update depth
 // exceeded" infinite re-render loop during transient states (mount, agent
 // switch, session switch) where the agent's session entry does not yet
-// exist. The same pattern is already used in ResultsPanel.tsx.
+// exist. The same pattern is already used in RightPanel.tsx.
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
 /**
@@ -2089,7 +2089,7 @@ export function ChatPanel() {
         {/* Todo list box — above the message queue, same collapsible style.
           Shows current task list from todo_write tool calls. */}
         {todos.length > 0 && (
-          <div className="mx-5 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="mx-7 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
               className="flex items-center w-full px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
@@ -2169,7 +2169,7 @@ export function ChatPanel() {
           flush against input, slightly narrower for layered depth */}
         {queuedMessages.length > 0 && (
           <div className={cn(
-            "mx-5 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            "mx-7 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
@@ -2212,7 +2212,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-chat-area">
+        <div className="mx-3 mb-3 rounded-xl border border-right-panel bg-right-panel">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
@@ -2335,7 +2335,7 @@ export function ChatPanel() {
                     : t("chatPanel.inputMessage")
             }
             disabled={inputDisabled}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" || e.shiftKey) return;
@@ -2662,8 +2662,15 @@ function ModelMenu({
           )}
           style={{ width: `${menuWidth}px` }}
         >
+          {/* Menu title */}
+          <div className="px-3 pt-2.5 pb-1">
+            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+              {t("chatPanel.modelMenuTitle")}
+            </h2>
+          </div>
+
           {/* Model list */}
-          <div className="max-h-[240px] overflow-y-auto">
+          <div className="max-h-[240px] overflow-y-auto py-1">
             {models.map((m) => {
               const isActive = m.name === currentModel && m.provider === currentProvider;
               return (
@@ -2675,7 +2682,7 @@ function ModelMenu({
                     setOpen(false);
                   }}
                   className={cn(
-                    "flex w-full items-center justify-between px-2.5 py-1.5 text-xs font-medium transition-colors",
+                    "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
                     isActive
                       ? "text-[var(--color-accent)]"
                       : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
@@ -2717,7 +2724,7 @@ function ModelMenu({
               setShowAddDialog(true);
               setOpen(false);
             }}
-            className="mx-1.5 mt-2 mb-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
+            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("chatPanel.addModel")}
@@ -2803,35 +2810,45 @@ function ReasoningEffortMenu({
           )}
           style={{ width: "140px" }}
         >
-          {OPTIONS.map((opt) => {
-            const isActive = opt.value === effort;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => {
-                  onChange(opt.value);
-                  setOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center gap-2 px-2.5 py-1.5 text-xs font-medium transition-colors",
-                  isActive
-                    ? "text-[var(--color-accent)]"
-                    : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
-                )}
-              >
-                <span
-                  className="h-2 w-2 rounded-full shrink-0"
-                  style={{ backgroundColor: opt.color }}
-                />
-                <span
-                  className={cn("font-medium", isActive && "text-[var(--color-accent)]")}
+          {/* Menu title */}
+          <div className="px-3 pt-2.5 pb-1">
+            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+              {t("chatPanel.reasoningMenuTitle")}
+            </h2>
+          </div>
+
+          {/* Options */}
+          <div className="py-1">
+            {OPTIONS.map((opt) => {
+              const isActive = opt.value === effort;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt.value);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors",
+                    isActive
+                      ? "text-[var(--color-accent)]"
+                      : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
+                  )}
                 >
-                  {opt.label}
-                </span>
-              </button>
-            );
-          })}
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{ backgroundColor: opt.color }}
+                  />
+                  <span
+                    className={cn("font-medium", isActive && "text-[var(--color-accent)]")}
+                  >
+                    {opt.label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </ToolbarDropdownTrigger>

@@ -166,7 +166,10 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
   };
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-chat-area" onContextMenu={onContextMenu}>
+    <div
+      className="flex flex-1 flex-col overflow-hidden rounded-md border border-zinc-400/70 bg-panel-inset-2 dark:border-zinc-600"
+      onContextMenu={onContextMenu}
+    >
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <button

@@ -3,6 +3,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { NodeInfo } from "../../lib/types";
 import { fetchNodes } from "../../lib/gateway-api";
 import { cn } from "../../lib/utils";
+import { ExpandableRow, ListBox } from "../common/list";
 
 /**
  * Node management tab (ADR-055 §6.13.3 / Phase 3g).
@@ -16,6 +17,8 @@ export function NodesTab() {
   const { t } = useTranslation();
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(false);
+  // Tools-tab style level-1 collapsible card (default open)
+  const [nodesOpen, setNodesOpen] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -35,20 +38,27 @@ export function NodesTab() {
 
   return (
     <div className="max-w-3xl space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xs font-medium">{t("settings.nodesTitle")}</h2>
-        <button
-          onClick={() => void load()}
-          disabled={loading}
-          className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={nodesOpen}
+          onToggle={() => setNodesOpen((v) => !v)}
+          title={t("settings.nodesTitle", { count: nodes.length })}
+          ariaLabel={t("settings.nodesTitle", { count: nodes.length })}
+          trailing={
+            <span onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => void load()}
+                disabled={loading}
+                className="rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+              >
+                {t("settings.nodesRefresh")}
+              </button>
+            </span>
+          }
+          bodyClassName="overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
         >
-          {t("settings.nodesRefresh")}
-        </button>
-      </div>
-
-      <div className="overflow-hidden rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
         {nodes.length === 0 ? (
-          <p className="p-4 text-xs text-zinc-400">
+          <p className="p-3 text-xs text-zinc-400">
             {loading ? t("settings.loading") : t("settings.nodesEmpty")}
           </p>
         ) : (
@@ -94,7 +104,8 @@ export function NodesTab() {
             </tbody>
           </table>
         )}
-      </div>
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }

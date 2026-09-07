@@ -18,6 +18,8 @@ import {
   RefreshCw,
   RotateCcw,
   Bug,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ToolsTab } from "./ToolsTab";
@@ -30,10 +32,11 @@ import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
 // prepare overrides before clicking "Enter Debug"; the reload button
 // stays reachable once DevMode is on).
 import { PromptList } from "../debug/PromptList";
+import { ListBox, ExpandableRow } from "../common/list";
 import { Switch } from "../common/Switch";
 import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
 
-interface ResultsPanelProps {
+interface RightPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
   onResizeStart?: (e: React.MouseEvent) => void;
@@ -44,7 +47,7 @@ interface ResultsPanelProps {
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-export function ResultsPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: ResultsPanelProps & { width: number }) {
+export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: RightPanelProps & { width: number }) {
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
   const activeSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
@@ -294,13 +297,38 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/status`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data) log.debug("[ResultsPanel] Agent status:", data);
+        if (data) log.debug("[RightPanel] Agent status:", data);
       })
       .catch(() => {/* ignore */});
   }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
 
+  // Context-snapshots level-1 collapse (whole card body toggles from the
+  // card header — same interaction as the PROMPT card). Default open.
+  const [snapshotsOpen, setSnapshotsOpen] = useState(true);
+  // Status-tab level-1 collapsible cards (Session Status / Agent
+  // Status) — same grammar as the Tools-tab "Builtin Tools" list:
+  // the header row toggles the whole body; default open.
+  const [sessionStatusOpen, setSessionStatusOpen] = useState(true);
+  const [agentStatusOpen, setAgentStatusOpen] = useState(true);
+  // Context snapshots are paged (like the memory list) so a long session
+  // with dozens of iterations cannot push the compression-history card
+  // out of the visible area. Page controls live in the empty right side
+  // of the card header.
+  const [snapshotPage, setSnapshotPage] = useState(0);
+  const SNAPSHOT_PAGE_SIZE = 20;
+  const snapshotTotalPages = Math.max(1, Math.ceil(snapshots.length / SNAPSHOT_PAGE_SIZE));
+  const snapshotStart = snapshotPage * SNAPSHOT_PAGE_SIZE;
+  const pageSnapshots = snapshots.slice(snapshotStart, snapshotStart + SNAPSHOT_PAGE_SIZE);
+  // Clamp back to the last page when the list shrinks (session switch /
+  // reload) and the current page no longer exists.
+  useEffect(() => {
+    if (snapshotPage >= snapshotTotalPages) {
+      setSnapshotPage(Math.max(0, snapshotTotalPages - 1));
+    }
+  }, [snapshotPage, snapshotTotalPages]);
+
   return (
-    <div className="relative flex flex-col shrink-0 bg-zinc-100 dark:bg-[#1F1F22] rounded-xl ml-1" style={{ width }}>
+    <div className="relative flex flex-col shrink-0 ml-1" style={{ width }}>
       {/* Resize handle overlay — sits at the left edge */}
       <div
         className="absolute -left-1 top-0 bottom-0 w-1 cursor-col-resize z-10 group"
@@ -308,9 +336,16 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
       >
         <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
       </div>
+      {/* Clip container — owns the rounded-xl surface + overflow-hidden so the
+          full-bleed tab content (each tab root paints bg-right-panel) gets
+          clipped to the rounded box: the bottom-left corner stays symmetric
+          with the top-left. The resize handle sits ABOVE it (absolute at
+          -left-1), so it must stay outside this clipping box or it would be
+          cut off and resizing would break. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-right-panel">
       {/* Tab title header */}
       <div className="border-b border-zinc-200 px-3 pt-[11px] pb-[7px] text-xs font-medium text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-        {t(`resultsPanel.${activeTab}`)}
+        {t(`rightPanel.${activeTab}`)}
       </div>
 
       {/* ── Debug tab content ─────────────────────────────────────── */}
@@ -331,7 +366,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                connected                    → state + snapshots + prompts
                                               + compression history */}
       {activeTab === "debug" && (
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-right-panel">
           {/* ADR-063 §3.7 — package prompt override editor. Always
               visible at the TOP of the Debug tab, BEFORE the
               "no agent running" placeholder, the action block, and
@@ -339,11 +374,17 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               Operators must be able to browse and prepare overrides
               regardless of agent running state or DevMode. */}
           <PromptList />
+
+          {/* Divider — full panel-width hairline separating the PROMPT
+              override area (above) from the debug controls (below). Matches
+              the workspace/memory panel divider style. */}
+          <div className="my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
           {!selectedAgent?.running ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
               <Bug className="h-5 w-5" />
               <span className="text-center">
-                {t("resultsPanel.noAgentDebug")}
+                {t("rightPanel.noAgentDebug")}
               </span>
             </div>
           ) : (
@@ -352,15 +393,17 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   section headings in this tab (e.g. Status tab's
                   "Token statistics" h3). */}
               <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                {t("resultsPanel.debugSection")}
+                {t("rightPanel.debugSection")}
               </div>
 
               {/* Action block — always shown when the agent is running.
                   Left: two-state text button (Enter/Exit Debug, btn-solid,
                   no icon). Right: 4 session debug buttons, only rendered
-                  once DevMode is on. */}
-              <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
-                <div className="flex min-h-[26px] items-center gap-1">
+                  once DevMode is on. Same strip height (36px, no vertical
+                  padding) as the collapsible card headers below, so the
+                  debug tab's horizontal bars share one rhythm. */}
+              <div className="flex min-h-[36px] items-center rounded-md border border-zinc-200 bg-panel-block px-2 dark:border-zinc-700">
+                <div className="flex w-full items-center gap-1">
                   <Switch
                     checked={selectedAgent?.debug_state === "enabled"}
                     onChange={async (checked) => {
@@ -376,18 +419,18 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                         if (!selectedAgentId) return;
                         setEnablingDebug(true);
                         try {
-                          log.debug("[ResultsPanel] enable_agent_debug: invoking", { agentId: selectedAgentId });
+                          log.debug("[RightPanel] enable_agent_debug: invoking", { agentId: selectedAgentId });
                           await invoke<{ enabled: boolean; already_enabled: boolean; debug_port: number }>(
                             "enable_agent_debug",
                             { agentId: selectedAgentId, debugPort: 0 },
                           );
-                          log.debug("[ResultsPanel] enable_agent_debug: invoke ok, refreshing agents");
+                          log.debug("[RightPanel] enable_agent_debug: invoke ok, refreshing agents");
                           await useAgentStore.getState().fetchAgents();
-                          log.debug("[ResultsPanel] enable_agent_debug: calling connect() directly");
+                          log.debug("[RightPanel] enable_agent_debug: calling connect() directly");
                           useDebugStore.getState().connect(selectedAgentId);
                           onTabChange("debug");
                         } catch (err) {
-                          log.error("[ResultsPanel] enable_agent_debug failed:", err);
+                          log.error("[RightPanel] enable_agent_debug failed:", err);
                         } finally {
                           setEnablingDebug(false);
                         }
@@ -397,11 +440,11 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                         if (disablingDebug) return;
                         setDisablingDebug(true);
                         try {
-                          log.debug("[ResultsPanel] exit_debug: invoking disableDebugMode");
+                          log.debug("[RightPanel] exit_debug: invoking disableDebugMode");
                           await disableDebugMode();
-                          log.debug("[ResultsPanel] exit_debug: disableDebugMode ok");
+                          log.debug("[RightPanel] exit_debug: disableDebugMode ok");
                         } catch (err) {
-                          log.error("[ResultsPanel] exit_debug failed:", err);
+                          log.error("[RightPanel] exit_debug failed:", err);
                         } finally {
                           setDisablingDebug(false);
                         }
@@ -411,12 +454,12 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     size="sm"
                     label={
                       enablingDebug
-                        ? t("resultsPanel.enteringDebug")
+                        ? t("rightPanel.enteringDebug")
                         : disablingDebug
-                          ? t("resultsPanel.exitingDebug")
+                          ? t("rightPanel.exitingDebug")
                           : selectedAgent?.debug_state === "enabled"
-                            ? t("resultsPanel.buttonExitDebug")
-                            : t("resultsPanel.enterDebug")
+                            ? t("rightPanel.buttonExitDebug")
+                            : t("rightPanel.enterDebug")
                     }
                     labelPosition="right"
                   />
@@ -433,7 +476,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                           debugState === "Paused"
                             ? "Resume (F5)"
                             : debugState === "Stopped"
-                              ? t("resultsPanel.buttonRestart")
+                              ? t("rightPanel.buttonRestart")
                               : "Pause (F6)"
                         }
                         active={debugState === "Paused"}
@@ -445,19 +488,19 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                       </ControlButton>
                       <ControlButton
                         onClick={() => step(activeSessionId, "iteration")}
-                        title={t("resultsPanel.buttonStep")}
+                        title={t("rightPanel.buttonStep")}
                         disabled={debugState === "Stopped"}
                       >
                         <StepForward className="h-3.5 w-3.5" />
                       </ControlButton>
                       <ControlButton
                         onClick={() => stop(activeSessionId)}
-                        title={t("resultsPanel.buttonStop")}
+                        title={t("rightPanel.buttonStop")}
                         disabled={debugState === "Stopped"}
                       >
                         <Square className="h-3.5 w-3.5" />
                       </ControlButton>
-                      <ControlButton onClick={() => restart(activeSessionId)} title={t("resultsPanel.buttonRestart")} disabled={!debugAgentId}>
+                      <ControlButton onClick={() => restart(activeSessionId)} title={t("rightPanel.buttonRestart")} disabled={!debugAgentId}>
                         <RefreshCw className="h-3.5 w-3.5" />
                       </ControlButton>
                       {hasPendingPatches && (
@@ -465,7 +508,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                           <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
                           <ControlButton
                             onClick={() => reExecute(activeSessionId).catch(log.error)}
-                            title={t("resultsPanel.buttonReExecute")}
+                            title={t("rightPanel.buttonReExecute")}
                             active
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
@@ -486,77 +529,128 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
                     <WifiOff className="h-5 w-5" />
                     <span className="text-center text-xs">
-                      {t("resultsPanel.debugUnavailableRemote")}
+                      {t("rightPanel.debugUnavailableRemote")}
                     </span>
                     <span className="text-center text-xs text-zinc-400">
-                      {t("resultsPanel.debugRemoteDesc")}
+                      {t("rightPanel.debugRemoteDesc")}
                     </span>
                   </div>
                 ) : !connected ? (
                   <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
                     <WifiOff className="h-5 w-5" />
                     <span className="text-center">
-                      {t("resultsPanel.debugConnectionLost")}
+                      {t("rightPanel.debugConnectionLost")}
                     </span>
                   </div>
                 ) : (
                   <>
                     {/* State card */}
-                    <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
+                    <div className="rounded-md border border-zinc-200 bg-panel-block p-3 dark:border-zinc-700">
                       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-                        <StateLabel label={t("resultsPanel.iteration")} value={`#${iteration}`} />
-                        <StateLabel label={t("resultsPanel.phase")} value={phase} highlight />
-                        <StateLabel label={t("resultsPanel.tokens")} value={`${promptTokens + completionTokens}`} />
+                        <StateLabel label={t("rightPanel.iteration")} value={`#${iteration}`} />
+                        <StateLabel label={t("rightPanel.phase")} value={phase} highlight />
+                        <StateLabel label={t("rightPanel.tokens")} value={`${promptTokens + completionTokens}`} />
                         <StateLabel
-                          label={t("resultsPanel.sessionStatusLabel")}
+                          label={t("rightPanel.sessionStatusLabel")}
                           value={debugState}
                           highlight={debugState !== "Running" && debugState !== "Stepping"}
                         />
                       </div>
                     </div>
-                    {/* Context snapshots card */}
-                    <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
-                      <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                        {t("resultsPanel.contextSnapshots", { count: snapshots.length })}
-                      </div>
-                      {snapshots.length === 0 && (
-                        <div className="py-3 text-center text-xs text-zinc-400">
-                          {t("resultsPanel.noSnapshots")}
-                          <br />
-                          {t("resultsPanel.sendMessageToGenerate")}
-                        </div>
-                      )}
-                      {snapshots.map((snap) => (
-                        <SnapshotNode
-                          key={snap.iteration}
-                          snapshot={snap}
-                          expandedSections={expandedSections}
-                          sectionCache={sectionCache}
-                          editingSection={editingSection}
-                          onToggleSection={(section) => toggleSection(snap.iteration, section)}
-                          onStartEdit={(section, original) =>
-                            setEditingSection({ iteration: snap.iteration, section, original, current: original })
-                          }
-                          onCancelEdit={() => setEditingSection(null)}
-                          onSaveEdit={(section, content) => {
-                            const patches: Record<string, unknown> = {};
-                            patches[section] = content;
-                            patchContext(activeSessionId, patches).catch(log.error);
-                            setEditingSection(null);
-                          }}
-                          onEditChange={(content) =>
-                            setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
-                          }
-                          onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
-                          getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
-                          // Anchor per-section token counts to the real, LLM-billed
-                          // total for the latest call so they sum exactly to
-                          // the value the user sees in the context-usage popover
-                          // instead of the per-section `token_estimate` heuristic.
-                          realTotalTokens={contextUsage?.total_tokens ?? undefined}
-                        />
-                      ))}
-                    </div>
+                    {/* Context snapshots card — level-1 collapsible list:
+                        the header toggles the whole snapshot list (same
+                        interaction as the PROMPT card, default open);
+                        snapshot rows are separated by the unified hairline
+                        so each iteration reads as a clear list row. When
+                        there is more than one page, the empty right side of
+                        the header carries the page number + arrows. */}
+                    <ListBox dividers={false}>
+                      <ExpandableRow
+                        open={snapshotsOpen}
+                        onToggle={() => setSnapshotsOpen((v) => !v)}
+                        title={t("rightPanel.contextSnapshots", { count: snapshots.length })}
+                        ariaLabel={t("rightPanel.contextSnapshots", { count: snapshots.length })}
+                        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                        trailing={
+                          snapshotTotalPages > 1 ? (
+                            <span
+                              className="flex items-center gap-1"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                aria-label="Previous snapshot page"
+                                disabled={snapshotPage === 0}
+                                onClick={() => {
+                                  setSnapshotsOpen(true);
+                                  setSnapshotPage((p) => Math.max(0, p - 1));
+                                }}
+                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                              >
+                                <ChevronLeft className="h-3.5 w-3.5" />
+                              </button>
+                              <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500">
+                                {snapshotPage + 1}/{snapshotTotalPages}
+                              </span>
+                              <button
+                                type="button"
+                                aria-label="Next snapshot page"
+                                disabled={snapshotPage >= snapshotTotalPages - 1}
+                                onClick={() => {
+                                  setSnapshotsOpen(true);
+                                  setSnapshotPage((p) => Math.min(snapshotTotalPages - 1, p + 1));
+                                }}
+                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                              >
+                                <ChevronRight className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          ) : undefined
+                        }
+                      >
+                        {snapshots.length === 0 && (
+                          <div className="px-3 py-3 text-center text-xs text-zinc-400">
+                            {t("rightPanel.noSnapshots")}
+                            <br />
+                            {t("rightPanel.sendMessageToGenerate")}
+                          </div>
+                        )}
+                        {pageSnapshots.length > 0 && (
+                          <ListBox variant="plain">
+                            {pageSnapshots.map((snap) => (
+                              <SnapshotNode
+                                key={snap.iteration}
+                                snapshot={snap}
+                                expandedSections={expandedSections}
+                                sectionCache={sectionCache}
+                                editingSection={editingSection}
+                                onToggleSection={(section) => toggleSection(snap.iteration, section)}
+                                onStartEdit={(section, original) =>
+                                  setEditingSection({ iteration: snap.iteration, section, original, current: original })
+                                }
+                                onCancelEdit={() => setEditingSection(null)}
+                                onSaveEdit={(section, content) => {
+                                  const patches: Record<string, unknown> = {};
+                                  patches[section] = content;
+                                  patchContext(activeSessionId, patches).catch(log.error);
+                                  setEditingSection(null);
+                                }}
+                                onEditChange={(content) =>
+                                  setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
+                                }
+                                onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
+                                getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
+                                // Anchor per-section token counts to the real, LLM-billed
+                                // total for the latest call so they sum exactly to
+                                // the value the user sees in the context-usage popover
+                                // instead of the per-section `token_estimate` heuristic.
+                                realTotalTokens={contextUsage?.total_tokens ?? undefined}
+                              />
+                            ))}
+                          </ListBox>
+                        )}
+                      </ExpandableRow>
+                    </ListBox>
                     <CompressionHistoryCard
                       agentId={selectedAgentId}
                       sessionId={activeSessionId}
@@ -571,18 +665,24 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
 
       {/* ── Status tab content ───────────────────────────────────── */}
       {activeTab === "status" && (
-        <div className="flex-1 overflow-y-auto p-3">
-          {/* Token statistics */}
-          <div className="mb-4">
-            <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              {t("resultsPanel.sessionStatus")}
-            </h3>
-            <div className="rounded-md bg-modal-surface p-3 text-xs">
+        <div className="flex-1 overflow-y-auto bg-right-panel p-3">
+          {/* Session Status — level-1 collapsible card matching the
+              Tools-tab "Builtin Tools" grammar: the clickable header
+              row (chevron + title) toggles the whole stats body, which
+              sits on the inset surface below a hairline. Default open. */}
+          <ListBox dividers={false}>
+            <ExpandableRow
+              open={sessionStatusOpen}
+              onToggle={() => setSessionStatusOpen((v) => !v)}
+              title={t("rightPanel.sessionStatus")}
+              ariaLabel={t("rightPanel.sessionStatus")}
+              bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 text-xs dark:border-zinc-700"
+            >
               {/* Context usage progress bar */}
               {contextUsage ? (
                 <div className="mb-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-zinc-500">{t("resultsPanel.contextUsage")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.contextUsage")}</span>
                     <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
                       {formatPercent(contextUsage.usage_percent)}%
                     </span>
@@ -594,19 +694,19 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     />
                   </div>
                   <div className="flex justify-between text-zinc-400 dark:text-zinc-500">
-                    <span>{formatTokenCount(contextUsage.total_tokens)} {t("resultsPanel.used")}</span>
-                    <span>{formatTokenCount(contextUsage.usable_context)} / {formatTokenCount(contextUsage.context_window)} {t("resultsPanel.available")}</span>
+                    <span>{formatTokenCount(contextUsage.total_tokens)} {t("rightPanel.used")}</span>
+                    <span>{formatTokenCount(contextUsage.usable_context)} / {formatTokenCount(contextUsage.context_window)} {t("rightPanel.available")}</span>
                   </div>
                   {/* Compacting indicator */}
                   {isCompacting && (
                     <div className="flex items-center gap-1.5 mt-1">
                       <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                      <span className="thinking-shimmer text-zinc-500">{t("resultsPanel.compacting")}</span>
+                      <span className="thinking-shimmer text-zinc-500">{t("rightPanel.compacting")}</span>
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="mb-3 text-zinc-400 dark:text-zinc-500 italic">{t("resultsPanel.noContextData")}</div>
+                <div className="mb-3 text-zinc-400 dark:text-zinc-500 italic">{t("rightPanel.noContextData")}</div>
               )}
               {/* ADR-066: cache hit ratio — same progress-bar style as the
                   context-usage block above.  This is the session-status
@@ -622,7 +722,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               {hasCacheData(contextUsage, "cumulative") && (
                 <div className="mb-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-zinc-500">{t("resultsPanel.cacheHitRatio")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.cacheHitRatio")}</span>
                     <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
                       {cacheHitRateLabel ?? "\u2014"}
                     </span>
@@ -636,33 +736,33 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     </div>
                   )}
                   <div className="flex justify-between text-zinc-400 dark:text-zinc-500">
-                    <span>{formatTokenCount(cacheStats.numerator)} {t("resultsPanel.cached")}</span>
-                    <span>{formatTokenCount(cacheStats.denominator)} {t("resultsPanel.promptTokens")}</span>
+                    <span>{formatTokenCount(cacheStats.numerator)} {t("rightPanel.cached")}</span>
+                    <span>{formatTokenCount(cacheStats.denominator)} {t("rightPanel.promptTokens")}</span>
                   </div>
                 </div>
               )}
               {/* Divider */}
               {contextUsage && <div className="border-t border-zinc-100 dark:border-zinc-700/50 mb-2" />}
-              <StatRow label={t("resultsPanel.promptTokens")} value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
-              <StatRow label={t("resultsPanel.completionTokens")} value={(tokenUsage?.completion_tokens ?? contextUsage?.output_tokens)?.toLocaleString()} />
+              <StatRow label={t("rightPanel.promptTokens")} value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
+              <StatRow label={t("rightPanel.completionTokens")} value={(tokenUsage?.completion_tokens ?? contextUsage?.output_tokens)?.toLocaleString()} />
               {/* Cumulative session totals — sourced from SessionTokens via the
                   context_usage WebSocket event. Distinct from the per-turn
                   Prompt / Completion rows above (which use the `last_` value
                   from the most recent LLM call). Rendered only when the runtime
                   has reported at least one LLM call for this session. */}
               <StatRow
-                label={t("resultsPanel.totalInputTokens")}
+                label={t("rightPanel.totalInputTokens")}
                 value={contextUsage?.total_input_tokens?.toLocaleString()}
               />
               <StatRow
-                label={t("resultsPanel.totalOutputTokens")}
+                label={t("rightPanel.totalOutputTokens")}
                 value={contextUsage?.total_output_tokens?.toLocaleString()}
               />
               {/* 字符/token — kept next to the token rows above so all
                   token-related counters read as one block. A divider
                   below separates this token cluster from the runtime
                   / model / status fields that follow. */}
-              <StatRow label={t("resultsPanel.labelCharactersPerToken")} value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
+              <StatRow label={t("rightPanel.labelCharactersPerToken")} value={modelRatio != null ? modelRatio.toFixed(2) : undefined} />
               {/* Divider — separates the token-count cluster above from
                   the runtime / model / status fields below. Uses `my-2`
                   (not `mb-2`) so the gap above and below the line is
@@ -670,19 +770,19 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   asymmetric `mb-2` makes the line look glued to the
                   text above and far from the text below. */}
               <div className="my-2 border-t border-zinc-100 dark:border-zinc-700/50" />
-              <StatRow label={t("resultsPanel.iterations")} value={iterations ? String(iterations) : undefined} />
+              <StatRow label={t("rightPanel.iterations")} value={iterations ? String(iterations) : undefined} />
               {sessionModel && (
-                <StatRow label={t("resultsPanel.labelModel")} value={sessionModel} />
+                <StatRow label={t("rightPanel.labelModel")} value={sessionModel} />
               )}
               {sessionProvider && (
-                <StatRow label={t("resultsPanel.labelProvider")} value={sessionProvider} />
+                <StatRow label={t("rightPanel.labelProvider")} value={sessionProvider} />
               )}
               {reasoningEffort != null && (
-                <StatRow label={t("resultsPanel.labelThinkingLevel")} value={reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1)} />
+                <StatRow label={t("rightPanel.labelThinkingLevel")} value={reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1)} />
               )}
-              <StatRow label={t("resultsPanel.labelTemperature")} value={temperature != null ? temperature.toFixed(2) : undefined} />
+              <StatRow label={t("rightPanel.labelTemperature")} value={temperature != null ? temperature.toFixed(2) : undefined} />
               <div className="flex justify-between py-1">
-                <span className="text-zinc-500">{t("resultsPanel.sessionStatusLabel")}</span>
+                <span className="text-zinc-500">{t("rightPanel.sessionStatusLabel")}</span>
                 <span className="flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300">
                   <span
                     className={cn(
@@ -703,19 +803,28 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   {sessionStatus ? sessionStatus.status.replace(/_/g, " ") : "\u2014"}
                 </span>
               </div>
-            </div>
-          </div>
+            </ExpandableRow>
+          </ListBox>
 
-          {/* Agent running status */}
-          <div>
-            <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              {t("resultsPanel.agentStatus")}
-            </h3>
-            <div className="rounded-md bg-modal-surface p-3 text-xs">
+          {/* Divider — full panel-width hairline separating the Session
+              Status card (above) from the Agent Status card (below).
+              Matches the workspace/memory panel divider style. */}
+          <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+
+          {/* Agent Status — level-1 collapsible card, same grammar as
+              the Session Status card above. */}
+          <ListBox dividers={false}>
+            <ExpandableRow
+              open={agentStatusOpen}
+              onToggle={() => setAgentStatusOpen((v) => !v)}
+              title={t("rightPanel.agentStatus")}
+              ariaLabel={t("rightPanel.agentStatus")}
+              bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 text-xs dark:border-zinc-700"
+            >
               {selectedAgent ? (
                 <>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.sessionStatusLabel")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.sessionStatusLabel")}</span>
                     <span className="flex items-center gap-1.5">
                       <span
                         className={cn(
@@ -724,24 +833,24 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                         )}
                       />
                       <span className="text-zinc-700 dark:text-zinc-300">
-                        {selectedAgent.running ? t("resultsPanel.running") : t("resultsPanel.stopped")}
+                        {selectedAgent.running ? t("rightPanel.running") : t("rightPanel.stopped")}
                       </span>
                     </span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.agent")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.agent")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{selectedAgent.name}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.version")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.version")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{selectedAgent.version}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.activeSessions")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.activeSessions")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{openSessionCount}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.totalSessions")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.totalSessions")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{totalSessionCount}</span>
                   </div>
                   {/* Divider — separates the identity / session-count
@@ -767,7 +876,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                            the gap before the first LLM call lands, and
                            remains usable even when no session is active. */}
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.agentTotalInputTokens")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.agentTotalInputTokens")}</span>
                     <span className="font-mono text-zinc-700 dark:text-zinc-300">
                       {(
                         contextUsage?.agent_total_input_tokens ??
@@ -776,7 +885,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     </span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.agentTotalOutputTokens")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.agentTotalOutputTokens")}</span>
                     <span className="font-mono text-zinc-700 dark:text-zinc-300">
                       {(
                         contextUsage?.agent_total_output_tokens ??
@@ -796,7 +905,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                            `agentStore.agents[id].agentTokenTotals`,
                            refreshed on every session-list fetch. */}
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.agentTotalCacheReadTokens")}</span>
+                    <span className="text-zinc-500">{t("rightPanel.agentTotalCacheReadTokens")}</span>
                     <span className="font-mono text-zinc-700 dark:text-zinc-300">
                       {(
                         contextUsage?.agent_total_cache_read_tokens ??
@@ -814,7 +923,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                       for non-Anthropic sessions. */}
                   {cacheProtocol === "anthropic" && (
                     <div className="flex justify-between py-1">
-                      <span className="text-zinc-500">{t("resultsPanel.agentTotalCacheWriteTokens")}</span>
+                      <span className="text-zinc-500">{t("rightPanel.agentTotalCacheWriteTokens")}</span>
                       <span className="font-mono text-zinc-700 dark:text-zinc-300">
                         {(
                           contextUsage?.agent_total_cache_write_tokens ??
@@ -825,10 +934,10 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   )}
                 </>
               ) : (
-                <div className="py-1 text-zinc-400 dark:text-zinc-500">{t("resultsPanel.noAgentSelected")}</div>
+                <div className="py-1 text-zinc-400 dark:text-zinc-500">{t("rightPanel.noAgentSelected")}</div>
               )}
-            </div>
-          </div>
+            </ExpandableRow>
+          </ListBox>
         </div>
       )}
 
@@ -856,6 +965,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
         style={{ display: activeTab === "workspace" ? "flex" : "none" }}
       >
         <WorkspaceExplorer />
+      </div>
       </div>
     </div>
 

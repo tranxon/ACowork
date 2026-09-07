@@ -16,6 +16,7 @@ import type { UserAvatarConfig } from "../../lib/avatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
+import { ExpandableRow, ListBox } from "../common/list";
 import i18n from "../../i18n";
 import { log } from "../../lib/logger";
 
@@ -223,12 +224,21 @@ export function ProfileTab() {
   };
 
   // ── Render ────────────────────────────────────────────────────────
+  // Tools-tab style level-1 collapsible cards (default open)
+  const [profileOpen, setProfileOpen] = useState(true);
+  const [identityOpen, setIdentityOpen] = useState(true);
 
   return (
     <div className="max-w-lg space-y-4">
       {/* ── Avatar & Display Name ────────────────────────────────── */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="mb-3 text-xs font-medium">{t("settings.profileTitle")}</h2>
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={profileOpen}
+          onToggle={() => setProfileOpen((v) => !v)}
+          title={t("settings.profileTitle")}
+          ariaLabel={t("settings.profileTitle")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
 
         {/* Avatar preview — click to open picker popup */}
         <div className="flex items-center gap-4">
@@ -381,19 +391,28 @@ export function ProfileTab() {
             className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
           />
         </div>
-      </div>
+        </ExpandableRow>
+      </ListBox>
 
       {/* ── Backend Identity Fields ───────────────────────────────── */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xs font-medium">{t("settings.identityTitle")}</h2>
-          {savedMsg && (
-            <span className={`text-[10px] ${savedMsg === "saved" ? "text-[var(--color-accent)]" : "text-red-500"}`}>
-              {savedMsg === "saved" ? t("settings.saved") : t("settings.saveFailed")}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={identityOpen}
+          onToggle={() => setIdentityOpen((v) => !v)}
+          title={t("settings.identityTitle")}
+          ariaLabel={t("settings.identityTitle")}
+          trailing={
+            <span onClick={(e) => e.stopPropagation()} className="flex shrink-0 items-center gap-2">
+              {savedMsg && (
+                <span className={`text-[10px] ${savedMsg === "saved" ? "text-[var(--color-accent)]" : "text-red-500"}`}>
+                  {savedMsg === "saved" ? t("settings.saved") : t("settings.saveFailed")}
+                </span>
+              )}
+              {saving && <span className="text-[10px] text-zinc-400">{t("settings.saving")}</span>}
             </span>
-          )}
-          {saving && <span className="text-[10px] text-zinc-400">{t("settings.saving")}</span>}
-        </div>
+          }
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
 
         {backendLoading ? (
           <p className="text-xs text-zinc-400">{t("settings.loading")}</p>
@@ -474,7 +493,8 @@ export function ProfileTab() {
             {t("settings.noProfile")}
           </p>
         )}
-      </div>
+        </ExpandableRow>
+      </ListBox>
     </div>
   );
 }

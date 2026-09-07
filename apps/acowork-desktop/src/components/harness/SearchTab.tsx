@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchKeyEntry, SearchProviderDef } from "../../lib/types";
 import { StyledInput } from "../common/StyledInput";
+import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { SEARCH_PROVIDERS, lookupSearchProvider, searchKeyPlaceholder } from "../../lib/search-providers";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
@@ -24,6 +25,10 @@ export function SearchTab() {
   const [editKey, setEditKey] = useState("");
   const [editBaseUrl, setEditBaseUrl] = useState("");
   const [editProviderDef, setEditProviderDef] = useState<SearchProviderDef | null>(null);
+
+  // Tools-tab style level-1 collapsible groups (default open)
+  const [configuredOpen, setConfiguredOpen] = useState(true);
+  const [availableOpen, setAvailableOpen] = useState(true);
 
   const fetchKeys = useCallback(async () => {
     try {
@@ -143,71 +148,80 @@ export function SearchTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xs font-medium">{t("harnessSearch.searchProviderManagement")}</h2>
-        </div>
-
-        {/* Configured Search Providers (top section) */}
-        {keysLoading ? (
-          <div className="py-3 text-center text-xs text-zinc-400">{t("harnessSearch.loading")}</div>
-        ) : keys.length > 0 && (
-          <div>
-            <h3 className="mb-2 text-xs font-medium text-zinc-500">{t("harnessSearch.configuredSearchProviders")}</h3>
-            <div className="space-y-1">
+      {/* Configured Search Providers — Tools-tab level-1 collapsible
+          card, default open, unified rows in the inset body. */}
+      {keysLoading ? (
+        <div className="py-3 text-center text-xs text-zinc-400">{t("harnessSearch.loading")}</div>
+      ) : keys.length > 0 && (
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={configuredOpen}
+            onToggle={() => setConfiguredOpen((v) => !v)}
+            title={t("harnessSearch.configuredSearchProviders", { count: keys.length })}
+            ariaLabel={t("harnessSearch.configuredSearchProviders", { count: keys.length })}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          >
+            <ListBox variant="plain">
               {keys.map((keyEntry) => {
                 const def = lookupSearchProvider(keyEntry.provider);
                 const providerName = def?.name || keyEntry.provider;
 
                 return (
-                  <div key={keyEntry.provider} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center flex-nowrap gap-2">
-                        <span className="shrink-0 text-xs font-medium">{providerName}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
+                  <ListRow
+                    key={keyEntry.provider}
+                    trailing={
+                      <div className="flex shrink-0 items-center gap-2.5">
                         <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harnessSearch.active")}</span>
-                        <span className="text-xs text-zinc-400">{t("harnessSearch.key")}: {keyEntry.key_preview}</span>
                         <button
+                          type="button"
                           onClick={() => handleEdit(keyEntry.provider)}
-                          className="text-xs hover:opacity-70" style={{ color: "var(--color-accent)" }}
+                          className="text-xs hover:opacity-70"
+                          style={{ color: "var(--color-accent)" }}
                         >
                           {t("harnessSearch.edit")}
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleRemove(keyEntry.provider)}
                           className="text-xs text-red-500 hover:text-red-700"
                         >
                           {t("harnessSearch.remove")}
                         </button>
                       </div>
+                    }
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{providerName}</span>
+                      <span className="shrink-0 text-[11px] text-zinc-400">{t("harnessSearch.key")}: {keyEntry.key_preview}</span>
                     </div>
-                  </div>
+                  </ListRow>
                 );
               })}
-            </div>
-          </div>
-        )}
+            </ListBox>
+          </ExpandableRow>
+        </ListBox>
+      )}
 
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-
-        {/* Available Search Providers (bottom section) */}
-        <div>
-          <h3 className="mb-2 text-xs font-medium text-zinc-500">{t("harnessSearch.availableSearchProviders")}</h3>
-          <div className="space-y-1">
-            {availableProviders.length === 0 ? (
-              <div className="py-3 text-center text-xs text-zinc-400">{t("harnessSearch.allConfigured")}</div>
-            ) : (
-              availableProviders.map((item) => (
-                <div key={item.id} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
-                  <div className="flex items-center justify-between">
-                    <div className="min-w-0 flex-1">
-                      <span className="text-xs font-medium">{item.name}</span>
-                      <span className="ml-2 text-xs text-zinc-400">{item.description}</span>
-                    </div>
+      {/* Available Search Providers — Tools-tab level-1 collapsible
+          card, default open. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={availableOpen}
+          onToggle={() => setAvailableOpen((v) => !v)}
+          title={t("harnessSearch.availableSearchProviders", { count: availableProviders.length })}
+          ariaLabel={t("harnessSearch.availableSearchProviders", { count: availableProviders.length })}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          {availableProviders.length === 0 ? (
+            <div className="px-3 py-3 text-center text-xs text-zinc-400">{t("harnessSearch.allConfigured")}</div>
+          ) : (
+            <ListBox variant="plain">
+              {availableProviders.map((item) => (
+                <ListRow
+                  key={item.id}
+                  trailing={
                     <button
+                      type="button"
                       onClick={() => {
                         setNewProvider(item.id);
                         setNewBaseUrl(item.base_url);
@@ -217,14 +231,21 @@ export function SearchTab() {
                     >
                       {t("harnessSearch.addKey")}
                     </button>
+                  }
+                >
+                  <div className="flex min-w-0 items-baseline gap-2">
+                    <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{item.name}</span>
+                    <span className="truncate text-[11px] text-zinc-400">{item.description}</span>
                   </div>
-                  <div className="mt-0.5 text-xs text-zinc-400">{item.free_quota}</div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
+                  {item.free_quota && (
+                    <div className="mt-0.5 text-[10px] text-zinc-400">{item.free_quota}</div>
+                  )}
+                </ListRow>
+              ))}
+            </ListBox>
+          )}
+        </ExpandableRow>
+      </ListBox>
 
       {/* Add key dialog */}
       {showAddDialog && (

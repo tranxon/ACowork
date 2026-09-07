@@ -18,6 +18,8 @@ import { DocTreeSidebar } from "./doc/DocTreeSidebar";
 import { ReviewQueue } from "./doc/ReviewQueue";
 import { DocEditor } from "./doc/DocEditor";
 import { DOC_ROOT_DIR_ID } from "../lib/doc-types";
+import { useDragResize } from "../hooks/useDragResize";
+import { SplitHandle } from "../components/common/SplitHandle";
 
 export function DocsView() {
   const { t } = useTranslation();
@@ -51,12 +53,24 @@ export function DocsView() {
     return () => clearInterval(timer);
   }, [check, loadDir, loadPending]);
 
+  // 与聊天 AgentList 一致的左侧分栏宽度（可拖动 + localStorage 持久化）
+  const sidebar = useDragResize({
+    storageKey: "acowork-doc-list-width",
+    defaultWidth: 240,
+    minWidth: 160,
+    maxWidth: 400,
+  });
+
   const offline = healthy === false;
 
   return (
-    <div className="flex h-full overflow-hidden rounded-xl bg-chat-area">
+    <div className="flex h-full overflow-hidden rounded-xl bg-page-bg">
       {/* 左侧目录树（离线也可浏览缓存） */}
-      <DocTreeSidebar />
+      <DocTreeSidebar width={sidebar.width} />
+      <SplitHandle
+        onMouseDown={sidebar.onHandleMouseDown}
+        ariaLabel={t("appLayout.ariaLabelResizeSidebar")}
+      />
 
       {/* 右侧列 */}
       <div className="flex h-full min-w-0 flex-1 flex-col">

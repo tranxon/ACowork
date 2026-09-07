@@ -9,16 +9,18 @@
 //! `GET /api/agents/{id}/sessions/{sid}/messages` API (the same source
 //! the chat stream's `CompactionCard` renders from).
 //!
-//! UI mirrors `SnapshotNode`'s collapse/expand style: each row collapses
-//! to a single-line summary (time / level / ratio) and expands into a
-//! vertical key-value block on click. Avoids the narrow-panel cramping
-//! of the previous 6-column table.
+//! Renders on the unified list grammar (common/list): a ListBox card
+//! containing one ExpandableRow per compaction event; the expanded body
+//! shows the details as a KvList. The per-level colour pill (cnLevel)
+//! intentionally keeps its own amber/orange coding — it is data-viz
+//! (deep-compaction severity), not a generic status badge.
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, Loader, RefreshCw } from "lucide-react";
+import { Loader, RefreshCw } from "lucide-react";
 
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { CompactionEventMeta, ConversationEntry } from "../../lib/types";
+import { ListBox, ExpandableRow, KvList } from "../common/list";
 
 interface CompactionRow {
   ts: number;
@@ -63,6 +65,9 @@ export function CompressionHistoryCard({
   // Indices of expanded rows. Use a Set so multiple rows can be open at
   // once (mirrors SnapshotNode, which keeps each snapshot independent).
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  // Level-1 collapse state — the whole history card body toggles from
+  // the header row (same interaction as the PROMPT card). Default open.
+  const [open, setOpen] = useState(true);
 
   const load = useCallback(async () => {
     if (!agentId || !sessionId) {
@@ -105,116 +110,98 @@ export function CompressionHistoryCard({
   }, []);
 
   return (
-    <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-          {t("resultsPanel.compressionHistory", { count: rows?.length ?? 0 })}
-        </span>
-        <button
-          type="button"
-          onClick={() => void load()}
-          title={t("resultsPanel.buttonRefresh")}
-          className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-        </button>
-      </div>
+    <ListBox dividers={false}>
+      {/* Level-1 collapsible header — matches the PROMPT card header:
+          clicking the row toggles the whole history list; the refresh
+          button stops propagation. */}
+      <ExpandableRow
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        title={t("rightPanel.compressionHistory", { count: rows?.length ?? 0 })}
+        trailing={
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void load();
+            }}
+            title={t("rightPanel.buttonRefresh")}
+            className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        }
+        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+      >
 
       {rows === null && !error && (
         <div className="flex items-center justify-center gap-2 py-3 text-xs text-zinc-400">
           <Loader className="h-3.5 w-3.5 animate-spin" />
-          {t("resultsPanel.loadingCompressionHistory")}
+          {t("rightPanel.loadingCompressionHistory")}
         </div>
       )}
 
       {error && (
         <div className="py-3 text-center text-xs text-red-500">
-          {t("resultsPanel.compressionHistoryError")}: {error}
+          {t("rightPanel.compressionHistoryError")}: {error}
         </div>
       )}
 
       {rows !== null && !error && rows.length === 0 && (
         <div className="py-3 text-center text-xs text-zinc-400">
-          {t("resultsPanel.noCompressionEvents")}
+          {t("rightPanel.noCompressionEvents")}
         </div>
       )}
 
       {rows !== null && !error && rows.length > 0 && (
-        <div className="-mx-1">
+        <ListBox variant="plain">
           {rows.map((row, i) => {
             const m = row.meta;
-            const isOpen = expanded.has(i);
             const time = formatTime(row.ts);
             const before = m.before_tokens ?? 0;
             const after = m.after_tokens ?? 0;
             const ratio = formatRatio(before, after);
             return (
-              <div key={i} className="border-b border-zinc-100 dark:border-zinc-800">
-                {/* Collapsed header — main info only */}
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => toggleExpanded(i)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      toggleExpanded(i);
-                    }
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800/50 cursor-pointer"
-                >
-                  {isOpen ? (
-                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                  )}
+              <ExpandableRow
+                key={i}
+                open={expanded.has(i)}
+                onToggle={() => toggleExpanded(i)}
+                surface="inset"
+                title={
                   <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                     {time}
                   </span>
-                  <span className={cnLevel(m.level)}>
-                    Lv{m.level}
-                  </span>
-                  <span className="ml-auto font-mono text-[11px] text-zinc-700 dark:text-zinc-300">
+                }
+                meta={<span className={cnLevel(m.level)}>Lv{m.level}</span>}
+                trailing={
+                  <span className="font-mono text-[11px] text-zinc-700 dark:text-zinc-300">
                     {ratio}
                   </span>
-                </div>
-
-                {/* Expanded details — vertical key/value list, one per row */}
-                {isOpen && (
-                  <div className="mx-2 mb-2 mt-0.5 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-400">
-                    <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compTime")}: {time}
-                    </div>
-                    <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compLevel")}: {m.level}
-                    </div>
-                    <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compTokens")}: {formatTokens(before)} → {formatTokens(after)}
-                    </div>
-                    <div className="whitespace-nowrap leading-4">
-                      {t("resultsPanel.compRatio")}: {ratio}
-                    </div>
-                    {m.model && (
-                      <div
-                        className="whitespace-nowrap leading-4"
-                        title={m.model}
-                      >
-                        {t("resultsPanel.compModel")}: {m.model}
-                      </div>
-                    )}
-                    {(m.compacted_from_id || m.compacted_to_id) && (
-                      <div className="whitespace-nowrap leading-4">
-                        {t("resultsPanel.compRange")}: {shortId(m.compacted_from_id)} → {shortId(m.compacted_to_id)}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
+                }
+                bodyClassName="mx-2 mb-2 mt-1"
+              >
+                <KvList
+                  rows={[
+                    { k: t("rightPanel.compTime"), v: time },
+                    { k: t("rightPanel.compLevel"), v: m.level },
+                    { k: t("rightPanel.compTokens"), v: `${formatTokens(before)} → ${formatTokens(after)}` },
+                    { k: t("rightPanel.compRatio"), v: ratio },
+                    ...(m.model ? [{ k: t("rightPanel.compModel"), v: m.model }] : []),
+                    ...(m.compacted_from_id || m.compacted_to_id
+                      ? [{
+                          k: t("rightPanel.compRange"),
+                          v: `${shortId(m.compacted_from_id)} → ${shortId(m.compacted_to_id)}`,
+                        }]
+                      : []),
+                  ]}
+                />
+              </ExpandableRow>
             );
           })}
-        </div>
+        </ListBox>
       )}
-    </div>
+      </ExpandableRow>
+    </ListBox>
   );
 }
 

@@ -9,7 +9,9 @@ import { Dropdown } from "../common/Dropdown";
 import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel, startMigration, selectEmbeddingModelWithMigration } from "../../lib/gateway-api";
 import { fetchCloudEmbeddingProviders, selectCloudEmbeddingModel, setCloudEmbeddingApiKey, deleteCloudEmbeddingApiKey, testCloudEmbeddingProvider, addCloudEmbeddingProvider } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
-import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus } from "lucide-react";
+import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw } from "lucide-react";
+import { ExpandableRow, ListBox } from "../common/list";
+import { Tooltip } from "../common/Tooltip";
 
 export function EmbeddingModelTab() {
     const { t } = useTranslation();
@@ -34,6 +36,9 @@ export function EmbeddingModelTab() {
     const migrationPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<EmbeddingTestResponse | null>(null);
+    // Tools-tab level-1 collapsible group shells for Local / Cloud, default open.
+    const [localOpen, setLocalOpen] = useState(true);
+    const [cloudOpen, setCloudOpen] = useState(true);
 
     // ── Cloud embedding providers (S1-7) ─────────────────────────────
     const [cloudProviders, setCloudProviders] = useState<CloudEmbeddingProvider[]>([]);
@@ -577,155 +582,200 @@ export function EmbeddingModelTab() {
                 />
             )}
 
-            {/* Model list */}
-            <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-                <div className="mb-3 flex items-center justify-between">
-                    <h2 className="inline-flex items-center gap-1.5 text-xs font-medium">
-                        <HardDrive className="h-3.5 w-3.5" />
-                        {t("embedding.localModels")}
-                    </h2>
-                    <button
-                        onClick={loadModels}
-                        disabled={loading}
-                        className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
-                    >
-                        {loading ? t("embedding.loading") : t("embedding.refresh")}
-                    </button>
-                </div>
-
-                {loading && models.length === 0 ? (
-                    <p className="text-xs text-zinc-400">{t("embedding.loading")}</p>
-                ) : models.length === 0 ? (
-                    <p className="text-xs text-zinc-400">{t("embedding.noModels")}</p>
-                ) : (
-                    <div className="space-y-2">
-                        {models.map((model) => (
-                            <ModelCard
-                                key={model.id}
-                                model={model}
-                                isActive={model.id === activeModelId}
-                                isDownloading={downloadingIds.has(model.id)}
-                                isSelecting={selectingId === model.id}
-                                isDeleting={deletingId === model.id}
-                                progress={downloadProgress[model.id]}
-                                onDownload={handleDownload}
-                                onSelect={() => handleSelect(model.id)}
-                                onDelete={() => setDeleteConfirm({ modelId: model.id, modelName: model.name })}
-                            />
-                        ))}
-                    </div>
-                )}
-            </div>
-
-            {/* Cloud Embedding Providers (S1-7) */}
-            <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-                <div className="mb-3 flex items-center justify-between">
-                    <h2 className="inline-flex items-center gap-1.5 text-xs font-medium">
-                        <Cloud className="h-3.5 w-3.5" />
-                        {t("embedding.cloudProviders")}
-                    </h2>
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={() => setCustomDialogOpen(true)}
-                            className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
-                        >
-                            <Plus className="h-3 w-3" />
-                            {t("embedding.addCustom")}
-                        </button>
-                        <button
-                            onClick={loadCloudProviders}
-                            disabled={cloudLoading}
-                            className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
-                        >
-                            {cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
-                        </button>
-                    </div>
-                </div>
-
-                {/* Active cloud selection summary */}
-                {cloudActive && (
-                    <div className="mb-3 flex items-center justify-between rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-[11px] dark:border-zinc-700 dark:bg-zinc-800">
-                        <div className="flex items-center gap-2">
-                            <span
-                                className="rounded px-1.5 py-0.5 text-[10px] font-medium"
-                                style={{
-                                    backgroundColor:
-                                        "color-mix(in srgb, var(--color-accent) 15%, transparent)",
-                                    color: "var(--color-accent)",
-                                }}
+            {/* Local models — Tools-tab level-1 collapsible card: chevron +
+                title + count badge; the interactive ModelCards stay intact
+                inside the fold body. */}
+            <ListBox dividers={false}>
+                <ExpandableRow
+                    open={localOpen}
+                    onToggle={() => setLocalOpen((v) => !v)}
+                    title={
+                        <span className="inline-flex items-center gap-1.5">
+                            <HardDrive className="h-3.5 w-3.5" />
+                            {t("embedding.localModels", { count: models.length })}
+                        </span>
+                    }
+                    ariaLabel={t("embedding.localModels", { count: models.length })}
+                    trailing={
+                        <span onClick={(e) => e.stopPropagation()}>
+                            <Tooltip
+                                content={loading ? t("embedding.loading") : t("embedding.refresh")}
+                                variant="plain"
                             >
-                                {t("embedding.cloudActive")}
-                            </span>
-                            <span className="font-medium">
-                                {cloudActive.provider_id}/{cloudActive.model_id}
-                            </span>
-                            <span className="text-zinc-500">· {cloudActive.dimension}d</span>
-                            {!cloudActive.has_api_key && (
-                                <span className="text-amber-600 dark:text-amber-400">
-                                    · {t("embedding.apiKeyMissing")}
-                                </span>
-                            )}
+                                <button
+                                    aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
+                                    onClick={loadModels}
+                                    disabled={loading}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                >
+                                    {loading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                    )}
+                                </button>
+                            </Tooltip>
+                        </span>
+                    }
+                    bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                >
+                    {loading && models.length === 0 ? (
+                        <div className="px-3 py-3 text-xs text-zinc-400">{t("embedding.loading")}</div>
+                    ) : models.length === 0 ? (
+                        <div className="px-3 py-3 text-xs text-zinc-400">{t("embedding.noModels")}</div>
+                    ) : (
+                        <div className="space-y-2 p-3">
+                            {models.map((model) => (
+                                <ModelCard
+                                    key={model.id}
+                                    model={model}
+                                    isActive={model.id === activeModelId}
+                                    isDownloading={downloadingIds.has(model.id)}
+                                    isSelecting={selectingId === model.id}
+                                    isDeleting={deletingId === model.id}
+                                    progress={downloadProgress[model.id]}
+                                    onDownload={handleDownload}
+                                    onSelect={() => handleSelect(model.id)}
+                                    onDelete={() => setDeleteConfirm({ modelId: model.id, modelName: model.name })}
+                                />
+                            ))}
                         </div>
-                    </div>
-                )}
+                    )}
+                </ExpandableRow>
+            </ListBox>
 
-                {/* Cloud error inline */}
-                {cloudError && (
-                    <div className="mb-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
-                        {cloudError}
-                    </div>
-                )}
+            {/* Cloud Embedding Providers (S1-7) — Tools-tab level-1
+                collapsible card; add-custom / refresh actions live in the
+                header trailing slot (stopPropagation so they never toggle
+                the fold). CloudProviderCard bodies stay intact. */}
+            <ListBox dividers={false}>
+                <ExpandableRow
+                    open={cloudOpen}
+                    onToggle={() => setCloudOpen((v) => !v)}
+                    title={
+                        <span className="inline-flex items-center gap-1.5">
+                            <Cloud className="h-3.5 w-3.5" />
+                            {t("embedding.cloudProviders", { count: cloudProviders.length })}
+                        </span>
+                    }
+                    ariaLabel={t("embedding.cloudProviders", { count: cloudProviders.length })}
+                    trailing={
+                        <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                            <Tooltip content={t("embedding.addCustomProvider")} variant="plain">
+                                <button
+                                    aria-label={t("embedding.addCustomProvider")}
+                                    onClick={() => setCustomDialogOpen(true)}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                </button>
+                            </Tooltip>
+                            <Tooltip
+                                content={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
+                                variant="plain"
+                            >
+                                <button
+                                    aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
+                                    onClick={loadCloudProviders}
+                                    disabled={cloudLoading}
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                >
+                                    {cloudLoading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                    )}
+                                </button>
+                            </Tooltip>
+                        </span>
+                    }
+                    bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                >
+                    {/* Active cloud selection summary */}
+                    {cloudActive && (
+                        <div className="mx-3 mt-3 flex items-center justify-between rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-[11px] dark:border-zinc-700 dark:bg-zinc-800">
+                            <div className="flex items-center gap-2">
+                                <span
+                                    className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                                    style={{
+                                        backgroundColor:
+                                            "color-mix(in srgb, var(--color-accent) 15%, transparent)",
+                                        color: "var(--color-accent)",
+                                    }}
+                                >
+                                    {t("embedding.cloudActive")}
+                                </span>
+                                <span className="font-medium">
+                                    {cloudActive.provider_id}/{cloudActive.model_id}
+                                </span>
+                                <span className="text-zinc-500">· {cloudActive.dimension}d</span>
+                                {!cloudActive.has_api_key && (
+                                    <span className="text-amber-600 dark:text-amber-400">
+                                        · {t("embedding.apiKeyMissing")}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    )}
 
-                {cloudProviders.length === 0 ? (
-                    <p className="text-xs text-zinc-400">{t("embedding.cloudNoProviders")}</p>
-                ) : (
-                    <div className="space-y-3">
-                        {cloudProviders.map((provider) => (
-                            <CloudProviderCard
-                                key={provider.id}
-                                provider={provider}
-                                active={cloudActive?.provider_id === provider.id ? cloudActive : null}
-                                testing={cloudTesting === provider.id}
-                                testResult={
-                                    // Hide result while testing this card OR while editing
-                                    // its key. Otherwise render this provider's own result
-                                    // (was previously a single global state — caused
-                                    //  one card's failure to bleed into every other card).
-                                    cloudTesting === provider.id || keyEditingProvider === provider.id
-                                        ? null
-                                        : cloudTestResults[provider.id] ?? null
-                                }
-                                selectingModelId={cloudSelecting?.startsWith(`${provider.id}/`)
-                                    ? cloudSelecting.split("/", 2)[1] ?? null
-                                    : null}
-                                keyEditing={keyEditingProvider === provider.id}
-                                keyDraft={keyDraft}
-                                keySaving={keySaving}
-                                onChangeKeyDraft={setKeyDraft}
-                                onStartKeyEdit={() => {
-                                    setKeyEditingProvider(provider.id);
-                                    setKeyDraft("");
-                                    // Clear only this provider's previous test result
-                                    setCloudTestResults((prev) => {
-                                        if (!(provider.id in prev)) return prev;
-                                        const next = { ...prev };
-                                        delete next[provider.id];
-                                        return next;
-                                    });
-                                }}
-                                onCancelKeyEdit={() => {
-                                    setKeyEditingProvider(null);
-                                    setKeyDraft("");
-                                }}
-                                onSubmitKey={() => handleCloudKeySubmit(provider.id)}
-                                onDeleteKey={() => handleCloudKeyDelete(provider.id)}
-                                onTest={() => handleCloudTest(provider.id)}
-                                onSelectModel={(modelId) => handleCloudSelect(provider.id, modelId)}
-                            />
-                        ))}
-                    </div>
-                )}
-            </div>
+                    {/* Cloud error inline */}
+                    {cloudError && (
+                        <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                            {cloudError}
+                        </div>
+                    )}
+
+                    {cloudProviders.length === 0 ? (
+                        <div className="px-3 py-3 text-xs text-zinc-400">{t("embedding.cloudNoProviders")}</div>
+                    ) : (
+                        <div className="space-y-3 p-3">
+                            {cloudProviders.map((provider) => (
+                                <CloudProviderCard
+                                    key={provider.id}
+                                    provider={provider}
+                                    active={cloudActive?.provider_id === provider.id ? cloudActive : null}
+                                    testing={cloudTesting === provider.id}
+                                    testResult={
+                                        // Hide result while testing this card OR while editing
+                                        // its key. Otherwise render this provider's own result
+                                        // (was previously a single global state — caused
+                                        //  one card's failure to bleed into every other card).
+                                        cloudTesting === provider.id || keyEditingProvider === provider.id
+                                            ? null
+                                            : cloudTestResults[provider.id] ?? null
+                                    }
+                                    selectingModelId={cloudSelecting?.startsWith(`${provider.id}/`)
+                                        ? cloudSelecting.split("/", 2)[1] ?? null
+                                        : null}
+                                    keyEditing={keyEditingProvider === provider.id}
+                                    keyDraft={keyDraft}
+                                    keySaving={keySaving}
+                                    onChangeKeyDraft={setKeyDraft}
+                                    onStartKeyEdit={() => {
+                                        setKeyEditingProvider(provider.id);
+                                        setKeyDraft("");
+                                        // Clear only this provider's previous test result
+                                        setCloudTestResults((prev) => {
+                                            if (!(provider.id in prev)) return prev;
+                                            const next = { ...prev };
+                                            delete next[provider.id];
+                                            return next;
+                                        });
+                                    }}
+                                    onCancelKeyEdit={() => {
+                                        setKeyEditingProvider(null);
+                                        setKeyDraft("");
+                                    }}
+                                    onSubmitKey={() => handleCloudKeySubmit(provider.id)}
+                                    onDeleteKey={() => handleCloudKeyDelete(provider.id)}
+                                    onTest={() => handleCloudTest(provider.id)}
+                                    onSelectModel={(modelId) => handleCloudSelect(provider.id, modelId)}
+                                />
+                            ))}
+                        </div>
+                    )}
+                </ExpandableRow>
+            </ListBox>
 
             {/* Add custom cloud embedding provider dialog (S2) */}
             <AddCustomEmbeddingProviderDialog

@@ -143,9 +143,27 @@ pub(crate) async fn phase_d_run(
         ));
     };
 
+    // Companion to `lifecycle_publisher`: re-publishes the retained
+    // `acowork/agents/{id}/config` snapshot. The MCP-reconnect
+    // branch in `mqtt_only_loop` calls this after
+    // `connect_mcp_with_reconcile_and_filter` finishes so the
+    // Desktop Tools panel refreshes the per-tool list / chevron
+    // count without a tab remount (the previous workaround).
+    let config_publisher: crate::mqtt::MqttAgentConfigPublisher = if let Some(ref mqtt) =
+        ctx.mqtt_client
+    {
+        crate::mqtt::MqttAgentConfigPublisher::from_runtime_client(mqtt)
+    } else {
+        // Unreachable: same guard as `lifecycle_publisher` above.
+        return Err(crate::error::RuntimeError::Config(
+            "config publisher: MQTT client disappeared".into(),
+        ));
+    };
+
     let result = mqtt_only_loop(
         &session_manager,
         &lifecycle_publisher,
+        &config_publisher,
         mqtt_dispatch_rx,
         mcp_startup_rx,
         mcp_runtime_tx,
@@ -379,6 +397,7 @@ fn control_action_to_inbound(
 async fn mqtt_only_loop(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
+    config_publisher: &crate::mqtt::MqttAgentConfigPublisher,
     mut mqtt_dispatch_rx: tokio::sync::mpsc::UnboundedReceiver<(
         String,
         crate::agent::inbound::InboundMessage,
@@ -461,6 +480,22 @@ async fn mqtt_only_loop(
                     session_manager.lock().await.apply_mcp_connection_result(
                         registry, wrappers, specs, failures,
                     );
+                    // MCP reconcile+filter (ADR-069) is now persisted
+                    // into `agent_mcp_tools.json` — re-publish the
+                    // retained `acowork/agents/{id}/config` so the
+                    // Desktop Tools panel refreshes `/mcp-tools` and
+                    // shows the chevron + per-tool list without a tab
+                    // remount. Source of truth is the on-disk file
+                    // (use case result for the patch path, freshly
+                    // serialized here for the MCP path — equivalent on
+                    // the receiver).
+                    if let Ok(Some(cfg)) =
+                        crate::agent_config::load_agent_config(std::path::Path::new(&work_dir))
+                    {
+                        let config_json =
+                            serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+                        config_publisher.publish(config_json).await;
+                    }
                 }
             }
 

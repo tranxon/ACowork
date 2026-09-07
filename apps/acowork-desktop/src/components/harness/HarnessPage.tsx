@@ -8,7 +8,7 @@ import { Dropdown } from "../common/Dropdown";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
-import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star } from "lucide-react";
+import { Monitor, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, CheckCircle2 } from "lucide-react";
 import { useMcpStore } from "../../stores/mcpStore";
 import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
 import { SearchTab } from "./SearchTab";
@@ -21,6 +21,7 @@ import { GlobalCompactModelCard } from "./GlobalCompactModelCard";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { ErrorBox } from "../common/ErrorBox";
+import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { TabButton } from "../common/tab";
 
 type HarnessTab = "providers" | "search" | "mcp" | "embedding" | "lsp";
@@ -38,7 +39,7 @@ export function HarnessPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-chat-area">
+    <div className="flex flex-1 flex-col bg-page-bg">
       {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
         {tabs.map((tab) => (
@@ -87,6 +88,9 @@ function ProvidersTab() {
   const [editModelCaps, setEditModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
   const [editExpandedModels, setEditExpandedModels] = useState<Set<string>>(new Set());
   const [editCompactModel, setEditCompactModel] = useState("");
+
+  // Tools-tab style level-1 collapsible groups on this tab (default open).
+  const [configuredOpen, setConfiguredOpen] = useState(true);
 
   // Gateway config for default provider indication
   const [config, setConfig] = useState<GatewayConfig | null>(null);
@@ -249,37 +253,41 @@ function ProvidersTab() {
         providers={dynamicProviders}
       />
 
-      <hr className="border-zinc-200 dark:border-zinc-700" />
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-xs font-medium">{t("harness.providerManagement")}</h2>
-        </div>
-
-        {/* Configured Providers (top section) — depends on fetchKeys */}
-        {keysLoading ? (
-          <div className="py-3 text-center text-xs text-zinc-400">{t("harness.loadingKeys")}</div>
-        ) : keys.length > 0 && (
-          <div>
-            <h3 className="mb-2 text-xs font-medium text-zinc-500">{t("harness.configuredProviders")}</h3>
-            <div className="space-y-1">
+      {/* Configured Providers — Tools-tab level-1 collapsible card:
+          chevron + title + count badge in the header, default open;
+          configured keys render as unified rows in the inset body. */}
+      {keysLoading ? (
+        <div className="py-3 text-center text-xs text-zinc-400">{t("harness.loadingKeys")}</div>
+      ) : keys.length > 0 && (
+        <ListBox dividers={false}>
+          <ExpandableRow
+            open={configuredOpen}
+            onToggle={() => setConfiguredOpen((v) => !v)}
+            title={t("harness.configuredProviders", { count: keys.length })}
+            ariaLabel={t("harness.configuredProviders", { count: keys.length })}
+            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          >
+            <ListBox variant="plain">
               {keys.map((keyEntry) => {
                 const provider = dynamicProviders.find((p) => p.id === keyEntry.provider);
                 const providerName = provider?.name || keyEntry.provider;
                 const isLocal = keyEntry.local || isLocalProvider(keyEntry.provider);
                 const isCustom = keyEntry.custom || provider?.custom;
+                const isDefault = config?.default_provider === keyEntry.provider;
 
                 return (
-                  <div key={keyEntry.provider} className="rounded-md border border-zinc-200 px-3 py-1.5 dark:border-zinc-700">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="shrink-0 text-xs font-medium">{providerName}</span>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <Tooltip content={config?.default_provider === keyEntry.provider ? t("harness.defaultProvider") : t("harness.setDefaultProvider")} variant="plain">
+                  <ListRow
+                    key={keyEntry.provider}
+                    trailing={
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <Tooltip content={isDefault ? t("harness.defaultProvider") : t("harness.setDefaultProvider")} variant="plain">
                           <button
+                            type="button"
                             onClick={() => handleSetDefaultProvider(keyEntry.provider)}
+                            aria-label={t("harness.setDefaultProvider")}
                             className={cn(
                               "rounded p-0.5",
-                              config?.default_provider === keyEntry.provider
+                              isDefault
                                 ? "text-amber-500"
                                 : "text-zinc-400 hover:text-amber-500 dark:hover:text-amber-400",
                             )}
@@ -287,87 +295,83 @@ function ProvidersTab() {
                             <Star className="h-3.5 w-3.5" />
                           </button>
                         </Tooltip>
-                        <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
-                        {isCustom ? (
-                          <Tooltip content={t("harness.customProviderNoKey")} variant="plain">
-                            <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
-                              🔧 {t("harness.custom")}
-                            </span>
-                          </Tooltip>
-                        ) : isLocal ? (
-                          <Tooltip content={t("harness.localProviderNoKey")} variant="plain">
-                            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
-                              🏠 {t("harness.local")}
-                            </span>
-                          </Tooltip>
-                        ) : (
-                          <span className="text-xs text-zinc-400">{t("harness.key")}: {keyEntry.key_preview}</span>
-                        )}
                         <button
+                          type="button"
                           onClick={() => handleEdit(keyEntry.provider)}
                           className="rounded btn-solid px-2 py-0.5 text-xs"
                         >
                           {t("harness.edit")}
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleRemove(keyEntry.provider)}
                           className="rounded btn-solid px-2 py-0.5 text-xs"
                         >
                           {t("harness.remove")}
                         </button>
                       </div>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-                      {keyEntry.models?.length ? (
-                        <span className="text-xs text-zinc-600 dark:text-zinc-400">{keyEntry.models.join(", ")}</span>
-                      ) : keyEntry.default_model ? (
-                        <span className="text-xs text-zinc-600 dark:text-zinc-400">{keyEntry.default_model}</span>
+                    }
+                  >
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{providerName}</span>
+                      <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
+                      {isCustom ? (
+                        <Tooltip content={t("harness.customProviderNoKey")} variant="plain">
+                          <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                            🔧 {t("harness.custom")}
+                          </span>
+                        </Tooltip>
+                      ) : isLocal ? (
+                        <Tooltip content={t("harness.localProviderNoKey")} variant="plain">
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
+                            🏠 {t("harness.local")}
+                          </span>
+                        </Tooltip>
                       ) : (
-                        <span className="text-xs text-zinc-400">—</span>
+                        <span className="text-[11px] text-zinc-400">{t("harness.key")}: {keyEntry.key_preview}</span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      {keyEntry.models?.length ? (
+                        <span className="text-[11px] text-zinc-600 dark:text-zinc-400">{keyEntry.models.join(", ")}</span>
+                      ) : keyEntry.default_model ? (
+                        <span className="text-[11px] text-zinc-600 dark:text-zinc-400">{keyEntry.default_model}</span>
+                      ) : (
+                        <span className="text-[11px] text-zinc-400">—</span>
                       )}
                       {keyEntry.compact_model && (
                         <Tooltip content={t("harness.compactModelHint")} variant="plain">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
+                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
                             {t("harness.compact")}: {keyEntry.compact_model}
                           </span>
                         </Tooltip>
                       )}
                     </div>
-                  </div>
+                  </ListRow>
                 );
               })}
-            </div>
-          </div>
-        )}
+            </ListBox>
+          </ExpandableRow>
+        </ListBox>
+      )}
 
-      </div>
-
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-
-        {/* Available Providers — uses shared ProviderPicker component */}
-        <div>
-          <div className="mb-2 flex items-center">
-            <h3 className="shrink-0 text-xs font-medium text-zinc-500">
-              {t("harness.availableProviders")}
-            </h3>
-          </div>
-
-          <ProviderPicker
-            providers={dynamicProviders}
-            keys={keys}
-            onConnect={(providerId, entry) => {
-              setAddFlowProvider(providerId);
-              setAddFlowEntry(entry);
-              setShowAddFlow(true);
-            }}
-            onAddCustom={() => {
-              setAddFlowProvider(undefined);
-              setAddFlowEntry(undefined);
-              setShowAddFlow(true);
-            }}
-          />
-        </div>
-      </div>
+      {/* Available Providers — shared ProviderPicker renders three level-1
+          collapsible groups (Custom / Local / Remote), each default open.
+          No divider lines: boxes are spaced evenly by the root space-y-4. */}
+      <ProviderPicker
+        providers={dynamicProviders}
+        keys={keys}
+        onConnect={(providerId, entry) => {
+          setAddFlowProvider(providerId);
+          setAddFlowEntry(entry);
+          setShowAddFlow(true);
+        }}
+        onAddCustom={() => {
+          setAddFlowProvider(undefined);
+          setAddFlowEntry(undefined);
+          setShowAddFlow(true);
+        }}
+      />
 
       {/* Add Provider Flow dialog (picker → add / custom) */}
       <AddProviderFlow
@@ -482,6 +486,9 @@ function McpTab() {
   const { catalog, loading, error, loadCatalog, addServer, removeServer, probeServer, probeByName,
     healthStatus, healthErrors, healthToolCounts } = useMcpStore();
   const [showAddForm, setShowAddForm] = useState(false);
+  // Tools-tab style level-1 collapsible groups (default open)
+  const [catalogOpen, setCatalogOpen] = useState(true);
+  const [recommendedOpen, setRecommendedOpen] = useState(true);
 
   // Probe-before-add state
   const [pendingConfig, setPendingConfig] = useState<McpServerConfigDef | null>(null);
@@ -594,48 +601,75 @@ function McpTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      {/* Catalog servers */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-medium">{t("harnessMcp.mcpServerCatalog")}</h2>
-          <button
-            onClick={() => setShowAddForm(true)}
-            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
-          >
-            {t("harnessMcp.addServer")}
-          </button>
-        </div>
+      {/* MCP Server Catalog — Tools-tab level-1 collapsible card:
+          header carries title + count badge + Add button; server rows
+          live in the inset body (default open). */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={catalogOpen}
+          onToggle={() => setCatalogOpen((v) => !v)}
+          title={t("harnessMcp.mcpServerCatalog", { count: catalog.length })}
+          ariaLabel={t("harnessMcp.mcpServerCatalog", { count: catalog.length })}
+          trailing={
+            <span onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                onClick={() => setShowAddForm(true)}
+                className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+              >
+                {t("harnessMcp.addServer")}
+              </button>
+            </span>
+          }
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          {error && (
+            <div className="px-3 pt-2">
+              <ErrorBox message={error} onClose={() => useMcpStore.setState({ error: null })} />
+            </div>
+          )}
 
-        {error && (
-          <div className="mt-2">
-            <ErrorBox message={error} onClose={() => useMcpStore.setState({ error: null })} />
-          </div>
-        )}
+          {loading && catalog.length === 0 && (
+            <p className="px-3 py-3 text-xs text-zinc-400">{t("harnessMcp.loadingCatalog")}</p>
+          )}
 
-        {loading && catalog.length === 0 && (
-          <p className="mt-3 text-xs text-zinc-400">{t("harnessMcp.loadingCatalog")}</p>
-        )}
+          {!loading && catalog.length === 0 && (
+            <p className="px-3 py-3 text-xs text-zinc-400">
+              {t("harnessMcp.noMcpServers")}
+            </p>
+          )}
 
-        {!loading && catalog.length === 0 && (
-          <p className="mt-3 text-xs text-zinc-400">
-            {t("harnessMcp.noMcpServers")}
-          </p>
-        )}
-
-        {/* Server list */}
-        {catalog.length > 0 && (
-          <div className="mt-3 space-y-2">
-            {catalog.map((server) => {
-              const status = healthStatus[server.name];
-              const healthErr = healthErrors[server.name];
-              const toolCount = healthToolCounts[server.name];
-              return (
-                <div
-                  key={server.name}
-                  className="rounded border border-zinc-100 px-3 py-2 dark:border-zinc-600"
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2 min-w-0">
+          {/* Server list */}
+          {catalog.length > 0 && (
+            <ListBox variant="plain">
+              {catalog.map((server) => {
+                const status = healthStatus[server.name];
+                const healthErr = healthErrors[server.name];
+                const toolCount = healthToolCounts[server.name];
+                return (
+                  <ListRow
+                    key={server.name}
+                    trailing={
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => probeByName(server.name)}
+                          disabled={status === "probing"}
+                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                        >
+                          {status === "probing" ? "..." : t("harnessMcp.testConn")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeServer(server.name)}
+                          className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                        >
+                          {t("harnessMcp.remove")}
+                        </button>
+                      </div>
+                    }
+                  >
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       {/* Health indicator dot */}
                       {status === "probing" && (
                         <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400 animate-pulse" title={t("harnessMcp.testing")} />
@@ -646,7 +680,7 @@ function McpTab() {
                       {status === "unhealthy" && (
                         <span className="h-2 w-2 shrink-0 rounded-full bg-red-500" title={healthErr || t("harnessMcp.connFailed")} />
                       )}
-                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500 dark:bg-zinc-700 shrink-0">
+                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-zinc-500 dark:bg-zinc-700">
                         {server.transport}
                       </span>
                       {(() => {
@@ -654,7 +688,7 @@ function McpTab() {
                         const Icon = iconName ? MCP_ICON_MAP[iconName] : undefined;
                         return Icon ? <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" /> : null;
                       })()}
-                      <span className="text-xs font-medium truncate">{server.name}</span>
+                      <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{server.name}</span>
                       {server.has_secrets && (
                         <span className="text-[10px] text-amber-500 shrink-0">{t("harnessMcp.hasApiKey")}</span>
                       )}
@@ -662,88 +696,87 @@ function McpTab() {
                         <span className="text-[10px] text-green-500 shrink-0">{toolCount} tools</span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => probeByName(server.name)}
-                        disabled={status === "probing"}
-                        className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
-                      >
-                        {status === "probing" ? "..." : t("harnessMcp.testConn")}
-                      </button>
-                      <button
-                        onClick={() => removeServer(server.name)}
-                        className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
-                      >
-                        {t("harnessMcp.remove")}
-                      </button>
-                    </div>
-                  </div>
-                  {(server.command || server.url) && (
-                    <p className="mt-1 text-[10px] text-zinc-400 break-all">
-                      {server.command || server.url}
-                    </p>
-                  )}
-                  {/* Show health error inline */}
-                  {status === "unhealthy" && healthErr && (
-                    <div className="mt-1">
-                      <ErrorBox message={healthErr} className="!p-2 !text-[10px]" />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                    {(server.command || server.url) && (
+                      <p className="mt-0.5 truncate text-[10px] text-zinc-400 break-all">
+                        {server.command || server.url}
+                      </p>
+                    )}
+                    {/* Show health error inline */}
+                    {status === "unhealthy" && healthErr && (
+                      <div className="mt-0.5">
+                        <ErrorBox message={healthErr} className="!p-2 !text-[10px]" />
+                      </div>
+                    )}
+                  </ListRow>
+                );
+              })}
+            </ListBox>
+          )}
+        </ExpandableRow>
+      </ListBox>
 
-      {/* Presets gallery — always visible */}
-      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-        <h2 className="text-xs font-medium mb-3">{t("harnessMcp.recommendedMcpServers")}</h2>
-        <div className="grid grid-cols-2 gap-2">
-          {MCP_PRESETS.map((preset) => {
-            const isInstalled = catalogNames.has(preset.id);
-            return (
-              <div
-                key={preset.id}
-                className="rounded border border-zinc-100 p-2 dark:border-zinc-600"
-              >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <span className="flex items-center gap-1">
-                      {(() => {
-                        const Icon = MCP_ICON_MAP[preset.icon ?? ""];
-                        return Icon ? <Icon className="h-3.5 w-3.5 shrink-0" /> : null;
-                      })()}
-                      <span className="text-xs font-medium">{preset.name}</span>
-                    </span>
-                    <span className="ml-1.5 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-400 dark:bg-zinc-700">
+      {/* Recommended servers — Tools-tab level-1 collapsible card: presets
+          now render as unified ListRow rows (hairline separators + inset
+          hover) instead of the old 2-column mini-card grid. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={recommendedOpen}
+          onToggle={() => setRecommendedOpen((v) => !v)}
+          title={t("harnessMcp.recommendedMcpServers", { count: MCP_PRESETS.length })}
+          ariaLabel={t("harnessMcp.recommendedMcpServers", { count: MCP_PRESETS.length })}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          <ListBox variant="plain">
+            {MCP_PRESETS.map((preset) => {
+              const isInstalled = catalogNames.has(preset.id);
+              return (
+                <ListRow
+                  key={preset.id}
+                  surface="inset"
+                  leading={
+                    (() => {
+                      const Icon = MCP_ICON_MAP[preset.icon ?? ""];
+                      return Icon ? (
+                        <Icon className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      ) : null;
+                    })()
+                  }
+                  trailing={
+                    isInstalled ? (
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-green-100 px-2 py-1 text-[11px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                        <CheckCircle2 className="h-3 w-3" />
+                        {t("harnessMcp.installed")}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleAddFromPreset(preset)}
+                        className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
+                      >
+                        <Plus className="h-3 w-3" />
+                        {t("harnessMcp.add")}
+                      </button>
+                    )
+                  }
+                >
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{preset.name}</span>
+                    <span className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-[10px] text-zinc-400 dark:bg-zinc-700">
                       {preset.category}
                     </span>
                   </div>
-                  {isInstalled ? (
-                    <span className="text-[10px] text-green-500">{t("harnessMcp.installed")}</span>
-                  ) : (
-                    <button
-                      onClick={() => handleAddFromPreset(preset)}
-                      className="inline-flex items-center gap-1 rounded btn-solid px-2 py-0.5 text-[10px] font-medium"
-                    >
-                      {t("harnessMcp.add")}
-                    </button>
+                  <p className="mt-0.5 line-clamp-1 text-[10px] text-zinc-400">{preset.description}</p>
+                  {preset.requiredEnv.length > 0 && !isInstalled && (
+                    <p className="mt-0.5 text-[10px] text-amber-500">
+                      {t("harnessMcp.requires")}{preset.requiredEnv.join(", ")}
+                    </p>
                   )}
-                </div>
-                <p className="mt-1 text-[10px] text-zinc-400 line-clamp-2">
-                  {preset.description}
-                </p>
-                {preset.requiredEnv.length > 0 && !isInstalled && (
-                  <p className="mt-1 text-[10px] text-amber-500">
-                    {t("harnessMcp.requires")}{preset.requiredEnv.join(", ")}
-                  </p>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+                </ListRow>
+              );
+            })}
+          </ListBox>
+        </ExpandableRow>
+      </ListBox>
 
       {/* Add Server dialog */}
       {showAddForm && (

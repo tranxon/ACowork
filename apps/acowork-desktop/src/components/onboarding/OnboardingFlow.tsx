@@ -133,7 +133,7 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
   if (state.completed) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-chat-area">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-page-bg">
       <div className="w-full max-w-md px-8">
         {/* Progress bar */}
         <div className="mb-8">

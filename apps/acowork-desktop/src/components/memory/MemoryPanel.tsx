@@ -196,14 +196,14 @@ export function MemoryPanel() {
   // ── Empty state: no agent selected ──
   if (!selectedAgentId) {
     return (
-      <div className="flex flex-1 items-center justify-center p-6 text-xs text-zinc-400 dark:text-zinc-500">
+      <div className="flex flex-1 items-center justify-center bg-right-panel p-6 text-xs text-zinc-400 dark:text-zinc-500">
         {t("memoryPanel.selectAgent")}
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
       {/* ADR-071 D3/D5: memory distiller settings card (enabled switch,
           model pick, periodic trigger tuning). Reads/writes
           agent_config.json via GET/PUT /agents/{id}/config. */}
@@ -214,13 +214,13 @@ export function MemoryPanel() {
       />
 
       {/* Filters */}
-      <div className="flex flex-col gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      <div className="flex flex-col gap-2 border-b border-zinc-200 px-panel-gutter py-2 dark:border-zinc-800">
         <StyledInput
           type="text"
           value={filters.keyword}
           onChange={(e) => setFilters({ keyword: e.target.value })}
           placeholder={t("memoryPanel.searchNodes")}
-          className="rounded-md bg-modal-surface px-2.5 py-1.5"
+          className="rounded-md bg-panel-block px-2.5 py-1.5"
         />
         <div className="flex gap-2">
           <Dropdown
@@ -287,7 +287,7 @@ export function MemoryPanel() {
 
       {/* Stats cards */}
       {stats && (
-        <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 px-3 py-2 sm:grid-cols-4 dark:border-zinc-800">
+        <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 px-panel-gutter py-2 sm:grid-cols-4 dark:border-zinc-800">
           <StatCard label={t("memoryPanel.totalNodes")} value={stats.total_nodes} />
           {/* Optional chain on by_status defends against any future wire-format
               drift on the stats endpoint — the panel must render zeros rather
@@ -309,7 +309,7 @@ export function MemoryPanel() {
           flow that the Harness tab already uses. */}
       {(dimMismatch || missingEmbeddings) && stats && (
         <div
-          className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100"
+          className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-panel-gutter py-2 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100"
           role="alert"
           data-testid="index-health-banner"
         >
@@ -361,14 +361,17 @@ export function MemoryPanel() {
 
       {/* Consolidate feedback banner */}
       {consolidateMessage && (
-        <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5">
+        <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-panel-gutter py-1.5">
           <Info className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
           <span className="text-[11px] text-[var(--color-accent)]">{consolidateMessage}</span>
         </div>
       )}
 
       {/* Main content: master-detail toggle */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      {/* Main content: master-detail toggle. The gutter on all four
+          sides keeps the list/detail card from touching the hairline
+          dividers above (stats/banner) and below (bottom actions). */}
+      <div className="flex min-h-0 flex-1 overflow-hidden px-panel-gutter py-panel-gutter">
         {!selectedNode ? (
           <MemoryNodeList
             nodes={nodes}
@@ -394,7 +397,7 @@ export function MemoryPanel() {
       </div>
 
       {/* Bottom actions */}
-      <div className="flex gap-3 border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      <div className="flex gap-3 border-t border-zinc-200 px-panel-gutter py-2 dark:border-zinc-800">
         <button
           onClick={handleDistill}
           disabled={loading}
@@ -423,7 +426,7 @@ function StatCard({
   value: string | number;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded border border-zinc-200 p-2 dark:border-zinc-700">
+    <div className="min-w-0 overflow-hidden rounded border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
       <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400" title={label}>{label}</p>
       <p
         className="mt-0.5 truncate text-xs font-semibold text-zinc-700 dark:text-zinc-200"

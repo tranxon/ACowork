@@ -122,7 +122,7 @@ export function SkillBrowser() {
   // ── Empty state: no agent selected ──
   if (!selectedAgentId) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-chat-area">
+      <div className="flex flex-1 items-center justify-center bg-page-bg">
         <div className="text-center">
           <Wrench className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
           <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">
@@ -134,7 +134,7 @@ export function SkillBrowser() {
   }
 
   return (
-    <div className="flex flex-1 flex-col bg-chat-area">
+    <div className="flex flex-1 flex-col bg-page-bg">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
         <h1 className="text-xl font-semibold">{t("skillsPanel.title")}</h1>

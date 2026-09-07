@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
+import { ExpandableRow } from "../common/list";
 import { useTranslation } from "../../i18n/useTranslation";
 import { redistributeTokensByBytes } from "../../lib/contextUsageBreakdown";
 import {
@@ -340,39 +341,45 @@ export function SnapshotNode({
   }, [editingSection]);
 
   return (
-    <div className="border-b border-zinc-100 dark:border-zinc-800">
-      {/* Iteration header */}
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => setCollapsed(!collapsed)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setCollapsed(!collapsed); }}
-        className="flex w-full items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:hover:bg-zinc-800/50 cursor-pointer"
+    <div>
+      {/* Iteration header — unified collapsible row inside the
+          snapshot card's expanded sub-surface (ExpandableRow "row"
+          variant + surface="inset"): NO persistent strip. The zinc-50
+          / zinc-900 sub-surface is the list background itself, so rows
+          only highlight on hover — exactly like PROMPT rows, tool rows
+          and compression event rows. A fixed per-row strip would blend
+          with the card header tone (dark: zinc-800 strip over a
+          zinc-800 card) and break the header-vs-list contrast. */}
+      <ExpandableRow
+        open={!collapsed}
+        onToggle={() => setCollapsed(!collapsed)}
+        variant="row"
+        surface="inset"
+        title={
+          <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            Iteration #{snapshot.iteration}
+          </span>
+        }
+        meta={
+          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+            ~{displayTotalTokens.toLocaleString()} tok
+          </span>
+        }
+        trailing={
+          <Tooltip content={t("debugPanel.rewindToIteration", { iteration: snapshot.iteration })} variant="plain">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRewind(snapshot.iteration);
+              }}
+              className="rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+            >
+              <Rewind className="h-3 w-3" />
+            </button>
+          </Tooltip>
+        }
+        ariaLabel={`Toggle iteration ${snapshot.iteration}`}
       >
-        {collapsed ? (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-        ) : (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-        )}
-        <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-          Iteration #{snapshot.iteration}
-        </span>
-        <span className="ml-1 text-[10px] text-zinc-400 dark:text-zinc-500">
-          ~{displayTotalTokens.toLocaleString()} tok
-        </span>
-        <Tooltip content={t("debugPanel.rewindToIteration", { iteration: snapshot.iteration })} variant="plain">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRewind(snapshot.iteration);
-            }}
-            className="ml-auto rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-          >
-          <Rewind className="h-3 w-3" />
-        </button>
-        </Tooltip>
-      </div>
-
       {/* ADR-054 step 2: request params metadata bar — only non-empty
           entries are shown; the whole bar is hidden when nothing is set.
           One param per line so narrow panels don't wrap mid-value. */}
@@ -401,7 +408,7 @@ export function SnapshotNode({
           by SECTION_ORDER (build() injection order); unknown keys sort last
           and fall back to the raw key as label. */}
       {!collapsed && (
-        <div className="ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-50 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600 dark:bg-zinc-800/30">
+            <div className="ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-panel-inset-2 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600">
           {[...snapshot.sections]
             .sort((a, b) => {
               const ia = SECTION_ORDER.indexOf(a.key);
@@ -475,7 +482,7 @@ export function SnapshotNode({
                         <textarea
                           value={editingSection.current}
                           onChange={(e) => onEditChange(e.target.value)}
-                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-modal-surface px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none dark:border-[var(--color-accent)]/50 dark:text-zinc-300"
+                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none dark:border-[var(--color-accent)]/50 dark:text-zinc-300"
                           autoFocus
                         />
                         <div className="flex items-center gap-1">
@@ -539,6 +546,7 @@ export function SnapshotNode({
           })}
         </div>
       )}
+      </ExpandableRow>
     </div>
   );
 }
