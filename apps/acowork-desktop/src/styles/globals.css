@@ -26,7 +26,11 @@
      The .dark block below overrides all seven with dark-mode values,
      so consumers just write `bg-chat-bubble` / `bg-chat-title` /
      `bg-chat-body` / `border-chat-border` / `bg-chat-badge` /
-     `bg-chat-user` / `text-chat-user-text` with no `dark:` prefix needed. */
+     `bg-chat-user` / `text-chat-user-text` /
+     `border-chat-input-border` (chat input box outline; defaults to the
+       right-panel section divider color so the box reads as part of
+       the layout — tweak independently if it needs more / less
+       contrast against `bg-right-panel`) with no `dark:` prefix needed. */
   --color-chat-bubble: hsl(240 5.9% 90.6% / 0.4);
   /* = zinc-200/50 — message surface */
   --color-chat-title: hsl(240 4.8% 86.1% / 0.5);
@@ -35,6 +39,13 @@
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
+  --color-chat-input-border: hsl(0 0% 93%);
+  /* = zinc-200, #e4e4e7 — chat input box outline (matches the
+     right-panel section divider hairlines like `border-zinc-200` on
+     RightPanel's tab header / section dividers, so the input reads
+     as part of the layout instead of disappearing into
+     `bg-right-panel`. Independent from --color-chat-border — tweak
+     here without touching the CodeBlock/Mermaid wrapper border. */
   --color-chat-badge: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
@@ -359,6 +370,11 @@
   /* = zinc-900, #18181b — block body (darker, closer to panel) */
   --color-chat-border: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — container border */
+  --color-chat-input-border: hsl(0 0% 13%);
+  /* = zinc-800, #27272a — chat input box outline (mirrors the
+     right-panel section divider hairlines `dark:border-zinc-800` on
+     RightPanel's tab header / section dividers). Independent from
+     --color-chat-border. */
   --color-chat-badge: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
