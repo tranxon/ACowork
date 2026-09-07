@@ -1147,7 +1147,7 @@ impl AgentCore {
     /// interval / accumulation / idle fields (ADR-071 D1 additions), so the
     /// merge keeps the per-agent package defaults while letting the Desktop
     /// memory panel override them at runtime without an agent restart.
-    fn distiller_scheduler_config(&self) -> SchedulerConfig {
+    pub(crate) fn distiller_scheduler_config(&self) -> SchedulerConfig {
         let manifest = self.manifest.memory.distiller.as_ref();
         // Minutes → seconds (SchedulerConfig uses seconds internally).
         let minutes_to_secs = |v: Option<u64>| v.map(|m| m.saturating_mul(60));
