@@ -96,7 +96,9 @@
     "reasoningLow": "Low",
     "reasoningMedium": "Medium",
     "reasoningHigh": "High",
-    "addModel": "Add Model"
+    "addModel": "Add Model",
+    "modelMenuTitle": "Model",
+    "reasoningMenuTitle": "Reasoning effort"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM is reasoning",
@@ -338,6 +340,7 @@
     "newFile": "New file",
     "newFolder": "New folder",
     "addWorkspace": "Add Workspace",
+    "title": "Workspace",
     "remoteBrowseTitle": "Browse Remote Server",
     "remoteBrowseBtn": "Browse Server",
     "remoteBrowseEmpty": "No directories found",

@@ -36,7 +36,11 @@ export function ListBox({
       className={cn(
         "min-w-0",
         variant === "box" &&
-          "rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700",
+          // overflow-hidden: a rounded card must clip its children, or the
+          // square hover/selected fills of the first/last row (e.g. the
+          // collapsible title row) would paint over the card's top/bottom
+          // rounded corners and turn them into right angles on hover.
+          "overflow-hidden rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700",
         dividers && "divide-y divide-zinc-200 dark:divide-zinc-700",
         className,
       )}

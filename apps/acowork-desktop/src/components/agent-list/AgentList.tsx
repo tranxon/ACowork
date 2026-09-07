@@ -391,7 +391,7 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col shrink-0 bg-zinc-100 dark:bg-[#2F2F30] rounded-xl"
+      className="flex flex-col shrink-0 bg-nav-surface rounded-xl"
       style={{ width: width ?? 240 }}
     >
       {/* Header — search input */}
@@ -584,7 +584,7 @@ export function AgentList({ width }: AgentListProps) {
             setAddMenuOpen(!addMenuOpen);
             setInstallNodes(null);
           }}
-          className="flex w-full items-center justify-center rounded-md bg-nav-control px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-nav-control-hover dark:text-zinc-300"
+          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-nav-control focus-visible:bg-nav-control dark:text-zinc-300"
           aria-label={t("agentList.ariaLabelAddAgent")}
         >
           <Plus className="h-3.5 w-3.5" />

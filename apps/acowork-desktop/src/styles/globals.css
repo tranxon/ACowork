@@ -84,11 +84,11 @@
         consumers just write `bg-page-bg` / `bg-right-panel` /
         `bg-panel-block` / `bg-modal-surface` / `bg-modal-overlay`
         with no `dark:` prefix needed. */
-  --color-page-bg: hsl(0 0% 98%);
+  --color-page-bg: hsl(0 0% 99%);
   /* = #FAFAFA — unified page background (chat/settings/harness/pm/doc) */
   --color-right-panel: hsl(0 0% 95%);
   /* = #F3F3F3, zinc-100 — right panel surface (light) */
-  --color-panel-block: hsl(0 0% 100%);
+  --color-panel-block: hsl(0 0% 98%);
   /* = #FFFFFF — right-panel embedded card/list/block base (light).
      Formerly scattered across modal-surface / bg-zinc-* fills inside
      the right-side tabs; this one token now drives them all. */
@@ -120,7 +120,7 @@
         - nav-item-hover       : agent list-item row hover
         - nav-divider          : list-item separator (between agents)
      Auto-flipped in .dark; consumers write `bg-nav-*` directly. */
-  --color-nav-surface: hsl(240 8% 94%);
+  --color-nav-surface: hsl(0 0% 95%);
   /* = #EEEEF0 — sidebar container (light) */
   --color-nav-control: hsl(240 5% 87%);
   /* = #D8D9DC — input/button static bg (light) */
@@ -388,7 +388,7 @@
   /* modal-overlay is theme-independent (black/50 in both modes) */
   /* NavBar / AgentList warm-tint palette (dark) — auto-flips the @theme
      light values. Same hue, swapped lightness. */
-  --color-nav-surface: hsl(0 0% 18%);
+  --color-nav-surface: hsl(0 0% 11.7%);
   /* = #2F2F30 — sidebar container (dark) */
   --color-nav-control: hsl(0 0% 24%);
   /* = #3D3D3F — input/button static bg (dark) */

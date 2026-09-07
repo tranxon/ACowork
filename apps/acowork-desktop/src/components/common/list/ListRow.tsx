@@ -1,9 +1,13 @@
 //! ListRow — the unified single list row.
 //!
 //! Standardizes the row chrome that previously drifted between panels:
-//! full-width flex layout, uniform padding, the hover / selected fills
-//! (zinc-50 hover, zinc-100 selected), keyboard semantics when clickable,
-//! and the disabled (50% opacity) state.
+//! full-width flex layout, uniform padding, the hover / selected fills,
+//! keyboard semantics when clickable, and the disabled (50% opacity) state.
+//!
+//! Fill tones step one level deeper per surface (light mode shown; the
+//! dark scale is the zinc-700/800 translucent fills further below):
+//!   card  — hover zinc-50  / selected zinc-100
+//!   inset — hover zinc-100 / selected zinc-200
 //!
 //! The caller owns the middle column (`children`) — single-line label
 //! rows, two-line title+description rows, and rich master-detail rows
@@ -12,8 +16,9 @@
 //!
 //! `surface` keeps hover/selected fills legible on the surface the row
 //! sits on: "card" (default) is the raised list surface; "inset" is the
-//! darker expanded sub-surface (the body of a collapsed card), where the
-//! card-toned zinc-50 hover would be invisible against the zinc-50 body.
+//! expanded sub-surface revealed by a collapsed card, where the card
+//! fills would not read on the darker inset body — so the same zinc
+//! scale steps one level deeper (see the tone table above).
 import type { ReactNode } from "react";
 import { cn } from "../../../lib/utils";
 
@@ -62,8 +67,8 @@ export function ListRow({
     disabled && "opacity-50",
     !disabled && surface === "inset"
       ? selected
-        ? "bg-zinc-400 hover:bg-zinc-400 dark:bg-zinc-700/60 dark:hover:bg-zinc-700/60"
-        : "hover:bg-zinc-400 dark:hover:bg-zinc-700/40"
+        ? "bg-zinc-200 hover:bg-zinc-200 dark:bg-zinc-700/60 dark:hover:bg-zinc-700/60"
+        : "hover:bg-zinc-100 dark:hover:bg-zinc-700/40"
       : !disabled && (selected
         ? "bg-zinc-100 hover:bg-zinc-100 dark:bg-zinc-800 dark:hover:bg-zinc-800"
         : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"),

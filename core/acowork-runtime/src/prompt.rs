@@ -105,8 +105,39 @@ pub const COMPACT_PROMPT: &str = r#"<conversation>
 pub const SESSION_TITLE_MAX_CHARS: usize = 60;
 
 /// Prompt for generating a session title from the first user message.
-/// `{language}` and `{user_message}` are resolved at the call site.
-pub const TITLE_PROMPT: &str = r#"Generate a session title (max 60 characters) for the user_message. Write the title in the user's preferred language as {language}.
+///
+/// `{language}` and `{user_message}` are resolved at the call site
+/// (`agent/loop_.rs::run_inner`).
+///
+/// ## Output contract: PLAIN WORDS ONLY, no punctuation
+///
+/// The LLM output is rendered directly in the sidebar session tab, so the
+/// prompt is intentionally strict about what the title may contain:
+///
+/// - **No punctuation marks** of any kind — neither ASCII (`. , ! ? ; : - — _ / \ | ' " ` ( ) [ ] { } …`)
+///   nor their full-width CJK counterparts (`。，！？；：「」『』（）【】《》、· …`).
+/// - No emojis, no symbols, no markdown decoration, no surrounding quotes.
+/// - No leading or trailing punctuation, no ellipsis, no decoration at all.
+/// - Write in the user's preferred language as `{language}`.
+/// - Keep it concise (≤[`SESSION_TITLE_MAX_CHARS`] characters).
+/// - Return **only** the title — no explanation, no preamble.
+///
+/// `truncate_title_for_display` (defined below) still strips any trailing
+/// sentence-ending break that slips through as a defense-in-depth layer,
+/// but the prompt is the primary guard so we never rely on post-hoc
+/// stripping for the common case.
+pub const TITLE_PROMPT: &str = r#"Generate a session title (max 60 characters) for the user_message.
+
+Strict output rules — read carefully:
+- Output PLAIN WORDS ONLY. No punctuation of any kind.
+- Do NOT use any of these characters (or their full-width equivalents):
+  . , ! ? ; : - — _ / \ | ' " ` ( ) [ ] {{ }} < > … · • * # @ ~ ^ + = % $ &
+  ， 。 ！ ？ ； ： — … 「 」 『 （ ） 【 】 《 》 、 ·
+- No emojis, no symbols, no markdown, no surrounding quotes.
+- Do not end the title with a period, comma, or any punctuation.
+- Write the title in the user's preferred language as {language}.
+- Keep it concise (≤ 60 characters).
+- Return ONLY the title text — nothing else.
 
 {user_message}
 "#;
@@ -396,5 +427,98 @@ mod tests {
         // hard cut to 60 and add `…`. Total 61 chars.
         assert_eq!(out.chars().count(), SESSION_TITLE_MAX_CHARS + 1);
         assert!(out.ends_with('…'));
+    }
+
+    // ----- TITLE_PROMPT output contract -----
+
+    /// TITLE_PROMPT must carry the {language} and {user_message}
+    /// placeholders so the caller in `agent/loop_.rs::run_inner` can
+    /// resolve them. Catches accidental template regressions.
+    #[test]
+    fn title_prompt_carries_required_placeholders() {
+        assert!(
+            TITLE_PROMPT.contains("{language}"),
+            "TITLE_PROMPT must carry the {{language}} placeholder"
+        );
+        assert!(
+            TITLE_PROMPT.contains("{user_message}"),
+            "TITLE_PROMPT must carry the {{user_message}} placeholder"
+        );
+    }
+
+    /// TITLE_PROMPT must explicitly forbid ASCII punctuation so the LLM
+    /// does not decorate its output with `. , ! ? ; : - …` etc. This is
+    /// the primary guard for the sidebar's "plain words only" contract;
+    /// `truncate_title_for_display` is only a defense-in-depth layer.
+    #[test]
+    fn title_prompt_forbids_ascii_punctuation() {
+        for forbidden in [
+            '.', ',', '!', '?', ';', ':', '-', '_', '/', '\\', '|', '\'', '"', '`', '(', ')',
+            '[', ']', '{', '}', '<', '>', '…', '*', '#', '@', '~', '^', '+', '=', '%', '$', '&',
+        ] {
+            // The prompt lists these in a single "do NOT use" line, so
+            // even one occurrence of the char in the prose is enough to
+            // satisfy the test (the LLM is told they are forbidden).
+            assert!(
+                TITLE_PROMPT.contains(forbidden),
+                "TITLE_PROMPT must list {:?} as a forbidden char so the LLM is told to avoid it",
+                forbidden
+            );
+        }
+    }
+
+    /// TITLE_PROMPT must also forbid full-width CJK punctuation — CJK
+    /// users writing in zh-CN/ja/ko would otherwise get titles wrapped in
+    /// `。 ， ！ ？` etc., which look ugly in the sidebar session tab.
+    #[test]
+    fn title_prompt_forbids_fullwidth_cjk_punctuation() {
+        for forbidden in [
+            '，', '。', '！', '？', '；', '：', '—', '…', '「', '」', '『', '（', '）', '【',
+            '】', '《', '》', '、', '·',
+        ] {
+            assert!(
+                TITLE_PROMPT.contains(forbidden),
+                "TITLE_PROMPT must list {:?} (full-width CJK) as a forbidden char",
+                forbidden
+            );
+        }
+    }
+
+    /// TITLE_PROMPT must state the "plain words only / no punctuation"
+    /// contract in plain English — both for documentation value in the
+    /// file and so model output remains stable across providers that
+    /// weigh different phrasing of the rule differently.
+    #[test]
+    fn title_prompt_states_plain_words_only_contract() {
+        assert!(
+            TITLE_PROMPT.contains("PLAIN WORDS ONLY"),
+            "TITLE_PROMPT must declare the PLAIN WORDS ONLY contract verbatim"
+        );
+        assert!(
+            TITLE_PROMPT.contains("No punctuation"),
+            "TITLE_PROMPT must mention 'No punctuation' as a hard rule"
+        );
+        assert!(
+            TITLE_PROMPT.contains("Return ONLY the title"),
+            "TITLE_PROMPT must tell the LLM to return only the title (no preamble)"
+        );
+    }
+
+    /// Resolves {language} and {user_message} and checks that the user
+    /// message is appended verbatim — guards the template-formatting path
+    /// the caller relies on.
+    #[test]
+    fn title_prompt_resolves_placeholders() {
+        let resolved = TITLE_PROMPT
+            .replace("{language}", "zh-CN")
+            .replace("{user_message}", "帮我重构 Settings 页面");
+        assert!(!resolved.contains("{language}"));
+        assert!(!resolved.contains("{user_message}"));
+        assert!(resolved.contains("zh-CN"));
+        assert!(resolved.contains("帮我重构 Settings 页面"));
+        // The resolved string is what we ship to the LLM — re-check the
+        // contract rules survive substitution (the contract lives in the
+        // prose, not in the placeholders).
+        assert!(resolved.contains("PLAIN WORDS ONLY"));
     }
 }

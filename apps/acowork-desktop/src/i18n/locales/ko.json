@@ -192,7 +192,9 @@
     "reasoningLow": "낮음",
     "reasoningMedium": "중간",
     "reasoningHigh": "높음",
-    "addModel": "모델 추가"
+    "addModel": "모델 추가",
+    "modelMenuTitle": "모델",
+    "reasoningMenuTitle": "思考深度"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 추론 중",
@@ -684,6 +686,7 @@
     "newFile": "New file",
     "newFolder": "New folder",
     "addWorkspace": "워크스페이스 추가",
+    "title": "워크스페이스",
     "remoteBrowseTitle": "원격 서버 탐색",
     "remoteBrowseBtn": "서버 탐색",
     "remoteBrowseEmpty": "디렉토리 없음",
