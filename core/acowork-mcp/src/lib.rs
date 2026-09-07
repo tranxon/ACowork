@@ -6,12 +6,17 @@
 
 pub mod client;
 pub mod config;
+pub mod install;
 pub mod protocol;
 pub mod transport;
 pub mod wrapper;
 
 pub use client::{McpClient, McpConnectionFailure, McpRegistry};
 pub use config::{McpConfig, McpServerConfig, McpTransport};
+pub use install::{
+    DependencyStatus, InstallOutput, build_spawn_env, derive_install_command, derive_spawn_config,
+    ensure_runtime, health_check, probe_runtime, run_install,
+};
 pub use protocol::{JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION, McpToolDef};
 pub use transport::{McpTransportConn, create_transport};
 pub use wrapper::McpToolWrapper;

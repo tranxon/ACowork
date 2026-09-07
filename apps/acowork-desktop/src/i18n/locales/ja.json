@@ -602,7 +602,13 @@
     "connected": "接続済み — {{count}} ツール利用可能",
     "connFailed": "接続失敗",
     "testConn": "テスト",
-    "addAnyway": "それでも追加"
+    "addAnyway": "それでも追加",
+    "install": "インストール",
+    "installing": "インストール中...",
+    "installFirstRunHint": "初回実行には時間がかかる場合があります（依存関係 / ML モデルのダウンロード）。",
+    "installSuccess": "インストール完了 — {{count}} 個のツールを利用可能",
+    "installFailed": "インストールに失敗しました",
+    "installMissingRuntime": "ランタイム {{runtime}} が見つかりません。{{hint}} — 先にインストールしてから再試行してください。"
   },
   "rightPanel": {
     "debug": "デバッグ",

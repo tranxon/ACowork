@@ -26,6 +26,31 @@ export const MCP_PRESETS: McpPresetDef[] = [
     installHint:
       "npx auto-installs. First run downloads browser binaries (~300MB). No API key required.",
     icon: "Monitor",
+    install: {
+      package: { kind: "npm", spec: "@playwright/mcp@latest" },
+      state: "unknown",
+    },
+  },
+
+  // ── Desktop Automation ─────────────────────────────────────────────────────
+  {
+    id: "computer-use",
+    name: "Computer Use",
+    description:
+      "OS-level desktop automation: take screenshots, control mouse and keyboard, click UI elements by coordinates. Useful for driving GUI applications that have no API or MCP integration.",
+    category: "browser",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "computer-use-mcp"],
+    requiredEnv: [],
+    optionalEnv: {},
+    installHint:
+      "npx auto-installs. Requires OS-level input-control permissions (macOS: Accessibility + Screen Recording; Linux: X11/Wayland; Windows: UAC prompts). No API key required.",
+    icon: "MousePointer",
+    install: {
+      package: { kind: "npm", spec: "computer-use-mcp" },
+      state: "unknown",
+    },
   },
 
   // ── Web Search ─────────────────────────────────────────────────────
@@ -43,6 +68,10 @@ export const MCP_PRESETS: McpPresetDef[] = [
     installHint:
       "Get free API key at https://brave.com/search/api/ — generous free tier (2K queries/month).",
     icon: "Search",
+    install: {
+      package: { kind: "npm", spec: "@modelcontextprotocol/server-brave-search" },
+      state: "unknown",
+    },
   },
   {
     id: "exa-search",
@@ -58,6 +87,10 @@ export const MCP_PRESETS: McpPresetDef[] = [
     installHint:
       "Get API key at https://exa.ai — free tier includes 1000 searches/month. Superior to keyword search for complex queries.",
     icon: "Globe",
+    install: {
+      package: { kind: "npm", spec: "exa-mcp-server" },
+      state: "unknown",
+    },
   },
   {
     id: "context7",
@@ -73,6 +106,10 @@ export const MCP_PRESETS: McpPresetDef[] = [
     installHint:
       "npx auto-installs. No API key required. Covers 20K+ libraries (React, Next.js, Python, Rust crates, etc.).",
     icon: "BookOpen",
+    install: {
+      package: { kind: "npm", spec: "@upstash/context7-mcp@latest" },
+      state: "unknown",
+    },
   },
 
   // ── Document Processing ────────────────────────────────────────────
@@ -84,12 +121,26 @@ export const MCP_PRESETS: McpPresetDef[] = [
     category: "document",
     transport: "stdio",
     command: "uvx",
-    args: ["docling-mcp"],
+    args: ["--from", "docling-mcp", "docling-mcp-server", "--transport", "stdio"],
     requiredEnv: [],
     optionalEnv: {},
     installHint:
       "Requires uv (Python package manager). Install: `pip install uv` or see https://docs.astral.sh/uv/. First run downloads ML models (~500MB). No API key required — fully local.",
     icon: "FileText",
+    install: {
+      package: {
+        kind: "pypi",
+        spec: "docling-mcp",
+        runner: "uvx",
+        // ADR-072: entry point is NOT the package name — docling-mcp's
+        // console_script is `docling-mcp-server`; the default transport is
+        // streamable-http, so stdio must be requested explicitly.
+        entry_point: "docling-mcp-server",
+        spawn_args: ["--transport", "stdio"],
+        http_probe_ports: [8000],
+      },
+      state: "unknown",
+    },
   },
 
   // ── Knowledge & Collaboration ──────────────────────────────────────
@@ -107,6 +158,10 @@ export const MCP_PRESETS: McpPresetDef[] = [
     installHint:
       "Create integration at https://www.notion.so/my-integrations — then share target pages with the integration.",
     icon: "FileText",
+    install: {
+      package: { kind: "npm", spec: "@notionhq/notion-mcp-server" },
+      state: "unknown",
+    },
   },
 
   // ── Design ─────────────────────────────────────────────────────────
@@ -124,6 +179,14 @@ export const MCP_PRESETS: McpPresetDef[] = [
     installHint:
       "Generate personal access token at https://www.figma.com/developers/api#access-tokens — then share Figma files with the token owner.",
     icon: "PenTool",
+    install: {
+      package: {
+        kind: "npm",
+        spec: "figma-developer-mcp",
+        spawn_args: ["--figma-api-key=$FIGMA_API_KEY", "--stdio"],
+      },
+      state: "unknown",
+    },
   },
 ];
 
@@ -159,5 +222,6 @@ export function presetToServerConfig(
     env,
     headers: {},
     tool_timeout_secs: undefined,
+    install: preset.install,
   };
 }

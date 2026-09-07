@@ -614,7 +614,13 @@
     "connected": "已连接 — {{count}} 个工具可用",
     "connFailed": "连接失败",
     "testConn": "测试",
-    "addAnyway": "仍然添加"
+    "addAnyway": "仍然添加",
+    "install": "安装",
+    "installing": "安装中...",
+    "installFirstRunHint": "首次运行可能需要较长时间（下载依赖 / ML 模型）。",
+    "installSuccess": "安装成功 — {{count}} 个工具可用",
+    "installFailed": "安装失败",
+    "installMissingRuntime": "缺少运行时 {{runtime}}。{{hint}} — 请先安装再重试。"
   },
   "rightPanel": {
     "debug": "调试",

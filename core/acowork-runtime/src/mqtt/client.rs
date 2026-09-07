@@ -584,6 +584,7 @@ impl MqttClientHandler for RuntimeHandler {
                             .into_iter()
                             .map(|(k, v)| (k, resolve_agent_id(&v)))
                             .collect(),
+                        install: None,
                         tool_timeout_secs: if s.tool_timeout_secs == 0 {
                             None
                         } else {

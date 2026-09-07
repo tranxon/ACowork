@@ -1450,6 +1450,41 @@ export interface UpdateUserRequest {
 /** MCP transport type — matches McpTransportDef in acowork_core::protocol */
 export type McpTransportDef = "stdio" | "http" | "sse";
 
+// ── MCP install types (ADR-072) ──────────────────────────────────────
+
+/** Package distribution kind — matches PackageKind in acowork_core::protocol */
+export type PackageKind = "npm" | "pypi" | "cargo" | "go" | "docker" | "binary" | "script";
+
+/** PyPI runner — matches PypiRunner in acowork_core::protocol */
+export type PypiRunner = "uvx" | "pipx" | "pip";
+
+/** Install lifecycle state — matches InstallState in acowork_core::protocol */
+export type InstallState = "unknown" | "detected" | "installing" | "installed" | "failed";
+
+/** Full spawn override — matches ExecOverride in acowork_core::protocol */
+export interface McpExecOverride {
+  command: string;
+  args: string[];
+}
+
+/** Declarative install spec — matches McpPackageSpec in acowork_core::protocol */
+export interface McpPackageSpec {
+  kind: PackageKind;
+  spec: string;
+  runner?: PypiRunner;
+  entry_point?: string;
+  spawn_args?: string[];
+  exec_override?: McpExecOverride;
+  install_script?: string;
+  http_probe_ports?: number[];
+}
+
+/** Install context attached to a catalog entry — matches McpInstallSpec */
+export interface McpInstallSpec {
+  package: McpPackageSpec;
+  state: InstallState;
+}
+
 /** MCP server config — matches McpServerConfigDef in acowork_core::protocol */
 export interface McpServerConfigDef {
   name: string;
@@ -1460,6 +1495,8 @@ export interface McpServerConfigDef {
   env: Record<string, string>;
   headers?: Record<string, string>;
   tool_timeout_secs?: number;
+  /** ADR-072: optional install context (preset-added servers only) */
+  install?: McpInstallSpec;
 }
 
 /** MCP catalog entry response (env values with sensitive fields masked) */
@@ -1736,6 +1773,13 @@ export interface McpPresetDef {
   installHint?: string;
   /** Icon name from lucide-react */
   icon?: string;
+  /**
+   * ADR-072: declarative install spec for package-based presets.
+   * When present, adding the preset runs the install pipeline
+   * (runtime check → install → health check → write catalog) instead of
+   * a raw catalog write. Spawn config is derived from `package`.
+   */
+  install?: McpInstallSpec;
 }
 
 // ── Embedding Model types ─────────────────────────────────────────────────

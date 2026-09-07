@@ -738,7 +738,13 @@
     "connected": "Connected — {{count}} tools available",
     "connFailed": "Connection failed",
     "testConn": "Test",
-    "addAnyway": "Add Anyway"
+    "addAnyway": "Add Anyway",
+    "install": "Install",
+    "installing": "Installing...",
+    "installFirstRunHint": "First run may take a while (dependency download / ML models).",
+    "installSuccess": "Installed — {{count}} tools available",
+    "installFailed": "Install failed",
+    "installMissingRuntime": "Missing runtime {{runtime}}. {{hint}} — install it first, then retry."
   },
   "rightPanel": {
     "debug": "Debug",
