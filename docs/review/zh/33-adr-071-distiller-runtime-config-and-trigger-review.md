@@ -55,3 +55,37 @@
 | `abd32cbb` | W3 配置链路(AgentConfig/Manifest/Overrides/热更 RwLock) |
 | `c8c8426b` | W4 prompt 覆盖(白名单 +2 / AgentCore 槽 / grafeo override) |
 | `f4eaf46e` | W5 记忆面板 UI(蒸馏卡片 + 立即蒸馏 + legacy 退役) |
+
+## 6. 二次 Review(2026-09,W1–W6 全量测试覆盖率补强)
+
+首轮 review 发现测试覆盖与 commit 声明不符(W2 声称的 "adr071 memory e2e suite" 实际不存在),按优先级补齐。本次补强分两个 commit:
+
+### 6.1 P0 — 新增 ADR-071 全链路 e2e(`6069f791`)
+
+`core/acowork-runtime/src/memory/adr071_e2e.rs`(in-crate,因 `AgentCore::new` 为 `pub(crate)`,且需注入 `pub(crate)` 的 providers/timer;与 `prompts_reload_e2e` 文档化的限制一致):
+
+- **E1**:真实 in-memory `GrafeoStore` 播种 2 Fact + 3 Preference(满足 ADR-068 Step 3 evidence gate)→ HTTP `POST /memory/distill` → 断言 DistillResponse(`scanned=5`/`promoted≥2`/`marked=5`)、`KnowledgeNode.promotion_metadata.promoted_by="episodic_distiller"` + evidence ids、episode 清理、`GET /memory/consolidation/status` `last_run` 摘要。LLM 为 scripted `MockProvider`,但走**真实 `ProviderLlmAdapter`**(R3 部分缓解——不再是 distiller 内部直调);`multi_thread` runtime 同时覆盖 W2 `block_in_place` embedding 桥。
+- **E2**:manifest 无 `[memory.distiller]` → 409 + 零晋升 + episode 未 consolidated(opt-in 不变式)。
+- 顺带:`distiller_scheduler_config()` 改 `pub(crate)`,harness 用生产投影构造 timer(status 反映 effective switch,与 `start_consolidation_pipeline` 一致)。
+
+### 6.2 P1 — 单测补强(commit `102bdf8b`)
+
+| 项 | 内容 |
+|---|---|
+| `usecases/agent_config_impl.rs` +4 | `ConfigField` 5 个 distiller 变体的 Set/Clear/类型错配/wire 翻译(`from_request_fields` 缺省→skip、null→Clear、值→Set) |
+| `http/server.rs` +1 | `PUT /agents/{id}/config` 5 字段 → `agent_config.json` 落盘 → `GET /config` round-trip + partial-PUT 保留未发字段 |
+| `consolidation_bg.rs` +3 | embedding 桥三路径:multi_thread=`Some` 且可调用、current_thread=`None` 降级、无 runtime=`None` |
+| status `last_run` | 已由 E1 覆盖(不再单独补) |
+
+### 6.3 新发现(记录,未修)
+
+1. **`patch_typed` 语义歧义(预存,非 ADR-071 引入)**:`apply_field_patch` 无条件赋值 `cfg.x = patch_typed(...)`,而 `patch_typed` 对**类型错误的 `Set`** 返回 `None` → 字段被**清空**,与 impl 顶部注释 "leave on-disk alone" 矛盾。所有字段(含 distiller)共用此路径。建议后续 revision:区分 `Clear` 与 `Set-parse-failed`(tri-state),避免错误 JSON 造成数据丢失。P1a 测试按实际语义断言并标注。
+2. **wire 层无显式清空**:`UpdateAgentConfigRequest` 用 `Option<serde_json::Value>`,serde 将 JSON `null` 与字段缺失折叠为同一 `None` → 显式清空需引入 presence-tracking wrapper。当前 UI「空输入=不发送该字段」规避了此坑(P1b 测试验证 partial-PUT 语义)。
+3. **性能观察点(非阻塞)**:`count_unconsolidated_episodes` → `get_unconsolidated_episodes_by_subtype(None, i64::MAX)` 会全量物化 Episodic 层再数数;distiller enabled 时后台每 tick(60s)轮询。受 grafeo-engine 当前 GQL 限制(ORDER BY/WHERE 返回裸 ID),与 distiller Step 1 既有模式一致,但「数数」不应全量加载——建议引擎层提供 COUNT 或降频。
+4. **W5 commit message 偏差**:称按钮 "only exposes while enabled",实际按钮常显、disabled 时 409(行为可接受,反馈更直接;doc 待同步)。
+
+### 6.4 验证(本机实测)
+
+- `adr071_e2e` 2/2 ✅;`agent_config_impl` +4 ✅;`server.rs` distiller roundtrip +1 ✅;`embedding_bridge_tests` +3 ✅;`consolidation_bg` 全量 18 ✅
+- `acowork-runtime --lib` 1389 passed,唯一失败仍为预存基线 `restart_after_compression_preserves_todo_state`;clippy 0 新增
+- 测试补强后影响面映射:触发(W1)✅ 单测;手动端点(W2)✅ e2e + 单测;配置链(W3)✅ 单测 + HTTP roundtrip;prompt(W4)✅ grafeo/agent_core 单测;embedding 桥(W2)✅ 三路径;status(W2)✅ e2e
