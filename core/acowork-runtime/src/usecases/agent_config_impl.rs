@@ -197,3 +197,192 @@ where
         },
     }
 }
+// ============================================================================
+// Tests — ADR-071 D4 distiller field patches
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usecases::agent_config::FieldPatch;
+
+    fn patch(field: ConfigField, value: serde_json::Value) -> ConfigFieldPatch {
+        ConfigFieldPatch {
+            field,
+            op: FieldPatch::Set(value),
+        }
+    }
+
+    fn clear(field: ConfigField) -> ConfigFieldPatch {
+        ConfigFieldPatch {
+            field,
+            op: FieldPatch::Clear,
+        }
+    }
+
+    fn apply(cfg: &mut AgentConfig, patches: &[ConfigFieldPatch]) {
+        for ConfigFieldPatch { field, op } in patches {
+            apply_field_patch(cfg, *field, op);
+        }
+    }
+
+    /// ADR-071 D4: the enabled switch accepts booleans, refuses wrong-typed
+    /// JSON (collapses to leave-on-disk), and Clear nulls it.
+    #[test]
+    fn test_distiller_enabled_patch() {
+        let mut cfg = AgentConfig::default();
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::DistillerEnabled, serde_json::json!(true))],
+        );
+        assert_eq!(cfg.distiller_enabled, Some(true));
+
+        // Wrong-typed value: the shared dispatch collapses it to `None`
+        // (pre-existing semantics — `patch_typed` returns None on parse
+        // failure and `apply_field_patch` assigns unconditionally, so the
+        // field is CLEARED, not preserved; documented in review #33).
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::DistillerEnabled, serde_json::json!("yes"))],
+        );
+        assert_eq!(cfg.distiller_enabled, None, "bad type clears the field");
+
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::DistillerEnabled, serde_json::json!(false))],
+        );
+        assert_eq!(cfg.distiller_enabled, Some(false));
+
+        // Explicit clear -> None.
+        apply(&mut cfg, &[clear(ConfigField::DistillerEnabled)]);
+        assert_eq!(cfg.distiller_enabled, None);
+    }
+
+    /// ADR-071 D4/D5: the model patch accepts the `{provider_id, model_id}`
+    /// wire shape, refuses a plain string, and Clear nulls it.
+    #[test]
+    fn test_distiller_model_patch() {
+        let mut cfg = AgentConfig::default();
+        apply(
+            &mut cfg,
+            &[patch(
+                ConfigField::DistillerModel,
+                serde_json::json!({
+                    "provider_id": "openai",
+                    "model_id": "gpt-4o-mini",
+                }),
+            )],
+        );
+        assert_eq!(
+            cfg.distiller_model.as_ref().map(|m| m.provider_id.as_str()),
+            Some("openai")
+        );
+        assert_eq!(
+            cfg.distiller_model.as_ref().map(|m| m.model_id.as_str()),
+            Some("gpt-4o-mini")
+        );
+
+        // Wrong-typed value: clears the field (see test_distiller_enabled_patch
+        // for the pre-existing dispatch semantics).
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::DistillerModel, serde_json::json!("oops"))],
+        );
+        assert_eq!(cfg.distiller_model, None, "bad shape clears the field");
+
+        // Explicit clear.
+        apply(&mut cfg, &[clear(ConfigField::DistillerModel)]);
+        assert_eq!(cfg.distiller_model, None);
+    }
+
+    /// ADR-071 D1/D3: the three trigger fields accept u64 numbers (accumulation
+    /// narrows to usize), refuse strings, and Clear nulls them.
+    #[test]
+    fn test_distiller_numeric_patches() {
+        let mut cfg = AgentConfig::default();
+        apply(
+            &mut cfg,
+            &[
+                patch(
+                    ConfigField::DistillerIntervalMinutes,
+                    serde_json::json!(45),
+                ),
+                patch(
+                    ConfigField::DistillerAccumulationThreshold,
+                    serde_json::json!(80),
+                ),
+                patch(ConfigField::DistillerIdleMinutes, serde_json::json!(20)),
+            ],
+        );
+        assert_eq!(cfg.distiller_interval_minutes, Some(45));
+        assert_eq!(cfg.distiller_accumulation_threshold, Some(80usize));
+        assert_eq!(cfg.distiller_idle_minutes, Some(20));
+
+        // Wrong-typed values: clear the fields (see test_distiller_enabled_patch
+        // for the pre-existing dispatch semantics).
+        apply(
+            &mut cfg,
+            &[
+                patch(
+                    ConfigField::DistillerIntervalMinutes,
+                    serde_json::json!("fast"),
+                ),
+                patch(
+                    ConfigField::DistillerAccumulationThreshold,
+                    serde_json::json!("many"),
+                ),
+                patch(ConfigField::DistillerIdleMinutes, serde_json::json!(12.5)),
+            ],
+        );
+        assert_eq!(cfg.distiller_interval_minutes, None);
+        assert_eq!(cfg.distiller_accumulation_threshold, None);
+        assert_eq!(cfg.distiller_idle_minutes, None);
+
+        // Explicit clears.
+        apply(
+            &mut cfg,
+            &[
+                clear(ConfigField::DistillerIntervalMinutes),
+                clear(ConfigField::DistillerAccumulationThreshold),
+                clear(ConfigField::DistillerIdleMinutes),
+            ],
+        );
+        assert_eq!(cfg.distiller_interval_minutes, None);
+        assert_eq!(cfg.distiller_accumulation_threshold, None);
+        assert_eq!(cfg.distiller_idle_minutes, None);
+    }
+
+    /// ADR-071 D4: `from_request_fields` maps absent/null/value onto
+    /// skip/Clear/Set for the five distiller wire fields.
+    #[test]
+    fn test_distiller_wire_to_patch_translation() {
+        let body = PutAgentConfigBody::from_request_fields(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(serde_json::json!(true)), // distiller_enabled
+            Some(serde_json::json!({
+                "provider_id": "p",
+                "model_id": "m",
+            })), // distiller_model
+            Some(serde_json::json!(30)), // distiller_interval_minutes
+            Some(serde_json::json!(null)), // distiller_accumulation_threshold -> Clear
+            None,                          // distiller_idle_minutes absent -> skip
+        );
+
+        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
+            body.patches.iter().map(|p| (p.field, &p.op)).collect();
+        assert_eq!(fields.len(), 4, "five present/clear + one absent -> four patches");
+        assert!(fields.contains(&(ConfigField::DistillerEnabled, &FieldPatch::Set(serde_json::json!(true)))));
+        assert!(fields.contains(&(ConfigField::DistillerModel, &FieldPatch::Set(serde_json::json!({"provider_id":"p","model_id":"m"})))));
+        assert!(fields.contains(&(ConfigField::DistillerIntervalMinutes, &FieldPatch::Set(serde_json::json!(30)))));
+        assert!(fields.contains(&(ConfigField::DistillerAccumulationThreshold, &FieldPatch::Clear)));
+        assert!(!fields.iter().any(|(f, _)| *f == ConfigField::DistillerIdleMinutes));
+    }
+}

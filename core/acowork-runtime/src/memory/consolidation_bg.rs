@@ -1123,3 +1123,77 @@ mod distiller_fixture {
             .expect("distiller run should succeed")
     }
 }
+
+// ── ADR-071 W2: embedding bridge (block_in_place / degrade) ────────
+//
+// Separate test module (the main `tests` module above already closed);
+// `build_embedding_bridge` is reachable via `super::super::*`.
+#[cfg(test)]
+mod embedding_bridge_tests {
+    use super::*;
+
+    /// Dummy embedding used to exercise the bridge (pure function, no
+    /// runtime dependency).
+    struct DummyEmbedding;
+
+    #[async_trait::async_trait]
+    impl acowork_core::EmbeddingProvider for DummyEmbedding {
+        fn name(&self) -> &str {
+            "dummy-bridge-test"
+        }
+        async fn embed(
+            &self,
+            text: &str,
+        ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+            Ok(acowork_memory::manager::procedural_embedding_fallback(text))
+        }
+        async fn embed_batch(
+            &self,
+            texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimension(&self) -> usize {
+            384
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// W2 regression: on a multi-thread runtime the bridge hands the
+    /// embedding call to a blocking worker via `block_in_place` — it must
+    /// return `Some` and never panic ("Cannot start a runtime from within a
+    /// runtime").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_embedding_bridge_multi_thread_returns_fn_and_works() {
+        let bridge = build_embedding_bridge(Arc::new(DummyEmbedding));
+        let bridge = bridge.expect("multi-thread runtime must yield a bridge");
+        let vec = bridge("user lives in Shanghai");
+        assert_eq!(vec.len(), 384, "embedding dimension");
+    }
+
+    /// W2 regression: on a current-thread runtime the bridge degrades to
+    /// `None` (callers fall back to exact-key clustering) instead of
+    /// risking a `block_on` panic inside the single worker.
+    #[tokio::test]
+    async fn test_embedding_bridge_current_thread_degrades_to_none() {
+        let bridge = build_embedding_bridge(Arc::new(DummyEmbedding));
+        assert!(
+            bridge.is_none(),
+            "current-thread runtime must degrade to exact-key clustering"
+        );
+    }
+
+    /// W2 regression: with NO runtime context at all (pure sync call) the
+    /// bridge is `None` — `Handle::try_current()` fails gracefully.
+    #[test]
+    fn test_embedding_bridge_no_runtime_degrades_to_none() {
+        let bridge = build_embedding_bridge(Arc::new(DummyEmbedding));
+        assert!(bridge.is_none(), "no runtime context must yield None");
+    }
+}

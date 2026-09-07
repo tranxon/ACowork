@@ -4302,6 +4302,140 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// ADR-071 D4: the five distiller fields round-trip through
+    /// `PUT /agents/{id}/config` → `agent_config.json` → `GET /config`,
+    /// including the explicit-clear (`null`) semantics on a numeric field.
+    #[tokio::test]
+    async fn test_put_agent_config_distiller_fields_roundtrip() {
+        let temp_dir =
+            std::env::temp_dir().join("acowork-test-runtime-http-put-config-distiller");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore needed
+        )
+        .await
+        .expect("server should start");
+
+        let url = format!(
+            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            server.port
+        );
+        let client = reqwest::Client::new();
+
+        // 1. PUT all five distiller fields.
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({
+                "distiller_enabled": true,
+                "distiller_model": {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+                "distiller_interval_minutes": 45,
+                "distiller_accumulation_threshold": 80,
+                "distiller_idle_minutes": 20,
+            }))
+            .send()
+            .await
+            .expect("PUT distiller fields");
+        assert!(resp.status().is_success(), "PUT got {}", resp.status());
+
+        // 2. On-disk agent_config.json carries every field.
+        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
+            .expect("load ok")
+            .expect("config exists");
+        assert_eq!(reloaded.distiller_enabled, Some(true));
+        assert_eq!(
+            reloaded.distiller_model.as_ref().map(|m| m.model_id.as_str()),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(reloaded.distiller_interval_minutes, Some(45));
+        assert_eq!(reloaded.distiller_accumulation_threshold, Some(80usize));
+        assert_eq!(reloaded.distiller_idle_minutes, Some(20));
+
+        // 3. GET /config surfaces them (the Setup/memory-panel read path).
+        let get: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+        let cfg = get["config"].as_object().expect("config envelope");
+        assert_eq!(cfg["distiller_enabled"], serde_json::json!(true));
+        assert_eq!(
+            cfg["distiller_model"],
+            serde_json::json!({"provider_id": "openai", "model_id": "gpt-4o-mini"})
+        );
+        assert_eq!(cfg["distiller_interval_minutes"], serde_json::json!(45));
+        assert_eq!(
+            cfg["distiller_accumulation_threshold"],
+            serde_json::json!(80)
+        );
+        assert_eq!(cfg["distiller_idle_minutes"], serde_json::json!(20));
+
+        // 4. Partial PUT: the wire layer collapses JSON `null` and
+        //    absent-field into the same `None` (see UpdateAgentConfigRequest
+        //    doc), so "clearing" a field is done by NOT sending it — the
+        //    Desktop memory panel omits empty inputs. Here we flip the
+        //    switch off while omitting `distiller_interval_minutes`; the
+        //    untouchd field must be preserved (partial-PUT semantics).
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({
+                "distiller_enabled": false,
+            }))
+            .send()
+            .await
+            .expect("PUT partial");
+        assert!(resp.status().is_success(), "PUT partial got {}", resp.status());
+
+        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
+            .expect("load ok")
+            .expect("config exists");
+        assert_eq!(reloaded.distiller_enabled, Some(false));
+        assert_eq!(
+            reloaded.distiller_interval_minutes,
+            Some(45),
+            "omitted field is preserved (partial PUT)"
+        );
+        assert_eq!(
+            reloaded.distiller_accumulation_threshold,
+            Some(80usize),
+            "untouched distiller fields are preserved"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
     /// Win11-MCP-ToolsBugFix round-trip regression test.
     ///
     /// Before the fix, `PUT /api/agents/{id}/mcp-servers` and

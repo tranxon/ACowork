@@ -926,8 +926,9 @@ impl AgentCore {
         // previous runtime value alone — matching the global agent_config.json
         // partial-PUT semantics used by every other live-editable field.
         // When anything changed and the consolidation pipeline is already
-        // running, tear it down and rebuild with the new scheduler config
-        // (decision D6 in ADR-071).
+        // running, hot-swap the scheduler policy on the shared timer
+        // (ADR-071 D8: RwLock config, takes effect on the next loop tick —
+        // no background-task teardown needed).
         let mut distiller_changed = false;
         if let Some(v) = overrides.distiller_enabled
             && self.distiller_runtime.enabled != Some(v)
@@ -968,7 +969,7 @@ impl AgentCore {
                 idle_minutes = ?self.distiller_runtime.idle_minutes,
                 "runtime config: distiller settings updated (ADR-071 D6) — rebuilding consolidation pipeline if running"
             );
-            self.rebuild_consolidation_pipeline_if_running();
+            self.update_consolidation_scheduler_config_if_running();
         }
     }
 
@@ -1196,7 +1197,7 @@ impl AgentCore {
     /// internal `RwLock`; swapping the value takes effect on the next loop
     /// tick (≤60s). The timer's idle/backlog/last-run state is preserved, so
     /// a config change never spuriously fires (or delays) a distillation.
-    pub(crate) fn rebuild_consolidation_pipeline_if_running(&self) {
+    pub(crate) fn update_consolidation_scheduler_config_if_running(&self) {
         let Some(timer) = self.consolidation_timer.as_ref() else {
             tracing::debug!(
                 "Distiller config changed but consolidation timer not running (pipeline not started yet)"
@@ -2269,7 +2270,7 @@ mod tests {
     /// survive the overlay.
     #[test]
     fn test_distiller_scheduler_config_projects_prompt_overrides() {
-        let mut core = make_core_with_memory_toml(
+        let core = make_core_with_memory_toml(
             "[memory.distiller]\nenabled = true\nbatch_size = 20\n",
         );
         // Without override files the slots are `None` → manifest values.
@@ -2301,7 +2302,7 @@ mod tests {
     /// while the opt-in `distiller_enabled` stays OFF.
     #[test]
     fn test_distiller_scheduler_config_override_without_manifest_section() {
-        let mut core = make_core_with_memory_toml("");
+        let core = make_core_with_memory_toml("");
         assert!(!core.manifest.memory.distiller_enabled());
 
         *core.distiller_extraction_prompt.write().unwrap() = Some("EX_OVERRIDE".to_string());

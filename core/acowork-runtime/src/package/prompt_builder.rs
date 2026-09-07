@@ -88,7 +88,7 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
 
 /// O(1) lookup set of overridable filenames. Built lazily on first access
 /// via [`overridable_filenames`] so the cold-start cost is one allocation
-/// of five `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
+/// of seven `&str`s — cheaper than scanning [`OVERRIDABLE_PROMPTS`] on every
 /// file in `prompts/`.
 fn overridable_filenames() -> &'static HashSet<&'static str> {
     use std::sync::OnceLock;
