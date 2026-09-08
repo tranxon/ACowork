@@ -442,7 +442,10 @@
     "resetAgentSetup": "重設 Agent 設定",
     "reset": "重設",
     "compressionRatioThreshold": "壓縮比閾值",
-    "compressionRatioThresholdDesc": "上下文壓縮後保留的比例。90% 表示壓縮到剩餘 10%。範圍 50%–95%，預設 90%。"
+    "compressionRatioThresholdDesc": "上下文壓縮後保留的比例。90% 表示壓縮到剩餘 10%。範圍 50%–95%，預設 90%。",
+    "sectionAgentInfo": "Agent 資訊",
+    "sectionSessionParams": "會話參數",
+    "sectionModelParams": "模型參數"
   },
   "harness": {
     "tabProviders": "模型服務提供者",

@@ -444,7 +444,10 @@
     "reset": "초기화",
     "compressionRatioThreshold": "압축 비율 임계값",
     "compressionRatioThresholdDesc": "컨텍스트 압축 후 유지 비율. 90%는 10% 남을 때까지 압축. 범위 50%–95%, 기본값 90%.",
-    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}"
+    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
+    "sectionAgentInfo": "Agent 정보",
+    "sectionSessionParams": "세션 파라미터",
+    "sectionModelParams": "모델 파라미터"
   },
   "harness": {
     "tabProviders": "제공자",

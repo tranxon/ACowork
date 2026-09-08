@@ -443,7 +443,10 @@
     "resetAgentSetup": "Agent設定をリセット",
     "reset": "リセット",
     "compressionRatioThreshold": "圧縮率しきい値",
-    "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。"
+    "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。",
+    "sectionAgentInfo": "Agent情報",
+    "sectionSessionParams": "セッションパラメータ",
+    "sectionModelParams": "モデルパラメータ"
   },
   "harness": {
     "tabProviders": "プロバイダー",

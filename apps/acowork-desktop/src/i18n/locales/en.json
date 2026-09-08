@@ -564,7 +564,10 @@
     "tokens": "tokens",
     "builtinTools": "Builtin Tools ({{count}})",
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
-    "noBuiltinTools": "No builtin tools available."
+    "noBuiltinTools": "No builtin tools available.",
+    "sectionAgentInfo": "Agent Info",
+    "sectionSessionParams": "Session Parameters",
+    "sectionModelParams": "Model Parameters"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",

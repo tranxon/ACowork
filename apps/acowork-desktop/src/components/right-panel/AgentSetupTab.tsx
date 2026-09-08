@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAgentStore, type AgentProfileSettings } from "../../stores/agentStore";
@@ -26,6 +27,7 @@ import {
   idleTimeoutDisplayValue,
 } from "../../lib/idleTimeoutOptions";
 import { useToast } from "../common/ToastProvider";
+import { ListBox, ExpandableRow } from "../common/list";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -137,6 +139,55 @@ export function AgentSetupTab() {
   const [avatarAssets, setAvatarAssets] = useState<AvatarAssetEntry[]>([]);
   const [avatarConfig, setAvatarConfig] = useState<AvatarConfigResponse | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
+
+  // ── Avatar picker popup positioning ─────────────────────────────
+  // The picker popup used to be `absolute` inside the avatar button's
+  // `.relative` wrapper. Once the setup panel became a set of
+  // collapsible `ListBox` cards (each `overflow-hidden`), that absolute
+  // popup got clipped by the card. Fix mirrors the Tooltip /
+  // ContextMenu pattern: render the popup through `createPortal` to
+  // `document.body` with `position: fixed`, anchored to the avatar
+  // button's measured rect.
+  //   - `avatarAnchorRef`   → the `.relative` wrapper around the button
+  //   - `avatarPopupPos`    → { top, left } viewport coords for the popup
+  //   - Position is computed synchronously on open (no first-frame
+  //     flash) and re-computed on window resize / any scroll so the
+  //     popup tracks the button when the panel or page scrolls.
+  const avatarAnchorRef = useRef<HTMLDivElement>(null);
+  const [avatarPopupPos, setAvatarPopupPos] = useState<{ top: number; left: number } | null>(null);
+
+  const computeAvatarPopupPos = useCallback(() => {
+    const el = avatarAnchorRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    // 8px gap below the avatar button — same visual as the old
+    // `absolute left-0 top-full mt-2` placement.
+    setAvatarPopupPos({ top: rect.bottom + 8, left: rect.left });
+  }, []);
+
+  useEffect(() => {
+    if (!avatarPopupOpen) return;
+    computeAvatarPopupPos();
+    window.addEventListener("resize", computeAvatarPopupPos);
+    // Capture-phase scroll: catches scrolling of the right-panel /
+    // card containers, not just the window, so the fixed popup stays
+    // glued to the avatar button.
+    window.addEventListener("scroll", computeAvatarPopupPos, true);
+    return () => {
+      window.removeEventListener("resize", computeAvatarPopupPos);
+      window.removeEventListener("scroll", computeAvatarPopupPos, true);
+    };
+  }, [avatarPopupOpen, computeAvatarPopupPos]);
+
+  // ── Section collapse state ──────────────────────────────────────
+  // Three level-1 collapsible cards (Agent Info / Session Parameters /
+  // Model Parameters) using the same grammar as Status-tab Session
+  // Status / Agent Status cards in RightPanel and Tools-tab Builtin
+  // Tools / Web Search / MCP cards in ToolsTab. Default open so the
+  // previous always-visible behavior is preserved on first mount.
+  const [agentInfoOpen, setAgentInfoOpen] = useState(true);
+  const [sessionParamsOpen, setSessionParamsOpen] = useState(true);
+  const [modelParamsOpen, setModelParamsOpen] = useState(true);
 
   // Load avatar config + assets on mount and agent switch
   useEffect(() => {
@@ -561,484 +612,509 @@ export function AgentSetupTab() {
   const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-right-panel p-3">
-      {/* Avatar preview — click to open picker popup */}
-      <div className="mb-3 flex items-center gap-3">
-        <div className="relative">
-          <button
-            onClick={() => setAvatarPopupOpen((v) => !v)}
-            className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
-          >
-            <AgentAvatar
-              agentId={selectedAgentId}
-              avatarUrl={avatarConfig?.avatar ?? null}
-              builtinAvatarId={avatarConfig?.builtin_avatar ?? null}
-              version={selectedAgent.version}
-              size={64}
-            />
-            {/* Pencil badge */}
-            <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
-              <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
-                <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
-              </svg>
-            </span>
-          </button>
-
-          {/* Avatar picker popup */}
-          {avatarPopupOpen && (
-            <>
-              {/* Click-outside overlay */}
-              <div
-                className="fixed inset-0 z-40"
-                onClick={() => setAvatarPopupOpen(false)}
-              />
-              <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700">
-                {/* Tabs */}
-                <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
-                  <button
-                    onClick={() => setAvatarTab("custom")}
-                    className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
-                      ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-                      : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
-                      }`}
-                  >
-                    Custom
-                  </button>
-                  <button
-                    onClick={() => setAvatarTab("builtin")}
-                    className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
-                      ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-                      : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
-                      }`}
-                  >
-                    Builtin
-                  </button>
-                </div>
-
-                {/* Custom tab */}
-                {avatarTab === "custom" && (
-                  <div className="grid grid-cols-4 gap-2">
-                    <button
-                      onClick={handleUploadClick}
-                      disabled={avatarBusy}
-                      className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-500 dark:hover:border-zinc-400"
-                    >
-                      <span className="text-lg">+</span>
-                    </button>
-                    {avatarAssets.map((asset) => {
-                      const isSelected = avatarConfig?.avatar === asset.relative_path;
-                      return (
-                        <div
-                          key={asset.relative_path}
-                          className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
-                            ? "border-zinc-800 dark:border-zinc-200"
-                            : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
-                            }`}
-                        >
-                          <img
-                            src={resolveAgentAvatarFileUrl(selectedAgentId, asset.relative_path)}
-                            alt={asset.relative_path}
-                            draggable={false}
-                            className="h-full w-full cursor-pointer object-cover"
-                            onClick={() => handleSelectCustom(asset.relative_path)}
-                          />
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteAvatar(asset.relative_path);
-                            }}
-                            disabled={avatarBusy}
-                            className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-red-500/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
-                          >
-                            ×
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* Builtin tab */}
-                {avatarTab === "builtin" && (
-                  <div className="grid grid-cols-4 gap-2">
-                    {BUILTIN_ICON_IDS.map((iconId) => {
-                      const isSelected = avatarConfig?.builtin_avatar === iconId;
-                      return (
-                        <button
-                          key={iconId}
-                          onClick={() => handleSelectBuiltin(iconId)}
-                          disabled={avatarBusy}
-                          className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
-                            ? "bg-zinc-200 dark:bg-zinc-600"
-                            : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
-                            }`}
-                        >
-                          <img
-                            src={BUILTIN_ICONS[iconId] ?? ""}
-                            alt={iconId}
-                            draggable={false}
-                            className="h-12 w-12 rounded-full object-cover"
-                          />
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
-            {agentName}
-          </p>
-          <p className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
-            {selectedAgentId}
-          </p>
-        </div>
-      </div>
-
-      {/* Agent Name */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.agentName")}
-        </label>
-        <StyledInput
-          type="text"
-          value={profile.displayName ?? selectedAgent.name ?? ""}
-          onChange={(e) =>
-            setProfile(selectedAgentId, { displayName: e.target.value || undefined })
-          }
-          placeholder={selectedAgent.name ?? "Agent name"}
-          className="rounded-md bg-panel-block"
-        />
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Max Output Tokens */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.maxOutputTokens")}
-        </label>
-        <StyledInput
-          type="number"
-          min={0}
-          max={131072}
-          step={1024}
-          value={profile.maxTokens && profile.maxTokens > 0 ? profile.maxTokens : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            // Empty input → omit the field on the wire (don't clobber
-            // the on-disk value). 0 / non-numeric collapses to 0 by
-            // input convention, which is also omitted by the
-            // `> 0` gate in the old handleApply and matches
-            // the pre-write-through behavior.
-            saveField(
-              "maxTokens",
-              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
-            );
-          }}
-          placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
-          className="rounded-md bg-panel-block"
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.leaveEmptyDefault")}
-        </p>
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Max Iterations */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.maxIterations")}
-        </label>
-        <StyledInput
-          type="number"
-          min={0}
-          max={200}
-          value={profile.maxIterations && profile.maxIterations > 0 ? profile.maxIterations : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            saveField(
-              "maxIterations",
-              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
-            );
-          }}
-          placeholder={t("agentSetup.defaultIterations")}
-          className="rounded-md bg-panel-block"
-        />
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Max Sessions (ADR-024) */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.maxSessions")}
-        </label>
-        <StyledInput
-          type="number"
-          min={0}
-          max={10000}
-          value={profile.maxSessions && profile.maxSessions > 0 ? profile.maxSessions : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            saveField(
-              "maxSessions",
-              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
-            );
-          }}
-          placeholder="2000 (default)"
-          className="rounded-md bg-panel-block"
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.maxSessionsDesc")}
-        </p>
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Context Window */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.contextWindow")}
-        </label>
-        <div className="flex items-center gap-3">
-          <StyledInput
-            type="number"
-            min={0}
-            max={1000000}
-            step={1000}
-            value={profile.contextWindow ?? ""}
-            placeholder={t("agentSetup.contextWindowPlaceholder")}
-            onChange={(e) => {
-              const raw = e.target.value;
-              if (raw === "" || raw === "0") {
-                // 0 = no limit (use model's full window)
-                saveField("contextWindow", 0);
-              } else {
-                const n = parseInt(raw, 10);
-                if (!isNaN(n) && n >= 0) {
-                  saveField("contextWindow", n);
-                }
-              }
-            }}
-            className="w-32 rounded-md bg-panel-block"
-          />
-          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
-            {t("agentSetup.tokens")}
-          </span>
-        </div>
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.contextWindowDesc")}
-        </p>
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Approval Timeout */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.approvalTimeout")}
-        </label>
-        <StyledInput
-          type="number"
-          min={0}
-          max={3600}
-          step={30}
-          value={profile.approvalTimeoutSecs && profile.approvalTimeoutSecs > 0 ? profile.approvalTimeoutSecs : ""}
-          onChange={(e) => {
-            const v = e.target.value;
-            saveField(
-              "approvalTimeoutSecs",
-              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
-            );
-          }}
-          placeholder="300 (5 min)"
-          className="rounded-md bg-panel-block"
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.approvalTimeoutDesc")}
-        </p>
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Idle (auto-sleep) Timeout */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.idleTimeout")}
-        </label>
-        <Dropdown
-          value={idleTimeoutDisplayValue(profile.idleTimeoutSecs)}
-          onChange={(v) => {
-            if (v === "") {
-              saveField("idleTimeoutSecs", undefined);
-              return;
-            }
-            const n = parseInt(v, 10);
-            saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
-          }}
-          placeholder={{ value: "", label: t("agentSetup.idleTimeoutPlaceholder") }}
-          options={IDLE_TIMEOUT_OPTIONS.map((opt) => ({
-            value: String(opt.value),
-            label: t(opt.labelKey),
-          }))}
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.idleTimeoutDesc")}
-        </p>
-      </div>
-
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
-
-      {/* Shell Command Approval Threshold */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.shellCommandApproval")}
-        </label>
-        <Dropdown
-          value={
-            // Legacy "never" (pre-rename) is normalized to "auto_approve" so
-            // profiles saved before the rename still show the right option.
-            profile.shellApprovalThreshold === "never"
-              ? "auto_approve"
-              : (profile.shellApprovalThreshold ?? "medium")
-          }
-          onChange={(v) => saveField("shellApprovalThreshold", v)}
-          options={[
-            { value: "medium", label: t("agentSetup.approvalMedium") },
-            { value: "low", label: t("agentSetup.approvalLow") },
-            { value: "high", label: t("agentSetup.approvalHigh") },
-            { value: "auto_approve", label: t("agentSetup.approvalAutoApprove") },
-          ]}
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.approvalDesc")}
-        </p>
-        <button
-          onClick={async () => {
-            if (!selectedAgentId) return;
-            const url = `${getGatewayUrl()}/api/agents/${selectedAgentId}/shell-risk-rules`;
-            try {
-              const resp = await fetch(url);
-              if (!resp.ok) {
-                log.error("[AgentSetupTab] Failed to fetch shell risk rules:", resp.status);
-                return;
-              }
-              const data = (await resp.json()) as { content: string; has_user_override: boolean };
-              useFileEditorStore.getState().openFileWithContent(
-                selectedAgentId,
-                "__agent_home__",
-                "config/shell_risk_rules.toml",
-                data.content,
-                "ini", // TOML is mapped to "ini" language in the editor
-              );
-            } catch (e) {
-              log.error("[AgentSetupTab] Error opening shell risk rules:", e);
-            }
-          }}
-          className="mt-1 text-[9px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 underline underline-offset-2 transition-colors"
+    <div className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
+      {/* ── Card 1: Agent Info ────────────────────────────────
+          Avatar picker + display name. Level-1 collapsible card
+          matching the Status-tab Session/Agent Status and
+          Tools-tab Builtin/Web Search/MCP cards grammar (same
+          body chrome via `bg-panel-inset` + border-t hairline).
+          Default open so the previous always-visible behavior
+          is preserved. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={agentInfoOpen}
+          onToggle={() => setAgentInfoOpen((v) => !v)}
+          title={t("agentSetup.sectionAgentInfo")}
+          ariaLabel={t("agentSetup.sectionAgentInfo")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
         >
-          {t("agentSetup.editRiskRules")}
-        </button>
-      </div>
+          <div className="space-y-3">
+    {/* Avatar preview — click to open picker popup */}
+          <div className="flex items-center gap-3">
+            <div className="relative" ref={avatarAnchorRef}>
+              <button
+                onClick={() => {
+                  if (!avatarPopupOpen) computeAvatarPopupPos();
+                  setAvatarPopupOpen((v) => !v);
+                }}
+                className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+              >
+                <AgentAvatar
+                  agentId={selectedAgentId}
+                  avatarUrl={avatarConfig?.avatar ?? null}
+                  builtinAvatarId={avatarConfig?.builtin_avatar ?? null}
+                  version={selectedAgent.version}
+                  size={64}
+                />
+                {/* Pencil badge */}
+                <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
+                  <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
+                  </svg>
+                </span>
+              </button>
 
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
+              {/* Avatar picker popup — rendered via createPortal to
+                  document.body so the ListBox card's overflow-hidden
+                  does not clip it (same pattern as Tooltip/ContextMenu).
+                  `position: fixed` anchors to the avatar button's
+                  measured viewport coords (avatarPopupPos). */}
+              {avatarPopupOpen &&
+                createPortal(
+                  <>
+                    {/* Click-outside overlay */}
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setAvatarPopupOpen(false)}
+                    />
+                    <div
+                      className="fixed z-50 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
+                      style={{ top: avatarPopupPos?.top ?? 0, left: avatarPopupPos?.left ?? 0 }}
+                    >
+                    {/* Tabs */}
+                    <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
+                      <button
+                        onClick={() => setAvatarTab("custom")}
+                        className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
+                          ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
+                          : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                          }`}
+                      >
+                        Custom
+                      </button>
+                      <button
+                        onClick={() => setAvatarTab("builtin")}
+                        className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
+                          ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
+                          : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                          }`}
+                      >
+                        Builtin
+                      </button>
+                    </div>
+
+                    {/* Custom tab */}
+                    {avatarTab === "custom" && (
+                      <div className="grid grid-cols-4 gap-2">
+                        <button
+                          onClick={handleUploadClick}
+                          disabled={avatarBusy}
+                          className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-500 dark:hover:border-zinc-400"
+                        >
+                          <span className="text-lg">+</span>
+                        </button>
+                        {avatarAssets.map((asset) => {
+                          const isSelected = avatarConfig?.avatar === asset.relative_path;
+                          return (
+                            <div
+                              key={asset.relative_path}
+                              className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
+                                ? "border-zinc-800 dark:border-zinc-200"
+                                : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                                }`}
+                            >
+                              <img
+                                src={resolveAgentAvatarFileUrl(selectedAgentId, asset.relative_path)}
+                                alt={asset.relative_path}
+                                draggable={false}
+                                className="h-full w-full cursor-pointer object-cover"
+                                onClick={() => handleSelectCustom(asset.relative_path)}
+                              />
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteAvatar(asset.relative_path);
+                                }}
+                                disabled={avatarBusy}
+                                className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-red-500/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                              >
+                                ×
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Builtin tab */}
+                    {avatarTab === "builtin" && (
+                      <div className="grid grid-cols-4 gap-2">
+                        {BUILTIN_ICON_IDS.map((iconId) => {
+                          const isSelected = avatarConfig?.builtin_avatar === iconId;
+                          return (
+                            <button
+                              key={iconId}
+                              onClick={() => handleSelectBuiltin(iconId)}
+                              disabled={avatarBusy}
+                              className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
+                                ? "bg-zinc-200 dark:bg-zinc-600"
+                                : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                                }`}
+                            >
+                              <img
+                                src={BUILTIN_ICONS[iconId] ?? ""}
+                                alt={iconId}
+                                draggable={false}
+                                className="h-12 w-12 rounded-full object-cover"
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  </>,
+                  document.body,
+                )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                {agentName}
+              </p>
+              <p className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                {selectedAgentId}
+              </p>
+            </div>
+          </div>
+
+    {/* Agent Name */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.agentName")}
+            </label>
+            <StyledInput
+              type="text"
+              value={profile.displayName ?? selectedAgent.name ?? ""}
+              onChange={(e) =>
+                setProfile(selectedAgentId, { displayName: e.target.value || undefined })
+              }
+              placeholder={selectedAgent.name ?? "Agent name"}
+              className="rounded-md bg-panel-block"
+            />
+          </div>
+          </div>
+        </ExpandableRow>
+      </ListBox>
+
+      {/* Divider — full panel-width hairline separating the
+          Agent Info card (above) from the Session Parameters
+          card (below). Matches the workspace/memory panel
+          divider style. */}
       <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
 
-      {/* Temperature slider */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.temperature")}
-        </label>
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            min={0}
-            max={2}
-            step={0.05}
-            value={profile.temperature ?? 0.3}
-            onChange={(e) => {
-              saveField("temperature", parseFloat(e.target.value));
-            }}
-            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
-              bg-zinc-200 dark:bg-zinc-700
-              accent-zinc-600 dark:accent-zinc-400"
-          />
-          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
-            {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}
-          </span>
-        </div>
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.temperatureDesc")}
-        </p>
-      </div>
+      {/* ── Card 2: Session Parameters ─────────────────────────
+          Iteration / session-count / approval / idle /
+          shell-approval / compression-ratio knobs. Same
+          level-1 collapsible grammar as Card 1. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={sessionParamsOpen}
+          onToggle={() => setSessionParamsOpen((v) => !v)}
+          title={t("agentSetup.sectionSessionParams")}
+          ariaLabel={t("agentSetup.sectionSessionParams")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
+        >
+          <div className="space-y-3">
+    {/* Max Iterations */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.maxIterations")}
+            </label>
+            <StyledInput
+              type="number"
+              min={0}
+              max={200}
+              value={profile.maxIterations && profile.maxIterations > 0 ? profile.maxIterations : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                saveField(
+                  "maxIterations",
+                  v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+                );
+              }}
+              placeholder={t("agentSetup.defaultIterations")}
+              className="rounded-md bg-panel-block"
+            />
+          </div>
 
-      {/* Divider — full panel-width hairline separating each independent
-          setting (avatar+name are treated as one group above). Matches
-          the workspace/memory panel divider style. */}
+    {/* Max Sessions (ADR-024) */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.maxSessions")}
+            </label>
+            <StyledInput
+              type="number"
+              min={0}
+              max={10000}
+              value={profile.maxSessions && profile.maxSessions > 0 ? profile.maxSessions : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                saveField(
+                  "maxSessions",
+                  v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+                );
+              }}
+              placeholder="2000 (default)"
+              className="rounded-md bg-panel-block"
+            />
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.maxSessionsDesc")}
+            </p>
+          </div>
+
+    {/* Approval Timeout */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.approvalTimeout")}
+            </label>
+            <StyledInput
+              type="number"
+              min={0}
+              max={3600}
+              step={30}
+              value={profile.approvalTimeoutSecs && profile.approvalTimeoutSecs > 0 ? profile.approvalTimeoutSecs : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                saveField(
+                  "approvalTimeoutSecs",
+                  v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+                );
+              }}
+              placeholder="300 (5 min)"
+              className="rounded-md bg-panel-block"
+            />
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.approvalTimeoutDesc")}
+            </p>
+          </div>
+
+    {/* Idle (auto-sleep) Timeout */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.idleTimeout")}
+            </label>
+            <Dropdown
+              value={idleTimeoutDisplayValue(profile.idleTimeoutSecs)}
+              onChange={(v) => {
+                if (v === "") {
+                  saveField("idleTimeoutSecs", undefined);
+                  return;
+                }
+                const n = parseInt(v, 10);
+                saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
+              }}
+              placeholder={{ value: "", label: t("agentSetup.idleTimeoutPlaceholder") }}
+              options={IDLE_TIMEOUT_OPTIONS.map((opt) => ({
+                value: String(opt.value),
+                label: t(opt.labelKey),
+              }))}
+            />
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.idleTimeoutDesc")}
+            </p>
+          </div>
+
+    {/* Shell Command Approval Threshold */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.shellCommandApproval")}
+            </label>
+            <Dropdown
+              value={
+                // Legacy "never" (pre-rename) is normalized to "auto_approve" so
+                // profiles saved before the rename still show the right option.
+                profile.shellApprovalThreshold === "never"
+                  ? "auto_approve"
+                  : (profile.shellApprovalThreshold ?? "medium")
+              }
+              onChange={(v) => saveField("shellApprovalThreshold", v)}
+              options={[
+                { value: "medium", label: t("agentSetup.approvalMedium") },
+                { value: "low", label: t("agentSetup.approvalLow") },
+                { value: "high", label: t("agentSetup.approvalHigh") },
+                { value: "auto_approve", label: t("agentSetup.approvalAutoApprove") },
+              ]}
+            />
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.approvalDesc")}
+            </p>
+            <button
+              onClick={async () => {
+                if (!selectedAgentId) return;
+                const url = `${getGatewayUrl()}/api/agents/${selectedAgentId}/shell-risk-rules`;
+                try {
+                  const resp = await fetch(url);
+                  if (!resp.ok) {
+                    log.error("[AgentSetupTab] Failed to fetch shell risk rules:", resp.status);
+                    return;
+                  }
+                  const data = (await resp.json()) as { content: string; has_user_override: boolean };
+                  useFileEditorStore.getState().openFileWithContent(
+                    selectedAgentId,
+                    "__agent_home__",
+                    "config/shell_risk_rules.toml",
+                    data.content,
+                    "ini", // TOML is mapped to "ini" language in the editor
+                  );
+                } catch (e) {
+                  log.error("[AgentSetupTab] Error opening shell risk rules:", e);
+                }
+              }}
+              className="mt-1 text-[9px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 underline underline-offset-2 transition-colors"
+            >
+              {t("agentSetup.editRiskRules")}
+            </button>
+          </div>
+
+    {/* Compression Ratio Threshold (ADR-061) */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.compressionRatioThreshold")}
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={50}
+                max={95}
+                step={5}
+                value={ratioPct}
+                onChange={(e) => {
+                  saveField(
+                    "compressionRatioThreshold",
+                    parseFloat(e.target.value) / 100,
+                  );
+                }}
+                className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
+                  bg-zinc-200 dark:bg-zinc-700
+                  accent-zinc-600 dark:accent-zinc-400"
+              />
+              <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+                {ratioPct}%
+              </span>
+            </div>
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.compressionRatioThresholdDesc")}
+            </p>
+          </div>
+          </div>
+        </ExpandableRow>
+      </ListBox>
+
+      {/* Divider — full panel-width hairline separating the
+          Session Parameters card (above) from the Model
+          Parameters card (below). */}
       <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
 
-      {/* Compression Ratio Threshold (ADR-061) */}
-      <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          {t("agentSetup.compressionRatioThreshold")}
-        </label>
-        <div className="flex items-center gap-3">
-          <input
-            type="range"
-            min={50}
-            max={95}
-            step={5}
-            value={ratioPct}
-            onChange={(e) => {
-              saveField(
-                "compressionRatioThreshold",
-                parseFloat(e.target.value) / 100,
-              );
-            }}
-            className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
-              bg-zinc-200 dark:bg-zinc-700
-              accent-zinc-600 dark:accent-zinc-400"
-          />
-          <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
-            {ratioPct}%
-          </span>
-        </div>
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.compressionRatioThresholdDesc")}
-        </p>
-      </div>
+      {/* ── Card 3: Model Parameters ───────────────────────────
+          max_output_tokens / context_window / temperature.
+          Same level-1 collapsible grammar as Cards 1 and 2. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={modelParamsOpen}
+          onToggle={() => setModelParamsOpen((v) => !v)}
+          title={t("agentSetup.sectionModelParams")}
+          ariaLabel={t("agentSetup.sectionModelParams")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
+        >
+          <div className="space-y-3">
+    {/* Max Output Tokens */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.maxOutputTokens")}
+            </label>
+            <StyledInput
+              type="number"
+              min={0}
+              max={131072}
+              step={1024}
+              value={profile.maxTokens && profile.maxTokens > 0 ? profile.maxTokens : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                // Empty input → omit the field on the wire (don't clobber
+                // the on-disk value). 0 / non-numeric collapses to 0 by
+                // input convention, which is also omitted by the
+                // `> 0` gate in the old handleApply and matches
+                // the pre-write-through behavior.
+                saveField(
+                  "maxTokens",
+                  v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+                );
+              }}
+              placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
+              className="rounded-md bg-panel-block"
+            />
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.leaveEmptyDefault")}
+            </p>
+          </div>
 
-      {/* Divider — full panel-width hairline separating the last setting
-          from the footer actions. Matches the divider style above. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+    {/* Context Window */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.contextWindow")}
+            </label>
+            <div className="flex items-center gap-3">
+              <StyledInput
+                type="number"
+                min={0}
+                max={1000000}
+                step={1000}
+                value={profile.contextWindow ?? ""}
+                placeholder={t("agentSetup.contextWindowPlaceholder")}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === "" || raw === "0") {
+                    // 0 = no limit (use model's full window)
+                    saveField("contextWindow", 0);
+                  } else {
+                    const n = parseInt(raw, 10);
+                    if (!isNaN(n) && n >= 0) {
+                      saveField("contextWindow", n);
+                    }
+                  }
+                }}
+                className="w-32 rounded-md bg-panel-block"
+              />
+              <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+                {t("agentSetup.tokens")}
+              </span>
+            </div>
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.contextWindowDesc")}
+            </p>
+          </div>
+
+    {/* Temperature slider */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.temperature")}
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={0.05}
+                value={profile.temperature ?? 0.3}
+                onChange={(e) => {
+                  saveField("temperature", parseFloat(e.target.value));
+                }}
+                className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
+                  bg-zinc-200 dark:bg-zinc-700
+                  accent-zinc-600 dark:accent-zinc-400"
+              />
+              <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+                {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}
+              </span>
+            </div>
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.temperatureDesc")}
+            </p>
+          </div>
+          </div>
+        </ExpandableRow>
+      </ListBox>
+<div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
 
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
       <div className="flex items-center gap-3">
