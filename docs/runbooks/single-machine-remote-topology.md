@@ -184,6 +184,11 @@ MQTT connected, subscribing acowork/nodes/sim-node-1/#
 
 > **关键：这次没有端口冲突**。`19900` 和 `19878` 是默认 canonical 端口，可以直接用，不需要像 v1 那样改 `:19901`/`:19879`。
 
+> **移动机器（笔记本 / 常换热点）**：把 `--addr 192.168.1.20:19900` 换成 `--addr auto`。Node 会在
+> 每次 MQTT ConnAck 和 60s 心跳时重检本机当前 LAN IP，地址变化时自动重发 NodeInfo——控制面
+> （fs_browse / 包管理 / install / LSP）与已运行 Runtime 的可达性都无需重启即自愈（ADR-055 §6.3.3）。
+> 固定部署的服务器节点保持显式 `--addr HOST:PORT` 即可（地址稳定，不做无谓重检）。
+
 验证：
 
 ```bash
@@ -221,6 +226,7 @@ npm run tauri dev              # 启动 Tauri 窗口
 |---|---|---|
 | Desktop 启动时 | **probe-then-spawn**：先探测 `{url}/health`，没响应才 spawn Gateway 子进程（ownership = `owned`） | **不 spawn**：假定你已手动启动 Gateway（ownership = `foreign`） |
 | URL | 默认 `http://127.0.0.1:19876`，可改成任何地址（含本机 LAN IP） | 手动填，本机 IP / 局域网 IP 均可 |
+| Desktop spawn 的 Gateway | **loopback-only**：强制 `--addr 127.0.0.1:19876 --mqtt-addr 127.0.0.1:19875`（CLI > TOML），不随配置文件/环境变量变成 0.0.0.0；其 spawn 的 local node 也恒连 `127.0.0.1`（ADR-055 §6.3.3 #4）——local 链路免疫换网换 IP。**local 只服务本机**，外部 Node 连不上本机 spawn 的 Gateway（符合 local 语义）；要接远程 Node 请用远程模式 | 不 spawn，bind 由你的 `gateway.toml` / 启动参数决定（跨机需 `0.0.0.0`） |
 | Gateway 配置文件 | 同一个 `gateway.toml` | 同一个 `gateway.toml` |
 | Desktop 退出 | 弹出三选项（见 §4.2.2） | 直接退出，绝不 kill 远程 Gateway |
 
@@ -349,6 +355,8 @@ Desktop MQTT client 通过 Gateway `/api/status` 拿到 broker host:port 自动�
 | `advertise_host` 没生效，Runtime 找不到 embed | 没设或 LAN IP 拼错 | `gateway.toml` 设 + Desktop 重启 |
 | `packages_dir` 跑到了 `<gateway_home>/config/packages` 旧位置 | 升级前的数据（手动移走即可，不再写新代码兼容） | `mv <gateway_home>/config/packages <node_home>/packages` |
 | Tunnel 场景（WSL↔宿主机） | 同上 | ssh -L 端口转发 19876 + 19875 |
+| 笔记本换 Wi-Fi 热点后，Gateway 反代 Runtime 返回 503 | Node / Runtime 还抱着旧 IP（Node 未用 `--addr auto`） | Node 用 `--addr auto` 重启；之后换网 60s 内控制面 + Runtime 可达性自动恢复（ADR-055 §6.3.3），无需重启任何进程 |
+| local 模式：Desktop spawn 的 Gateway / node 日志里地址是 127.0.0.1 | 设计如此（loopback-only 不变式） | 正常现象；local 只服务本机，跨机请用远程模式手动起 Gateway |
 
 日志位置：
 

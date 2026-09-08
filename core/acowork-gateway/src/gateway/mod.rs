@@ -1221,7 +1221,6 @@ impl Gateway {
         let local_node_supervisor: Option<std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>> =
             if mqtt_broker_started && self.config.local_node.enabled {
                 match crate::gateway::node_manager::ensure_local_node(
-                    &mqtt_config.host,
                     mqtt_config.port,
                     &self.config.packages_dir,
                     node_registry.clone(),

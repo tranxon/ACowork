@@ -109,6 +109,12 @@ pub struct NodeState {
     /// lock) so concurrent starts can never receive the same port; the
     /// reservation is released on stop / process exit / spawn failure.
     pub port_allocator: std::sync::Arc<PortAllocator>,
+    /// Live public host of this node's reverse proxy (§6.3.3). Set at
+    /// connect time — either the configured `advertise_host` or (when
+    /// `advertise_host_auto`) the freshly detected LAN IP. Start/Stop
+    /// and heartbeat paths publish NodeInfo with this host so the
+    /// Gateway always sees the current address after a network change.
+    pub live_advertise_host: std::sync::Arc<std::sync::Mutex<String>>,
     snapshot: NodeRuntimeSnapshot,
 }
 
@@ -120,6 +126,7 @@ impl NodeState {
             installed_agents: HashMap::new(),
             lsp_relay_process: None,
             port_allocator: std::sync::Arc::new(PortAllocator::new()),
+            live_advertise_host: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
             snapshot: NodeRuntimeSnapshot::default(),
         }
     }

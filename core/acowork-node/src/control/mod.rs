@@ -61,7 +61,17 @@ pub struct NodeControlPlane {
 }
 
 /// Build the NodeInfo snapshot published on the retained info topic.
-pub fn build_node_info(identity: &NodeIdentity, config: &NodeConfig, agent_count: u32) -> NodeInfo {
+///
+/// `advertise_host` is the *live* public host (§6.3.3): the configured
+/// `advertise_host`, or — when `advertise_host_auto` is set — the LAN
+/// IP detected at connect time / heartbeat. Pass the value held in
+/// `state.live_advertise_host`.
+pub fn build_node_info(
+    identity: &NodeIdentity,
+    config: &NodeConfig,
+    advertise_host: &str,
+    agent_count: u32,
+) -> NodeInfo {
     NodeInfo {
         node_id: identity.node_id.clone(),
         machine_uid: identity.machine_uid.clone(),
@@ -76,8 +86,40 @@ pub fn build_node_info(identity: &NodeIdentity, config: &NodeConfig, agent_count
         agent_count,
         // ADR-055 §6.3 / L7-1: the reverse-proxy base URL the Gateway
         // uses to reach node-local HTTP services (fs_browse).
-        http_endpoint: config.proxy_advertise_endpoint(),
+        http_endpoint: config.proxy_advertise_endpoint_for(advertise_host),
     }
+}
+
+/// §6.3.3 self-healing: compute and store the node's *current* public
+/// host. With `advertise_host_auto` the LAN IP is re-detected on every
+/// (re)connect and every heartbeat (a cheap interface enumeration), so
+/// a laptop that switches Wi-Fi hotspots converges on the new address
+/// within one heartbeat — no node restart, no Runtime restart. Detection
+/// failure falls back to the configured `advertise_host` (127.0.0.1),
+/// which keeps the control plane loopback-functional. With a fixed
+/// `advertise_host` (remote deployments) the configured value is used
+/// verbatim and this is a pure no-op.
+fn refresh_live_advertise_host<S: std::ops::Deref<Target = NodeState>>(
+    state: S,
+    config: &NodeConfig,
+) -> String {
+    let host = if config.advertise_host_auto {
+        acowork_core::addr::detect_non_loopback_ipv4()
+            .filter(|h| h != "127.0.0.1")
+            .unwrap_or_else(|| config.advertise_host.clone())
+    } else {
+        config.advertise_host.clone()
+    };
+    let host = if host.is_empty() {
+        config.advertise_host.clone()
+    } else {
+        host
+    };
+    *state
+        .live_advertise_host
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = host.clone();
+    host
 }
 
 /// Decode an incoming envelope and dispatch a command to its handler.
@@ -119,13 +161,17 @@ async fn handle_command(
     match command.command.as_ref() {
         Some(Command::Ping(_)) => reply("ok", "pong".to_string()),
         Some(Command::Start(cmd)) => {
+            // §6.3.3: pass the CURRENT proxy endpoint to the spawned
+            // Runtime so its retained `http_endpoint` reflects the live
+            // LAN IP even if the machine just changed networks.
+            let live = refresh_live_advertise_host(state.read().await, config);
             let mut mgr = ProcessManager::new(
                 config.log_file_size_mb,
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
                 command.node_id.clone(),
-                Some(config.proxy_advertise_endpoint()),
+                Some(config.proxy_advertise_endpoint_for(&live)),
                 node_token.map(str::to_string),
             );
             match mgr.start_agent(&cmd.agent_id, state, cmd.dev_mode, true).await {
@@ -141,13 +187,16 @@ async fn handle_command(
             }
         }
         Some(Command::Stop(cmd)) => {
+            // Same live endpoint as Start — the Runtime is told where
+            // its reverse proxy lives when it (re)connects.
+            let live = refresh_live_advertise_host(state.read().await, config);
             let mut mgr = ProcessManager::new(
                 config.log_file_size_mb,
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
                 command.node_id.clone(),
-                Some(config.proxy_advertise_endpoint()),
+                Some(config.proxy_advertise_endpoint_for(&live)),
                 node_token.map(str::to_string),
             );
             match mgr.stop_agent(&cmd.agent_id, state).await {
@@ -492,7 +541,7 @@ fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<
     else {
         return None; // No credential to present.
     };
-    let info = build_node_info(identity, config, 0);
+    let info = build_node_info(identity, config, &config.advertise_host, 0);
     let enroll = NodeEnroll {
         node_id: identity.node_id.clone(),
         machine_uid: identity.machine_uid.clone(),
@@ -729,8 +778,18 @@ impl NodeControlPlane {
                     tracing::warn!(error = %e, "Failed to publish node status=online");
                 }
 
+                // §6.3.3: re-detect the live LAN IP on every (re)connect
+                // and store it in shared state, so Start/Stop/heartbeat
+                // publish NodeInfo with the CURRENT address (a Wi-Fi
+                // hotspot switch is healed here without a restart).
+                let live_host = refresh_live_advertise_host(state.read().await, &config);
                 let agent_count = state.read().await.agents.len() as u32;
-                let info = build_node_info(&identity.read().await.clone(), &config, agent_count);
+                let info = build_node_info(
+                    &identity.read().await.clone(),
+                    &config,
+                    &live_host,
+                    agent_count,
+                );
                 let envelope = DataEnvelope {
                     version: 1,
                     payload: Some(data_envelope::Payload::NodeInfo(info)),
@@ -1149,8 +1208,17 @@ impl NodeControlPlane {
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    // §6.3.3: refresh the live host on every heartbeat so
+                    // a network change converges within one interval.
+                    let live_host =
+                        refresh_live_advertise_host(self.state.read().await, &self.config);
                     let agent_count = self.state.read().await.agents.len() as u32;
-                    let info = build_node_info(&self.identity, &self.config, agent_count);
+                    let info = build_node_info(
+                        &self.identity,
+                        &self.config,
+                        &live_host,
+                        agent_count,
+                    );
                     let envelope = DataEnvelope {
                         version: 1,
                         payload: Some(data_envelope::Payload::NodeInfo(info)),
@@ -1307,7 +1375,8 @@ impl NodeControlPlane {
                 let _ = client
                     .publish(&status_topic, QoS::AtLeastOnce, true, "online".as_bytes())
                     .await;
-                let info = build_node_info(&id, &config, 0);
+                let live_host = refresh_live_advertise_host(state.read().await, &config);
+                let info = build_node_info(&id, &config, &live_host, 0);
                 let envelope = DataEnvelope {
                     version: 1,
                     payload: Some(data_envelope::Payload::NodeInfo(info)),
@@ -1442,7 +1511,8 @@ impl NodeControlPlane {
         // NodeInfo under the NEW name (machine_uid / hostname unchanged).
         let mut new_identity = identity.clone();
         new_identity.node_id = new_name.to_string();
-        let info = build_node_info(&new_identity, &config, installed.len() as u32);
+        let live_host = refresh_live_advertise_host(&state, &config);
+        let info = build_node_info(&new_identity, &config, &live_host, installed.len() as u32);
 
         let old_id_for_cb = old_id.clone();
         let new_id_for_cb = new_name.to_string();
@@ -1894,6 +1964,54 @@ mod tests {
             home: tmp.path().to_path_buf(),
             ..NodeConfig::default()
         }
+    }
+
+    // ── refresh_live_advertise_host (§6.3.3) ─────────────────────────
+
+    #[tokio::test]
+    async fn live_host_fixed_config_is_verbatim() {
+        let state = test_state();
+        let config = NodeConfig {
+            advertise_host: "10.0.0.5".to_string(),
+            advertise_host_auto: false,
+            ..test_config()
+        };
+        let host = refresh_live_advertise_host(state.read().await, &config);
+        assert_eq!(host, "10.0.0.5");
+        // The live slot mirrors the configured host.
+        assert_eq!(
+            *state
+                .read()
+                .await
+                .live_advertise_host
+                .lock()
+                .unwrap(),
+            "10.0.0.5"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_host_auto_is_consistent_and_nonempty() {
+        let state = test_state();
+        let config = NodeConfig {
+            advertise_host: "127.0.0.1".to_string(),
+            advertise_host_auto: true,
+            ..test_config()
+        };
+        let host = refresh_live_advertise_host(state.read().await, &config);
+        // Either a real LAN IP was detected, or detection failed and we
+        // fell back to the placeholder — but never empty, and the shared
+        // slot always matches what the caller uses for NodeInfo.
+        assert!(!host.is_empty());
+        assert_eq!(
+            *state
+                .read()
+                .await
+                .live_advertise_host
+                .lock()
+                .unwrap(),
+            host
+        );
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ use acowork_core::mqtt_proto::{
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
     IterationLimitPausedPayload, LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport,
-    NewDataAvailablePayload, RecordCompletePayload,
+    NewDataAvailablePayload, NodeInfo, RecordCompletePayload,
     SessionMessage, StoppedPayload, StreamDeltaPayload,
     StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
 };
@@ -164,6 +164,34 @@ pub(crate) fn decode_lsps_payload(payload: &[u8]) -> LspRelayUpdate {
             }
         }
         _ => LspRelayUpdate { endpoint: None },
+    }
+}
+
+/// Decode the node's reverse-proxy base URL from a retained
+/// `acowork/nodes/{node_id}/info` payload (`DataEnvelope<NodeInfo>`).
+///
+/// Returns `None` on any decode failure, a non-NodeInfo payload, or an
+/// empty `http_endpoint` (the node cleared its state). The base is the
+/// `http://{live_host}:{port}` part — the Runtime appends
+/// `/agents/{agent_id}` when re-publishing its own `http_endpoint`.
+pub(crate) fn decode_node_proxy_base(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+    let envelope = match DataEnvelope::decode(payload) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(error = %e, "node info payload is not a valid DataEnvelope");
+            return None;
+        }
+    };
+    match envelope.payload {
+        Some(data_envelope::Payload::NodeInfo(NodeInfo { http_endpoint, .. }))
+            if !http_endpoint.is_empty() =>
+        {
+            Some(http_endpoint)
+        }
+        _ => None,
     }
 }
 
@@ -384,6 +412,18 @@ pub struct MqttConnectConfig<'a> {
     /// the client connects anonymously (auth disabled broker).
     pub username: Option<&'a str>,
     pub password: Option<&'a str>,
+    /// §6.3.3: sink for the node's reverse-proxy base URL on CHANGE.
+    /// The event loop decodes the node's retained `NodeInfo`; when its
+    /// `http_endpoint` base differs from the last one, the new base is
+    /// pushed here. The owner (agent_init) re-publishes this Runtime's
+    /// retained `http_endpoint` so the Gateway keeps routing through
+    /// the node after a LAN IP change — no node / Runtime restart.
+    ///
+    /// Optional: None disables live endpoint re-publication (standalone
+    /// Runtimes have no node).
+    pub node_proxy_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<String>,
+    >,
 }
 
 /// Event payload for `publish_tool_approval_needed`.
@@ -468,6 +508,12 @@ struct BootstrapData {
     /// (`acowork/nodes/{node_id}/lsps`). `None` when the Runtime runs
     /// without `--node-id` (standalone / Gateway-spawned).
     node_lsps_topic: Option<String>,
+    /// §6.3.3: the node's retained info topic
+    /// (`acowork/nodes/{node_id}/info`). `None` standalone. Subscribed
+    /// so the Runtime can watch the node's reverse-proxy base URL and
+    /// re-publish its own `http_endpoint` when the node changes
+    /// network (self-healing without a restart).
+    node_info_topic: Option<String>,
     /// ADR-039 Phase 3 follow-up (post-2026-09-07 incident): the
     /// `acowork/agents/{id}/ready` topic. Republished on every
     /// (re)connect so a Gateway that reconnects after a sleep/wake —
@@ -523,6 +569,19 @@ struct RuntimeHandler {
     agent_id: String,
     /// The node's LSP relay topic (ADR-055 §6.7). `None` standalone.
     node_lsps_topic: Option<String>,
+    /// The node's retained info topic (§6.3.3). `None` standalone.
+    node_info_topic: Option<String>,
+    /// §6.3.3: sink for the node's reverse-proxy base URL whenever it
+    /// CHANGES (extracted from a fresh NodeInfo). The owner
+    /// (`agent_init.rs`) re-publishes this Runtime's retained
+    /// `http_endpoint` so the Gateway keeps routing through the node.
+    /// `None` standalone / tests.
+    node_proxy_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<String>,
+    >,
+    /// Last known node reverse-proxy base URL — dedupes the node's
+    /// 60 s heartbeat, which re-delivers an unchanged NodeInfo.
+    last_node_proxy_base: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Signals `connect()` when the first ConnAck bootstrap completes.
     first_conn_tx: tokio::sync::Mutex<Option<oneshot::Sender<Result<(), String>>>>,
 }
@@ -793,6 +852,34 @@ impl MqttClientHandler for RuntimeHandler {
             if let Some(ref tx) = self.lsps_update_tx {
                 let _ = tx.send(update);
             }
+        } else if let Some(info_topic) = self.node_info_topic.as_deref()
+            && topic == info_topic
+        {
+            // §6.3.3: the node re-published its NodeInfo — initial
+            // connect, 60 s heartbeat, or a LAN IP change after a Wi-Fi
+            // hotspot switch. Extract the node's CURRENT reverse-proxy
+            // base; when it differs from the last known one, forward the
+            // new base so agent_init re-publishes our retained
+            // `http_endpoint` (`{base}/agents/{id}`). The dedupe guard
+            // keeps the node's heartbeat from churning retained
+            // publishes on every 60 s tick.
+            if let Some(base) = decode_node_proxy_base(payload) {
+                let mut last = self
+                    .last_node_proxy_base
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if last.as_deref() != Some(base.as_str()) {
+                    *last = Some(base.clone());
+                    if let Some(ref tx) = self.node_proxy_update_tx
+                        && tx.send(base).is_err()
+                    {
+                        tracing::debug!(
+                            agent_id = %self.agent_id,
+                            "node proxy update receiver dropped (endpoint re-publish sink closed)"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -878,6 +965,9 @@ impl RuntimeMqttClient {
             node_lsps_topic: cfg
                 .node_id
                 .map(acowork_core::node::node_lsps_topic),
+            node_info_topic: cfg
+                .node_id
+                .map(acowork_core::node::node_info_topic),
             ready_topic: format!("acowork/agents/{}/ready", cfg.agent_id),
             ready_ever: std::sync::atomic::AtomicBool::new(false),
         });
@@ -933,6 +1023,9 @@ impl RuntimeMqttClient {
             work_dir: cfg.work_dir.clone(),
             agent_id: cfg.agent_id.to_string(),
             node_lsps_topic: bootstrap_data.node_lsps_topic.clone(),
+            node_info_topic: bootstrap_data.node_info_topic.clone(),
+            node_proxy_update_tx: cfg.node_proxy_update_tx.clone(),
+            last_node_proxy_base: std::sync::Arc::new(std::sync::Mutex::new(None)),
             first_conn_tx: tokio::sync::Mutex::new(Some(first_conn_tx)),
             // ready_topic is not cloned into the handler struct — it
             // lives on `bootstrap_data` (an `Arc<BootstrapData>` clone
@@ -1003,6 +1096,8 @@ impl RuntimeMqttClient {
     ///    `running_agents[id].ready`) would leave the Gateway with
     ///    `ready=false` until the next Phase A → publish_ready cycle,
     ///    which does not run on a (re)connect.
+    /// 8. SUBSCRIBE `acowork/nodes/{node_id}/info` - node reverse-proxy
+    ///    base URL watch (§6.3.3, only when `--node-id` is set).
     async fn run_bootstrap(
         client: &AsyncClient,
         data: &BootstrapData,
@@ -1110,6 +1205,23 @@ impl RuntimeMqttClient {
                 "Step 7 (ready) republish failed; bootstrap continues, \
                  Gateway will see ready=true on the next reconnect"
             );
+        }
+
+        // Step 8: SUBSCRIBE the node's retained info topic (§6.3.3,
+        // only when `--node-id` is set). Lets the Runtime watch the
+        // node's reverse-proxy base URL and re-publish its own
+        // `http_endpoint` when the node changes network — self-healing
+        // without a node or Runtime restart. On a fresh broker the
+        // retained NodeInfo is re-delivered here right after ConnAck,
+        // which also repairs the endpoint if the node re-published it
+        // while we were disconnected.
+        if let Some(info_topic) = data.node_info_topic.as_deref() {
+            client
+                .subscribe(info_topic, QoS::AtLeastOnce)
+                .await
+                .map_err(|e| {
+                    RuntimeMqttClientError::Subscribe(format!("node info: {}", e))
+                })?;
         }
 
         Ok(())
@@ -2161,6 +2273,50 @@ mod tests {
         assert!(update.endpoint.is_none());
     }
 
+    // ── decode_node_proxy_base (§6.3.3) ──────────────────────────────
+
+    fn encode_node_info(http_endpoint: &str) -> Vec<u8> {
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::NodeInfo(NodeInfo {
+                node_id: "node-test".to_string(),
+                machine_uid: "mu".to_string(),
+                hostname: "host".to_string(),
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                node_version: "1.0.0".to_string(),
+                protocol_version: 1,
+                capabilities: vec!["control_plane".to_string()],
+                max_agents: 10,
+                agent_count: 0,
+                http_endpoint: http_endpoint.to_string(),
+            })),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    #[test]
+    fn decode_node_proxy_base_extracts_endpoint() {
+        let payload = encode_node_info("http://192.168.1.20:19900");
+        assert_eq!(decode_node_proxy_base(&payload).as_deref(), Some("http://192.168.1.20:19900"));
+    }
+
+    #[test]
+    fn decode_node_proxy_base_empty_endpoint_is_none() {
+        let payload = encode_node_info("");
+        assert!(decode_node_proxy_base(&payload).is_none());
+    }
+
+    #[test]
+    fn decode_node_proxy_base_empty_payload_is_none() {
+        assert!(decode_node_proxy_base(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_node_proxy_base_garbage_is_none() {
+        assert!(decode_node_proxy_base(b"not-a-protobuf").is_none());
+    }
+
     #[tokio::test]
     async fn test_runtime_mqtt_client_connects_and_publishes() {
         // Start a broker (using the Gateway's broker module). Threaded
@@ -2198,6 +2354,7 @@ mod tests {
                 embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
+                node_proxy_update_tx: None,
                 work_dir,
                 username: None,
                 password: None,
@@ -2294,6 +2451,7 @@ mod tests {
                 embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
+                node_proxy_update_tx: None,
                 work_dir,
                 username: None,
                 password: None,

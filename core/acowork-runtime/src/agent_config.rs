@@ -1701,8 +1701,8 @@ mod tests {
             env: std::collections::HashMap::new(),
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
-                install: None,
-            }];
+            install: None,
+        }];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
 
         let reloaded = load_agent_mcp_config(dir.path()).unwrap().unwrap();
