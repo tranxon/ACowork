@@ -42,7 +42,10 @@ pub enum Command {
         /// reverse-proxy port). Default: the machine's first non-loopback
         /// IPv4 (fallback `127.0.0.1`) + `19900`. The proxy always binds
         /// `0.0.0.0`; this value is what gets registered on the Gateway.
-        #[arg(long, value_name = "HOST:PORT")]
+        /// `auto` (or `auto:PORT`) = live-detect the LAN IP at connect
+        /// time and self-heal NodeInfo when the machine changes network
+        /// (ADR-055 §6.3.3).
+        #[arg(long, value_name = "HOST:PORT|auto")]
         addr: Option<String>,
         /// Reverse-proxy port override (default 19900; used by the
         /// Gateway when spawning a second node instance on the same
@@ -226,11 +229,27 @@ impl Cli {
                 // proxy port. The proxy always binds 0.0.0.0. A granular
                 // `--proxy-port` (internal second-instance override) wins
                 // over the port carried by `--addr`.
-                let (advertise_host, default_proxy_port) = match addr {
-                    Some(a) => split_addr(&a)?,
+                //
+                // `--addr auto` (§6.3.3): the host is a placeholder —
+                // the LAN IP is re-detected at connect time and published
+                // live, so a laptop that switches Wi-Fi hotspots keeps
+                // control-plane + Runtime reachability without a restart.
+                let (advertise_host, advertise_host_auto, default_proxy_port) = match addr {
+                    Some(a) if a == "auto" || a.starts_with("auto:") => {
+                        let port = a
+                            .split_once(':')
+                            .and_then(|(_, p)| p.parse().ok())
+                            .unwrap_or(acowork_core::node::NODE_PROXY_PORT);
+                        ("127.0.0.1".to_string(), true, port)
+                    }
+                    Some(a) => {
+                        let (host, port) = split_addr(&a)?;
+                        (host, false, port)
+                    }
                     None => (
                         acowork_core::addr::detect_non_loopback_ipv4()
                             .unwrap_or_else(|| "127.0.0.1".to_string()),
+                        false,
                         acowork_core::node::NODE_PROXY_PORT,
                     ),
                 };
@@ -244,6 +263,7 @@ impl Cli {
                     token,
                     max_agents,
                     advertise_host,
+                    advertise_host_auto,
                     proxy_port,
                     lsp_relay_port,
                     ..NodeConfig::default()

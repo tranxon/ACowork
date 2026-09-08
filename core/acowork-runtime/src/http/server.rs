@@ -4429,6 +4429,7 @@ mod tests {
             embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
+            node_proxy_update_tx: None,
             work_dir: temp_dir.clone(),
             username: None,
             password: None,

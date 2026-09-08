@@ -87,6 +87,7 @@ async fn connect_runtime(port: u16, agent_id: &str) -> RuntimeMqttClient {
         embedding_update_tx: None,
         node_id: None,
         lsps_update_tx: None,
+        node_proxy_update_tx: None,
         work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
         username: None,
         password: None,

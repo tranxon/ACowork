@@ -331,6 +331,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // codebase tool is registered / unregistered in all sessions.
         let (lsps_update_tx, lsps_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::LspRelayUpdate>();
+        // §6.3.3: sink for the node's reverse-proxy base URL on change
+        // (LAN IP switch). The MQTT event loop decodes the retained
+        // `acowork/nodes/{id}/info` push; when the base changed, we
+        // re-publish this Runtime's retained `http_endpoint` so the
+        // Gateway keeps routing through the node — no restart.
+        let (node_proxy_update_tx, mut node_proxy_update_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
@@ -355,6 +362,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 embedding_update_tx: Some(embedding_update_tx),
                 node_id: config.node_id.as_deref(),
                 lsps_update_tx: Some(lsps_update_tx),
+                node_proxy_update_tx: Some(node_proxy_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
                 username: config.mqtt_username.as_deref(),
                 password: config.mqtt_password.as_deref(),
@@ -418,6 +426,53 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 // which downstream sites (`subsystems.rs` / `gateway_loop.rs`)
                 // still consume by `&RuntimeMqttClient` reference.
                 *mqtt_client_slot.lock().await = Some(Arc::new(tokio::sync::Mutex::new(client.clone())));
+
+                // §6.3.3: live re-publication of the retained
+                // `http_endpoint`. When the node changes network (Wi-Fi
+                // hotspot switch), the MQTT event loop decodes the fresh
+                // retained NodeInfo and pushes the new reverse-proxy base
+                // here; we re-publish `{base}/agents/{id}` retained so
+                // the Gateway keeps routing through the node — no node or
+                // Runtime restart, no agent restart.
+                {
+                    let endpoint_client = client.clone();
+                    let endpoint_agent_id = loaded.manifest.agent_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(base) = node_proxy_update_rx.recv().await {
+                            let endpoint = format!(
+                                "{}/agents/{}",
+                                base.trim_end_matches('/'),
+                                endpoint_agent_id
+                            );
+                            let topic = format!(
+                                "acowork/agents/{}/http_endpoint",
+                                endpoint_agent_id
+                            );
+                            match endpoint_client
+                                .publish_raw(
+                                    &topic,
+                                    endpoint.as_bytes(),
+                                    crate::mqtt::client::MqttQoS::AtLeastOnce,
+                                    true,
+                                )
+                                .await
+                            {
+                                Ok(()) => tracing::info!(
+                                    agent_id = %endpoint_agent_id,
+                                    %endpoint,
+                                    "Re-published retained http_endpoint after node proxy change (§6.3.3)"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    agent_id = %endpoint_agent_id,
+                                    %endpoint,
+                                    error = %e,
+                                    "Failed to re-publish retained http_endpoint after node proxy change"
+                                ),
+                            }
+                        }
+                    });
+                }
+
                 mqtt_client = Some(client);
                 available_cache = Some(cache);
                 control_rx = Some(ctrl_rx);

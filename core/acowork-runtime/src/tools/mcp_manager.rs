@@ -242,6 +242,7 @@ mod tests {
             env: Default::default(),
             headers: Default::default(),
             tool_timeout_secs: Some(30),
+            install: None,
         };
         assert_eq!(def.name, "test-server");
         assert_eq!(def.command, "test-cmd");

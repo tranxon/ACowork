@@ -34,6 +34,13 @@ pub struct NodeConfig {
     /// node's reverse proxy. Defaults to `127.0.0.1` (single-machine
     /// topology); set to a non-loopback IP for remote deployments.
     pub advertise_host: String,
+    /// When `true` (CLI `--advertise-host auto`), `advertise_host` is
+    /// treated as a *placeholder*: the Node Agent re-detects the
+    /// machine's current LAN IP at connect time (`detect_local_ip`)
+    /// and publishes it live via NodeInfo (§6.3.3 self-healing). If
+    /// detection fails it falls back to `advertise_host` (127.0.0.1),
+    /// keeping control-plane loopback intact.
+    pub advertise_host_auto: bool,
     /// Bind address for the node reverse proxy (§6.4). Defaults to
     /// `0.0.0.0` so remote nodes are reachable without reconfiguring
     /// the bind; the advertise_host remains the reachable address.
@@ -62,6 +69,7 @@ impl Default for NodeConfig {
             token: None,
             max_agents: acowork_core::node::NODE_DEFAULT_MAX_AGENTS,
             advertise_host: "127.0.0.1".to_string(),
+            advertise_host_auto: false,
             proxy_bind: "0.0.0.0".to_string(),
             proxy_port: acowork_core::node::NODE_PROXY_PORT,
             lsp_relay_port: crate::sidecar::lsp_relay::LSP_RELAY_DEFAULT_PORT,
@@ -83,6 +91,15 @@ impl NodeConfig {
     /// `http_endpoint`.
     pub fn proxy_advertise_endpoint(&self) -> String {
         format!("http://{}:{}", self.advertise_host, self.proxy_port)
+    }
+
+    /// Like [`Self::proxy_advertise_endpoint`], but for a caller-supplied
+    /// host. Used by the self-healing path (§6.3.3): the live LAN IP is
+    /// recomputed at connect time and re-published as `http://{host}:{port}`
+    /// so already-running Runtimes and the Gateway both converge on the
+    /// current address without a restart.
+    pub fn proxy_advertise_endpoint_for(&self, host: &str) -> String {
+        format!("http://{}:{}", host, self.proxy_port)
     }
 
     /// Resolve the agent package install directory: the explicit

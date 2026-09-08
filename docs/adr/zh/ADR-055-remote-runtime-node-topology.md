@@ -342,6 +342,49 @@ acowork/nodes/{node_id}/lsps                        QoS1 Retained   节点本地
 
 **advertise 注入链路（闭合 D3 的最后一环）**：Runtime 注册的 `http_endpoint` 值为 `http://{node_advertise}:19900/agents/{id}`——其中 `{node_advertise}` 由 **Node spawn Runtime 时经新增 CLI 参数 `--http-advertise-endpoint` 注入**（值为 Node 配置的 `advertise_host` + `:19900`，缺省 `127.0.0.1`；Node 的该配置项与 Gateway 的 `advertise_host` 语义对称：bind 可为 `0.0.0.0`，advertise 必须是其他机器可达地址）。Runtime 只透传拼接、不自知节点拓扑——「Runtime 零感知节点内部结构」（§6.4）与「禁止接收方自行拼接 host」（D3）同时成立。
 
+#### 6.3.3 动态地址自愈（local 全 loopback / remote 换网自动回连）
+
+**问题**：个人电脑切换 Wi-Fi 热点后 IP 变化，三端（Gateway / Node / Desktop）各自缓存的旧 IP 会导致互相断连。断连点全量清单：
+
+| # | 断连点 | 旧行为 | 修复 |
+|---|--------|--------|------|
+| 1 | Gateway 缓存 Node 旧 `http_endpoint` | NodeInfo 只发一次，换网后 Gateway 反代打到旧 IP | Node 在 ConnAck + 60s 心跳时用**当前** LAN IP 重建 NodeInfo；Gateway `update_info_from_mqtt` 每次 retained 重发布即覆盖（已支持，零改动） |
+| 2 | Runtime 注册的 `http_endpoint` 是旧的 Node 反代地址 | 仅在 spawn 时按启动参数发布一次 | Runtime 订阅 `acowork/nodes/{node_id}/info`（Step 7 订阅）；Node 反代 base 变化时以 `{新 base}/agents/{id}` 重发 retained `http_endpoint`（去重：仅 base 变化时发，忽略 60s 心跳重复） |
+| 3 | Node 侧 Start/Stop 把旧 base 注入新 Runtime | 用静态 `advertise_host` 计算 | Start/Stop 均取 `state.live_advertise_host`（连接时刷新） |
+| 4 | Desktop 缓存旧 Gateway IP（local 模式） | Desktop 直连 Gateway HTTP/MQTT 用 LAN IP | local 模式全链路强制 loopback：Desktop spawn Gateway 时 pin `--addr 127.0.0.1:19876 --mqtt-addr 127.0.0.1:19875`（CLI > TOML，覆盖残留配置）；Gateway spawn local node 恒传 `--gateway 127.0.0.1:{port} --addr 127.0.0.1:19900`——本机链路彻底免疫 IP 变化 |
+| 5 | Node 换网后控制面短暂失联 | 依赖 MQTT 指数退避重连 | 无需额外逻辑：MQTT 重连即触发 #1（ConnAck 重建 NodeInfo） |
+
+**两条部署模式的地址策略**：
+
+```text
+local 模式（Desktop spawn Gateway + Gateway spawn 本机 Node）
+  └─ 全链路 127.0.0.1：Gateway bind loopback、local node 连 loopback、
+     反代 loopback。IP 变化零影响。语义：local 只服务本机（远程 node 连不上
+     本机 spawn 的 Gateway，符合 local 语义）。
+
+remote 模式（服务器手动启动 Gateway，远端机器手动启动 Node）
+  ├─ Gateway：服务器 IP 稳定，无自愈需求（advertise_host 显式配置）
+  └─ Node（笔记本 / 移动机器）：`acowork-node start --addr auto`
+       └─ ConnAck / 60s 心跳重检本机 LAN IP → 重建 NodeInfo retained
+          → Gateway 注册表实时覆盖（#1）
+          → 本机 Runtime 收到新 NodeInfo → 重发 http_endpoint（#2）
+          → 控制面（fs_browse / 包管理 / install / LSP loopback）与
+            Runtime 可达性同时自愈，无需重启任何进程
+```
+
+**设计要点**：
+
+1. `--addr auto`（或 `auto:PORT`）是**显式 opt-in**，不是默认：默认 `None` 路径仍是一次性探测 LAN IP（服务器行为不变）；`auto` 只在移动机器上开，避免多网卡 / VPN 误选接口时反复横跳。
+2. 检测失败回退 `127.0.0.1`（auto 模式下 proxy bind 仍是 `0.0.0.0`，控制面 loopback 至少可用，远程可达性等网络恢复后下一次心跳收敛）。
+3. NodeInfo 重建是**幂等 retained 发布**：地址没变时 Gateway 收到同样的值，开销仅为每 60s 一次小包。
+4. Runtime 订阅 node info 仅用于「base 变化」事件；去重状态 `last_node_proxy_base` 在进程内保留，心跳重复发布被忽略。
+5. Runtime 换网后的收敛时间上界 = MQTT 重连时间 + 一个心跳周期（60s）。
+
+#### 6.3.4 （承接 §6.3.3）孤儿清理匹配不变式
+
+Gateway 孤儿清理靠内部 spawn 标记 `--gateway-managed --gateway 127.0.0.1:{mqtt_port}` 匹配（`node_manager.rs`）。**不变量：Gateway spawn 的 local node 永远连 loopback**（§6.3.3 #4），因此标记中的 host 恒为 `127.0.0.1`，与 bind host / 配置文件无关——多实例、换网场景下清理逻辑不漂移。
+
+
 ### 6.4 Runtime HTTP 访问链路（D2：Node 反代）
 
 ```text
@@ -465,6 +508,7 @@ pub struct RunningAgentInfo {
 ### 6.11 单机模式 = local node（D1 落地）
 
 - Gateway 启动时若发现本机无 Node Agent 在线（`acowork/nodes/{机器名}/status` 无 retained online），spawn 一个 `acowork-node` 子进程（sibling 二进制，复用 L1-1 的定位逻辑），node_id = 机器名 slug（统一命名规则：不传 `--name` 即用 hostname，无保留名）。
+- **loopback-only spawn（§6.3.3 #4 不变式）**：Gateway spawn local node 恒传 `--gateway 127.0.0.1:{mqtt_port} --addr 127.0.0.1:19900 --gateway-managed`——本机链路不依赖任何 LAN IP，Wi-Fi 换网 / 热点切换零影响；孤儿清理标记（`--gateway-managed --gateway 127.0.0.1:{port}`）与 spawn 参数严格一致（§6.3.4）。
 - **启动时序与竞争避让**：
   1. **顺序保证**：local node 的 spawn 点位于 MQTT broker 就绪之后（Gateway 启动序列中的显式前置步骤）；即便时序竞争失败，Node 侧 ADR-039 指数退避重连兜底——双保险。
   2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/{机器名}/status`（retained）后等待短窗口（默认 500ms）。窗口内收到 `online` → 复用现有 node（覆盖「Gateway 重启、本机 node 存活」场景）；超时 → 进入 spawn 判定。
@@ -561,12 +605,15 @@ Node spawn Runtime 时下发 `--gateway-host {gateway_addr}`（Node 自己的连
 
 ```text
 acowork-node                                     # 无参数 = start（前台 daemon）
-acowork-node start --gateway ADDR [--addr HOST:PORT] [--token T] [--name N] [--work-dir DIR]
+acowork-node start --gateway ADDR [--addr HOST:PORT|auto] [--token T] [--name N] [--work-dir DIR]
                                                  # 一条命令完成部署：identity.json 不存在则
                                                  # 自动 enroll，然后常驻运行（幂等）
                                                  #   --gateway 必填：Gateway MQTT ip:port
                                                  #   --addr 可选：本节点对外 ip:port（advertise+proxy），
                                                  #            缺省=本机 IP + 19900
+                                                 #   --addr auto：移动机器（笔记本/常换热点）自愈模式，
+                                                 #            每次 ConnAck/心跳重检 LAN IP 并重发
+                                                 #            NodeInfo（§6.3.3），换网免重启
                                                  #   --work-dir = --home 别名（缺省=默认工作目录）
 acowork-node enroll --gateway ADDR [--token T] [--name N]
                                                  # 仅注册不常驻（Ansible/脚本批量部署用）

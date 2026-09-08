@@ -1421,6 +1421,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "local-b".into(),
@@ -1431,6 +1432,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
         
             active_names: None,};
@@ -1454,6 +1456,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "dup-name".into(),
@@ -1464,6 +1467,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
         
             active_names: None,};
@@ -1486,6 +1490,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "loc".into(),
@@ -1496,6 +1501,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
         
             active_names: None,};
@@ -1517,6 +1523,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "loc".into(),
@@ -1527,6 +1534,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
         
             active_names: None,};
@@ -1563,6 +1571,7 @@ mod tests {
                 },
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: Some(30),
+                install: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "local1".into(),
@@ -1577,6 +1586,7 @@ mod tests {
                     m
                 },
                 tool_timeout_secs: None,
+                install: None,
             }],
         
             active_names: None,};
@@ -1637,6 +1647,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "orig-loc".into(),
@@ -1647,6 +1658,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
 
             active_names: None,};
@@ -1661,6 +1673,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
+            install: None,
         }];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
 
@@ -1698,6 +1711,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             }],
             local: vec![],
             active_names: Some(vec!["context7".into()]),
@@ -1715,6 +1729,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             },
             McpServerConfigDef {
                 name: "new-mcp".into(),
@@ -1725,6 +1740,7 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
+                install: None,
             },
         ];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
@@ -1857,6 +1873,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             headers: std::collections::HashMap::new(),
             tool_timeout_secs: None,
+            install: None,
         }
     }
 

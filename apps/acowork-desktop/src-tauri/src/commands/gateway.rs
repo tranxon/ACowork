@@ -677,7 +677,17 @@ pub async fn spawn_gateway(
         // onboarding stalls on "waiting" states. Remote nodes are
         // unaffected: they keep using the gateway's own resolved
         // advertise host when configured.
-        .env("ACOWORK_GATEWAY_ADVERTISE_HOST", "127.0.0.1");
+        .env("ACOWORK_GATEWAY_ADVERTISE_HOST", "127.0.0.1")
+        // Pin the BIND addresses to loopback too (CLI > TOML). A config
+        // file left over from remote-style experiments (`[http]`/`[mqtt]`
+        // host = 0.0.0.0) would otherwise leak a Desktop-spawned Gateway
+        // onto the LAN and make it IP-sensitive again. Local mode is
+        // loopback-only: remote nodes attach to a remote-mode Gateway,
+        // never to one spawned by Desktop.
+        .arg("--addr")
+        .arg(format!("127.0.0.1:{}", defaults::GATEWAY_HTTP_PORT))
+        .arg("--mqtt-addr")
+        .arg(format!("127.0.0.1:{}", defaults::GATEWAY_MQTT_PORT));
     // Suppress the pop-up Windows Terminal / conhost window. The Gateway
     // is a console-subsystem binary, so when spawned from a non-console
     // parent (the Tauri WebView2 host), Windows otherwise allocates a new

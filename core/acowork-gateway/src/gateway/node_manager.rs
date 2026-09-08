@@ -12,10 +12,18 @@
 //!    spawning a fresh one. Detection mirrors
 //!    `cleanup_orphaned_runtimes`: process-list scan for
 //!    `acowork-node` whose cmdline carries our spawn markers
-//!    (`--gateway-managed --gateway {host}:{port}`). The
+//!    (`--gateway-managed --gateway 127.0.0.1:{port}`). The
 //!    `--gateway-managed` marker is set ONLY by the Gateway, so this
 //!    never touches user-managed nodes on the same machine — the name
 //!    itself is a plain hostname slug with no reserved value.
+//!
+//! **Loopback-only spawn rule (local-mode decision):** a
+//! Gateway-spawned node is by definition on this very machine, so it
+//! always connects to the broker and advertises itself via
+//! `127.0.0.1` — never the broker bind host (which may be `0.0.0.0`
+//! for remote nodes and is NOT a valid connect target) and never a
+//! LAN IP (which would break the link whenever the machine changes
+//! networks). See [`LOCAL_GATEWAY_HOST`].
 //! 2. **Reuse window** — the Gateway client is already subscribed to
 //!    `acowork/nodes/+/status`; wait a short window for a retained
 //!    `online` — an externally-managed local node (e.g. systemd) is
@@ -57,6 +65,16 @@ const REUSE_WINDOW: Duration = Duration::from_millis(500);
 
 /// Delay before respawning a crashed local node (§6.11 step 3, 60s).
 const RESPAWN_DELAY: Duration = Duration::from_secs(60);
+
+/// Loopback address used to reach the Gateway's OWN machine node:
+/// both the `--gateway` spawn target and the orphan-cleanup marker.
+///
+/// A Gateway-spawned node is always same-machine, so `127.0.0.1` is
+/// always reachable and immune to LAN/WiFi IP changes (local-mode
+/// loopback-only rule). The broker may bind `0.0.0.0` to accept remote
+/// nodes, but `0.0.0.0` is not a valid connect target — the spawn
+/// target must never be the bind host.
+const LOCAL_GATEWAY_HOST: &str = "127.0.0.1";
 
 /// Grace period after SIGTERM before escalating to SIGKILL.
 ///
@@ -173,9 +191,9 @@ pub(crate) fn find_procs_by_cmdline(pattern: &str) -> Vec<(u32, String)> {
 /// value. pgrep-less environments (Windows): skipped (returns 0) —
 /// same limitation as `cleanup_orphaned_runtimes`; Windows-specific
 /// verification is a Phase 2b gate item.
-fn cleanup_orphaned_local_nodes(mqtt_host: &str, mqtt_port: u16) -> usize {
+fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
     let my_pid = std::process::id();
-    let gateway_marker = format!("--gateway {mqtt_host}:{mqtt_port}");
+    let gateway_marker = format!("--gateway {LOCAL_GATEWAY_HOST}:{mqtt_port}");
 
     let pids: Vec<u32> = find_procs_by_cmdline("acowork-node")
         .into_iter()
@@ -217,7 +235,6 @@ fn cleanup_orphaned_local_nodes(mqtt_host: &str, mqtt_port: u16) -> usize {
 /// credential, forwarded to the child via `--token` when MQTT auth is
 /// enabled (None keeps the pre-5a credential-less spawn).
 pub async fn ensure_local_node(
-    mqtt_host: &str,
     mqtt_port: u16,
     packages_dir: &str,
     node_registry: SharedNodeRegistry,
@@ -227,7 +244,7 @@ pub async fn ensure_local_node(
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
     // Step 1: kill orphans from a previous Gateway run (they carry our
     // `--gateway-managed` marker — user-managed nodes never match).
-    let orphans = cleanup_orphaned_local_nodes(mqtt_host, mqtt_port);
+    let orphans = cleanup_orphaned_local_nodes(mqtt_port);
     if orphans > 0 {
         // Avoid a spawn race with the dying process. Retained state is
         // not a concern: the in-memory broker died with the old
@@ -251,7 +268,6 @@ pub async fn ensure_local_node(
     let supervisor = LocalNodeSupervisor::new_shared();
     if !reused {
         spawn_and_supervise(
-            mqtt_host,
             mqtt_port,
             packages_dir,
             node_registry,
@@ -269,7 +285,6 @@ pub async fn ensure_local_node(
 /// re-check, forever (until `shutdown()` sets the stop flag).
 #[allow(clippy::too_many_arguments)]
 async fn spawn_and_supervise(
-    mqtt_host: &str,
     mqtt_port: u16,
     packages_dir: &str,
     node_registry: SharedNodeRegistry,
@@ -292,7 +307,6 @@ async fn spawn_and_supervise(
     // binary must be present alongside `acowork-gateway`.
     let mut child = spawn_node_child(
         &bin,
-        mqtt_host,
         mqtt_port,
         packages_dir,
         local_token,
@@ -301,7 +315,6 @@ async fn spawn_and_supervise(
     )?;
     tracing::info!(pid = child.id(), binary = %bin.display(), "Local node agent spawned");
 
-    let supervise_host = mqtt_host.to_string();
     let supervise_packages_dir = packages_dir.to_string();
     let supervise_token = local_token.map(str::to_string);
     tokio::spawn(async move {
@@ -328,7 +341,7 @@ async fn spawn_and_supervise(
                 return;
             }
 
-            match spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
+            match spawn_node_child(&bin, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
                 Ok(new_child) => {
                     child = new_child;
                     tracing::info!(pid = child.id(), "Local node agent respawned");
@@ -349,7 +362,7 @@ async fn spawn_and_supervise(
                             );
                             return;
                         }
-                        if let Ok(new_child) = spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
+                        if let Ok(new_child) = spawn_node_child(&bin, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
                             child = new_child;
                             tracing::info!(pid = child.id(), "Local node agent respawned");
                             break;
@@ -364,14 +377,19 @@ async fn spawn_and_supervise(
 }
 
 /// Spawn the `acowork-node start` child with the internal spawn marker
-/// used by orphan cleanup (`--gateway-managed --gateway {host}:{port}`).
+/// used by orphan cleanup (`--gateway-managed --gateway 127.0.0.1:{port}`).
 /// No `--name` is passed: the node defaults to its machine hostname
 /// slug (unified naming rule). `token` (ADR-055 Phase 5a) is the
 /// pre-issued local node credential, forwarded as `--token` when MQTT
 /// auth is enabled.
+///
+/// Loopback-only (local-mode rule): the spawned node connects to the
+/// broker via [`LOCAL_GATEWAY_HOST`] and advertises itself with the
+/// same loopback address (`--addr`) — never the bind host, never a
+/// LAN IP. This makes the Gateway↔local-node link immune to network
+/// changes on the host.
 fn spawn_node_child(
     bin: &std::path::Path,
-    mqtt_host: &str,
     mqtt_port: u16,
     packages_dir: &str,
     token: Option<&str>,
@@ -379,10 +397,15 @@ fn spawn_node_child(
     lsp_relay_port: Option<u16>,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(bin);
+    let effective_proxy_port = proxy_port.unwrap_or(acowork_core::node::NODE_PROXY_PORT);
     cmd.args([
         "start",
         "--gateway",
-        &format!("{mqtt_host}:{mqtt_port}"),
+        &format!("{LOCAL_GATEWAY_HOST}:{mqtt_port}"),
+        "--addr",
+        &format!("{LOCAL_GATEWAY_HOST}:{effective_proxy_port}"),
+        "--proxy-port",
+        &effective_proxy_port.to_string(),
         "--gateway-managed",
         "--packages-dir",
         packages_dir,
@@ -391,12 +414,9 @@ fn spawn_node_child(
         cmd.args(["--token", token]);
     }
     // ADR-055 multi-instance: a second Gateway on the same machine
-    // (tests, previews) must not steal the primary node's reverse-proxy
-    // (:19900) or LSP relay (:19878) ports — forward the configured
-    // overrides when present.
-    if let Some(port) = proxy_port {
-        cmd.args(["--proxy-port", &port.to_string()]);
-    }
+    // (tests, previews) must not steal the primary node's LSP relay
+    // (:19878) port — forward the configured override when present.
+    // (The reverse-proxy port is already carried by `--addr` above.)
     if let Some(port) = lsp_relay_port {
         cmd.args(["--lsp-relay-port", &port.to_string()]);
     }
