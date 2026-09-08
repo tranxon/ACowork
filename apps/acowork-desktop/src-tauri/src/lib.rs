@@ -37,163 +37,6 @@ use state::AppState;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 
-// ── Windows Job Object for Gateway process tree cleanup ────────────────────
-//
-// On Windows, Ctrl+C in dev mode (npm run tauri dev) sends CTRL_C_EVENT.
-// The default handler calls ExitProcess without unwinding Rust destructors,
-// so RunEvent::Exit and Drop may not fire, leaving orphaned processes.
-//
-// This module creates a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
-// When the desktop app exits (Ctrl+C, crash, task-kill — *any* reason), the OS
-// closes all handles, which closes the job handle, which automatically
-// terminates EVERY process in the job (Gateway → Runtime → Embed → LSP).
-//
-// Child processes automatically inherit job membership, so assigning only the
-// Gateway process is sufficient to cover the entire process tree.
-//
-// On non-Windows platforms SIGINT is sent to the entire foreground process
-// group automatically, so no special handling is needed.
-#[cfg(target_os = "windows")]
-pub mod win_job {
-    #![allow(non_upper_case_globals)]
-    use std::ffi::c_void;
-
-    type HANDLE = *mut c_void;
-    type BOOL = i32;
-    type DWORD = u32;
-
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x2000;
-    const JobObjectExtendedLimitInformation: u32 = 9;
-    const PROCESS_SET_QUOTA: DWORD = 0x0100;
-    const PROCESS_TERMINATE: DWORD = 0x0001;
-
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        PerProcessUserTimeLimit: i64,
-        PerJobUserTimeLimit: i64,
-        LimitFlags: DWORD,
-        MinimumWorkingSetSize: usize,
-        MaximumWorkingSetSize: usize,
-        ActiveProcessLimit: DWORD,
-        Affinity: usize,
-        PriorityClass: DWORD,
-        SchedulingClass: DWORD,
-    }
-
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        IoInfo: [u8; 48],
-        ProcessMemoryLimit: usize,
-        JobMemoryLimit: usize,
-        PeakProcessMemoryUsed: usize,
-        PeakJobMemoryUsed: usize,
-    }
-
-    unsafe extern "system" {
-        fn CreateJobObjectW(
-            lpJobAttributes: *const c_void,
-            lpName: *const u16,
-        ) -> HANDLE;
-        fn SetInformationJobObject(
-            hJob: HANDLE,
-            JobObjectInfoClass: u32,
-            lpJobObjectInfo: *const c_void,
-            cbJobObjectInfoLength: DWORD,
-        ) -> BOOL;
-        fn AssignProcessToJobObject(
-            hJob: HANDLE,
-            hProcess: HANDLE,
-        ) -> BOOL;
-        fn OpenProcess(
-            dwDesiredAccess: DWORD,
-            bInheritHandle: BOOL,
-            dwProcessId: DWORD,
-        ) -> HANDLE;
-        fn CloseHandle(
-            hObject: HANDLE,
-        ) -> BOOL;
-    }
-
-    /// Owned Windows Job Object handle.
-    ///
-    /// Dropping this handle (including via OS handle-table cleanup on process
-    /// exit) triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, terminating all
-    /// processes associated with the job.
-    pub struct JobHandle(HANDLE);
-
-    // JobHandle is a kernel handle — the underlying HANDLE can be used from
-    // any thread.
-    unsafe impl Send for JobHandle {}
-    unsafe impl Sync for JobHandle {}
-
-    impl Drop for JobHandle {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { CloseHandle(self.0); }
-            }
-        }
-    }
-
-    /// Create a new Job Object configured to kill all processes when the last
-    /// handle is closed.
-    pub fn create_gateway_job() -> Result<JobHandle, String> {
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return Err("Failed to create Windows Job Object".into());
-            }
-
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-            let result = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                (&info) as *const _ as *const c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
-            );
-            if result == 0 {
-                CloseHandle(job);
-                return Err("Failed to set Job Object KILL_ON_CLOSE limit".into());
-            }
-
-            tracing::info!("Created Windows Job Object with KILL_ON_JOB_CLOSE");
-            Ok(JobHandle(job))
-        }
-    }
-
-    /// Assign the process identified by `pid` to the given job.
-    /// After assignment, the process and all its future children are in the job
-    /// and will be terminated when the job handle is closed.
-    pub fn assign_pid_to_job(job: &JobHandle, pid: u32) -> Result<(), String> {
-        unsafe {
-            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-            if process.is_null() {
-                return Err(format!(
-                    "Failed to open process PID {} for job assignment",
-                    pid
-                ));
-            }
-
-            let result = AssignProcessToJobObject(job.0, process);
-            CloseHandle(process);
-
-            if result == 0 {
-                return Err(format!(
-                    "Failed to assign PID {} to Job Object (process may already be in a job)",
-                    pid
-                ));
-            }
-
-            tracing::info!(pid = pid, "Assigned Gateway process to Job Object");
-            Ok(())
-        }
-    }
-}
-
 // ── System-sleep detection (Windows / macOS / Linux) ────────────────────────
 //
 // The frontend's old time-gap heuristic (heartbeat + visibilitychange) could
@@ -1134,40 +977,51 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        // ── Cleanup: Kill local Gateway process tree on exit ──────────
-        // Covers Ctrl+C (dev mode), window close, tray quit, and OS shutdown.
+        // ── Cleanup: Stop local Gateway process tree on exit ──────────
+        // Covers Ctrl+C (dev mode), tray quit, and OS shutdown.
         // On Windows, uses taskkill /T /F to kill Gateway + all children
         // (Runtime, Embed) in one shot. On Unix, sends SIGINT for clean
         // shutdown via Gateway's own signal handler.
+        //
+        // Exit policy: if the user chose "quit, keep Gateway running" in
+        // the tray-quit dialog (`gateway_keep_running_on_exit`), we leave
+        // the child process alone — it becomes an independent Gateway that
+        // the next Desktop run (or remote peers) will adopt.
         if matches!(
             event,
             tauri::RunEvent::Exit
                 | tauri::RunEvent::ExitRequested { .. }
         ) {
             let state = app_handle.state::<AppState>();
-            let gateway_handle = state.gateway_process.clone();
-            // try_lock: if the mutex is held by an inflight init_local_gateway,
-            // that command will store the child and this handler won't see it,
-            // but the next exit attempt will catch it. This is non-blocking
-            // because RunEvent::Exit fires in the main thread context.
-            if let Ok(mut proc) = gateway_handle.try_lock()
-                && let Some(mut child) = proc.take()
-            {
-                let pid = child.id();
-                tracing::info!(pid = pid, "App exiting, killing Gateway process tree");
-                #[cfg(target_os = "windows")]
+            if state.gateway_keep_running_on_exit.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    "App exiting with keep-running policy — leaving Gateway process alive"
+                );
+            } else {
+                let gateway_handle = state.gateway_process.clone();
+                // try_lock: if the mutex is held by an inflight init_local_gateway,
+                // that command will store the child and this handler won't see it,
+                // but the next exit attempt will catch it. This is non-blocking
+                // because RunEvent::Exit fires in the main thread context.
+                if let Ok(mut proc) = gateway_handle.try_lock()
+                    && let Some(mut child) = proc.take()
                 {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/T", "/F"])
-                        .output();
+                    let pid = child.id();
+                    tracing::info!(pid = pid, "App exiting, stopping Gateway process tree");
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/PID", &pid.to_string(), "/T", "/F"])
+                            .output();
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = std::process::Command::new("kill")
+                            .args(["-INT", &pid.to_string()])
+                            .output();
+                    }
+                    let _ = child.wait();
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = std::process::Command::new("kill")
-                        .args(["-INT", &pid.to_string()])
-                        .output();
-                }
-                let _ = child.wait();
             }
         }
 

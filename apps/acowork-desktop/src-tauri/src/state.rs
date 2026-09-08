@@ -21,6 +21,7 @@
 //! authoritative snapshot, then subscribes for subsequent updates.
 
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -30,9 +31,6 @@ use acowork_core::mqtt_proto::{BootstrapPhase, BootstrapState};
 
 use crate::gateway_client::GatewayClient;
 use crate::mqtt_client::SharedDesktopMqttClient;
-
-#[cfg(target_os = "windows")]
-use crate::win_job::JobHandle;
 
 /// Gateway deployment mode, mirrors frontend `GatewayMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,14 +114,17 @@ pub struct AppState {
     pub gateway: Arc<tokio::sync::RwLock<GatewayClient>>,
     /// Active deployment mode. Set by `set_gateway_config` (called from frontend).
     pub gateway_mode: Arc<tokio::sync::RwLock<GatewayMode>>,
-    /// Handle to the locally spawned Gateway process (None in remote mode
-    /// or before `init_local_gateway` is called).
+    /// Handle to the locally spawned Gateway process (None in remote mode,
+    /// when the configured Gateway is foreign/adopted, or before
+    /// `init_local_gateway` is called). `Some(child)` ⇔ Gateway is
+    /// *owned* by this Desktop process.
     pub gateway_process: Arc<Mutex<Option<Child>>>,
-    /// Windows Job Object that automatically kills the Gateway process tree
-    /// when the desktop app exits (any exit path: Ctrl+C, crash, kill).
-    /// On non-Windows platforms this field does not exist.
-    #[cfg(target_os = "windows")]
-    pub gateway_job: Arc<Mutex<Option<JobHandle>>>,
+    /// Exit policy for the owned Gateway process (set by the tray-quit
+    /// dialog). `true` = the user chose "quit, keep Gateway running", so
+    /// every exit path (RunEvent::Exit, AppState Drop) must leave the
+    /// child process alive. Default `false` = stop the Gateway on exit
+    /// (historical behavior).
+    pub gateway_keep_running_on_exit: Arc<AtomicBool>,
 
     /// ADR-033 Phase 3: Desktop MQTT client for real-time events.
     /// Connected after the Gateway is confirmed healthy. None until
@@ -149,36 +150,50 @@ impl AppState {
     ///     gateway immediately; the frontend must call `set_gateway_config`
     ///     on startup to switch to Remote if needed)
     ///   - base_url = acowork_core::defaults::GATEWAY_HTTP_URL
+    ///   - exit policy = stop the owned Gateway on exit (historical)
     pub fn new() -> Self {
         Self {
             gateway: Arc::new(tokio::sync::RwLock::new(GatewayClient::new())),
             gateway_mode: Arc::new(tokio::sync::RwLock::new(GatewayMode::Local)),
             gateway_process: Arc::new(Mutex::new(None)),
-            #[cfg(target_os = "windows")]
-            gateway_job: Arc::new(Mutex::new(None)),
+            gateway_keep_running_on_exit: Arc::new(AtomicBool::new(false)),
             mqtt_client: Arc::new(Mutex::new(None)),
             bootstrap_state: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 }
 
-/// Last-resort cleanup: kill the local Gateway process tree when AppState is
-/// dropped (e.g. on Ctrl+C termination, OS shutdown, or forced exit).
+/// Last-resort cleanup: stop the local Gateway process tree when AppState is
+/// dropped (e.g. on Ctrl+C termination, OS shutdown, or forced exit) —
+/// UNLESS the user chose to keep the Gateway running on exit.
 ///
 /// This is a safety net — the tray "quit" handler and `RunEvent::Exit` handler
-/// in lib.rs normally kill the Gateway before Drop fires in normal shutdown.
+/// in lib.rs normally stop the Gateway before Drop fires in normal shutdown.
 /// But on abrupt termination (Ctrl+C in dev mode, `taskkill` of the Tauri
 /// process), Rust's stack unwind will run this Drop and prevent orphaned
-/// Gateway / Runtime / Embed processes from lingering.
+/// Gateway / Runtime / Embed processes from lingering (when the default
+/// stop-on-exit policy applies).
 impl Drop for AppState {
     fn drop(&mut self) {
+        // Exit policy: if the user asked to keep the Gateway running,
+        // leave the child alone (it becomes an independent process).
+        if self.gateway_keep_running_on_exit.load(Ordering::Relaxed) {
+            tracing::info!(
+                "AppState dropped with keep-running policy — leaving Gateway process alive"
+            );
+            // Do NOT take the child: taking and dropping it would close our
+            // handle, which is fine (Child::drop detaches), but we must not
+            // kill or wait. Simply return and let the Child drop naturally.
+            return;
+        }
+
         // Only try to lock if the mutex isn't poisoned. During unwind from
         // a panic, the mutex may be poisoned.
         if let Ok(mut proc) = self.gateway_process.try_lock()
             && let Some(mut child) = proc.take()
         {
             let pid = child.id();
-            tracing::info!(pid = pid, "AppState dropped, killing Gateway process tree");
+            tracing::info!(pid = pid, "AppState dropped, stopping Gateway process tree");
             #[cfg(target_os = "windows")]
             {
                 let _ = std::process::Command::new("taskkill")
@@ -192,15 +207,6 @@ impl Drop for AppState {
                     .output();
             }
             let _ = child.wait();
-        }
-        // On Windows, drop the Job Object handle so KILL_ON_JOB_CLOSE fires.
-        // On abrupt exit (Ctrl+C) this Drop may not run, but the OS closes
-        // all handles anyway, triggering the same cleanup.
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(mut job) = self.gateway_job.try_lock() {
-                *job = None;
-            }
         }
     }
 }
