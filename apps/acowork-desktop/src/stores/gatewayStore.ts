@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
-import type { HealthResponse, GatewayStatus, LocalGatewayState, AgentMigrationProgress } from "../lib/types";
+import type { HealthResponse, GatewayStatus, LocalGatewayState, GatewayOwnership, GatewayBootResult, AgentMigrationProgress } from "../lib/types";
 import { fetchMigrationProgress } from "../lib/gateway-api";
 import { log } from "../lib/logger";
 
@@ -8,12 +8,23 @@ interface GatewayStore {
   status: GatewayStatus;
   health: HealthResponse | null;
   localState: LocalGatewayState;
+  /**
+   * Single-topology ownership of the reachable Gateway (see
+   * `GatewayOwnership`). Kept separate from `localState` — the state
+   * machine tracks the local *process*, this field tracks *who started
+   * the Gateway*. Recorded from the boot results returned by
+   * `init_local_gateway` / `start_local_gateway` and from
+   * `checkLocalStatus` (a live in-process child ⇔ owned).
+   */
+  localOwnership: GatewayOwnership;
   /** Migration progress for all agents (polled from Gateway) */
   migrationProgress: Record<string, AgentMigrationProgress>;
   checkHealth: () => Promise<void>;
   startLocalGateway: () => Promise<void>;
   stopLocalGateway: () => Promise<void>;
   checkLocalStatus: () => Promise<void>;
+  /** Record the outcome of a Rust boot call (`init` / `start`) */
+  recordBootResult: (result: GatewayBootResult) => void;
   /** Poll migration progress from Gateway, returns true if any migration is in progress */
   pollMigrationProgress: () => Promise<boolean>;
   /** Update migration progress for a single agent (from WebSocket event) */
@@ -34,6 +45,7 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
   status: "disconnected",
   health: null,
   localState: "idle",
+  localOwnership: "none",
   migrationProgress: {},
 
   checkHealth: async () => {
@@ -91,8 +103,15 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     try {
       // Dynamically import invoke to avoid issues when not in Tauri context
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("start_local_gateway");
-      set({ localState: "running" });
+      const result = await invoke<GatewayBootResult>("start_local_gateway");
+      // Single-topology probe-then-spawn: "owned" means Desktop spawned a
+      // child (localState → running); "foreign" means a Gateway was
+      // already answering at the URL, so no child exists and the process
+      // state stays "stopped" even though the Gateway is reachable.
+      set({
+        localState: result.ownership === "owned" ? "running" : "stopped",
+        localOwnership: result.ownership,
+      });
       // Check health now that the local gateway is up
       await get().checkHealth();
     } catch (err) {
@@ -105,7 +124,12 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("stop_local_gateway");
-      set({ localState: "stopped", status: "disconnected", health: null });
+      set({
+        localState: "stopped",
+        localOwnership: "none",
+        status: "disconnected",
+        health: null,
+      });
     } catch (err) {
       log.error("Failed to stop local gateway:", err);
       set({ localState: "error" });
@@ -116,12 +140,27 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const running = await invoke<boolean>("get_local_gateway_status");
-      set({ localState: running ? "running" : "stopped" });
+      set((s) => ({
+        // `get_local_gateway_status` reports whether a live in-process
+        // *child* exists, which is exactly the "owned" condition. A
+        // foreign (adopted) Gateway has no child handle, so it never
+        // flips `localOwnership` to "owned" here — that stays whatever
+        // the boot result recorded.
+        localState: running ? "running" : "stopped",
+        localOwnership: running ? "owned" : s.localOwnership,
+      }));
     } catch {
       // Not in Tauri context (e.g. plain web dev mode) or command failed.
       // Leave localState unchanged so we don't clobber a valid "running"
       // state from a previous successful start.
     }
+  },
+
+  recordBootResult: (result) => {
+    set({
+      localOwnership: result.ownership,
+      localState: result.ownership === "owned" ? "running" : "stopped",
+    });
   },
 
   pollMigrationProgress: async () => {

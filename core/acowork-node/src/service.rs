@@ -16,7 +16,7 @@
 //!
 //! The generated unit pins the node's runtime identity: it always runs
 //! `acowork-node start` with the explicit `--name`, `--home`,
-//! `--gateway-host`, `--gateway-mqtt-port` captured from the persisted
+//! `--gateway` captured from the persisted
 //! `identity.json`, so the service re-connects to the same Gateway
 //! under the same node_id across reboots.
 
@@ -123,10 +123,8 @@ fn render_launchd_plist(
     <array>
         <string>{bin}</string>
         <string>start</string>
-        <string>--gateway-host</string>
-        <string>{host}</string>
-        <string>--gateway-mqtt-port</string>
-        <string>{port}</string>
+        <string>--gateway</string>
+        <string>{host}:{port}</string>
         <string>--name</string>
         <string>{node_id}</string>
         <string>--home</string>
@@ -164,10 +162,8 @@ fn render_systemd_unit(
     home: &Path,
 ) -> String {
     let exec_start = format!(
-        "{} start --gateway-host {} --gateway-mqtt-port {} --name {} --home {}",
+        "{} start --gateway {host}:{port} --name {} --home {}",
         systemd_escape(&bin.to_string_lossy()),
-        systemd_escape(host),
-        port,
         systemd_escape(node_id),
         systemd_escape(&home.to_string_lossy()),
     );
@@ -236,9 +232,9 @@ pub fn install_service(config: &NodeConfig) -> Result<()> {
         // guidance only (sc / NSSM), no unit file is written.
         println!(
             "Windows: install the node as a service manually, e.g.\n  \
-             nssm install acowork-node \"{}\" start --gateway-host {host} --gateway-mqtt-port {port} --name {node_id} --home \"{}\"\n\
+             nssm install acowork-node \"{}\" start --gateway {host}:{port} --name {node_id} --home \"{}\"\n\
              or\n  \
-             sc create acowork-node binPath= \"\\\"{}\\\" start --gateway-host {host} --gateway-mqtt-port {port} --name {node_id} --home \\\"{}\\\"\" start= auto",
+             sc create acowork-node binPath= \"\\\"{}\\\" start --gateway {host}:{port} --name {node_id} --home \\\"{}\\\"\" start= auto",
             bin.display(),
             config.home.display(),
             bin.display(),
@@ -361,6 +357,7 @@ mod tests {
         );
         assert!(body.contains("Restart=always"));
         assert!(body.contains("gpu-server"));
-        assert!(body.contains("--gateway-host"));
+        assert!(body.contains("--gateway"));
+        assert!(body.contains("192.168.1.10:19875"));
     }
 }

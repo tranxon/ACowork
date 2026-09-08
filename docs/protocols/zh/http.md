@@ -141,13 +141,46 @@ LLM Provider / Models 全局资源、MCP 目录、嵌入模型、用户档案、
 | GET | `/health` | 健康检查（无鉴权），含 IPC（MQTT）/ CronStore / 磁盘空间 |
 | GET | `/api/status` | 系统状态：版本、运行中 Agent 数、内存占用；`mqtt.auth_enabled` 开启时额外返回 `mqtt_username` / `mqtt_password`（Desktop MQTT 凭据下发，ADR-055 Phase 5a） |
 | GET | `/api/config` | 读取 Gateway 配置 |
-| PUT | `/api/config` | 更新日志级别、日志切分、idle_timeout、默认 provider/model、HF mirror 等 |
+| PUT | `/api/config` | 更新日志级别、日志切分、idle_timeout、默认 provider/model、HF mirror 等（**不含** `[security]` 段——见下） |
 | DELETE | `/api/logs` | 清空日志 |
 | GET | `/api/agents/{id}/lsp-endpoint` | LSP Relay 端点（node-local，ADR-055 §6.7）：按 agent 解析宿主 Node 的 relay base URL（`endpoint`/`ready` 字段），供 Desktop / Runtime 直连 |
+
+#### 4.1.1 对端 IP 白名单（安全兜底，`[security].allowed_node_ips`）
+
+Gateway 可在 TCP 层对 HTTP 与 MQTT 分别施加「对端 IP 白名单」——防止未授权机器扫描 / 探测
+Gateway 版本或占用端口。作为安全兜底：**空列表 = 全部放行（默认）；非空 = 仅列表内 IP / CIDR 的
+对端可以连接**。`127.0.0.1` / `::1` 恒放行（Desktop 同机访问不中断）。白名单仅从
+`gateway.toml` / 环境变量读取（**启动后不可变**，不能经 Desktop / `PUT /api/config` 修改）：
+
+```toml
+# <ACOWORK_HOME>/config/gateway.toml（或 <node_home>/../ 见 ADR-055）
+[security]
+allowed_node_ips = ["192.168.1.20", "192.168.1.0/24", "fd00::/64"]
+```
+
+环境变量等价写法（`gateway.toml` 同样支持 env 覆盖，见 §配置章节）：
+
+```bash
+ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
+```
+
+行为差异：
+
+| 层 | 拦截点 | 被拦表现 |
+|---|---|---|
+| HTTP（含 `/health`、`/api/*` 全部端点） | Axum middleware（`ConnectInfo<SocketAddr>`） | `403 Forbidden` + JSON `{"error":"forbidden","detail":"peer IP not allowed by gateway security policy"}` |
+| MQTT | TCP pre-filter（rumqttd 0.20 不暴露对端 IP，无法在 CONNECT 层判断） | TCP 直接断开，无 MQTT 应答 |
+
+> 设计动机：`/health` 无鉴权，若 Gateway 绑到 `0.0.0.0`，任何能路由到该端口的人都能探测版本；
+> 白名单是网络层兜底，与 §4.1 的 bearer-token 鉴权（应用层）正交。详见
+> [ADR-055 §6.8](../adr/zh/ADR-055-remote-runtime-node-topology.md) 与
+> [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md)。
 
 ### 4.2 Agent 包管理
 
 包级 CRUD 与发布。包安装到 `<packages_dir>`，Gateway 在 `installed_agents` 中维护清单。
+
+> `<packages_dir>` 默认指向 `<node_home>/packages`（`ACOWORK_NODE_HOME` env → `$HOME/.acowork/acowork-node` → `./.acowork-node`），与 local / standalone Node 看到一致布局。Node 端真正执行文件操作，Gateway 仅做 HTTP API + manifest。详见 [ADR-055 §6.11 / §6.20](../adr/zh/ADR-055-remote-runtime-node-topology.md) 与 [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md)。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -707,6 +740,7 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 |---|---|
 | 400 | 参数校验失败、content 过长、id 格式不合法 |
 | 401 | Bearer token 缺失或错误 |
+| 403 | 对端 IP 不在 `[security].allowed_node_ips`（白名单拦截，§4.1.1）；或 Node token 校验不匹配（`X-Error-Origin: node`） |
 | 404 | Agent / 资源不存在 |
 | 409 | 状态冲突：Agent 未运行、未安装 |
 | 500 | Gateway 内部错误 |

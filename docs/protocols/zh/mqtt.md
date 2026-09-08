@@ -974,7 +974,7 @@ client.publish(
 acowork-gateway nodes token create [--ttl 2h]
 
 # 2) 目标机器首启 Node（携带 token；identity.json 生成后不再需要）
-acowork-node start --gateway-host <gw> --name <node-id> --token <token>
+acowork-node start --gateway <gw:port> --name <node-id> --token <token>
 
 # 3) enroll 成功后 node_token 持久化进 identity.json，重启自动用 node_token 重连
 ```

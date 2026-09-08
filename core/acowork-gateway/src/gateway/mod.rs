@@ -338,12 +338,21 @@ impl Gateway {
         // variants) so the registry accepts arbitrary subsystems
         // without changing its API — see ADR-059 §5.4 OCP boundary.
         let bootstrap_registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
-        // Required: vault, mqtt broker + client, gateway publisher.
-        // Optional: embed (a remote fallback exists).
-        // `node.local` is marked ready by the NodeReady topic handler
-        // and `system_agent` by the local node's retained installed
-        // inventory (both in mqtt/dispatch.rs); the handles are local
-        // to this function, hence the `_` prefix.
+        // Required subsystems registered statically here:
+        //   * vault   - unlocked by the HTTP vault handler / dev-mode
+        //               auto-unlock via unlock_vault_and_mark_ready
+        //   * mqtt    - marked ready once the Gateway MQTT client
+        //               connects (below)
+        //   * publisher - marked ready when the global-resources
+        //               publisher task is started (below)
+        // Required subsystems registered dynamically by mqtt/dispatch.rs:
+        //   * node.NODE_ID - one Required entry per connected node,
+        //               raised by the NodeReady topic handler (covers
+        //               both the local node and any remote nodes)
+        //   * system_agent - raised when the local node's retained
+        //               installed inventory aggregates com.acowork.system
+        // Optional:
+        //   * embedding - fall back to a remote embedder if missing
         let vault_handle = bootstrap_registry.register(
             "vault",
             crate::bootstrap::ReadinessKind::Required,
@@ -354,14 +363,6 @@ impl Gateway {
         );
         let publisher_handle = bootstrap_registry.register(
             "publisher",
-            crate::bootstrap::ReadinessKind::Required,
-        );
-        let _local_node_handle = bootstrap_registry.register(
-            "node.local",
-            crate::bootstrap::ReadinessKind::Required,
-        );
-        let _system_agent_handle = bootstrap_registry.register(
-            "system_agent",
             crate::bootstrap::ReadinessKind::Required,
         );
         let embed_handle = bootstrap_registry.register(
@@ -795,6 +796,35 @@ impl Gateway {
             http_token: http_auth.token().map(str::to_string),
         };
 
+        // security backstop: peer-IP allowlist. Decided once at boot —
+        // may redirect the broker to loopback and enable a TCP
+        // pre-filter that enforces the list on non-loopback binds.
+        let mqtt_allowlist = self.config.security.to_allowlist();
+        let mqtt_filter = if mqtt_config.enabled
+            && crate::mqtt::tcp_filter::needs_mqtt_tcp_filter(&mqtt_config.host, &mqtt_allowlist)
+        {
+            // Broker binds loopback; the pre-filter owns the configured
+            // external address and gates peers by IP before splicing.
+            let target_port = mqtt_config.port;
+            match crate::mqtt::tcp_filter::start_mqtt_tcp_filter(
+                &mqtt_config.host,
+                mqtt_config.port,
+                "127.0.0.1",
+                target_port,
+                mqtt_allowlist.clone(),
+            )
+            .await
+            {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    tracing::error!(%e, "MQTT TCP pre-filter failed to start");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
             // ADR-033: start_broker runs in a separate OS thread
             // because rumqttd creates its own tokio runtime internally.
@@ -803,8 +833,23 @@ impl Gateway {
             } else {
                 None
             };
-            match crate::mqtt::start_broker_with_auth(&mqtt_config.host, mqtt_config.port, auth) {
-                Ok(h) => { tracing::info!(addr = %h.listen_addr, "MQTT broker started"); Some(h) }
+            // When the pre-filter is active the broker must bind loopback
+            // (the pre-filter already owns the external address). Only the
+            // pre-filter's absence lets the broker bind the configured host.
+            let broker_host = if mqtt_filter.is_some() {
+                "127.0.0.1"
+            } else {
+                &mqtt_config.host
+            };
+            match crate::mqtt::start_broker_with_auth(broker_host, mqtt_config.port, auth) {
+                Ok(h) => {
+                    if mqtt_filter.is_some() {
+                        tracing::info!(addr = %h.listen_addr, "MQTT broker started (loopback, behind TCP pre-filter)");
+                    } else {
+                        tracing::info!(addr = %h.listen_addr, "MQTT broker started");
+                    }
+                    Some(h)
+                }
                 Err(e) => { tracing::error!(%e, "MQTT broker failed"); None }
             }
         } else { None };
@@ -1168,13 +1213,13 @@ impl Gateway {
                 node_tokens
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .upsert(acowork_core::node::LOCAL_NODE_ID, ""),
+                    .upsert(&acowork_core::node::local_node_id(), ""),
             )
         } else {
             None
         };
         let local_node_supervisor: Option<std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>> =
-            if mqtt_broker_started {
+            if mqtt_broker_started && self.config.local_node.enabled {
                 match crate::gateway::node_manager::ensure_local_node(
                     &mqtt_config.host,
                     mqtt_config.port,
@@ -1192,6 +1237,12 @@ impl Gateway {
                         None
                     }
                 }
+            } else if mqtt_broker_started && !self.config.local_node.enabled {
+                tracing::info!(
+                    "Local node agent disabled by [local_node] enabled=false \
+                     (or --no-spawn-local-node); relying on externally-started nodes"
+                );
+                None
             } else {
                 None
             };
@@ -1211,7 +1262,7 @@ impl Gateway {
                     if registry_for_ready
                         .read()
                         .await
-                        .is_online(acowork_core::node::LOCAL_NODE_ID)
+                        .is_online(&acowork_core::node::local_node_id())
                     {
                         let st = ready_state.read().await;
                         if let Some(ref h) = st.mqtt_publisher_handle {
@@ -1263,7 +1314,7 @@ impl Gateway {
                         tracing::warn!("System Agent not installed — skipping auto-start");
                     } else {
                         match nc
-                            .start_agent(acowork_core::node::LOCAL_NODE_ID, SYSTEM_AGENT_ID, false)
+                            .start_agent(&acowork_core::node::local_node_id(), SYSTEM_AGENT_ID, false)
                             .await
                         {
                             Ok(event) => {
@@ -1291,7 +1342,7 @@ impl Gateway {
                                         pid: 0,
                                         started_at: chrono::Utc::now(),
                                         workspace,
-                                        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                                        node_id: acowork_core::node::local_node_id(),
                                         connected: false,
                                         ready: false,
                                         dev_mode: false,
@@ -1522,8 +1573,10 @@ mod tests {
             advertise_host: None,
             node_proxy_port: None,
             node_lsp_relay_port: None,
+            local_node: crate::config::LocalNodeConfig::default(),
             pm: crate::config::PmConfig::default(),
             doc: crate::config::DocConfig::default(),
+            security: crate::config::SecurityConfig::default(),
         }
     }
 

@@ -20,13 +20,40 @@ use tauri::Manager;
 pub struct GatewayConfigInput {
     /// `"local"` or `"remote"` (anything else falls back to `local`)
     pub mode: String,
-    /// User-configured URL. Only used in remote mode; ignored in local mode
-    /// (local always listens on `acowork_core::defaults::GATEWAY_HTTP_URL`).
+    /// User-configured Gateway URL. Used in BOTH modes (single-topology:
+    /// local mode defaults to `http://127.0.0.1:19876` but accepts any
+    /// URL; the mode only controls whether Desktop spawns the Gateway).
     #[serde(default)]
     pub url: String,
 }
 
-/// Returned by [`get_gateway_config`] so the frontend can re-sync after
+/// Result of a local-gateway boot (probe-or-spawn).
+///
+/// `ownership` tells the frontend whether the reachable Gateway was
+/// spawned by this Desktop App ("owned") or was already running and
+/// merely adopted ("foreign"). Ownership drives the exit UX: Desktop
+/// only offers to stop an *owned* Gateway on quit; a foreign Gateway
+/// is never touched.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub enum GatewayOwnership {
+    /// The Gateway was spawned by this Desktop process (and is tracked
+    /// in `state.gateway_process`). Desktop may stop it on exit.
+    Owned,
+    /// A Gateway was already reachable at the configured URL and was
+    /// adopted without spawning. Desktop must never stop it.
+    Foreign,
+}
+
+impl GatewayOwnership {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GatewayOwnership::Owned => "owned",
+            GatewayOwnership::Foreign => "foreign",
+        }
+    }
+}
+
+/// Returned by [`set_gateway_config`] so the frontend can re-sync after
 /// reload / external mutation.
 #[derive(Debug, Serialize)]
 pub struct GatewayConfigOutput {
@@ -34,17 +61,29 @@ pub struct GatewayConfigOutput {
     pub base_url: String,
 }
 
+/// Boot result returned by [`init_local_gateway`] / [`start_local_gateway`]:
+/// the resolved base URL plus the ownership of the running Gateway.
+#[derive(Debug, Serialize)]
+pub struct GatewayBootResult {
+    pub base_url: String,
+    /// `"owned"` if Desktop spawned it, `"foreign"` if it was adopted.
+    pub ownership: String,
+}
+
 /// Push the persisted gateway configuration from the frontend into Rust.
 ///
-/// - Local mode: `base_url` is forced to `acowork_core::defaults::GATEWAY_HTTP_URL`
-///   regardless of what the frontend sends. This guarantees the spawned
-///   Gateway and the HTTP client always agree on the same address.
-/// - Remote mode: `base_url` is taken from the input. Trust-on-save: no
-///   health probe (the user sees connection errors in the UI if unreachable).
+/// Mode-independent URL policy: **both** local and remote modes accept
+/// the user-configured URL. This is the "single topology" principle —
+/// local mode differs from remote only in that the Desktop App *spawns*
+/// the Gateway when none is reachable; the Gateway itself, its config,
+/// ports and bind addresses are identical in both modes. Local mode's
+/// URL defaults to `http://127.0.0.1:19876` in the UI, but the user can
+/// point it anywhere (including a LAN IP — in which case other machines
+/// may connect to that Gateway exactly as if it were a "remote" one).
 ///
 /// If the mode changes from local→remote while a local Gateway is running,
 /// the running local process is stopped to avoid leaving an orphan on the
-/// default port. The reverse (remote→local) does NOT auto-spawn; the
+/// shared port. The reverse (remote→local) does NOT auto-spawn; the
 /// frontend must call [`init_local_gateway`] to start a new local instance.
 #[tauri::command]
 pub async fn set_gateway_config(
@@ -58,16 +97,13 @@ pub async fn set_gateway_config(
         config.url
     );
 
-    // Resolve base_url per mode policy
-    let base_url = match mode {
-        GatewayMode::Local => defaults::GATEWAY_HTTP_URL.to_string(),
-        GatewayMode::Remote => {
-            let trimmed = config.url.trim().trim_end_matches('/').to_string();
-            if trimmed.is_empty() {
-                return Err("Remote gateway URL cannot be empty".to_string());
-            }
-            trimmed
-        }
+    // Resolve base_url — mode-independent. Empty URL falls back to the
+    // shared default (covers legacy local-mode callers that omit it).
+    let trimmed = config.url.trim().trim_end_matches('/').to_string();
+    let base_url = if trimmed.is_empty() {
+        defaults::GATEWAY_HTTP_URL.to_string()
+    } else {
+        trimmed
     };
 
     // Update HTTP client base_url
@@ -115,12 +151,23 @@ pub async fn get_gateway_config(
     })
 }
 
-/// Spawn the local Gateway process and wait for bootstrap READY.
+/// Ensure a Gateway is running at the configured URL (local mode) and
+/// wait for bootstrap READY.
 ///
 /// This is the ONLY place local Gateway is spawned. It is called from the
 /// frontend (SplashScreen init) after `set_gateway_config`, so we know:
 ///   - The mode is `local` (otherwise this is an error)
-///   - The `GatewayClient.base_url` points at the local default
+///   - `GatewayClient.base_url` is the address the user wants (default
+///     `http://127.0.0.1:19876`, but any URL is accepted — single
+///     topology, the mode only decides whether we spawn).
+///
+/// **Probe-then-spawn**: if a Gateway is already reachable at the
+/// configured URL (started manually, left over from a previous run, or
+/// on a remote host), it is adopted without spawning and reported as
+/// `ownership = "foreign"`. Only when nothing answers do we spawn a
+/// child (`ownership = "owned"`). This is what makes local mode work
+/// against an already-running Gateway — Desktop never fights over the
+/// port.
 ///
 /// ADR-059: returns once the Gateway's bootstrap snapshot reaches
 /// `phase=READY` (max ~30s) — one wait covers liveness AND subsystem
@@ -131,7 +178,7 @@ pub async fn get_gateway_config(
 pub async fn init_local_gateway(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<String, DependencyNotReady> {
+) -> Result<GatewayBootResult, DependencyNotReady> {
     {
         let m = state.gateway_mode.read().await;
         if *m != GatewayMode::Local {
@@ -142,17 +189,23 @@ pub async fn init_local_gateway(
         }
     }
 
-    spawn_gateway(&state, &app_handle)
+    let base_url = state.gateway.read().await.base_url().to_string();
+
+    // Probe-then-spawn: the spawn path itself re-checks reachability under
+    // a lock (concurrency-safe); here we just need the outcome.
+    let ownership = spawn_gateway(&state, &app_handle)
         .await
         .map_err(DependencyNotReady::install_failed)?;
 
-    // Determine the URL to poll. In local mode this is always the
-    // shared default constant, but we still read it from the client to
-    // honour any future override.
-    let base_url = state.gateway.read().await.base_url().to_string();
+    // Wait for READY on the configured URL. When ownership is "foreign",
+    // the gateway is already up; this wait doubles as the health probe.
     let client = bootstrap_probe_client()?;
     wait_for_bootstrap_ready(&client, &base_url, BOOTSTRAP_TIMEOUT_SECS).await?;
-    Ok(base_url)
+
+    Ok(GatewayBootResult {
+        base_url,
+        ownership: ownership.as_str().to_string(),
+    })
 }
 
 /// Time budget for waiting on the Gateway bootstrap phase (seconds).
@@ -510,7 +563,7 @@ async fn wait_for_bootstrap_ready(
 pub async fn start_local_gateway(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<(), DependencyNotReady> {
+) -> Result<GatewayBootResult, DependencyNotReady> {
     {
         let m = state.gateway_mode.read().await;
         if *m != GatewayMode::Local {
@@ -520,31 +573,37 @@ pub async fn start_local_gateway(
             )));
         }
     }
-    spawn_gateway(&state, &app_handle)
+    let ownership = spawn_gateway(&state, &app_handle)
         .await
         .map_err(DependencyNotReady::install_failed)?;
     let base_url = state.gateway.read().await.base_url().to_string();
     let client = bootstrap_probe_client()?;
     wait_for_bootstrap_ready(&client, &base_url, BOOTSTRAP_TIMEOUT_SECS).await?;
-    Ok(())
+    Ok(GatewayBootResult {
+        base_url,
+        ownership: ownership.as_str().to_string(),
+    })
 }
 
-/// Spawn the Gateway process without waiting for readiness.
-/// Used by both `start_local_gateway` command and Rust-side early startup.
+/// Ensure a Gateway child is running; report who owns it.
+/// Used by both `start_local_gateway` command and `init_local_gateway`.
 ///
 /// # Concurrency
 ///
 /// This function is safe to call concurrently from multiple Tauri commands.
-/// The entire decision pipeline (`check in-process handle → probe port →
+/// The entire decision pipeline (`check in-process handle → probe URL →
 /// kill stale → spawn → store`) runs under a single `Mutex` critical
 /// section, so React StrictMode's dev double-invocation, or any other
 /// race, results in **at most one** child Gateway process. Late callers
 /// see the freshly-spawned child stored in `state.gateway_process` and
-/// return immediately. A port probe additionally detects Gateway
-/// instances started outside of Tauri (e.g. a leftover from a crashed
-/// previous run still holding the port) and skips spawning in that case
-/// as well.
-pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> Result<(), String> {
+/// return immediately. A URL probe additionally detects Gateway
+/// instances already running (started manually, or a leftover from a
+/// crashed previous run still holding the port) and adopts them without
+/// spawning — reported as [`GatewayOwnership::Foreign`].
+pub async fn spawn_gateway(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
+) -> Result<GatewayOwnership, String> {
     tracing::info!("[BOOT] spawn_gateway entered");
 
     // ── Single critical section: serialise check → spawn → store ─────
@@ -558,24 +617,27 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
         && child_output_is_alive(child)
     {
         tracing::info!("[BOOT] Gateway already running (in-process handle), skipping spawn");
-        return Ok(());
+        return Ok(GatewayOwnership::Owned);
     }
 
-    // 2) Port probe: is there already a Gateway listening on the default
-    //    URL? Covers the case of a stale process from a previous run that
-    //    is reachable but was never tracked in our handle.
-    let base_url = defaults::GATEWAY_HTTP_URL;
-    if is_gateway_reachable(base_url).await {
+    // 2) URL probe: is there already a Gateway listening on the
+    //    configured URL? Covers a manually-started Gateway, a remote
+    //    Gateway the user pointed local mode at, and a stale process
+    //    from a previous run that is reachable but was never tracked in
+    //    our handle. In every case we adopt rather than fight over the
+    //    port (single-topology: the configured URL is authoritative).
+    let base_url = state.gateway.read().await.base_url().to_string();
+    if is_gateway_reachable(&base_url).await {
         tracing::info!(
-            "[BOOT] Gateway already reachable at {} (external), skipping spawn",
+            "[BOOT] Gateway already reachable at {} — adopting (foreign), skipping spawn",
             base_url
         );
-        return Ok(());
+        return Ok(GatewayOwnership::Foreign);
     }
 
     // 3) Kill any stale local Gateway from a previous run.
-    //    We only get here if no in-process handle AND port is free, so
-    //    anything left holding the port is genuinely stale.
+    //    We only get here if no in-process handle AND the URL is
+    //    unreachable, so nothing is legitimately holding the port.
     tracing::info!("[BOOT] Checking for stale Gateway processes...");
     kill_stale_gateway_process();
     tracing::info!("[BOOT] Stale Gateway cleanup done");
@@ -642,27 +704,21 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
     let pid = child.id();
     tracing::info!("[BOOT] Gateway process spawned, pid: {:?}", pid);
 
-    // 5) On Windows, create a Job Object with KILL_ON_JOB_CLOSE and assign
-    //    the Gateway process to it. When the desktop app exits (Ctrl+C,
-    //    crash, or normal), the OS closes the job handle, automatically
-    //    terminating the entire process tree (Gateway → Runtime → Embed →
-    //    LSP). On non-Windows this is a no-op.
-    #[cfg(target_os = "windows")]
-    {
-        let job = crate::win_job::create_gateway_job()
-            .map_err(|e| format!("Failed to create Job Object: {}", e))?;
-        if let Err(e) = crate::win_job::assign_pid_to_job(&job, pid) {
-            tracing::warn!(error = %e, "Failed to assign Gateway to Job Object");
-        }
-        let mut job_guard = state.gateway_job.lock().await;
-        *job_guard = Some(job);
-    }
-
-    // 6) Store the handle. The next concurrent caller will see this
+    // 5) Store the handle. The next concurrent caller will see this
     //    inside the same lock and return early at step 1.
+    //
+    // NOTE: no Windows Job Object / KILL_ON_JOB_CLOSE here. Gateway
+    // lifecycle is a *policy decision* made at exit time (see
+    // `state.gateway_exit_policy` and the tray quit dialog): the user may
+    // choose to keep the Gateway running after Desktop quits. Job-object
+    // auto-kill would make that impossible, and explicit `taskkill /T /F`
+    // in `stop_local_gateway` already provides the same process-tree kill
+    // when stopping IS requested. A crashed Desktop may leave an orphaned
+    // Gateway behind; it is then adopted (not duplicated) by the next run's
+    // probe-then-spawn, so this is safe.
     *proc_guard = Some(child);
 
-    Ok(())
+    Ok(GatewayOwnership::Owned)
 }
 
 /// Stop the locally running Gateway process and all its children.
@@ -677,13 +733,6 @@ pub async fn stop_local_gateway(state: tauri::State<'_, AppState>) -> Result<(),
     if let Some(child) = proc.take() {
         let pid = child.id();
         tracing::info!(pid = pid, "Stopping local Gateway process tree");
-
-        // Drop the Windows Job Object handle so KILL_ON_JOB_CLOSE fires.
-        #[cfg(target_os = "windows")]
-        {
-            let mut job_guard = state.gateway_job.lock().await;
-            *job_guard = None;
-        }
 
         #[cfg(target_os = "windows")]
         {

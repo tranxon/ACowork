@@ -70,7 +70,12 @@ pub struct Cli {
     ///
     /// Overrides the `ACOWORK_HOME` environment variable. Useful for
     /// tests and running multiple isolated instances side-by-side.
-    #[arg(long, env = "ACOWORK_HOME")]
+    /// `--work-dir` is an alias with identical semantics.
+    #[arg(
+        long,
+        visible_alias = "work-dir",
+        env = "ACOWORK_HOME"
+    )]
     pub home: Option<String>,
 
     /// Advertise host: the address other machines should use to reach
@@ -82,9 +87,47 @@ pub struct Cli {
     #[arg(long, env = "ACOWORK_GATEWAY_ADVERTISE_HOST")]
     pub advertise_host: Option<String>,
 
+    /// HTTP API listen address as `HOST:PORT` (bind host + port).
+    ///
+    /// Overrides `[http].host` / `[http].port` and the
+    /// `ACOWORK_GATEWAY_HTTP_PORT` env var. Default: `127.0.0.1:19876`.
+    /// IPv6 must be bracketed (`[::1]:19876`); a bare host without a
+    /// port keeps the default port. Port `0` is rejected — use the TOML
+    /// `[http] port = 0` auto-assign if you need an ephemeral port.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// MQTT broker listen address as `HOST:PORT` (bind host + port).
+    ///
+    /// Overrides `[mqtt].host` / `[mqtt].port` and the
+    /// `ACOWORK_GATEWAY_MQTT_PORT` env var. Default: `127.0.0.1:19875`.
+    /// Same grammar as `--addr`.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub mqtt_addr: Option<String>,
+
     /// Log level (trace/debug/info/warn/error)
     #[arg(long, env = "ACOWORK_GATEWAY_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
+
+    /// Skip auto-spawning the local Node Agent on daemon startup.
+    ///
+    /// Default behaviour (ADR-055 §6.11): Gateway spawns a `name=local`
+    /// Node Agent as a sibling child process and supervises it for the
+    /// lifetime of the daemon. Pass this flag when:
+    ///   - the local Node is started manually (CI / containers /
+    ///     multi-node verification) and you don't want a duplicate
+    ///     `name=local` race
+    ///   - the `acowork-node` binary is intentionally absent
+    ///   - you run Gateway in pure-orchestrator mode against remote
+    ///     nodes only
+    ///
+    /// Mirror in TOML: `[local_node] enabled = false`.
+    #[arg(
+        long,
+        env = "ACOWORK_GATEWAY_NO_SPAWN_LOCAL_NODE",
+        default_value_t = false
+    )]
+    pub no_spawn_local_node: bool,
 
     /// Subcommands
     #[command(subcommand)]
@@ -97,19 +140,21 @@ pub enum Commands {
     Install {
         /// Path to .agent package file
         package: String,
-        /// Target node (ADR-055 §6.13.3; default `local`). Wiring
-        /// lands in Phase 3 — the command is currently delegated to
-        /// the local node via the HTTP API.
-        #[arg(long, default_value = "local")]
-        node: String,
+        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
+        /// machine node, named by hostname). Wiring lands in Phase 3 —
+        /// the command is currently delegated to the local node via the
+        /// HTTP API.
+        #[arg(long)]
+        node: Option<String>,
     },
     /// Uninstall an agent
     Uninstall {
         /// Agent ID to uninstall
         agent_id: String,
-        /// Target node (ADR-055 §6.13.3; default `local`).
-        #[arg(long, default_value = "local")]
-        node: String,
+        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
+        /// machine node, named by hostname).
+        #[arg(long)]
+        node: Option<String>,
     },
     /// Upgrade an installed agent
     Upgrade {
@@ -117,25 +162,28 @@ pub enum Commands {
         agent_id: String,
         /// Path to new .agent package file
         package: String,
-        /// Target node (ADR-055 §6.13.3; default `local`).
-        #[arg(long, default_value = "local")]
-        node: String,
+        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
+        /// machine node, named by hostname).
+        #[arg(long)]
+        node: Option<String>,
     },
     /// Start an agent
     Start {
         /// Agent ID to start
         agent_id: String,
-        /// Target node (ADR-055 §6.13.3; default `local`).
-        #[arg(long, default_value = "local")]
-        node: String,
+        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
+        /// machine node, named by hostname).
+        #[arg(long)]
+        node: Option<String>,
     },
     /// Stop a running agent
     Stop {
         /// Agent ID to stop
         agent_id: String,
-        /// Target node (ADR-055 §6.13.3; default `local`).
-        #[arg(long, default_value = "local")]
-        node: String,
+        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
+        /// machine node, named by hostname).
+        #[arg(long)]
+        node: Option<String>,
     },
     /// List installed agents
     List,
@@ -245,6 +293,7 @@ impl Cli {
         let gateway = Gateway::new(config)?;
         match self.command {
             Some(Commands::Install { package, node }) => {
+                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -265,6 +314,7 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Uninstall { agent_id, node }) => {
+                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -277,6 +327,7 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Upgrade { agent_id, package, node }) => {
+                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -298,6 +349,7 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Start { agent_id, node }) => {
+                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 // Need async runtime for start/stop
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -311,6 +363,7 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Stop { agent_id, node }) => {
+                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -587,6 +640,23 @@ mod tests {
     fn test_cli_parse_daemon() {
         let cli = Cli::parse_from(["acowork-gateway", "--daemon"]);
         assert!(cli.daemon);
+        assert!(!cli.no_spawn_local_node);
+    }
+
+    #[test]
+    fn test_cli_parse_no_spawn_local_node() {
+        let cli = Cli::parse_from(["acowork-gateway", "--daemon", "--no-spawn-local-node"]);
+        assert!(cli.daemon);
+        assert!(cli.no_spawn_local_node);
+    }
+
+    #[test]
+    fn test_no_spawn_local_node_default_false() {
+        let cli = Cli::parse_from(["acowork-gateway", "--daemon"]);
+        assert!(
+            !cli.no_spawn_local_node,
+            "default must be false (spawn local node by default)"
+        );
     }
 
     #[test]

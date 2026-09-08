@@ -163,7 +163,7 @@ pub async fn install_locally(
     })?;
     let event = node_control
         .install_agent(
-            acowork_core::node::LOCAL_NODE_ID,
+            &acowork_core::node::local_node_id(),
             &agent_id,
             &req.package_path,
             crate::http::agents::gateway_dev_mode(&state).await,

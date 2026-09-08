@@ -54,7 +54,7 @@ pub struct NodeConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
-            home: default_node_home(),
+            home: acowork_core::node::default_node_home(),
             packages_dir: None,
             gateway_host: acowork_core::defaults::GATEWAY_MQTT_HOST.to_string(),
             gateway_mqtt_port: acowork_core::defaults::GATEWAY_MQTT_PORT,
@@ -118,71 +118,23 @@ impl NodeConfig {
     }
 }
 
-/// Default node home directory, resolution order:
-///   `ACOWORK_NODE_HOME` env > `$HOME/.acowork/acowork-node/`
-///   (Windows: `%USERPROFILE%\.acowork\acowork-node`) > `./.acowork-node`.
-///
-/// The env override lets multi-instance runs and the ADR-055 node
-/// topology verification isolate node state; the Gateway-spawned local
-/// node inherits it from the parent environment automatically.
-pub fn default_node_home() -> PathBuf {
-    if let Some(dir) = std::env::var_os("ACOWORK_NODE_HOME")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-    // Windows has no `HOME` env var (only `USERPROFILE`); without this
-    // branch the node silently fell back to `./.acowork-node` in the cwd,
-    // scattering node state across whatever directory started the process.
-    #[cfg(windows)]
-    if let Some(profile) = std::env::var_os("USERPROFILE")
-        && !profile.is_empty()
-    {
-        return PathBuf::from(profile)
-            .join(".acowork")
-            .join("acowork-node");
-    }
-    if let Some(home) = std::env::var_os("HOME")
-        && !home.is_empty()
-    {
-        return PathBuf::from(home)
-            .join(".acowork")
-            .join("acowork-node");
-    }
-    PathBuf::from(".").join(".acowork-node")
-}
-
 /// Resolve the node home from an optional `--home` override.
+///
+/// The default value is sourced from [`acowork_core::node::default_node_home`]
+/// — shared with `acowork-gateway` so both sides derive a single
+/// Node home directory without `acowork-gateway` depending on
+/// `acowork-node` (ADR-055 §6.20 dependency red line).
 pub fn resolve_home(explicit: Option<&Path>) -> PathBuf {
-    explicit.map(Path::to_path_buf).unwrap_or_else(default_node_home)
+    explicit
+        .map(Path::to_path_buf)
+        .unwrap_or_else(acowork_core::node::default_node_home)
 }
 
-/// Best-effort system hostname without a dedicated crate: libc
-/// `gethostname` on Unix, `COMPUTERNAME` on Windows, "localhost"
-/// fallback.
+/// Best-effort system hostname — shared implementation lives in
+/// `acowork-core` (used identically by the Gateway to compute the
+/// local node id, so both sides always agree).
 pub fn system_hostname() -> String {
-    #[cfg(unix)]
-    {
-        let mut buf = [0u8; 256];
-        // SAFETY: `gethostname` writes at most `buf.len()` bytes into
-        // the provided buffer and NUL-terminates on success.
-        let rc = unsafe {
-            libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-        };
-        if rc == 0 {
-            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            if let Ok(s) = std::str::from_utf8(&buf[..end]) {
-                return s.to_string();
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(name) = std::env::var("COMPUTERNAME") {
-            return name;
-        }
-    }
-    "localhost".to_string()
+    acowork_core::node::system_hostname()
 }
 
 #[cfg(test)]

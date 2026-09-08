@@ -1,7 +1,7 @@
 # ADR-055：Runtime 远程化部署 - Node Agent 拓扑
 
 **状态**：已定案（Phase 1–5a 实施完成；Phase 5b 待办）
-**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差）
+**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差。2026-08-27 修订：§6.8 新增对端 IP 白名单安全兜底（`[security].allowed_node_ips`，HTTP 403 / MQTT TCP pre-filter）；Desktop「本地/远程单一拓扑」语义定稿——本地模式仅表示 Desktop 可能 spawn Gateway，Gateway/Node/Runtime 行为与配置在两种模式完全一致（相关 runbook 同步）。2026-08-28 修订：node 命名统一为机器名 slug——移除保留名 `local`（`LOCAL_NODE_ID` 常量删除，改为共享函数 `local_node_id()`）；Gateway spawn 本机节点不再传 `--name`，改传内部标记 `--gateway-managed`（孤儿清理专用）；§6.11/§6.12 同步）
 **决策者**：大鱼
 **前置**：
 - [ADR-033](./ADR-033-mqtt-replace-grpc-websocket.md)（MQTT 替换 gRPC + WebSocket）
@@ -414,6 +414,7 @@ Gateway 侧触碰共享领地的所有代码点的归宿：
 1. **Node 注册令牌（enrollment token）**：Gateway 配置生成一次性/长效 token（`nodes token create [--ttl]`，明文一次性打印，仅存 sha256 哈希于 `{data_dir}/enrollment_tokens.json`）；Node 首连 MQTT 时在 CONNECT 后的第一条消息里出示 token（`acowork/nodes/{id}/enroll` payload），Gateway 校验后登记 node_id ↔ 令牌。**未注册节点的 MQTT 连接被 broker 拒绝（CONNACK 5）**。
 2. **节点令牌（node token）**：注册成功后 Gateway 签发 per-node 长期令牌（`{data_dir}/node_tokens.json` 持久化），用于 ① Node 拉 package 的 HTTP 鉴权（`X-ACowork-Node-Token`）；② Node 反代入口校验（Gateway → Node 的反代请求携带，Node 侧入站校验）；③ CONNECT 凭据（`node:{id}` 重连）。
 3. **MQTT 鉴权收紧（Phase 5a 已实施为 CONNECT 层动态鉴权）**：rumqttd 0.20 `set_auth_handler`，决策纯函数 `check_connect_auth(client_id, username, password)`——`node:{id}` 凭 node_token 或未消费 enrollment token；`agent:{id}` 凭任一已注册 node_token（第一档简化：不校验 agent→node 归属）；`gateway:publisher` 凭内部 publisher token；`user:*:desktop:*` 凭 `http_token`；其他拒绝。
+4. **对端 IP 白名单安全兜底（Phase 5a 补充，2026-08-27 实施）**：`gateway.toml` 的 `[security].allowed_node_ips`（或 env `ACOWORK_GATEWAY_ALLOWED_NODE_IPS`，逗号分隔）声明「允许连接本 Gateway 的对端 IP / CIDR（IPv4/IPv6）」。**空列表 = 全部放行（默认）；非空 = 仅列表内对端可连**，`127.0.0.1` / `::1` 恒放行。白名单仅启动时读取（TOML/env），**不可经 Desktop / `PUT /api/config` 修改**——安全兜底不能由应用层 UI 放开。拦截点：HTTP（含 `/health`，Axum middleware 读 `ConnectInfo<SocketAddr>`）→ `403 Forbidden`；MQTT → TCP pre-filter 直接断开（**rumqttd 0.20 的 auth handler 不暴露对端 IP，故无法在 CONNECT 层判断对端来源**——此为既 topic-ACL 之后第二个 rumqttd 能力限制偏差，mosquitto 评估一并列入 Phase 5b）。
 
 > **Phase 5a 实施偏差（2026-08-26 记录）**：§6.8 原设计为「rumqttd 内置 ACL 按 topic 动态收紧」，但 **rumqttd 0.20 无 per-topic ACL 能力**，Phase 5a 仅落地 **CONNECT 层动态鉴权**（连接身份认证，不含 topic 级授权）。topic 级 ACL 依赖 broker 能力，**mosquitto 切换评估列入 Phase 5b**（ADR-033 已把「broker 可替换」列为缓解措施，客户端全是标准 MQTT 3.1.1，切换成本可控）。
 
@@ -432,7 +433,7 @@ Gateway 侧触碰共享领地的所有代码点的归宿：
 pub struct InstalledAgentInfo {
     pub agent_id: String,
     pub version: String,
-    pub node_id: String,          // 新增：安装在哪台节点（local node 的 id 固定为 "local"）
+    pub node_id: String,          // 新增：安装在哪台节点（本机节点名 = 机器名 slug）
     pub install_path: String,     // 语义变化：节点本机路径（Gateway 仅记录，不再解引用）
     // ... manifest 缓存字段保留（供 /api/agents 列表快速渲染）
 }
@@ -463,14 +464,21 @@ pub struct RunningAgentInfo {
 
 ### 6.11 单机模式 = local node（D1 落地）
 
-- Gateway 启动时若发现本机无 Node Agent 在线（`acowork/nodes/local/status` 无 retained online），spawn 一个 `acowork-node` 子进程（sibling 二进制，复用 L1-1 的定位逻辑），node_id 固定 `local`。
+- Gateway 启动时若发现本机无 Node Agent 在线（`acowork/nodes/{机器名}/status` 无 retained online），spawn 一个 `acowork-node` 子进程（sibling 二进制，复用 L1-1 的定位逻辑），node_id = 机器名 slug（统一命名规则：不传 `--name` 即用 hostname，无保留名）。
 - **启动时序与竞争避让**：
   1. **顺序保证**：local node 的 spawn 点位于 MQTT broker 就绪之后（Gateway 启动序列中的显式前置步骤）；即便时序竞争失败，Node 侧 ADR-039 指数退避重连兜底——双保险。
-  2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/local/status`（retained）后等待短窗口（默认 3s）。窗口内收到 `online` → 复用现有 node（覆盖「Gateway 重启、local node 存活」场景）；超时 → 进入 spawn 判定。
+  2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/{机器名}/status`（retained）后等待短窗口（默认 500ms）。窗口内收到 `online` → 复用现有 node（覆盖「Gateway 重启、本机 node 存活」场景）；超时 → 进入 spawn 判定。
   3. **重复 spawn 避让**：spawn 前探测本机 `:19900`（local node 反代端口）。端口被占用且 health 返回本节点身份 → 判定 node 已在运行但 MQTT 未连（broker 刚重启）→ 不重复 spawn，等其重连；端口空闲 → spawn。spawn 失败记录日志并周期重试（60s）。
   4. **崩溃自愈**：Gateway 对 local node 子进程挂 reaper（同 Runtime reaper 模式）；退出后回到上述判定窗口重新 spawn。local node 崩溃不杀其 Runtime 子进程（§8「Node 单点」同一语义），Runtime 由 MQTT 重连框架维持，Node 重启后按 §6.19 re-adopt 收养。
-- **Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认 `local`。
+- **Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认本机节点（机器名 slug）。
 - 这保证「单机用户零额外步骤」且「Gateway 代码只有一条路径」——不存在 `if remote { ... } else { ... }` 的协议分叉，只有 `node_id` 路由参数化。
+- **关闭自动 spawn 的出口**（多节点 / 容器 / 单步调试场景）：
+  - CLI flag `--no-spawn-local-node`
+  - 环境变量 `ACOWORK_GATEWAY_NO_SPAWN_LOCAL_NODE=1`
+  - TOML `[local_node] enabled = false`
+  - 三者优先级：CLI > TOML > 默认（默认 `enabled=true`）。
+  - 实现位置：`core/acowork-gateway/src/cli.rs`（CliArgs 解析）、`core/acowork-gateway/src/config.rs`（`GatewayConfig::local_node` + `LocalNodeConfig::enabled`）、`core/acowork-gateway/src/gateway/mod.rs`（`ensure_local_node` 调用 gate）。细节与本机模拟场景示例见 [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md)。
+  - **错误语义变化**：关闭该 fallback 之前，binary 缺失会被静默忽略并 disable；现在无论 enable 与否，binary 缺失一律 hard-error——避免 build 异常被掩盖。
 
 ### 6.12 Node 身份模型（node_id 的定义与生成）
 
@@ -481,7 +489,7 @@ Node 与 Runtime 是**一对多**（一个 Node Agent 管理本机 N 个 Runtime
 | **`machine_uid`** | UUID v4 | Node 首次启动时生成，持久化于 `{node_data_dir}/identity.json` | 永不变（重装除外） | 机器指纹：Gateway 判定「重名不同机」冲突、「改名后仍是同一台」、enrollment 重放防护 |
 | **`node_id`** | slug：`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`（小写字母/数字/连字符，2-32 字符） | `--name` 显式指定；缺省从 hostname 规整（小写化、非法字符转 `-`、截断 32 字符） | 持久化于同一 identity.json；可通过 `rename` 命令变更 | **一切 topic / client_id / ACL / UI 展示使用的逻辑名**：`node:{node_id}`、`acowork/nodes/{node_id}/#` |
 
-保留名：`local`（Gateway 本机 node 专用，§6.11）；保留前缀：`node-`（避免与 agent_id 空间混淆的显示层约定）。
+保留前缀：`node-`（避免与 agent_id 空间混淆的显示层约定）。**没有保留名**：本机节点与远程节点统一用机器名 slug 命名（`node_id_from_hostname(hostname)`，Gateway 侧与 Node 侧从同一函数推导，天然一致）；Gateway 靠内部 spawn 标记 `--gateway-managed` 识别自己 spawn 的子进程（孤儿清理专用），因此无需靠保留名区分。
 
 **为什么 node_id 必须在首次 CONNECT 之前定稿**：MQTT LastWill 是 CONNECT 报文的一部分（`LastWill::new("acowork/nodes/{node_id}/status", "offline", QoS1, retained)`，同 `runtime/mqtt/client.rs:449` 的 Runtime 模式）——遗嘱 topic 在建立连接时就要确定，不存在「连上之后再协商分配名字」的时序空间。因此身份在 enrollment 阶段一次性定稿并落盘，后续启动只读不写。
 
@@ -553,9 +561,13 @@ Node spawn Runtime 时下发 `--gateway-host {gateway_addr}`（Node 自己的连
 
 ```text
 acowork-node                                     # 无参数 = start（前台 daemon）
-acowork-node start [--gateway ADDR] [--token T] [--name N] [--home DIR]
+acowork-node start --gateway ADDR [--addr HOST:PORT] [--token T] [--name N] [--work-dir DIR]
                                                  # 一条命令完成部署：identity.json 不存在则
                                                  # 自动 enroll，然后常驻运行（幂等）
+                                                 #   --gateway 必填：Gateway MQTT ip:port
+                                                 #   --addr 可选：本节点对外 ip:port（advertise+proxy），
+                                                 #            缺省=本机 IP + 19900
+                                                 #   --work-dir = --home 别名（缺省=默认工作目录）
 acowork-node enroll --gateway ADDR [--token T] [--name N]
                                                  # 仅注册不常驻（Ansible/脚本批量部署用）
 acowork-node status                              # 本节点身份 + gateway 连接状态 + 本机 agents 概览
@@ -566,15 +578,15 @@ acowork-node agents logs <agent_id> [-f] [--lines N]
 acowork-node agents kill <agent_id>              # 紧急停止（SIGKILL 进程组）。仅限 gateway 失联时
                                                  # 的逃生门；状态经 Runtime LWT 自动收敛，gateway
                                                  # 侧无需修复
-acowork-node rename <new_name>                   # §6.12 改名流程
-acowork-node leave [--force]                     # 注销：graceful drain（逐个 stop 本机 agents 并等
+acowork-node rename <new_name> --gateway ADDR    # §6.12 改名流程
+acowork-node leave [--force] --gateway ADDR      # 注销：graceful drain（逐个 stop 本机 agents 并等
                                                  # 待退出）后清除 retained + 从 gateway 删除节点记录；
                                                  # --force = 不等 drain 直接下线
 acowork-node service install|uninstall           # 生成 systemd unit / launchd plist 并启用（常驻
                                                  # 便捷度；Windows 用 sc/nssm 文档化）
 ```
 
-环境变量对齐现有惯例：`ACOWORK_NODE_GATEWAY`、`ACOWORK_NODE_TOKEN`、`ACOWORK_HOME`（复用 Gateway 的 home 解析约定）。
+环境变量对齐现有惯例：`ACOWORK_NODE_HOME`（=`--work-dir` 别名）、`ACOWORK_NODE_NAME`、`ACOWORK_NODE_PACKAGES_DIR`、`ACOWORK_NODE_TOKEN`。
 
 #### 6.13.3 CLI 命令面（acowork-gateway 扩展）
 
@@ -698,6 +710,8 @@ Node Agent 重启（崩溃自愈、升级、运维重启）后，其子进程表
 
 **依赖红线（Phase 2 架构验收项）**：`acowork-node` 的 `[dependencies]` **禁止出现 `acowork-gateway`**。Node 可依赖：`acowork-core`（协议类型）、`acowork-mqtt-session`（重连框架）及通用第三方库。理由：Gateway 内部类型（`GatewayState` / `SharedState` / `GatewayError`）携带 13 个全局模块的耦合——迁移代码中的 15 处 `crate::gateway::state`、9 处 `GatewayError`、3 处 `SharedState` 引用**必须在迁移时重构**：`LifecycleManager` 的 `state: &SharedState` 参数改为 Node 自有的 `NodeState`（进程表 + 本地安装表视图，`src/state.rs`）；`GatewayError` 中被迁移的变体（Lifecycle / PackageManager）下沉到 `acowork-core` 或改为 Node 自有 error 类型。违反红线的后果 = 新组件被旧巨石污染、Node 永远无法独立编译分发——方案 D 否决理由（死代码 + 攻击面）将在 Node 身上重演。CI 中对 acowork-node 的 Cargo.toml 加依赖断言防回归。
 
+> **红线实施记录**：反向也成立——`acowork-gateway` 不依赖 `acowork-node`。本机路径相关的共享实现（如 `default_node_home()` 解析 `ACOWORK_NODE_HOME` env / `$HOME/.acowork/acowork-node` / `./.acowork-node`）已下沉到 [`acowork-core::node::default_node_home`](../../../core/acowork-core/src/node.rs#L287)，`acowork-gateway` 与 `acowork-node` 同时引用，`packages_dir` 默认指向 `<node_home>/packages`——local / standalone Node 看到一致布局。
+
 **内部模块结构（防 grab-bag，迁移代码有唯一落点）**：
 
 ```text
@@ -747,7 +761,7 @@ core/acowork-node/
 | 2a.3 | 节点控制面协议落地：`acowork/nodes/#` topic 族 + request_id 去重 + 指令幂等语义（§6.2）+ 版本协商（§6.9）；protobuf 契约 golden 测试（acowork-core） |
 | 2a.4 | Gateway 侧：`NodeRegistry`（LWT 驱动）+ spawn local node + 启动时序/竞争避让（§6.11） |
 
-**验证**：local node 常驻运行、`acowork-gateway nodes list` 可见 local 节点、`acowork-node status` 可用；既有 agent 功能零影响（Node 此时尚不管理任何 Runtime）；全量既有测试 + clippy 门禁通过。
+**验证**：local node（本机节点，机器名 slug）常驻运行、`acowork-gateway nodes list` 可见本机节点、`acowork-node status` 可用；既有 agent 功能零影响（Node 此时尚不管理任何 Runtime）；全量既有测试 + clippy 门禁通过。
 
 #### Phase 2b：lifecycle + package_manager 迁移（硬切，Gateway 同变更内删除）
 
@@ -795,7 +809,7 @@ core/acowork-node/
 
 | # | 内容 | 状态 |
 |---|------|------|
-| 5a | Node enrollment token + node token + MQTT CONNECT 层动态鉴权（§6.8 第一档；topic ACL 因 rumqttd 无能力，偏差记录于 §6.8，mosquitto 评估移入 5b） | ✅ 已完成（2026-08-26） |
+| 5a | Node enrollment token + node token + MQTT CONNECT 层动态鉴权（§6.8 第一档；topic ACL 因 rumqttd 无能力，偏差记录于 §6.8，mosquitto 评估移入 5b）+ 对端 IP 白名单兜底（`[security].allowed_node_ips`：HTTP 403 / MQTT TCP pre-filter，§6.8 第 4 点） | ✅ 已完成（2026-08-26 鉴权；2026-08-27 白名单） |
 | 5b | （接口预留）broker TLS / mosquitto 切换评估（含 topic ACL）、api_key payload 加密、全链路 HTTPS | 待办 |
 
 ### 7.1 测试策略（贯穿各 Phase 的验收构成）
@@ -824,7 +838,7 @@ core/acowork-node/
 | **api_key 明文分发范围扩大**（跨网络） | 高（仅公网场景） | Phase 5a 前明确「仅限可信网络」部署约束；5b 的加密方案已定义接口 |
 | **迁移期 Gateway / Node 双写 package** | 中 | Phase 2 是硬切（无兼容包袱）：lifecycle/package_manager 整体迁入 Node，Gateway 删除同模块，不允许双路径并存 |
 | **Phase 2 硬切无回滚灰度**（回滚 = 整体 revert） | 低 | 单用户阶段可接受；2a/2b/2c 各自独立成变更序列（2a 不触碰既有模块、可长期停留；2b 的 Gateway 删除与 Node 迁入同一变更内完成，revert 边界清晰） |
-| **e2e 测试环境复杂化**（需要多机拓扑模拟） | 低 | 全部组件可用不同 loopback 端口在同机模拟（Node 用 `--gateway-host 127.0.0.1` + 不同 data_dir）；现有 mqtt_e2e_full 的 fresh_broker_port 模式可扩展 |
+| **e2e 测试环境复杂化**（需要多机拓扑模拟） | 低 | 全部组件可用不同 loopback 端口在同机模拟（Node 用 `--gateway 127.0.0.1:19875` + 不同 data_dir）；现有 mqtt_e2e_full 的 fresh_broker_port 模式可扩展 |
 | **零停机升级**（Node/Runtime 版本滚动升级） | 中 | 升级 Node 时其上 Runtime 进程独立存活，Node 重启后按 §6.19 re-adopt（与「Node 单点」同一机制）；Runtime 升级时进行中的会话按 ADR-038/051 生命周期处理；灰度按 node 分批升级（先升非关键节点）。版本协商（§6.9）保证混合版本期不误触发 |
 
 > **范围声明（Gateway HA / Federation）**：本 ADR 不改变「Gateway 单点」这一 ADR-033 已声明的现状。Gateway 自身 HA（broker 外置 mosquitto + HTTP 无状态化 + DNS/VIP/负载均衡）与多 Gateway federation（跨地域、broker bridge）是明确的**范围外演进议题**，需要时另立 ADR。本 ADR 的贡献是把 Gateway 单点故障半径从「所有 Runtime 失管」缩小到「控制面暂不可用、执行面继续运行」。

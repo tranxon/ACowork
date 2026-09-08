@@ -17,11 +17,6 @@ pub const NODE_PROTOCOL_VERSION: u32 = 1;
 /// Minimum node protocol version the Gateway accepts commands to.
 pub const NODE_MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 
-/// Reserved node_id for the local Node Agent spawned by the Gateway
-/// on its own machine (ADR-055 §6.11 / §6.12). Users must not enroll
-/// remote nodes under this name.
-pub const LOCAL_NODE_ID: &str = "local";
-
 /// Default capacity limit for Runtime processes per node
 /// (ADR-055 §6.18).
 pub const NODE_DEFAULT_MAX_AGENTS: u32 = 16;
@@ -129,8 +124,7 @@ pub fn node_enroll_result_topic(node_id: &str) -> String {
 
 /// Validate a node_id slug: `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
 /// (lowercase letters / digits / hyphens, 2–32 chars, no leading or
-/// trailing hyphen). `local` additionally requires
-/// [`LOCAL_NODE_ID`] semantics (Gateway-spawned only).
+/// trailing hyphen).
 pub fn node_id_is_valid(node_id: &str) -> bool {
     if node_id.len() < 2 || node_id.len() > NODE_ID_MAX_LEN {
         return false;
@@ -168,6 +162,45 @@ pub fn node_id_from_hostname(hostname: &str) -> String {
     } else {
         "node".to_string()
     }
+}
+
+/// Best-effort machine hostname: libc `gethostname` on Unix,
+/// `COMPUTERNAME` on Windows, `"localhost"` fallback (same portable
+/// logic the Node Agent used in `acowork-node/src/config.rs`).
+pub fn system_hostname() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: `gethostname` writes at most `buf.len()` bytes into
+        // the provided buffer and NUL-terminates on success.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+        if rc == 0 {
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            if let Ok(s) = std::str::from_utf8(&buf[..end]) {
+                return s.to_string();
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(name) = std::env::var("COMPUTERNAME") {
+            return name;
+        }
+    }
+    "localhost".to_string()
+}
+
+/// Node id of the Gateway's own-machine Node Agent: the machine
+/// hostname normalized into a slug (ADR-055 §6.11).
+///
+/// Unified naming rule: every Node Agent — whether spawned by the
+/// Gateway or started manually on a remote machine — defaults to its
+/// machine's hostname slug; there is no reserved `local` name anymore.
+/// The Gateway computes this from its own hostname, which equals the
+/// name the Node derives at first start (`--name` absent), so registry
+/// lookups / topics / orphan-cleanup all agree.
+pub fn local_node_id() -> String {
+    node_id_from_hostname(&system_hostname())
 }
 
 /// Whether a node's reported protocol version can receive commands
@@ -259,5 +292,111 @@ mod tests {
         assert!(is_node_protocol_compatible(1));
         assert!(is_node_protocol_compatible(2));
         assert!(!is_node_protocol_compatible(0));
+    }
+
+    #[test]
+    fn system_hostname_is_non_empty() {
+        assert!(!system_hostname().is_empty());
+    }
+
+    #[test]
+    fn local_node_id_is_valid_hostname_slug() {
+        let id = local_node_id();
+        assert!(node_id_is_valid(&id), "local_node_id() = '{id}' must be a valid slug");
+        // The Gateway and the Node must derive the SAME id from the
+        // same machine — the identity created at first start reuses
+        // this exact function.
+        assert_eq!(id, node_id_from_hostname(&system_hostname()));
+    }
+}
+
+// ── Default Node home directory (shared with Gateway) ────────────────
+//
+// Single source of truth so `acowork-gateway` can derive a default
+// `packages_dir` (= `<node_home>/packages`) without depending on
+// `acowork-node` (ADR-055 §6.20 dependency red line). Previously
+// lived in `acowork-node/src/config.rs`.
+//
+// Resolution order:
+//   1. `ACOWORK_NODE_HOME` env (multi-instance isolation; inherited
+//      by the Gateway-spawned local node via §6.13.2 unit)
+//   2. Windows: `%USERPROFILE%\.acowork\acowork-node`
+//      Unix:    `$HOME/.acowork/acowork-node`
+//   3. `./.acowork-node` (cwd fallback when no HOME is set)
+
+/// Default Node Agent home directory.
+///
+/// Platform conventions:
+/// - Windows: `%USERPROFILE%\.acowork\acowork-node`
+/// - Linux/macOS: `$HOME/.acowork/acowork-node`
+///
+/// Override at runtime via the `ACOWORK_NODE_HOME` env var (multi-instance
+/// runs, ADR-055 node topology verification) or `acowork-node --home`.
+pub fn default_node_home() -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    if let Some(dir) = std::env::var_os("ACOWORK_NODE_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    // Windows has no `HOME` env var (only `USERPROFILE`); without this
+    // branch the node silently falls back to `./.acowork-node` in the
+    // cwd, scattering node state across whatever directory started
+    // the process.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE")
+        && !profile.is_empty()
+    {
+        return PathBuf::from(profile)
+            .join(".acowork")
+            .join("acowork-node");
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".acowork")
+            .join("acowork-node");
+    }
+    PathBuf::from(".").join(".acowork-node")
+}
+
+#[cfg(test)]
+mod default_node_home_tests {
+    use super::default_node_home;
+
+    /// Serialize tests that mutate `ACOWORK_NODE_HOME` to prevent flaky
+    /// failures from parallel env-var races (mirrors the pattern in
+    /// `acowork-gateway/src/config.rs`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn respects_acowork_node_home_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("ACOWORK_NODE_HOME");
+        unsafe { std::env::set_var("ACOWORK_NODE_HOME", "/tmp/acowork-node-test") };
+        assert_eq!(
+            default_node_home(),
+            std::path::PathBuf::from("/tmp/acowork-node-test")
+        );
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_NODE_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_NODE_HOME") },
+        }
+    }
+
+    #[test]
+    fn empty_env_falls_through() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("ACOWORK_NODE_HOME");
+        unsafe { std::env::set_var("ACOWORK_NODE_HOME", "") };
+        // Empty is treated as unset — falls through to HOME/USERPROFILE.
+        let path = default_node_home();
+        assert!(!path.as_os_str().is_empty());
+        match prev {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_NODE_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_NODE_HOME") },
+        }
     }
 }

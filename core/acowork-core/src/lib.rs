@@ -12,6 +12,7 @@ pub mod mqtt_proto {
     include!(concat!(env!("OUT_DIR"), "/acowork.mqtt.v1.rs"));
 }
 
+pub mod addr;
 pub mod budget;
 pub mod crlf;
 pub mod defaults;

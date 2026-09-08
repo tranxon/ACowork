@@ -30,6 +30,7 @@ pub mod global_resources_publisher;
 pub mod node_control;
 pub mod node_registry;
 pub mod sidecar;
+pub mod tcp_filter;
 
 // Re-export key types
 pub use acl::{AclConfig, AclConfigError, AclPermission, AclRule};

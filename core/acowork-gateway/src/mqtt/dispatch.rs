@@ -517,7 +517,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                     pid: 0,
                     started_at: chrono::Utc::now(),
                     workspace,
-                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    node_id: acowork_core::node::local_node_id(),
                     connected: true,
                     ready,
                     dev_mode: false,
@@ -1481,13 +1481,16 @@ mod tests {
     async fn node_ready_replay_does_not_demote_reconnected_node() {
         // Regression for the ADR-059 §7.2 replay race: when the
         // Gateway MQTT client reconnects, the broker replays the
-        // retained snapshot asynchronously. A stale EMPTY `NodeReady`
+        // retained snapshot asynchronously. A stale EMPTY NodeReady
         // (the node cleared it on disconnect BEFORE the Gateway
-        // subscribed) or a stale LWT `offline` can be delivered AFTER
+        // subscribed) or a stale LWT offline can be delivered AFTER
         // the node's live re-announcement marked it ready. They must
         // not demote the node back to BOOTING — that would stick
         // bootstrap in BOOTING and the Runtime's LLM availability in
         // LOADING until the node's next reconnect.
+        //
+        // The fixture node id is `nytb` to mirror the unified topology
+        // where every node is identified by its machine slug.
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
         // The Gateway MQTT client (re)connected — this is what makes
@@ -1496,30 +1499,30 @@ mod tests {
 
         // Live re-announcement: retained non-empty NodeReady.
         handle_plaintext_message(
-            "acowork/nodes/local/ready",
-            &node_ready_payload("local"),
+            "acowork/nodes/nytb/ready",
+            &node_ready_payload("nytb"),
             &ctx,
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
-            registry.state(&SubsystemId("node.local".to_string())),
+            registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Ready)
         );
 
         // Stale replay: empty retained snapshot delivered late.
-        handle_plaintext_message("acowork/nodes/local/ready", &[], &ctx);
+        handle_plaintext_message("acowork/nodes/nytb/ready", &[], &ctx);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
-            registry.state(&SubsystemId("node.local".to_string())),
+            registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Ready),
             "stale empty NodeReady replay must not demote a reconnected node"
         );
 
-        // Stale replay: LWT `offline` delivered late.
-        handle_plaintext_message("acowork/nodes/local/status", b"offline", &ctx);
+        // Stale replay: LWT offline delivered late.
+        handle_plaintext_message("acowork/nodes/nytb/status", b"offline", &ctx);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
-            registry.state(&SubsystemId("node.local".to_string())),
+            registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Ready),
             "stale offline replay must not demote a reconnected node"
         );
@@ -1532,13 +1535,13 @@ mod tests {
         // the reconnect window, not real LWT offlines (ADR-059 §7.2).
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
-        let handle = registry.register("node.local", crate::bootstrap::ReadinessKind::Required);
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
         handle.mark_ready(None);
 
-        handle_plaintext_message("acowork/nodes/local/status", b"offline", &ctx);
+        handle_plaintext_message("acowork/nodes/nytb/status", b"offline", &ctx);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
-            registry.state(&SubsystemId("node.local".to_string())),
+            registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Booting),
             "genuine offline must demote a ready node"
         );
@@ -1553,13 +1556,13 @@ mod tests {
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
         ctx.node_replay_guard.mark_gateway_reconnect();
-        let handle = registry.register("node.local", crate::bootstrap::ReadinessKind::Required);
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
         handle.mark_ready(None);
 
-        handle_plaintext_message("acowork/nodes/local/status", b"offline", &ctx);
+        handle_plaintext_message("acowork/nodes/nytb/status", b"offline", &ctx);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
-            registry.state(&SubsystemId("node.local".to_string())),
+            registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Booting),
             "offline must demote when the node never re-announced after the gateway reconnect"
         );

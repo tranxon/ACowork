@@ -5,6 +5,28 @@ export type GatewayMode = "local" | "remote";
 /** Local Gateway process state */
 export type LocalGatewayState = "idle" | "starting" | "running" | "stopped" | "error";
 
+/**
+ * Who is responsible for the Gateway Desktop is talking to.
+ *
+ * Orthogonal to `LocalGatewayState` (single-topology design): the state
+ * machine describes the local *process*, ownership describes *agency*.
+ *   - "owned"   — the current Desktop session spawned the Gateway child
+ *                 (a live `gateway_process` handle exists).
+ *   - "foreign" — a Gateway answers at the configured URL, but this
+ *                 Desktop session did NOT spawn it (started manually,
+ *                 left running after a previous quit with "keep running",
+ *                 or running on another machine). Desktop must never
+ *                 force-stop a foreign Gateway.
+ *   - "none"    — nothing reachable yet / ownership unknown.
+ */
+export type GatewayOwnership = "owned" | "foreign" | "none";
+
+/** Result of the Rust `init_local_gateway` / `start_local_gateway` commands */
+export interface GatewayBootResult {
+  base_url: string;
+  ownership: GatewayOwnership;
+}
+
 /** Gateway health check response */
 export interface HealthResponse {
   status: string;

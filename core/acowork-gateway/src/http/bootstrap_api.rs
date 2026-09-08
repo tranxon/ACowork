@@ -133,8 +133,12 @@ mod tests {
     #[tokio::test]
     async fn phase_advances_to_ready() {
         let (state, registry) = test_state().await;
-        // All required subsystems ready → phase READY.
-        for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+        // All required subsystems ready → phase READY. node.local is
+        // intentionally NOT included: under the unified single-machine
+        // / remote topology it is no longer a Required subsystem (the
+        // local node subsumes the old `node.local` role via its
+        // machine-slug entry, e.g. `node.nytb`).
+        for id in ["vault", "mqtt", "publisher", "node.nytb", "system_agent"] {
             registry.register(id, ReadinessKind::Required).mark_ready(None);
         }
         // The orchestrator's background listener recomputes
@@ -153,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn optional_failure_yields_degraded() {
         let (state, registry) = test_state().await;
-        for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+        for id in ["vault", "mqtt", "publisher", "node.nytb", "system_agent"] {
             registry.register(id, ReadinessKind::Required).mark_ready(None);
         }
         registry
@@ -167,7 +171,6 @@ mod tests {
         }
         assert_eq!(resp.phase, "DEGRADED");
     }
-
     #[tokio::test]
     async fn missing_orchestrator_is_503() {
         let dir = std::env::temp_dir().join(format!(

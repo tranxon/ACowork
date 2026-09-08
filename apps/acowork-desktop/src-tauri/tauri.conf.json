@@ -36,7 +36,8 @@
         "visible": false,
         "shadow": true,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "additionalBrowserArgs": "--disable-breakpad"
       }
     ]
   },

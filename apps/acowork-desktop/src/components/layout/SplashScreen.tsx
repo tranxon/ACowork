@@ -10,46 +10,58 @@ import { useTranslation } from "../../i18n/useTranslation";
 import pkg from "../../../package.json";
 import brandMark from "../../../../../assets/brand-mark.svg";
 import { log } from "../../lib/logger";
-import type { BootstrapStateView } from "../../lib/types";
+import type { BootstrapStateView, GatewayBootResult } from "../../lib/types";
 
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
 const MAX_WAIT_MS = 30_000;
 
 /**
- * Push the persisted settings into Rust and (for local mode) spawn the
- * Gateway child process. Returns the URL the frontend should poll.
+ * Push the persisted settings into Rust and (for local mode) boot the
+ * Gateway — probe-then-spawn. Returns nothing; the poll loop in
+ * `SplashScreen` decides when the Gateway is ready.
  *
- * This replaces the previous architecture where Rust unconditionally
- * spawned the local Gateway in its setup hook, hardcoding the URL and
- * ignoring the frontend's "remote gateway" setting.
+ * Single-topology policy: Gateway behaviour/config does NOT depend on the
+ * Desktop's local/remote mode. Rust accepts the user-configured URL in
+ * BOTH modes (no local-mode URL override). The only difference:
+ *   - local  → Desktop probes `{url}/health`; if nothing answers it
+ *              spawns a child Gateway (ownership "owned"); if a Gateway
+ *              is already running there it adopts it ("foreign").
+ *   - remote → Desktop never spawns; the Gateway is presumed to have
+ *              been started manually (this machine or another).
  */
 async function bootGateway(): Promise<void> {
     const settings = useSettingsStore.getState();
     const mode = settings.gatewayMode;
     const url = settings.gatewayUrl;
+    const gatewayStore = useGatewayStore.getState();
 
-    // 1) Sync config into Rust. Rust will:
-    //    - local: force base_url = defaults::GATEWAY_HTTP_URL (ignores `url`)
-    //    - remote: store the user-configured URL; if a local process is
-    //      already running it will be stopped to free the port.
+    // 1) Sync config into Rust. Switching local→remote stops any
+    //    locally-spawned Gateway (frees the port for the manual one).
     await invoke("set_gateway_config", {
         config: { mode, url },
     });
 
     // 2) Boot the gateway itself
     if (mode === "local") {
-        // Spawns child Gateway + waits up to 10s for /health
-        await invoke("init_local_gateway");
+        // Probe-then-spawn (see spawn_gateway in commands/gateway.rs):
+        // adopts an already-running Gateway ("foreign") or spawns a
+        // child ("owned"). Waits for bootstrap READY before returning.
+        const boot = await invoke<GatewayBootResult>("init_local_gateway");
+        gatewayStore.recordBootResult(boot);
         // Sync the frontend store with the Rust-side process handle.
         // `init_local_gateway` bypasses `startLocalGateway()` (the store
         // action), so without this call `localState` would stay "idle"
         // even though the backend has a running child process. This
         // causes the Settings page to show a spurious "Start Gateway"
         // button next to the green "Running" indicator.
-        await useGatewayStore.getState().checkLocalStatus();
+        await gatewayStore.checkLocalStatus();
+    } else {
+        // Remote mode: the Gateway is presumed already running on `url`
+        // (started manually — possibly on this machine's LAN IP). The
+        // poll loop below verifies reachability; ownership is irrelevant
+        // because Desktop never spawns in remote mode.
     }
-    // Remote mode: the Gateway is presumed already running on `url`.
 
     // 3) Ensure System Agent is installed on whichever Gateway we ended
     //    up with. Rust uses its internal base_url (already configured).

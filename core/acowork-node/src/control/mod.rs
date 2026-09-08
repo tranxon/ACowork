@@ -1540,19 +1540,14 @@ impl NodeControlPlane {
     }
 }
 
-/// Validate a rename target: a valid slug, not the reserved `local`
-/// name, and different from the current name (ADR-055 §6.12).
+/// Validate a rename target: a valid slug, and different from the
+/// current name (ADR-055 §6.12). There is no reserved name — every
+/// node is named by its machine hostname slug.
 fn validate_rename_target(old_id: &str, new_name: &str) -> Result<(), NodeError> {
     if !acowork_core::node::node_id_is_valid(new_name) {
         return Err(NodeError::Identity(format!(
             "Invalid node name '{new_name}': must be 2-32 chars of [a-z0-9-], \
              no leading/trailing hyphen"
-        )));
-    }
-    if new_name == acowork_core::node::LOCAL_NODE_ID {
-        return Err(NodeError::Identity(format!(
-            "'{}' is reserved for the Gateway's own local node — choose another name",
-            acowork_core::node::LOCAL_NODE_ID
         )));
     }
     if new_name == old_id {
@@ -2073,14 +2068,11 @@ mod tests {
     }
 
     #[test]
-    fn rename_target_valid_slug_is_accepted() {
+    fn rename_target_hostname_slug_is_accepted() {
+        // "local" is no longer reserved — it is a plain slug and is
+        // valid unless it equals the current name.
+        assert!(validate_rename_target("gpu-server", "local").is_ok());
         assert!(validate_rename_target("gpu-server", "gpu-2").is_ok());
-    }
-
-    #[test]
-    fn rename_target_reserved_local_is_rejected() {
-        let err = validate_rename_target("gpu-server", "local").unwrap_err();
-        assert!(err.to_string().contains("reserved"));
     }
 
     #[test]

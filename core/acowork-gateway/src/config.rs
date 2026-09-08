@@ -135,6 +135,13 @@ pub struct GatewayConfig {
     /// (default 19878). See `node_proxy_port`.
     #[serde(default)]
     pub node_lsp_relay_port: Option<u16>,
+    /// Local Node Agent configuration (ADR-055 §6.11).
+    ///
+    /// Controls whether the Gateway auto-spawns a `name=local` Node
+    /// Agent on daemon startup. CLI override: `--no-spawn-local-node`.
+    /// Env override: `ACOWORK_GATEWAY_NO_SPAWN_LOCAL_NODE=1`.
+    #[serde(default)]
+    pub local_node: LocalNodeConfig,
     /// PM 项目管理服务配置（ADR-064）。
     ///
     /// PM 作为**独立进程**运行（`acowork-pm` 二进制），由 Gateway supervisor
@@ -153,6 +160,55 @@ pub struct GatewayConfig {
     /// itself parses its tuning parameters independently.
     #[serde(default)]
     pub doc: DocConfig,
+
+    /// Peer IP allowlist — the "who may connect to this Gateway" backstop.
+    ///
+    /// `allowed_node_ips` restricts which peer IPs may reach the HTTP API
+    /// and MQTT broker. Empty list = allow everyone (default). Entries may
+    /// be exact IPs (`"192.168.1.20"`) or CIDR prefixes (`"10.0.0.0/24"`).
+    /// Loopback is always allowed regardless of this list.
+    ///
+    /// **Boot-time only.** Read from `gateway.toml` / env when the config
+    /// loads; deliberately NOT part of `PUT /api/config` or any runtime
+    /// update path — an operator must edit the config file directly (or
+    /// set the env var) and restart. This keeps it a true out-of-band
+    /// security backstop that the Desktop UI / HTTP API can never relax.
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// Local Node Agent configuration (ADR-055 §6.11 / §6.13).
+///
+/// Gateway auto-spawns a `name=local` Node Agent (sibling binary, MQTT
+/// localhost) by default to provide the same one-command-deploy UX
+/// as pre-ADR-055 single-machine runs. Set `enabled = false` to skip
+/// the spawn entirely — useful when:
+///   - the local Node is started manually (CI / containers / multi-node
+///     verification) and you don't want a duplicate `name=local` race
+///   - the `acowork-node` binary is intentionally absent on this machine
+///   - you're running Gateway in pure-orchestrator mode against remote
+///     nodes only
+///
+/// CLI counterpart: `--no-spawn-local-node` (default false = spawn).
+/// Env override: `ACOWORK_GATEWAY_NO_SPAWN_LOCAL_NODE=1`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalNodeConfig {
+    /// Whether to auto-spawn the local Node Agent on daemon startup.
+    ///
+    /// Default `true`. Set `false` to skip spawn; the local Node
+    /// identity is then either unused or provided by an externally
+    /// started `acowork-node start --name local ...` process (which
+    /// still wins the 500ms reuse window, §6.11).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LocalNodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+        }
+    }
 }
 
 /// PM 服务配置（Gateway 侧，ADR-064）。
@@ -270,6 +326,57 @@ impl Default for DocConfig {
             mcp_http_path: default_doc_mcp_http_path(),
             request_ttl_hours: None,
         }
+    }
+}
+
+/// Security configuration — currently the peer IP allowlist.
+///
+/// This struct is **boot-time only**: it is populated from `gateway.toml`
+/// (`[security]`) or the `ACOWORK_GATEWAY_ALLOWED_NODE_IPS` env var when
+/// the config loads, and it is deliberately excluded from the runtime
+/// `PUT /api/config` update surface (`UpdateConfigRequest` has no
+/// `security` field). See the module docs of `crate::security` for the
+/// rationale.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Peer IP / CIDR allowlist for Gateway inbound connections.
+    ///
+    /// Empty = allow everyone. Exact IPs and CIDR prefixes are accepted;
+    /// loopback is always allowed. This applies to both the HTTP API
+    /// (Axum middleware) and the MQTT broker (TCP pre-filter when the
+    /// broker binds non-loopback).
+    #[serde(default)]
+    pub allowed_node_ips: Vec<String>,
+}
+
+impl SecurityConfig {
+    /// Env override: `ACOWORK_GATEWAY_ALLOWED_NODE_IPS=ip1,ip2/cidr`
+    /// Comma-separated, whitespace-trimmed. If set (non-empty after trim),
+    /// it replaces the TOML list.
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(raw) = std::env::var("ACOWORK_GATEWAY_ALLOWED_NODE_IPS") {
+            let raw = raw.trim();
+            if !raw.is_empty() {
+                let parsed: Vec<String> = raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                tracing::info!(
+                    entries = parsed.len(),
+                    source = "env",
+                    "security.allowed_node_ips loaded from ACOWORK_GATEWAY_ALLOWED_NODE_IPS"
+                );
+                self.allowed_node_ips = parsed;
+            }
+        }
+    }
+
+    /// Parse the configured entries into a ready-to-test [`crate::security::IpAllowlist`].
+    pub fn to_allowlist(&self) -> crate::security::IpAllowlist {
+        crate::security::IpAllowlist::new(crate::security::parse_ip_allowlist(
+            &self.allowed_node_ips,
+        ))
     }
 }
 
@@ -533,7 +640,14 @@ impl GatewayConfig {
         // Defaults
         let base_dir = Self::project_config_dir();
         let default_vault = base_dir.join("vault").to_string_lossy().to_string();
-        let default_packages = base_dir.join("packages").to_string_lossy().to_string();
+        // ADR-055: packages live under the Node Agent's home (Node owns
+        // package management per §6.12). Default points at
+        // `<node_home>/packages` so local Node (Gateway-spawned) and
+        // standalone Node share the same on-disk layout.
+        let default_packages = acowork_core::node::default_node_home()
+            .join("packages")
+            .to_string_lossy()
+            .to_string();
 
         let data_dir = Self::project_data_dir();
         let default_data = data_dir.to_string_lossy().to_string();
@@ -606,6 +720,19 @@ impl GatewayConfig {
                         http.port_max = port + 10;
                     }
                 }
+                // CLI `--addr HOST:PORT` is the highest-priority override
+                // for the HTTP bind address (CLI > env > file > default).
+                if let Some(addr_str) = &cli.addr {
+                    let hp = acowork_core::addr::parse_host_port(addr_str, default_http_port())
+                        .map_err(|e| {
+                            GatewayError::Config(format!("invalid --addr '{addr_str}': {e}"))
+                        })?;
+                    http.host = hp.host;
+                    http.port = hp.port;
+                    if http.port_max < hp.port + 10 {
+                        http.port_max = hp.port + 10;
+                    }
+                }
                 http
             },
             default_provider: file_config
@@ -639,6 +766,16 @@ impl GatewayConfig {
                 {
                     mqtt.port = port;
                 }
+                // CLI `--mqtt-addr HOST:PORT` is the highest-priority
+                // override for the broker bind address.
+                if let Some(addr_str) = &cli.mqtt_addr {
+                    let hp = acowork_core::addr::parse_host_port(addr_str, default_mqtt_port())
+                        .map_err(|e| {
+                            GatewayError::Config(format!("invalid --mqtt-addr '{addr_str}': {e}"))
+                        })?;
+                    mqtt.host = hp.host;
+                    mqtt.port = hp.port;
+                }
                 mqtt
             },
             advertise_host: cli
@@ -647,6 +784,17 @@ impl GatewayConfig {
                 .or(file_config.as_ref().and_then(|c| c.advertise_host.clone())),
             node_proxy_port: file_config.as_ref().and_then(|c| c.node_proxy_port),
             node_lsp_relay_port: file_config.as_ref().and_then(|c| c.node_lsp_relay_port),
+            local_node: {
+                // Merge order: CLI flag > env (parsed by clap) > TOML > default
+                let mut local_node = file_config
+                    .as_ref()
+                    .map(|c| c.local_node.clone())
+                    .unwrap_or_default();
+                if cli.no_spawn_local_node {
+                    local_node.enabled = false;
+                }
+                local_node
+            },
             pm: file_config
                 .as_ref()
                 .map(|c| c.pm.clone())
@@ -655,6 +803,16 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.doc.clone())
                 .unwrap_or_default(),
+            security: {
+                // Boot-time only (see `SecurityConfig` docs). Env override
+                // wins over TOML; never part of runtime update paths.
+                let mut sec = file_config
+                    .as_ref()
+                    .map(|c| c.security.clone())
+                    .unwrap_or_default();
+                sec.apply_env_overrides();
+                sec
+            },
         };
 
         config.validate()?;
@@ -762,8 +920,10 @@ impl Default for GatewayConfig {
             advertise_host: None,
             node_proxy_port: None,
             node_lsp_relay_port: None,
+            local_node: LocalNodeConfig::default(),
             pm: PmConfig::default(),
             doc: DocConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -865,6 +1025,103 @@ mod tests {
         assert!(config.http.enabled);
         assert_eq!(config.http.port, 19876);
         assert_eq!(config.http.host, "127.0.0.1");
+        // Local node spawning defaults to enabled
+        assert!(config.local_node.enabled);
+    }
+
+    #[test]
+    fn test_local_node_default_enabled() {
+        let config = GatewayConfig::default();
+        assert!(
+            config.local_node.enabled,
+            "default must be enabled — Gateway auto-spawns local node"
+        );
+    }
+
+    #[test]
+    fn test_local_node_config_roundtrip() {
+        // TOML with [local_node] enabled = false must round-trip
+        let toml = r#"
+log_level = "info"
+vault_dir = "/tmp/test-vault"
+packages_dir = "/tmp/test-packages"
+data_dir = "/tmp/test-data"
+[local_node]
+enabled = false
+"#;
+        let parsed: GatewayConfig = toml::from_str(toml).unwrap();
+        assert!(!parsed.local_node.enabled);
+
+        // Serialize back and verify it's preserved
+        let s = toml::to_string(&parsed).unwrap();
+        assert!(s.contains("[local_node]"));
+        assert!(s.contains("enabled = false"));
+
+        // Default (no [local_node] section) is enabled = true
+        let default_toml = r#"
+vault_dir = "/tmp/test-vault"
+packages_dir = "/tmp/test-packages"
+data_dir = "/tmp/test-data"
+"#;
+        let parsed_default: GatewayConfig = toml::from_str(default_toml).unwrap();
+        assert!(parsed_default.local_node.enabled);
+    }
+
+    #[test]
+    fn test_packages_dir_default_points_at_node_home() {
+        // ADR-055: packages live under the Node Agent's home so the
+        // Gateway-spawned local node and a standalone node share the
+        // same on-disk layout.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("ACOWORK_HOME");
+        let prev_node_home = std::env::var_os("ACOWORK_NODE_HOME");
+        let tmp = std::env::temp_dir().join("acowork-test-pkg-default");
+        let _ = std::fs::create_dir_all(&tmp);
+        unsafe { std::env::set_var("ACOWORK_HOME", &tmp) };
+        unsafe { std::env::set_var("ACOWORK_NODE_HOME", "/tmp/sim-node-home") };
+
+        let cli = Cli::parse_from(["acowork-gateway"]);
+        let config = GatewayConfig::from_cli(&cli).unwrap();
+        assert_eq!(
+            config.packages_dir,
+            std::path::PathBuf::from("/tmp/sim-node-home")
+                .join("packages")
+                .to_string_lossy()
+                .to_string()
+        );
+
+        // Restore env
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_HOME") },
+        }
+        match prev_node_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_NODE_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_NODE_HOME") },
+        }
+    }
+
+    #[test]
+    fn test_local_node_cli_overrides_toml() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("ACOWORK_HOME");
+        let tmp = std::env::temp_dir().join("acowork-test-cli-overrides-toml");
+        let _ = std::fs::create_dir_all(&tmp);
+        unsafe { std::env::set_var("ACOWORK_HOME", &tmp) };
+
+        // TOML says enabled = true (default), CLI says --no-spawn-local-node
+        // → CLI must win.
+        let cli = Cli::parse_from(["acowork-gateway", "--no-spawn-local-node"]);
+        let config = GatewayConfig::from_cli(&cli).unwrap();
+        assert!(
+            !config.local_node.enabled,
+            "CLI flag must override TOML default"
+        );
+
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_HOME") },
+        }
     }
 
     #[test]
@@ -890,6 +1147,112 @@ mod tests {
         ]);
         let config = GatewayConfig::from_cli(&cli).unwrap();
         assert_eq!(config.log_level, "debug");
+    }
+
+    #[test]
+    fn test_config_from_cli_addr_overrides_http_bind() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("ACOWORK_HOME");
+        let prev_http_port = std::env::var_os("ACOWORK_GATEWAY_HTTP_PORT");
+        let tmp = std::env::temp_dir().join("acowork-test-cli-http-addr");
+        let _ = std::fs::create_dir_all(&tmp);
+        unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
+        unsafe { std::env::remove_var("ACOWORK_GATEWAY_HTTP_PORT") };
+
+        let cli = Cli::parse_from(["acowork-gateway", "--addr", "0.0.0.0:21000"]);
+        let config = GatewayConfig::from_cli(&cli).unwrap();
+        assert_eq!(config.http.host, "0.0.0.0");
+        assert_eq!(config.http.port, 21000);
+        // port_max must stay above the explicit port (auto-increment).
+        assert!(config.http.port_max >= 21010);
+        // MQTT untouched by --addr → defaults.
+        assert_eq!(config.mqtt.host, "127.0.0.1");
+        assert_eq!(config.mqtt.port, 19875);
+
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_HOME") },
+        }
+        match prev_http_port {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_GATEWAY_HTTP_PORT", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_GATEWAY_HTTP_PORT") },
+        }
+    }
+
+    #[test]
+    fn test_config_from_cli_addr_wins_over_env_port() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("ACOWORK_HOME");
+        let prev_http_port = std::env::var_os("ACOWORK_GATEWAY_HTTP_PORT");
+        let tmp = std::env::temp_dir().join("acowork-test-cli-http-env-precedence");
+        let _ = std::fs::create_dir_all(&tmp);
+        unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
+        // env says 22000, CLI says 22100 → CLI (highest priority) wins.
+        unsafe { std::env::set_var("ACOWORK_GATEWAY_HTTP_PORT", "22000") };
+
+        let cli = Cli::parse_from(["acowork-gateway", "--addr", "192.168.1.9:22100"]);
+        let config = GatewayConfig::from_cli(&cli).unwrap();
+        assert_eq!(config.http.host, "192.168.1.9");
+        assert_eq!(config.http.port, 22100);
+
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_HOME") },
+        }
+        match prev_http_port {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_GATEWAY_HTTP_PORT", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_GATEWAY_HTTP_PORT") },
+        }
+    }
+
+    #[test]
+    fn test_config_from_cli_mqtt_addr_overrides_broker_bind() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("ACOWORK_HOME");
+        let prev_mqtt_port = std::env::var_os("ACOWORK_GATEWAY_MQTT_PORT");
+        let tmp = std::env::temp_dir().join("acowork-test-cli-mqtt-addr");
+        let _ = std::fs::create_dir_all(&tmp);
+        unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
+        unsafe { std::env::remove_var("ACOWORK_GATEWAY_MQTT_PORT") };
+
+        let cli = Cli::parse_from(["acowork-gateway", "--mqtt-addr", "[::]:21999"]);
+        let config = GatewayConfig::from_cli(&cli).unwrap();
+        assert_eq!(config.mqtt.host, "::");
+        assert_eq!(config.mqtt.port, 21999);
+        // HTTP untouched → defaults.
+        assert_eq!(config.http.host, "127.0.0.1");
+        assert_eq!(config.http.port, 19876);
+
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_HOME") },
+        }
+        match prev_mqtt_port {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_GATEWAY_MQTT_PORT", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_GATEWAY_MQTT_PORT") },
+        }
+    }
+
+    #[test]
+    fn test_config_from_cli_invalid_addr_is_error() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev_home = std::env::var_os("ACOWORK_HOME");
+        let tmp = std::env::temp_dir().join("acowork-test-cli-invalid-addr");
+        let _ = std::fs::create_dir_all(&tmp);
+        unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
+
+        for bad in ["host:notaport", "host:0", ":19876", "host:99999", ""] {
+            let cli = Cli::parse_from(["acowork-gateway", "--addr", bad]);
+            assert!(
+                GatewayConfig::from_cli(&cli).is_err(),
+                "--addr '{bad}' should be rejected"
+            );
+        }
+
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_HOME", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_HOME") },
+        }
     }
 
     #[test]
@@ -1161,5 +1524,77 @@ request_ttl_hours = 24
         assert!(doc.auto_inject_mcp);
         assert_eq!(doc.mcp_http_path, "/api/doc/mcp");
         assert!(doc.request_ttl_hours.is_none());
+    }
+
+    // ── [security].allowed_node_ips ────────────────────────────────
+
+    #[test]
+    fn test_security_default_empty_allowlist() {
+        let config = GatewayConfig::default();
+        assert!(config.security.allowed_node_ips.is_empty());
+        assert!(config.security.to_allowlist().is_empty());
+        assert!(config.security.to_allowlist().allows(
+            "10.1.2.3".parse::<std::net::IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_security_toml_parses_allowlist() {
+        let path = write_toml_config(
+            "security-allowlist",
+            r#"
+vault_dir = "/tmp/v"
+packages_dir = "/tmp/p"
+data_dir = "/tmp/d"
+
+[security]
+allowed_node_ips = ["192.168.1.20", "10.0.0.0/24", "fd00::1"]
+"#,
+        );
+        let config: GatewayConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config.security.allowed_node_ips.len(), 3);
+        let allowlist = config.security.to_allowlist();
+        assert!(allowlist.allows("192.168.1.20".parse().unwrap()));
+        assert!(allowlist.allows("10.0.0.55".parse().unwrap()));
+        assert!(allowlist.allows("fd00::1".parse().unwrap()));
+        // 10.0.1.0 is outside 10.0.0.0/24
+        assert!(!allowlist.allows("10.0.1.1".parse().unwrap()));
+        // loopback always allowed
+        assert!(allowlist.allows("127.0.0.1".parse().unwrap()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_security_env_override_wins_over_toml() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(
+                "ACOWORK_GATEWAY_ALLOWED_NODE_IPS",
+                "192.168.5.10,172.16.0.0/12",
+            );
+        }
+        let mut sec = SecurityConfig {
+            allowed_node_ips: vec!["10.0.0.0/8".to_string()],
+        };
+        sec.apply_env_overrides();
+        unsafe { std::env::remove_var("ACOWORK_GATEWAY_ALLOWED_NODE_IPS") };
+        assert_eq!(sec.allowed_node_ips.len(), 2);
+        let allowlist = sec.to_allowlist();
+        assert!(allowlist.allows("192.168.5.10".parse().unwrap()));
+        assert!(allowlist.allows("172.16.3.4".parse().unwrap()));
+        // TOML value was replaced, not merged.
+        assert!(!allowlist.allows("10.9.9.9".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_security_env_unset_leaves_toml_intact() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ACOWORK_GATEWAY_ALLOWED_NODE_IPS") };
+        let mut sec = SecurityConfig {
+            allowed_node_ips: vec!["10.0.0.0/8".to_string()],
+        };
+        sec.apply_env_overrides();
+        assert_eq!(sec.allowed_node_ips.len(), 1);
     }
 }

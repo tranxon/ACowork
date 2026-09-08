@@ -377,7 +377,7 @@ pub async fn import_skill(
     })?;
     let zip_path = temp_file.to_string_lossy().to_string();
     let event = node_control
-        .skills_import(acowork_core::node::LOCAL_NODE_ID, &agent_id, &zip_path)
+        .skills_import(&acowork_core::node::local_node_id(), &agent_id, &zip_path)
         .await
         .map_err(|e| {
             let _ = std::fs::remove_file(&temp_file);

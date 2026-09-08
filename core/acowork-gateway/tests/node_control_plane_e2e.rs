@@ -155,10 +155,8 @@ async fn node_binary_speaks_the_control_plane_contract() {
     let mut child = std::process::Command::new(&bin)
         .args([
             "start",
-            "--gateway-host",
-            "127.0.0.1",
-            "--gateway-mqtt-port",
-            &TEST_PORT.to_string(),
+            "--gateway",
+            &format!("127.0.0.1:{TEST_PORT}"),
             "--name",
             NODE_ID,
             "--home",
@@ -358,10 +356,8 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     let mut child = std::process::Command::new(&bin)
         .args([
             "start",
-            "--gateway-host",
-            "127.0.0.1",
-            "--gateway-mqtt-port",
-            &AUTH_TEST_PORT.to_string(),
+            "--gateway",
+            &format!("127.0.0.1:{AUTH_TEST_PORT}"),
             "--name",
             AUTH_NODE_ID,
             "--proxy-port",
@@ -440,10 +436,8 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     let mut child2 = std::process::Command::new(&bin)
         .args([
             "start",
-            "--gateway-host",
-            "127.0.0.1",
-            "--gateway-mqtt-port",
-            &AUTH_TEST_PORT.to_string(),
+            "--gateway",
+            &format!("127.0.0.1:{AUTH_TEST_PORT}"),
             "--name",
             AUTH_NODE_ID,
             "--proxy-port",
