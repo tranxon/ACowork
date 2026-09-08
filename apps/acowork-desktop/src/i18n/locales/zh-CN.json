@@ -945,6 +945,7 @@
     "forgettingDormantThreshold": "沉睡阈值",
     "forgettingArchiveDays": "归档（天）",
     "forgettingDisabledHint": "开启后，经历按半衰期曲线渐进衰减：半衰期内全权重参与检索，之后逐步降权，最终沉睡并归档",
+    "forgettingStatusLine": "运行时参数：半衰期 {{halfLife}} 天 · 沉睡 {{dormant}} · 归档 {{archive}} 天",
     "forgettingSaveFailed": "保存失败（HTTP {{status}}）",
     "distillNow": "立即沉淀",
     "distillDone": "已蒸馏 {{scanned}} 条经历，晋升 {{promoted}} 条记忆",

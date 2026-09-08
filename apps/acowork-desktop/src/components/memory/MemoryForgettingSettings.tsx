@@ -168,13 +168,21 @@ export function MemoryForgettingSettings({
   const numInputCls =
     "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200";
 
+  // Runtime status hint — lives INSIDE the expanded body (same grammar as
+  // the distill card). Shows the live forgetting params once we've loaded
+  // them from `agent_config.json`. Intentionally does NOT echo the card
+  // title or the feature description: the description below the hint is
+  // a single, pale block of prose — duplicating it here caused the card
+  // to render the same explanation twice in two different tones.
   const runtimeHint =
     loaded && forgettingStatus ? (
-      <p className="flex items-center gap-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
         <span>
-          {forgettingStatus.enabled
-            ? t("memoryPanel.forgettingTitle")
-            : t("memoryPanel.forgettingDisabledHint")}
+          {t("memoryPanel.forgettingStatusLine", {
+            halfLife: forgettingStatus.half_life_days,
+            dormant: forgettingStatus.dormant_threshold,
+            archive: forgettingStatus.archive_days,
+          })}
         </span>
       </p>
     ) : null;
@@ -201,10 +209,13 @@ export function MemoryForgettingSettings({
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 dark:border-zinc-700"
         >
           <div className="flex flex-col gap-2">
-            {runtimeHint}
+            {/* Feature description — single pale block, placed ABOVE the
+                numeric options (mirrors the distill card where the prose
+                hint sits before the form controls). */}
             <p className="text-[10px] leading-relaxed text-zinc-500 dark:text-zinc-400">
               {t("memoryPanel.forgettingDisabledHint")}
             </p>
+            {runtimeHint}
 
             <div className="grid grid-cols-3 gap-2">
               <label className="flex flex-col gap-1">
