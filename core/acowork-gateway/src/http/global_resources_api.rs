@@ -402,10 +402,19 @@ mod tests {
     /// exercise every `BootstrapPhase` branch (Booting / Ready /
     /// Degraded / Failed / ShuttingDown) without standing up real
     /// subsystems. `None` exercises the orchestrator-not-attached path.
+    //
+    // Unique-per-call directory suffix: tests in this module run
+    // concurrently inside one process, and a shared fixed path made
+    // `remove_dir_all` + `create_dir_all` race each other (sporadic
+    // OS error 183).
+    static DIR_SEQ: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
     async fn test_state_with_snapshot(snapshot: Option<BootstrapSnapshot>) -> AppState {
         let dir = std::env::temp_dir().join(format!(
-            "acowork-test-global-resources-api-{}",
-            std::process::id()
+            "acowork-test-global-resources-api-{}-{}",
+            std::process::id(),
+            DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

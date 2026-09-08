@@ -468,6 +468,26 @@ struct BootstrapData {
     /// (`acowork/nodes/{node_id}/lsps`). `None` when the Runtime runs
     /// without `--node-id` (standalone / Gateway-spawned).
     node_lsps_topic: Option<String>,
+    /// ADR-039 Phase 3 follow-up (post-2026-09-07 incident): the
+    /// `acowork/agents/{id}/ready` topic. Republished on every
+    /// (re)connect so a Gateway that reconnects after a sleep/wake —
+    /// or a fresh Gateway that subscribes mid-flight — sees the
+    /// Runtime's session-ready state without waiting for the next
+    /// heartbeat. Without this the `running_agents[id].ready` flag can
+    /// stay `false` until the Phase B/C work finishes again, which is
+    /// the exact divergence the post-wake bug depends on.
+    ready_topic: String,
+    /// Whether the session has EVER reached `ready=true` — set by
+    /// `RuntimeMqttClient::publish_ready` once Phase A completes.
+    /// Step 7 of `run_bootstrap` re-stamps the retained
+    /// `ready=true` on (re)connects only after this flag is set: on
+    /// the very first connect Phase A owns the ready signal, and
+    /// re-publishing it from Step 7 would open the Gateway's
+    /// `running && ready` gate up to `PULL_MAX_DURATION` before the
+    /// session can actually serve. Atomic — shared through
+    /// `Arc<BootstrapData>` between the handler task (Step 7) and the
+    /// `publish_ready` caller.
+    ready_ever: std::sync::atomic::AtomicBool,
 }
 
 /// Runtime entity handler for the shared [`MqttClient`] (ADR-065 Step 4).
@@ -858,6 +878,8 @@ impl RuntimeMqttClient {
             node_lsps_topic: cfg
                 .node_id
                 .map(acowork_core::node::node_lsps_topic),
+            ready_topic: format!("acowork/agents/{}/ready", cfg.agent_id),
+            ready_ever: std::sync::atomic::AtomicBool::new(false),
         });
 
         // ADR-065 Step 4: build the entity-only config for the shared
@@ -912,6 +934,10 @@ impl RuntimeMqttClient {
             agent_id: cfg.agent_id.to_string(),
             node_lsps_topic: bootstrap_data.node_lsps_topic.clone(),
             first_conn_tx: tokio::sync::Mutex::new(Some(first_conn_tx)),
+            // ready_topic is not cloned into the handler struct — it
+            // lives on `bootstrap_data` (an `Arc<BootstrapData>` clone
+            // is held by the handler via `self.bootstrap_data` below)
+            // and `run_bootstrap` consumes only `bootstrap_data`.
         };
 
         let inner = MqttClient::connect(config, handler, None)
@@ -956,7 +982,8 @@ impl RuntimeMqttClient {
     /// invoke on every (re)connect to restore both retained state
     /// and persistent subscriptions.
     ///
-    /// Implements the "Bootstrap six-step contract" of ADR-039:
+    /// Implements the "Bootstrap seven-step contract" of ADR-039
+    /// (Step 7 added in the post-2026-09-07 incident follow-up):
     /// 1. PUBLISH `status = online` (Retained) - overrides the Last
     ///    Will payload (`offline`) set during `connect()`.
     /// 2. PUBLISH `meta` (Retained) - agent capability descriptor.
@@ -968,6 +995,14 @@ impl RuntimeMqttClient {
     ///    (re)connect - the symptom that prompted ADR-039.
     /// 6. SUBSCRIBE `acowork/nodes/{node_id}/lsps` - node LSP relay
     ///    state (ADR-055 §6.7, only when `--node-id` is set).
+    /// 7. PUBLISH `ready = true` (Retained) - idempotent re-publish
+    ///    so a reconnecting Gateway sees the Runtime's session-ready
+    ///    state immediately. Phase A publishes `ready=true` on first
+    ///    start; without Step 7 here, a Runtime that reconnects after
+    ///    an OS sleep/wake (the wake path that previously dropped
+    ///    `running_agents[id].ready`) would leave the Gateway with
+    ///    `ready=false` until the next Phase A → publish_ready cycle,
+    ///    which does not run on a (re)connect.
     async fn run_bootstrap(
         client: &AsyncClient,
         data: &BootstrapData,
@@ -1034,6 +1069,47 @@ impl RuntimeMqttClient {
                 .map_err(|e| {
                     RuntimeMqttClientError::Subscribe(format!("node lsps: {}", e))
                 })?;
+        }
+
+        // Step 7: PUBLISH `ready = true` (Retained) — gated on the
+        // session having been ready once.
+        //
+        // Phase A publishes `ready=true` after the first connect's
+        // global-resource pull completes and sets `ready_ever`. On any
+        // LATER (re)connect — OS sleep/wake, a dropped link — Phase A
+        // does not run again, so this step re-stamps the retained bit
+        // and the Gateway's `running_agents[id].ready` self-heals.
+        // Publishing on the very FIRST ConnAck would flip `ready=true`
+        // up to `PULL_MAX_DURATION` before the session can actually
+        // serve, so the gate keeps first-connect semantics with Phase
+        // A (the Desktop's `running && ready` gate stays closed until
+        // the pull completes).
+        //
+        // The payload is the plain text `"true"` / `"false"` shape the
+        // Gateway's `acowork/agents/+/ready` dispatch handler expects
+        // (see `core/acowork-gateway/src/mqtt/dispatch.rs::handle_plaintext_message`).
+        //
+        // Error semantics: a failed publish here MUST NOT abort the
+        // bootstrap. Steps 1–6 have already established status / meta /
+        // config / subscriptions; rolling them back because the ready
+        // bit could not be re-stamped would leave the Runtime in a
+        // strictly worse state than the one we entered with. We log
+        // at WARN and let the next (re)connect retry — the
+        // exponential backoff shared client guarantees there will be
+        // a next one. This is the canonical "recoverable error →
+        // automatic retry, user-invisible" pattern from the 2026-09-07
+        // incident review.
+        if data.ready_ever.load(std::sync::atomic::Ordering::Acquire)
+            && let Err(e) = client
+                .publish(&data.ready_topic, QoS::AtLeastOnce, true, "true")
+                .await
+        {
+            tracing::warn!(
+                agent_id = %data.agent_id,
+                error = %e,
+                "Step 7 (ready) republish failed; bootstrap continues, \
+                 Gateway will see ready=true on the next reconnect"
+            );
         }
 
         Ok(())
@@ -1108,6 +1184,15 @@ impl RuntimeMqttClient {
     /// restarts after the Runtime is already up will see the latest ready
     /// state on its first subscribe.
     pub async fn publish_ready(&self, ready: bool) -> Result<(), RuntimeMqttClientError> {
+        // Mark the session's ready history BEFORE publishing: once
+        // Phase A has completed, Step 7 of `run_bootstrap` may
+        // re-stamp the retained bit on any later reconnect, so the
+        // flag must not depend on this single publish succeeding (a
+        // failed publish means the link is about to retry anyway, and
+        // Step 7 will cover it then).
+        self.bootstrap_data
+            .ready_ever
+            .store(ready, std::sync::atomic::Ordering::Release);
         let topic = format!("acowork/agents/{}/ready", self.agent_id);
         let payload = if ready { "true" } else { "false" };
         self.client().await

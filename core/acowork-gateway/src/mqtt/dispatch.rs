@@ -52,6 +52,25 @@ use crate::operation_store::SharedOperationStore;
 /// is a replay.
 const REPLAY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How often the reconcile loop re-aligns `running_agents` to the
+/// authoritative `agent_registry` view. Cheap (a couple of `HashMap`
+/// walks) so a 5-second cadence is fine. The loop's first tick fires
+/// immediately (retained online snapshots from Runtimes may already
+/// be sitting in `agent_registry`); afterwards it is a pure
+/// interval — Gateway (re)connects converge through the dispatch
+/// event path (the broker replays retained statuses) with this loop
+/// as the backstop.
+pub const RECONCILE_INTERVAL_SECS: u64 = 5;
+
+/// Age beyond which a `running_agents` entry with no broker `online`
+/// backing is treated as stale and dropped. Entries younger than
+/// this are considered in-flight: the start path installs the entry
+/// as soon as the node acknowledges, but the Runtime still needs
+/// time to boot, connect and publish its retained `online` (cold
+/// boot after an OS wake can exceed one tick). Dropping such an
+/// entry would silently undo a start that is still progressing.
+pub const RECONCILE_STALE_GRACE_SECS: u64 = 2 * RECONCILE_INTERVAL_SECS;
+
 /// Per-node last-live-online-signal bookkeeping for the replay guard.
 ///
 /// An offline signal is only treated as a stale replay when BOTH hold:
@@ -293,19 +312,76 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let mqtt_client_for_republish = ctx.mqtt_client.clone();
         tokio::spawn(async move {
             // 1) Update internal registry (sleeping_at stamping, etc.)
+            //    `online` here covers `online`, `sleeping` and
+            //    `degraded` payloads (all mean the MQTT session is
+            //    alive — `degraded` = bootstrap failed but the
+            //    process is still connected); `offline` flips it
+            //    back to false. The registry is the single source of
+            //    truth for the "is the Runtime's MQTT session
+            //    reachable" question.
             reg.write().await.update_from_mqtt(&topic_owned, &payload_owned);
 
-            // ADR-055 §6.2: mirror liveness into GatewayState — drop the
-            // running entry when the Runtime reports offline (crash,
-            // auto-sleep, manual stop). The node reaper owns the process;
-            // the Gateway only tracks the running/ready surface.
-            if let Some(agent_id) = extract_agent_id_from_status_topic(&topic_owned)
-                && String::from_utf8_lossy(&payload_owned).trim() == "offline"
-            {
-                state_for_status.write().await.remove_running(&agent_id);
+            // 2) Symmetric reconciliation into `running_agents`
+            //    (ADR-055 §6.2). The dispatch surface has two paths
+            //    that touch `running_agents`:
+            //      - `status` topic → tracks MQTT liveness
+            //      - `ready` topic → tracks Runtime session readiness
+            //    Before this fix only the `offline` branch dropped the
+            //    entry, so an OS sleep/wake cycle (broker fires LWT
+            //    `offline` → 121 ms later Runtime reconnects and
+            //    publishes `online`) left `running_agents` empty while
+            //    the AgentRegistry said the agent was online — UI
+            //    showed 休眠 and POST /start idempotently short-circuited.
+            //
+            //    The fix: every status transition MUST keep the entry
+            //    and the registered fields consistent with the
+            //    broker's authoritative view. `offline` removes the
+            //    entry (broker knows the process is gone); every other
+            //    payload keeps / re-installs a node-hosted entry with
+            //    `connected=true` and the latest ready value (last
+            //    known; the `ready` topic handler will refine it).
+            if let Some(agent_id) = extract_agent_id_from_status_topic(&topic_owned) {
+                let payload_trim = String::from_utf8_lossy(&payload_owned).trim().to_string();
+                match payload_trim.as_str() {
+                    "offline" => {
+                        // The broker only publishes `offline` (LWT or
+                        // clean shutdown) after the Runtime's
+                        // connection actually dropped, so it is
+                        // authoritative: remove the entry. The
+                        // `NodeReplayGuard` protects the *node* topic
+                        // set only; for agent status topics retained
+                        // snapshot semantics already rule out stale
+                        // replays (a topic retains only its latest
+                        // payload, so a replay always reflects the
+                        // most recent truth). A live `online` from
+                        // the Runtime's reconnect re-installs the
+                        // entry via the online-class branch below.
+                        state_for_status.write().await.remove_running(&agent_id);
+                    }
+                    "online" | "sleeping" | "degraded" => {
+                        // Re-track on every online-class signal so a
+                        // post-wake reconnect always re-installs the
+                        // entry. `track_running_agent` is idempotent —
+                        // it preserves the existing entry's ready /
+                        // dev_mode / debug_state fields.
+                        track_running_agent_for_status(
+                            &state_for_status,
+                            &agent_id,
+                            payload_trim == "sleeping",
+                        )
+                        .await;
+                    }
+                    _ => {
+                        // Protobuf loopback (the Gateway re-publishes
+                        // its own status as DataEnvelope on the same
+                        // topic; the AgentRegistry handles the
+                        // protobuf decoding) and any unknown payload
+                        // — no `running_agents` mutation.
+                    }
+                }
             }
 
-            // 2) Re-publish as a protobuf DataEnvelope so subscribers
+            // 3) Re-publish as a protobuf DataEnvelope so subscribers
             //    that listen for `data_envelope::Payload::AgentStatus`
             //    (the Desktop's chat_mqtt) also see the transition.
             //    Without this, the Desktop would only see the
@@ -325,6 +401,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             let (online, sleeping) = match payload_str.trim() {
                 "sleeping" => (true, true),
                 "online" => (true, false),
+                "degraded" => (true, false),
                 "offline" => (false, false),
                 other => {
                     // Expected for the Gateway's own protobuf loopback
@@ -1141,6 +1218,224 @@ fn extract_agent_id_from_status_topic(topic: &str) -> Option<String> {
     None
 }
 
+/// Re-install (or keep) a `running_agents` entry on a non-offline
+/// status transition. Symmetric counterpart of the `offline` branch in
+/// the status dispatch path.
+///
+/// **Why this exists**: the original code only removed the
+/// `running_agents` entry on `status=offline`. After an OS
+/// sleep/wake the broker fires LWT `offline` (which correctly removes
+/// the entry), then 100-300 ms later the Runtime reconnects and
+/// publishes `online` — but no path re-installs the entry, so the
+/// Gateway's view of "running" diverges from the broker's view of
+/// "online". The Desktop showed `休眠`, POST `/start` short-circuited
+/// via the ADR-055 idempotent fast-path (because `is_online` is true),
+/// and the user could not recover.
+///
+/// Idempotent: preserves the existing entry's `ready`, `dev_mode`,
+/// `debug_state` and `started_at` fields if the entry already
+/// exists. The `ready` topic handler refines `ready` separately, so
+/// this helper only needs to install the bare-minimum liveness shape.
+async fn track_running_agent_for_status(
+    state: &SharedState,
+    agent_id: &str,
+    sleeping: bool,
+) {
+    let mut gw = state.write().await;
+    if gw.running_agents.contains_key(agent_id) {
+        // Already tracked — keep the existing rich fields (ready,
+        // dev_mode, debug_state). Just refresh `connected` so the
+        // post-wake UI flips back to `connected=true` immediately,
+        // without waiting for the next `ready` topic message.
+        if let Some(info) = gw.running_agents.get_mut(agent_id) {
+            info.connected = true;
+            tracing::debug!(
+                agent_id,
+                sleeping,
+                "running_agents: refreshed connected=true on status transition"
+            );
+        }
+        return;
+    }
+    let workspace = gw
+        .installed_agents
+        .get(agent_id)
+        .map(|i| {
+            std::path::PathBuf::from(&i.install_path)
+                .join("workspace")
+                .to_string_lossy()
+                .to_string()
+        })
+        .unwrap_or_default();
+    gw.add_running(crate::gateway::state::RunningAgentInfo {
+        agent_id: agent_id.to_string(),
+        // Node-hosted Runtimes are tracked with `pid = 0`; liveness
+        // is guaranteed by the MQTT broker's LWT registry, not by a
+        // local process probe.
+        pid: 0,
+        started_at: chrono::Utc::now(),
+        workspace,
+        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+        connected: true,
+        // `ready` defaults to false; the ready topic handler upgrades
+        // it the moment `ready=true` is observed. The Desktop's
+        // `running && ready` gate stays closed for ~1s after this
+        // point, which matches the Phase A→D window during normal
+        // startup (and is unavoidable when the process has truly
+        // just reconnected).
+        ready: false,
+        // Status is online-class (online / sleeping / degraded); the
+        // Runtime's session has been resumed. dev_mode / debug_state
+        // default to off until the ready topic handler refines them.
+        dev_mode: false,
+        debug_state: crate::gateway::state::DebugState::Disabled,
+        debug_port: None,
+        workspace_config_json: None,
+        current_embed_dim: None,
+        migration: None,
+    });
+    tracing::info!(
+        agent_id,
+        sleeping,
+        "Auto-tracked node-hosted Runtime from status=online/sleeping (pid=0, post-wake recovery)"
+    );
+}
+
+/// Best-effort full reconciliation pass.
+///
+/// Walks every installed agent, asks the AgentRegistry for the
+/// authoritative online/offline state, and re-aligns `running_agents`
+/// to match. Designed as the final safety net for the post-wake
+/// recovery flow:
+///
+/// 1. The Gateway MQTT client subscribes to `acowork/agents/+/status`.
+///    On every (re)connect the broker replays retained messages.
+/// 2. If the Gateway itself (or the broker) restarted while a Runtime
+///    was alive, the retained `online` snapshot re-installs the entry
+///    here in addition to the live event-driven path.
+/// 3. The `reconcile_loop` task in `gateway/mod.rs` calls this every
+///    `RECONCILE_INTERVAL` (its first tick fires immediately after
+///    the loop starts), so any divergence between `running_agents`
+///    (process view) and `agent_registry` (broker view) self-heals
+///    without user intervention. A Gateway (re)connect converges
+///    through the dispatch event path first — the broker replays
+///    retained statuses — with this loop as the interval backstop.
+///
+/// **Not a substitute** for the dispatch event handlers — those are
+/// the low-latency path. This is the consistency / idempotency
+/// backstop that catches everything the event path missed (e.g. a
+/// crash between the LWT `offline` and the live `online` re-publish).
+pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &SharedAgentRegistry) {
+    let reg = agent_registry.read().await;
+    let online_set: std::collections::HashSet<String> = reg
+        .snapshot()
+        .into_iter()
+        .filter(|(_, s)| s.online)
+        .map(|(id, _)| id)
+        .collect();
+    drop(reg);
+
+    let mut gw = state.write().await;
+    // Install missing entries for every agent the broker reports as online.
+    let installed_ids: Vec<String> = gw.installed_agents.keys().cloned().collect();
+    for agent_id in &installed_ids {
+        if online_set.contains(agent_id) && !gw.running_agents.contains_key(agent_id) {
+            let workspace = gw
+                .installed_agents
+                .get(agent_id)
+                .map(|i| {
+                    std::path::PathBuf::from(&i.install_path)
+                        .join("workspace")
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                agent_id: agent_id.clone(),
+                pid: 0,
+                started_at: chrono::Utc::now(),
+                workspace,
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                connected: true,
+                ready: false,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+            tracing::info!(
+                agent_id = %agent_id,
+                "reconcile_running_agents: installed missing entry from broker online view"
+            );
+        }
+    }
+    // Drop stale entries that the broker no longer reports as online.
+    //
+    // Grace window: an entry younger than RECONCILE_STALE_GRACE_SECS
+    // is treated as in-flight — a just-acknowledged start whose
+    // Runtime has not published its retained `online` yet (cold boot
+    // after an OS wake can take longer than one tick). Dropping it
+    // would silently undo the start and flick the UI back to
+    // "stopped"; the next tick can drop it once it truly ages out.
+    let stale: Vec<String> = gw
+        .running_agents
+        .iter()
+        .filter(|(id, info)| {
+            if online_set.contains(id.as_str()) {
+                return false;
+            }
+            let age = chrono::Utc::now().signed_duration_since(info.started_at);
+            age.num_seconds() >= RECONCILE_STALE_GRACE_SECS as i64
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for agent_id in stale {
+        gw.remove_running(&agent_id);
+        tracing::info!(
+            agent_id = %agent_id,
+            grace_secs = RECONCILE_STALE_GRACE_SECS,
+            "reconcile_running_agents: dropped stale entry not present in broker online view"
+        );
+    }
+}
+
+/// Periodic reconcile loop (background task). Spawned by
+/// `Gateway::run` after the MQTT client connects.
+///
+/// Cadence: [`RECONCILE_INTERVAL_SECS`] (5 s by default). Each tick
+/// re-aligns `running_agents` with the authoritative
+/// `agent_registry` view. This is the consistency backstop for the
+/// dispatch event handlers: if a transition is missed (broker
+/// retained replay ordering, race between LWT `offline` and live
+/// `online`, etc.) the next tick self-heals without user
+/// intervention.
+///
+/// The helper body is a couple of `HashMap` walks and `GatewayState`
+/// helper calls — no I/O, no allocation in the hot path. We don't
+/// wrap it in a `catch_unwind`: a panic here means the gateway is
+/// in an undefined state and the right thing to do is let the
+/// task die and let the supervisor (or operator) restart the
+/// process. Tokio logs a loud warning on task death, which is the
+/// right observability surface.
+pub async fn run_reconcile_loop(state: SharedState, agent_registry: SharedAgentRegistry) {
+    let interval = std::time::Duration::from_secs(RECONCILE_INTERVAL_SECS);
+    let mut ticker = tokio::time::interval(interval);
+    // First tick fires immediately (the Gateway just started —
+    // any retained online snapshots from Runtimes that connected
+    // before the Gateway did are now sitting in `agent_registry`).
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tracing::info!(
+        interval_secs = RECONCILE_INTERVAL_SECS,
+        "reconcile_loop: first tick (immediate)"
+    );
+    loop {
+        ticker.tick().await;
+        reconcile_running_agents(&state, &agent_registry).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1948,5 +2243,330 @@ mod tests {
     fn extract_agent_id_from_status_topic_rejects_wrong_topic() {
         assert_eq!(extract_agent_id_from_status_topic("acowork/global/providers"), None);
         assert_eq!(extract_agent_id_from_status_topic("acowork/agents//status"), None);
+    }
+
+    // ── 2026-09-07 incident follow-up: post-wake reconcile invariants ─────
+
+    /// `track_running_agent_for_status` is the symmetric counterpart of
+    /// the `offline` branch. The pre-fix bug only removed the
+    /// `running_agents` entry on `offline`, so an OS sleep/wake cycle
+    /// (LWT `offline` → Runtime reconnects → publishes `online`) left
+    /// the entry empty. The fast-path then 200'd but the UI still
+    /// showed 休眠. Pin the fix at the helper level so a future
+    /// refactor of the status handler cannot regress to the asymmetric
+    /// shape.
+    #[tokio::test]
+    async fn track_running_agent_for_status_installs_entry_on_online() {
+        let state = test_state();
+        // Seed an installed agent (the helper derives the workspace
+        // path from `installed_agents[agent_id].install_path`).
+        {
+            let mut gw = state.write().await;
+            gw.installed_agents.insert(
+                "com.acowork.architect".to_string(),
+                crate::gateway::state::AgentInfo {
+                    agent_id: "com.acowork.architect".to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "Architect".to_string(),
+                    install_path: "/tmp/pkg/architect".to_string(),
+                    manifest: acowork_core::AgentManifest {
+                        agent_id: "com.acowork.architect".to_string(),
+                        version: "1.0.0".to_string(),
+                        name: "Architect".to_string(),
+                        display_name: None,
+                        role: None,
+                        avatar: None,
+                        builtin_avatar: None,
+                        description: "test".to_string(),
+                        author: "test".to_string(),
+                        runtime_version: "0.1.0".to_string(),
+                        permissions: vec![],
+                        triggers: vec![],
+                        llm: Default::default(),
+                        memory: Default::default(),
+                        identity_deps: vec![],
+                        tools: vec![],
+                        capabilities: Default::default(),
+                        resources: Default::default(),
+                        sandbox: Default::default(),
+                        system: false,
+                        dev: false,
+                        skills: Default::default(),
+                    },
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                },
+            );
+        }
+
+        // No entry pre-condition.
+        assert!(
+            !state.read().await.is_running("com.acowork.architect"),
+            "preflight: entry must NOT exist before the status transition"
+        );
+
+        // Dispatch the online-class status.
+        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+
+        // Post-condition: entry installed, pid=0 (node-hosted), connected=true.
+        let entry = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .cloned()
+            .expect("entry must be installed after status=online");
+        assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
+        assert!(entry.connected, "entry must report connected after a live online signal");
+    }
+
+    /// Repeated `online` signals on the same agent must be idempotent
+    /// — the existing entry's rich fields (started_at, dev_mode, etc.)
+    /// must be preserved across the second transition. Otherwise a
+    /// re-connection storm would reset `started_at` and the Desktop's
+    /// uptime displays would reset on every wake.
+    #[tokio::test]
+    async fn track_running_agent_for_status_is_idempotent_on_repeated_online() {
+        let state = test_state();
+        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+        let started_at_first = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .map(|e| e.started_at)
+            .expect("first online installs entry");
+
+        // Sleep so the timestamp would observably change if the helper
+        // naively re-inserted the entry.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+
+        let started_at_second = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .map(|e| e.started_at)
+            .expect("entry must still exist after repeated online signal");
+        assert_eq!(
+            started_at_first, started_at_second,
+            "repeated online signals must NOT reset started_at"
+        );
+    }
+
+    /// A `sleeping` payload must install an entry the same way `online`
+    /// does — auto-sleep keeps the process alive. Without this, the
+    /// post-wake `running_agents` entry would disappear as soon as the
+    /// Runtime flipped to sleeping, re-opening the desync window.
+    #[tokio::test]
+    async fn track_running_agent_for_status_installs_entry_on_sleeping() {
+        let state = test_state();
+        track_running_agent_for_status(&state, "com.acowork.architect", true).await;
+        let entry = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .cloned()
+            .expect("sleeping must install a node-hosted entry too");
+        assert!(entry.connected, "sleeping entry is still connected");
+        assert_eq!(entry.pid, 0, "sleeping entry is node-hosted (pid=0)");
+    }
+
+    /// `reconcile_running_agents` is the safety-net backstop for the
+    /// dispatch event handlers — it must re-install missing entries
+    /// from the broker's authoritative online view even when the
+    /// event-driven `track_running_agent_for_status` did not fire
+    /// (e.g. Gateway restart after a wake, retained replay ordering
+    /// race, etc.).
+    #[tokio::test]
+    async fn reconcile_running_agents_installs_missing_entry_from_broker_view() {
+        let state = test_state();
+        // Seed an installed agent.
+        {
+            let mut gw = state.write().await;
+            gw.installed_agents.insert(
+                "com.acowork.architect".to_string(),
+                crate::gateway::state::AgentInfo {
+                    agent_id: "com.acowork.architect".to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "Architect".to_string(),
+                    install_path: "/tmp/pkg/architect".to_string(),
+                    manifest: acowork_core::AgentManifest {
+                        agent_id: "com.acowork.architect".to_string(),
+                        version: "1.0.0".to_string(),
+                        name: "Architect".to_string(),
+                        display_name: None,
+                        role: None,
+                        avatar: None,
+                        builtin_avatar: None,
+                        description: "test".to_string(),
+                        author: "test".to_string(),
+                        runtime_version: "0.1.0".to_string(),
+                        permissions: vec![],
+                        triggers: vec![],
+                        llm: Default::default(),
+                        memory: Default::default(),
+                        identity_deps: vec![],
+                        tools: vec![],
+                        capabilities: Default::default(),
+                        resources: Default::default(),
+                        sandbox: Default::default(),
+                        system: false,
+                        dev: false,
+                        skills: Default::default(),
+                    },
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                },
+            );
+        }
+
+        // Simulate: the broker says `online` (e.g. a retained snapshot
+        // arrived while the Gateway's event handler was on a backoff),
+        // but `running_agents` has no entry — this is the 2026-09-07
+        // desync the user observed.
+        let reg = crate::mqtt::agent_registry::new_shared_registry();
+        reg.write()
+            .await
+            .update_from_mqtt("acowork/agents/com.acowork.architect/status", b"online");
+        assert!(
+            reg.read().await.is_online("com.acowork.architect"),
+            "preflight: broker says online"
+        );
+        assert!(
+            !state.read().await.is_running("com.acowork.architect"),
+            "preflight: gateway says NOT running (DESYNC)"
+        );
+
+        reconcile_running_agents(&state, &reg).await;
+
+        let entry = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .cloned()
+            .expect("reconcile must install the missing entry from broker online view");
+        assert!(entry.connected, "reconciled entry must be connected");
+        assert_eq!(entry.pid, 0, "reconciled entry is node-hosted");
+    }
+
+    /// Stale `running_agents` entries (process view thinks X is
+    /// running, but the broker reports X offline) must be dropped —
+    /// otherwise the UI shows `running=true` for an agent whose MQTT
+    /// session is gone, and `POST /start` would short-circuit on a
+    /// stale entry.
+    #[tokio::test]
+    async fn reconcile_running_agents_drops_stale_entries_no_longer_in_broker_view() {
+        let state = test_state();
+        // Plant a stale entry: the agent is in `running_agents` but the
+        // broker has never seen it (fresh registry), and the entry is
+        // OLDER than the reconcile grace window — only then may
+        // reconcile drop it.
+        {
+            let mut gw = state.write().await;
+            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                agent_id: "com.acowork.stale".to_string(),
+                pid: 0,
+                started_at: chrono::Utc::now() - chrono::Duration::seconds(60),
+                workspace: String::new(),
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                connected: true,
+                ready: true,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+        }
+        // Empty broker registry — no agent is reported online.
+        let reg = crate::mqtt::agent_registry::new_shared_registry();
+
+        reconcile_running_agents(&state, &reg).await;
+
+        assert!(
+            !state.read().await.is_running("com.acowork.stale"),
+            "stale entry must be dropped by reconcile (broker says offline)"
+        );
+    }
+
+    /// An entry YOUNGER than the grace window must survive reconcile
+    /// even when the broker has no `online` backing yet — this is the
+    /// in-flight window between a node acknowledging `start` and the
+    /// Runtime publishing its retained `online` (cold boot after an
+    /// OS wake can take longer than one reconcile tick). Dropping it
+    /// would silently undo a start that is still progressing.
+    #[tokio::test]
+    async fn reconcile_running_agents_preserves_fresh_in_flight_entries() {
+        let state = test_state();
+        // Plant a just-installed entry (started_at = now): the broker
+        // has no record of this agent yet, but the entry is younger
+        // than RECONCILE_STALE_GRACE_SECS.
+        {
+            let mut gw = state.write().await;
+            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                agent_id: "com.acowork.booting".to_string(),
+                pid: 0,
+                started_at: chrono::Utc::now(),
+                workspace: String::new(),
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                connected: true,
+                ready: false,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+        }
+        // Empty broker registry — no agent is reported online yet.
+        let reg = crate::mqtt::agent_registry::new_shared_registry();
+
+        reconcile_running_agents(&state, &reg).await;
+
+        assert!(
+            state.read().await.is_running("com.acowork.booting"),
+            "in-flight entry younger than RECONCILE_STALE_GRACE_SECS must survive reconcile"
+        );
+    }
+
+    /// Reconciling against an empty broker view must NOT touch entries
+    /// that ARE in the broker's online view — the helper is
+    /// idempotent on the broker-authoritative set.
+    #[tokio::test]
+    async fn reconcile_running_agents_preserves_entries_consistent_with_broker_view() {
+        let state = test_state();
+        let reg = crate::mqtt::agent_registry::new_shared_registry();
+        reg.write()
+            .await
+            .update_from_mqtt("acowork/agents/com.acowork.architect/status", b"online");
+
+        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+        let started_at = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .map(|e| e.started_at)
+            .expect("preflight: entry exists");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        reconcile_running_agents(&state, &reg).await;
+
+        let entry = state
+            .read()
+            .await
+            .running_agents
+            .get("com.acowork.architect")
+            .cloned()
+            .expect("entry must still exist after idempotent reconcile");
+        assert_eq!(
+            entry.started_at, started_at,
+            "consistent entries must NOT be re-installed (started_at preserved)"
+        );
+        assert!(entry.connected);
     }
 }

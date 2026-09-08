@@ -829,6 +829,10 @@ impl Gateway {
         // ADR-033: Create runtime HTTP registry and agent registry.
         let runtime_http_registry = crate::http::proxy::new_shared_registry();
         let agent_registry = crate::mqtt::agent_registry::new_shared_registry();
+        // Clone for the reconcile loop. The clone is cheap (`Arc`
+        // bump) and gives the loop its own handle so it can run on a
+        // dedicated task without contending with the dispatch path.
+        let agent_registry_for_reconcile_opt = Some(agent_registry.clone());
         // ADR-055: node registry — the Gateway's view of Node Agents
         // (LWT-driven online state + retained info snapshots).
         let node_registry = crate::mqtt::node_registry::new_shared_registry();
@@ -1068,6 +1072,51 @@ impl Gateway {
                 )
                 .await;
             });
+        }
+
+        // Reconcile loop: periodic safety net for the
+        // `running_agents` ↔ `agent_registry` consistency contract.
+        //
+        // The dispatch layer's event handlers are the low-latency
+        // path (they react to each `acowork/agents/+/status` transition
+        // in milliseconds), but they can still drop a transition when
+        // the Gateway's MQTT client itself reconnects mid-burst — the
+        // broker's retained replay ordering, a stale message that races
+        // a fresh one, or a process crash between LWT `offline` and the
+        // live `online` re-publish. After an OS sleep/wake in
+        // particular the post-2026-09-07 incident logs show the
+        // sequence `offline → online` arriving within 121 ms — a stale
+        // `offline` (the LWT, or its retained replay after a Gateway
+        // (re)connect) can be processed after a live `online` already
+        // re-installed the entry, and nothing re-installs it a second
+        // time once the dispatcher has moved on. The dispatch event
+        // path converges most cases; this loop is the consistency
+        // backstop for the rest.
+        //
+        // The loop below polls every `RECONCILE_INTERVAL` (its first
+        // tick fires immediately, so retained snapshots from Runtimes
+        // that connected before the Gateway are picked up right away)
+        // and walks the full authoritative view from `agent_registry`,
+        // re-installing any missing `running_agents` entry and
+        // dropping any stale one. It is **idempotent** and cheap (a
+        // few `HashMap` walks), so the interval can be aggressive. A
+        // Gateway MQTT (re)connect itself converges through the
+        // dispatch event path — the broker replays the retained
+        // statuses and each one re-aligns `running_agents` — so no
+        // separate reconnect hook is needed on top of the interval.
+        if let Some(agent_registry_for_reconcile) = agent_registry_for_reconcile_opt.clone() {
+            let gw_for_reconcile = shared_state.clone();
+            let _reconcile_handle = tokio::spawn(async move {
+                crate::mqtt::dispatch::run_reconcile_loop(
+                    gw_for_reconcile,
+                    agent_registry_for_reconcile,
+                )
+                .await;
+            });
+            tracing::info!(
+                interval_secs = crate::mqtt::dispatch::RECONCILE_INTERVAL_SECS,
+                "running_agents reconcile loop started (ADR-055 / post-wake recovery)"
+            );
         }
 
         // Start the HTTP API as early as possible: the desktop app's
