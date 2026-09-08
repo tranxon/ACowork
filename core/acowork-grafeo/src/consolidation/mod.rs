@@ -1,22 +1,20 @@
-//! Consolidation pipeline - instant extraction and offline consolidation.
-//!
-//! The consolidation pipeline processes knowledge extracted by the LLM
-//! during conversation (instant) and in background batches (offline).
+//! Consolidation pipeline — instant extraction and episodic distillation.
 //!
 //! - **Instant extraction** (`instant`): processes `memory_store` tool calls
-//!   from the LLM in real-time, performing dedup, conflict detection, and
-//!   status assignment (Active/Pending).
-//! - **Offline consolidation** (`offline`): upgrades Pending nodes to Active
-//!   based on age and evidence. Full LLM-based re-evaluation is planned for
-//!   Phase 3.
+//!   from the LLM in real-time (dedup, conflict detection and arbitration).
+//! - **EpisodicDistiller** (`distiller` / `distill`): the single producer of
+//!   the semantic layer (ADR-068) — promotes Episodic evidence to
+//!   Knowledge / Procedural / Autobiographical nodes.
+//!
+//! The legacy offline consolidation pipeline (Pending-node upgrades,
+//! experience generalization) has been removed: Pending has had no producer
+//! since ADR-068 and the admin-driven manual pass had no consumer.
 
 pub mod ambiguous;
 pub mod conflict_llm;
 pub mod distill;
 pub mod distiller;
-pub mod generalization;
 pub mod instant;
-pub mod offline;
 pub mod scheduler;
 pub mod triple_extraction;
 
@@ -26,16 +24,9 @@ pub use distiller::{DefaultEpisodicDistiller, EpisodicDistiller};
 
 // Types migrated to acowork-memory are re-exported from the submodules.
 // The submodules themselves re-export from acowork_memory::consolidation.
-pub use generalization::{
-    BehaviorPattern, EmbeddingFn, GeneralizationConfig, GeneralizationResult, PatternCategory,
-    detect_simple_patterns, discover_patterns_llm,
-};
 pub use instant::{
     ConflictCandidate, ConflictResolutionDetail, MemoryStoreInput, MemoryStoreResult,
     ProcessResult,
 };
-pub use offline::{ConflictResolutionResult, OfflineConsolidationConfig, OfflineConsolidationResult};
-pub use scheduler::{ConsolidationRun, ConsolidationScheduler, SchedulerConfig, TriggerReason};
-pub use triple_extraction::{
-    ExtractedTriple, ExtractionResult, LlmMessage, LlmResponse, TripleExtractorLlm,
-};
+pub use scheduler::SchedulerConfig;
+pub use triple_extraction::{LlmMessage, LlmResponse, TripleExtractorLlm};

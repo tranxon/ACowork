@@ -1538,15 +1538,14 @@ impl HistoryManager {
     #[allow(dead_code)]
     pub(crate) fn recall_todo_round(&mut self) -> RecallResult {
         // Fast path: same round already injected by a prior compression.
-        if let Some(ref last_id) = self.last_injected_todo_call_id {
-            if let Some((asst, _)) = self.find_last_todo_write_round() {
-                let already_done = asst.tool_calls.as_ref().is_some_and(|tcs| {
-                    tcs.iter().any(|tc| tc.id == *last_id)
-                });
-                if already_done {
-                    return RecallResult::SkippedAlreadyInjected;
-                }
-            }
+        if let Some(ref last_id) = self.last_injected_todo_call_id
+            && let Some((asst, _)) = self.find_last_todo_write_round()
+            && asst
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == *last_id))
+        {
+            return RecallResult::SkippedAlreadyInjected;
         }
 
         // No marker means caller invoked us at the wrong time.

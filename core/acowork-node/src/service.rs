@@ -20,13 +20,17 @@
 //! `identity.json`, so the service re-connects to the same Gateway
 //! under the same node_id across reboots.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(not(windows))]
+use std::path::Path;
 
 use crate::config::NodeConfig;
 use crate::error::{NodeError, Result};
 use crate::identity::NodeIdentity;
 
 /// The launchd label / systemd unit name, fixed for the node agent.
+#[cfg(not(windows))]
 const SERVICE_LABEL: &str = "com.acowork.node";
 
 /// Split a persisted `gateway_addr` (`host:port`) into its parts,
@@ -61,6 +65,7 @@ fn systemd_escape(s: &str) -> String {
 }
 
 /// Where the supervisor unit file lives on this platform.
+#[cfg(not(windows))]
 fn unit_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -81,14 +86,10 @@ fn unit_path() -> Option<PathBuf> {
                 .join("acowork-node.service"),
         )
     }
-    #[cfg(windows)]
-    {
-        let _ = &SERVICE_LABEL;
-        None
-    }
 }
 
 /// The user home directory (`$HOME` / `%USERPROFILE%`).
+#[cfg(not(windows))]
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
@@ -277,6 +278,7 @@ pub fn uninstall_service(config: &NodeConfig) -> Result<()> {
 }
 
 /// Write a unit file, creating its parent directory first.
+#[cfg(not(windows))]
 fn write_unit(path: &Path, body: &str) -> Result<()> {
     let parent = path
         .parent()

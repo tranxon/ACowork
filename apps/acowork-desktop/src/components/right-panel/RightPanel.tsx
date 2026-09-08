@@ -389,20 +389,28 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
             </div>
           ) : (
             <div className="p-3 space-y-3">
-              {/* Section title — matches the visual weight of other
-                  section headings in this tab (e.g. Status tab's
-                  "Token statistics" h3). */}
-              <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                {t("rightPanel.debugSection")}
-              </div>
-
               {/* Action block — always shown when the agent is running.
                   Left: two-state text button (Enter/Exit Debug, btn-solid,
                   no icon). Right: 4 session debug buttons, only rendered
-                  once DevMode is on. Same strip height (36px, no vertical
-                  padding) as the collapsible card headers below, so the
-                  debug tab's horizontal bars share one rhythm. */}
-              <div className="flex min-h-[36px] items-center rounded-md border border-zinc-200 bg-panel-block px-2 dark:border-zinc-700">
+                  once DevMode is on.
+
+                  Height contract — must render at the same total pixel
+                  height as the PROMPT card header immediately above and
+                  the level-1 collapsible cards below. Tailwind defaults
+                  to `box-sizing: border-box`, so a banner that owns its
+                  own border cannot use `min-h-[36px]` and expect to match
+                  ExpandableRow's `min-h-[36px]` header — the border eats
+                  2px and the banner ends up 2px shorter than every other
+                  horizontal bar in the tab. The PROMPT card is
+                  `ListBox (1+1 border) + ExpandableRow header (36px) =
+                  38px` total, so this banner targets 38px to match.
+
+                  Padding: `px-3` matches the ExpandableRow header so the
+                  content's left/right inset reads identical across the
+                  tab. The earlier `px-2` was 4px shy and made the
+                  Switch + label sit visibly closer to the left edge
+                  than the chevron + title of the cards below it. */}
+              <div className="flex min-h-[38px] items-center rounded-md border border-zinc-200 bg-panel-block px-3 dark:border-zinc-700">
                 <div className="flex w-full items-center gap-1">
                   <Switch
                     checked={selectedAgent?.debug_state === "enabled"}

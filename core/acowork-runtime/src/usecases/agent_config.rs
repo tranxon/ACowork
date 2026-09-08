@@ -127,6 +127,15 @@ pub enum ConfigField {
     DistillerAccumulationThreshold,
     /// `AgentConfig::distiller_idle_minutes` — `Option<u64>`.
     DistillerIdleMinutes,
+    /// `AgentConfig::memory_forgetting_enabled` — `Option<bool>`.
+    /// Runtime switch for episodic memory forgetting (default off).
+    MemoryForgettingEnabled,
+    /// `AgentConfig::memory_forgetting_half_life_days` — `Option<u64>`.
+    MemoryForgettingHalfLifeDays,
+    /// `AgentConfig::memory_forgetting_dormant_threshold` — `Option<f32>`.
+    MemoryForgettingDormantThreshold,
+    /// `AgentConfig::memory_forgetting_archive_days` — `Option<u64>`.
+    MemoryForgettingArchiveDays,
 }
 
 impl ConfigField {
@@ -151,6 +160,12 @@ impl ConfigField {
                 "distiller_accumulation_threshold"
             }
             ConfigField::DistillerIdleMinutes => "distiller_idle_minutes",
+            ConfigField::MemoryForgettingEnabled => "memory_forgetting_enabled",
+            ConfigField::MemoryForgettingHalfLifeDays => "memory_forgetting_half_life_days",
+            ConfigField::MemoryForgettingDormantThreshold => {
+                "memory_forgetting_dormant_threshold"
+            }
+            ConfigField::MemoryForgettingArchiveDays => "memory_forgetting_archive_days",
         }
     }
 }
@@ -221,6 +236,10 @@ impl PutAgentConfigBody {
         distiller_interval_minutes: Option<serde_json::Value>,
         distiller_accumulation_threshold: Option<serde_json::Value>,
         distiller_idle_minutes: Option<serde_json::Value>,
+        memory_forgetting_enabled: Option<serde_json::Value>,
+        memory_forgetting_half_life_days: Option<serde_json::Value>,
+        memory_forgetting_dormant_threshold: Option<serde_json::Value>,
+        memory_forgetting_archive_days: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -304,6 +323,30 @@ impl PutAgentConfigBody {
         if let Some(v) = distiller_idle_minutes {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::DistillerIdleMinutes,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = memory_forgetting_enabled {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::MemoryForgettingEnabled,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = memory_forgetting_half_life_days {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::MemoryForgettingHalfLifeDays,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = memory_forgetting_dormant_threshold {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::MemoryForgettingDormantThreshold,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = memory_forgetting_archive_days {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::MemoryForgettingArchiveDays,
                 op: value_to_patch(&v),
             });
         }

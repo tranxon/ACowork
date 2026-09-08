@@ -604,192 +604,88 @@ LLM 生成回复（含 tool call 判断）
 
 遗忘不是记忆的失败，是记忆的优化。没有遗忘的记忆系统会退化——检索效率下降、无关信息干扰决策、存储资源无限增长。
 
-### 5.1 衰减公式
+> **v3.12 重写（ADR-057 §5.3 redesign）**：遗忘模型从"多维度规则分支"收敛为**单一时间衰减**。
+> 旧模型（consolidated × importance × 7/14 天分支、decay_score = importance × activity_signal 乘法模型、access_boost 访问加权）
+> 存在两个问题：① 规则复杂但缺乏说服力——7/14 天的"一步到位二值踢出"不符合渐进遗忘的直觉；
+> ② `access_count` 在检索路径从不自增，access_boost 形同虚设。
+> 新模型只回答一个问题：**这条经历多久没被想起了？** 半衰期是唯一核心参数，默认 180 天，开放到
+> `agent_config.json` 允许用户自定义。
 
-沉淀层每个节点（KnowledgeNode / ProceduralNode）的衰减分数由两个维度决定：
+### 5.1 经历层：单一时间衰减（默认）
 
-- **importance（固有价值）**：写入时 LLM 打分（0.0-1.0），静态不变，代表这条知识的内在重要性。可作为 Grafeo PageRank 的补充——PageRank 基于"被多少边引用"自动评估重要性，与手调 importance 正交互补：手调 importance 反映语义重要性（"用户姓名很重要"），PageRank 反映结构重要性（"被大量边引用的枢纽节点"）
-- **activity_signal（当前活跃度）**：综合近期访问和历史使用频率的动态信号，随时间衰减
+经历层（Episodic）是真实事件记录，本身有检索价值。遗忘是**渐进的**：随时间推移检索权重平滑下降，
+半衰期前全权参与，之后越老排名越靠后，最终彻底遗忘——不是到点就"删除"。
 
-公式采用**乘法模型**——importance 作为天花板，activity_signal 决定了"当前保留了多少"：
-
-```
-decay_score = importance × activity_signal
-
-activity_signal = clamp(recency_boost + access_boost, FLOOR, 1.0)
-
-其中：
-- recency_boost = exp(-λ × days_since_last_access)
-  λ = 0.03（半衰期 ≈ 23 天：23 天后衰减到 0.5，46 天后 0.25）
-- access_boost = min(BOOST_CAP, access_count × ACCESS_PER_HIT)
-  ACCESS_PER_HIT = 0.1（每次检索命中加 0.1）
-  BOOST_CAP = 0.5（历史访问最多贡献 0.5，避免"翻旧账"的访问次数补偿一切）
-  ⚠️ 权衡：0.5 的上限意味着被访问 5 次以上的节点，即使长期不用，activity_signal 底线仍有 0.55（假设 recency 完全衰减到 0.05），结合 importance >= 0.5 的节点永远不会进入 Purge 候选。这是有意为之——历史高频知识（如核心身份事实）应该有强抗遗忘能力。代价是低 importance 但被频繁访问的偏好（如临时项目相关）可能"卡"在 Active 状态更久。如果实际运行中发现 Dormant 转化率过低，可调低 BOOST_CAP 至 0.3。
-- FLOOR = 0.05（即使完全不用，也保留 5% 的 activity）
-```
-
-**直觉解释：**
-
-| 场景                 | importance | recency | access | activity | decay_score | 状态               |
-| -------------------- | ---------- | ------- | ------ | -------- | ----------- | ------------------ |
-| 核心事实，昨天刚用   | 0.9        | 0.97    | 0.5    | 1.0      | 0.9         | Active             |
-| 核心事实，60天未用   | 0.9        | 0.17    | 0.5    | 0.67     | 0.6         | Active             |
-| 中等偏好，90天未用   | 0.6        | 0.07    | 0.1    | 0.17     | 0.1         | Dormant 边界       |
-| 低价值碎片，60天未用 | 0.2        | 0.17    | 0      | 0.22     | 0.04        | Purge Candidate    |
-| 用户姓名，从不查询   | 1.0        | 0.05    | 0      | 0.05     | 0.05        | Dormant 但不 purge |
-
-**为什么用乘法而不是加法？**
-
-加法公式（旧版 `importance × 0.5 + recency × 0.2 + access × 0.3`）的问题：
-1. importance 是静态语义属性，recency 是动态时序信号，两者本质不同，放同一层级加权没有认知意义
-2. 加法下高 importance 节点的最低 decay_score = importance × α = 0.5（假设 α=0.5），意味着重要知识永远不会真正"沉睡"——这不符合人类认知（即使用户的名字，长期不用也会"一时想不起来"）
-3. 加法下低 importance 节点的最低值也是 importance × α，低价值知识的衰减幅度不够
-
-乘法模型解决了这些问题：importance 决定了"这条知识值多少"，activity 决定了"当前还记得多少"，两者正交且直觉清晰。高 importance 知识的绝对衰减幅度更大（0.9 → 0.045），但因为 Fact/Relation 类型的 purge 保护（§5.2），它只是 Dormant 不会丢失。
-
-**λ 的选择（0.03）：**
-
-λ = 0.05 时半衰期约 14 天，对于 Agent 记忆来说太激进——用户两周前提到的事不应该就"沉睡"了。λ = 0.03 给出约 23 天半衰期，约 2 个月降到 0.17——这意味着一个中等重要的偏好如果不被引用，大约 2-3 个月进入 Dormant，符合"过时偏好应该沉睡"的预期。可通过配置调整。
-
-### 5.2 遗忘策略
-
-遗忘策略分两步：**先统一计算 decay_score，再按节点类型决定动作**。
-
-**所有节点类型的 Active → Dormant 阈值统一为 0.3。** 区别仅在于 Dormant 之后是否有 Purge 路径。
-
-> **Phase 2 实现说明**（2026-08-25 更新，ADR-057 G4 确认）：遗忘机制采用**后台扫描模型**（`forgetting/scan.rs`，由 Gateway Cron 调度，频率可配置），而非按需计算。选择后台扫描的理由：① decay 计算移出查询路径，P99 检索延迟更稳定；② 多 Agent 场景下按需计算会在每次查询扫描全量节点，反而更差；③ 扫描频率可按 Agent 密度独立调整。语义与按需计算等价——decay_score 公式（§5.1 乘法模型）不变，仅计算时机不同。
+**保留率公式（半衰期指数衰减）：**
 
 ```
-后台定期扫描（每小时一次，可配置）
-   │
-   ▼
-第一步：计算每个 Active 节点的 decay_score（§5.1 公式）
-   │
-   ▼
-第二步：按节点类型 + decay_score 决定状态转换
-   │
-   ├─ KnowledgeNode（Fact / Relation）
-   │   ├─ decay_score >= 0.3 → Active
-   │   └─ decay_score < 0.3 → Dormant
-   │       ⚠️ 永不进入 Purge。事实性知识只沉睡不删除。
-   │       （即使用户搬家了，"曾经住北京"也是历史事实，不应被系统自动删除）
-   │
-   ├─ KnowledgeNode（Preference）
-   │   ├─ decay_score >= 0.3 → Active
-   │   └─ decay_score < 0.3 → Dormant
-   │       → Dormant 持续超过 90 天 → 进入 Purge 流程
-   │       （偏好可能已过时，90 天的沉睡期足够长）
-   │
-   ├─ ProceduralNode
-   │   ├─ decay_score >= 0.3 → Active
-   │   └─ decay_score < 0.3 → Dormant
-   │       → Dormant 持续超过 90 天 → 进入 Purge 流程
-   │       （行为模式可能不再适用）
-   │
-   └─ AutobiographicalNode
-       └─ 不参与衰减，始终 Active（schema 强制约束）
+retention = exp(-ln2 × age_days / half_life_days)
 ```
 
-**状态转换规则总结（Phase 2 更新）**：
+- `half_life_days`：半衰期（默认 **180 天**）。到达半衰期时 retention = 0.5，每过一个半衰期再减半（2⁻¹、2⁻²、2⁻³…）
+- `retention` 单调递减、永不归零——即使 3 个半衰期后（540 天）仍有 12.5% 的权重
 
-| 节点类型             | Active → Dormant 阈值 | Dormant → Purge 条件                                        | 永不 Purge                          |
-| -------------------- | --------------------- | ----------------------------------------------------------- | ----------------------------------- |
-| Fact / Relation      | 0.3                   | —（无 Purge 路径）                                          | 是                                  |
-| Preference           | 0.3                   | 路径1: Dormant > 90天 AND importance < 0.5；路径2: 容量压力 | importance ≥ 0.5 时仅容量压力可触发 |
-| ProceduralNode       | 0.3                   | 同 Preference                                               | 同 Preference                       |
-| AutobiographicalNode | —（不参与衰减）       | —                                                           | 是                                  |
+**两级渐进降级，不做二值踢出：**
 
-**Purge 三条路径**：
+1. **检索降权（渐进）**：检索排序时经历层分数 × retention。半衰期前 retention ≈ 1（全权参与），
+   之后随年龄平滑下降——旧记忆仍可被检索到，但自然排在更靠后（`MemoryManager` 检索路径，与扫描
+   共用同一半衰期曲线）
+2. **状态降级（阈值触发）**：retention < `dormant_threshold`（默认 0.1，≈ 3.3 个半衰期 ≈ 600 天）时
+   节点 Active → Dormant，退出检索
+3. **归档（最终遗忘）**：Dormant 状态持续超过 `archive_days`（默认 90 天）→ 写入 PurgeLog 归档
+   （30 天可恢复）
 
-路径 1 — 正常衰减（后台 decay_scan）：
-- 条件：Dormant > dormant_purge_days AND importance < purge_importance_threshold
-- 默认：90天 + importance < 0.5
-- 含义：低价值 + 长期沉睡 = 清理候选
+**参数（`agent_config.json`，全部开放可配置）：**
 
-路径 2 — 容量压力（存储接近上限时）：
-- 触发：Agent 存储用量 > max_storage_mb 的 90%
-- 执行：先 purge 满足路径1的节点，仍不够则按 decay_score 升序清理
+| 字段 | 默认值 | 含义 |
+| --- | --- | --- |
+| `memory_forgetting_enabled` | false | 总开关，默认关闭（关闭时扫描零开销、检索不降权） |
+| `memory_forgetting_half_life_days` | 180 | 半衰期（天）——**核心参数** |
+| `memory_forgetting_dormant_threshold` | 0.1 | retention 低于此值 → Active → Dormant |
+| `memory_forgetting_archive_days` | 90 | Dormant 满多少天 → 归档（PurgeLog，30 天可恢复） |
 
-路径 3 — 用户手动（Desktop App Memory 管理面板）
+**为什么半衰期默认 180 天？**
 
-详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.15
+经历层是真实事件记录，7/14 天就遗忘过快——用户几个月前的一次重要对话仍有检索价值。180 天（≈ 6 个月）
+对应"一年内的经历保持高权重"，3 个半衰期后（约 1.6 年）才进入 Dormant，符合直觉。
 
-**Fact 语义去重（发生在离线巩固阶段）：**
+**调度（`consolidation_bg` 后台任务）：**
 
-Fact/Relation 永不 Purge 可能导致存储膨胀（如用户每天说"今天天气不错"生成大量低价值重复节点）。即时提取和离线巩固阶段对 Fact 节点执行语义去重：
+- 周期性执行 `run_episodic_decay_scan()`（间隔默认 1 小时，`forgetting_interval_secs`）
+- 开关关闭时直接返回零值（零开销）
+- 旧 Pending 计数触发（accumulation / idle-timeout）已删除——Pending 状态自 ADR-068 起无生产者
 
-- 写入前检查：新 Fact 的 `(subject, predicate)` 是否与已有 Active 节点相同
-- 相同且 object 一致 → 更新 `confidence`（取最新值）和 `last_accessed`，不创建新节点
-- 相同但 object 不同 → 视为知识更新（如"用户住北京"→"用户住上海"），创建新节点并将旧节点标记为 Dormant（历史事实仍保留）
-- 用户可手动触发"归档非核心 Fact"：将 2 年以上未访问的非身份类 Fact 标记为 Dormant
+### 5.2 沉淀层：暂不衰减
 
-**Dormant 节点的处理：**
+沉淀层（Knowledge / Procedural / Autobiographical）是长期记忆，**暂时不衰减**：
 
-- 不参与常规检索（`hybrid_search` 默认过滤 `status != Dormant`）
-- 如果被其他机制重新引用（如用户再次提及、关联扩散路径经过），自动恢复为 Active，更新 `last_accessed`、`access_count += 1`（恢复引用算一次访问）并清除 **dormant_since**（90 天计时器归零）
-- 注意：恢复时不清零 `access_count` 的历史累积值，只增量 +1——历史使用频率是乘法模型的一部分，重置会抹杀抗遗忘能力
-- Dormant 节点仍然占用存储，但不在检索路径上，不影响检索效率
+- 事实性知识（Fact / Relation）只沉睡不删除——"曾经住北京"是历史事实
+- 偏好（Preference）、行为模式（Procedural）的过时判定需要语义判断，不能靠时间一刀切
+- 自传体节点是核心身份，遗忘 = 人格断裂，永不衰减
 
-**Purge 流程（真正删除）：**
-
-进入 Purge 流程不等于立即删除。Purge 前执行以下检查：
-
-```
-节点进入 Purge 流程
-   │
-   ▼
-① 检查是否有 Active 关联节点
-   - 有 → 不做自动知识合并（避免 LLM 判断的不确定性）
-     仅将该节点的 source_episode 引用转移到关联节点
-     （确保关联节点仍然知道这条知识的来源）
-   - 无 → 直接删除
-   │
-   ▼
-② 同时删除相关的图边（Grafeo LPG Edge 自动级联删除）
-   │
-   ▼
-③ 记录 purge_log（节点 ID、类型、内容摘要、purge 原因、关联节点 ID）
-   - purge_log 保留 30 天，用于调试和"找回被遗忘的记忆"
-   - purge_log 支持手动回滚：用户可从 purge_log 恢复任意已删除节点
-   - ⚠️ 未来可迁移至 Grafeo CDC history() 作为更可靠的审计机制
-```
-
-**用户手动操作：**
-
-- 用户可随时手动 purge 指定节点或所有 Dormant 节点（Desktop App → Memory 管理面板）
-- 用户可手动恢复任意 Dormant 节点为 Active（等同于"我想起来了"）
-
-**经验回溯 / 变更历史（基于 Grafeo CDC）：**
-
-Grafeo 内置 CDC（Change Data Capture）记录每个节点的完整变更历史。通过 `db.history(EntityId::Node(id))` 可以追溯任何记忆节点的创建、修改、删除全过程。
-
-使用场景：
-- 经验回溯：每次 Decay 修改节点属性后，可通过 `history()` 查看原始状态
-- 冲突调解：对比同一节点在不同时间点的版本，辅助 LLM 判断合并策略
-- 审计追踪：追踪记忆从 Episodic → Knowledge 的完整演化链路
-- Purge 恢复：被 purge 的节点可通过 CDC 历史找回（替代自研 purge_log）
-
-```rust
-// Retrieve full change history of a memory node
-let history = db.history(EntityId::Node(node_id))?;
-
-// Restore a node to a previous state after decay
-let snapshot = session.execute_at_epoch(
-    "MATCH (n) WHERE id(n) = $id RETURN n",
-    epoch,
-)?;
-```
-
-详见 docs/module-design/04-grafeo.md §CDC / History
+沉淀层沿用旧的乘法衰减模型（`forgetting/scan.rs` + `run_decay_scan`，importance × activity_signal），
+但**当前不在任何生产路径调度**——保留实现，待语义层衰减需求明确后再启用。
 
 ### 5.3 不参与遗忘的节点
 
 | 节点类型                           | 是否遗忘   | 原因                      |
 | ---------------------------------- | ---------- | ------------------------- |
+| EpisodicNode（经历层）             | 是（§5.1） | 真实事件记录，时间衰减    |
+| KnowledgeNode / ProceduralNode     | 否（§5.2） | 沉淀层暂不衰减            |
 | AutobiographicalNode               | 否         | 核心身份，遗忘 = 人格断裂 |
 | KnowledgeNode（identity 类）       | 否         | 用户姓名、语言等基础身份  |
 | SkillExperience                    | 专用衰减   | 按 Skill 系统规则管理     |
 | SkillDraft / Iteration / Execution | 开发期保留 | 调试完成后归档            |
+
+### 5.4 实现映射
+
+| 能力 | 代码位置 |
+| --- | --- |
+| 衰减引擎（扫描 + 归档） | `core/acowork-grafeo/src/forgetting/episodic_decay.rs` |
+| 配置定义 | `core/acowork-memory/src/types.rs::EpisodicDecayConfig` |
+| 调度（后台任务） | `core/acowork-runtime/src/memory/consolidation_bg.rs` |
+| 检索渐进降权 | `core/acowork-memory/src/manager.rs`（`RetrievalForgettingConfig`） |
+| 配置开放 | `agent_config.json` 的 `memory_forgetting_*` 字段 + 前端"记忆遗忘"卡片 |
 
 ## 6. 关联扩散检索
 

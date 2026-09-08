@@ -1385,9 +1385,7 @@ mod tests {
     use acowork_memory::consolidation::LlmResponse;
     use acowork_memory::types::{AutobioCategory, CollaborationSpan, MemoryQuery, SearchResult};
     use acowork_memory::{
-        DecayConfig, DecayScanResult, GeneralizationConfig, GeneralizationResult,
-        MemoryQualityConfig, OfflineConsolidationConfig, OfflineConsolidationResult,
-        PurgeResult, SchedulerConfig, StoreHealth, StoreStats,
+        DecayScanResult, EpisodicDecayConfig, MemoryQualityConfig, StoreHealth, StoreStats,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1619,13 +1617,10 @@ mod tests {
         fn graph_expand(&self, _s: &[SearchResult], _h: u8) -> acowork_core::error::Result<Vec<SearchResult>> {
             Ok(vec![])
         }
-        fn run_decay_scan(&self, _c: &DecayConfig) -> acowork_core::error::Result<DecayScanResult> {
-            unreachable!()
-        }
-        fn reactivate_node(&self, _id: u64) -> acowork_core::error::Result<()> {
-            unreachable!()
-        }
-        fn purge_expired(&self, _m: Duration) -> acowork_core::error::Result<PurgeResult> {
+        fn run_episodic_decay_scan(
+            &self,
+            _c: &EpisodicDecayConfig,
+        ) -> acowork_core::error::Result<DecayScanResult> {
             unreachable!()
         }
         fn health_check(&self) -> acowork_core::error::Result<StoreHealth> {
@@ -1664,17 +1659,6 @@ mod tests {
             unreachable!()
         }
         fn generate_confirmation_hint(&self) -> acowork_core::error::Result<Option<String>> {
-            unreachable!()
-        }
-        async fn run_generalization(
-            &self,
-            _s: Option<&str>,
-            _e: &EmbeddingFn,
-            _c: &GeneralizationConfig,
-        ) -> acowork_core::error::Result<GeneralizationResult> {
-            unreachable!()
-        }
-        fn compress_history_nodes(&self, _k: usize) -> acowork_core::error::Result<usize> {
             unreachable!()
         }
         fn get_all_procedural_nodes(&self) -> acowork_core::error::Result<Vec<ProceduralNode>> {
@@ -1758,23 +1742,6 @@ mod tests {
             _w: f64,
         ) -> acowork_core::error::Result<()> {
             Ok(())
-        }
-        fn start_consolidation(&self, _c: &SchedulerConfig) -> acowork_core::error::Result<()> {
-            unreachable!()
-        }
-        fn stop_consolidation(&self) {}
-        async fn notify_consolidation_active(&self) {}
-        fn get_pending_consolidation_count(&self) -> acowork_core::error::Result<usize> {
-            unreachable!()
-        }
-        async fn run_offline_consolidation(
-            &self,
-            _c: &OfflineConsolidationConfig,
-            _l: Option<&dyn TripleExtractorLlm>,
-            _e: Option<EmbeddingFn>,
-            _g: Option<&GeneralizationConfig>,
-        ) -> acowork_core::error::Result<OfflineConsolidationResult> {
-            unreachable!()
         }
     }
 

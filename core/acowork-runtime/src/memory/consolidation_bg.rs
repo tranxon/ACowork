@@ -2,13 +2,16 @@
 //!
 //! ADR-051 P4: Replaces the grafeo `ConsolidationScheduler` with a
 //! lightweight `ConsolidationTimer` that lives in the Runtime. The timer
-//! implements the same scheduling policy (idle-timeout + accumulation
-//! threshold) without needing a GrafeoStore.
+//! implements interval-gated triggers (distiller + episodic forgetting)
+//! without needing a GrafeoStore. The legacy Pending-count accumulation /
+//! idle-timeout triggers are gone — Pending nodes have had no producer
+//! since ADR-068, so those triggers could never fire.
 //!
 //! The background task:
-//! 1. Polls `should_run()` every 60 seconds
-//! 2. When triggered, runs the full offline consolidation pipeline
-//!    (triple extraction + conflict resolution + generalization)
+//! 1. Polls `should_run_distill()` / `should_run_forgetting()` every poll
+//!    interval (default 60s)
+//! 2. When triggered, runs the EpisodicDistiller and/or the episodic
+//!    forgetting decay scan
 //! 3. Logs results and errors
 //!
 //! The actual consolidation execution goes through `dyn MemoryProvider`,
@@ -18,8 +21,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use acowork_memory::consolidation::{
-    OfflineConsolidationConfig, SchedulerConfig, TripleExtractorLlm,
+    SchedulerConfig, TripleExtractorLlm,
 };
+use acowork_memory::EpisodicDecayConfig;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
@@ -33,12 +37,8 @@ use crate::memory::llm_adapter::ProviderLlmAdapter;
 /// Why a consolidation run was triggered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerReason {
-    /// Agent has been idle for longer than the configured timeout.
-    IdleTimeout,
-    /// The number of pending nodes exceeded the accumulation threshold.
-    Accumulation,
-    /// Manually triggered by the user or API.
-    Manual,
+    /// Episodic forgetting scan interval point reached (opt-in).
+    ForgettingInterval,
     /// Distiller (ADR-071 D1): interval point reached and the
     /// unconsolidated-episode backlog is at/above the accumulation threshold.
     DistillerAccumulation,
@@ -112,11 +112,12 @@ impl DistillRunRecord {
 #[derive(Debug)]
 struct TimerState {
     last_active_at: chrono::DateTime<Utc>,
-    pending_count: usize,
     /// Unconsolidated-episode backlog (distiller input, ADR-071 D1).
     episode_count: usize,
     /// Last time the distiller actually ran (interval gate, ADR-071 D1).
     last_distill_at: chrono::DateTime<Utc>,
+    /// Last time the episodic forgetting scan ran (interval gate).
+    last_forgetting_at: chrono::DateTime<Utc>,
     /// Summary of the most recent distiller run (ADR-071 D2). `None` until
     /// the first run completes.
     last_distill: Option<DistillRunRecord>,
@@ -129,9 +130,9 @@ impl ConsolidationTimer {
             config: RwLock::new(config),
             state: Mutex::new(TimerState {
                 last_active_at: now,
-                pending_count: 0,
                 episode_count: 0,
                 last_distill_at: now,
+                last_forgetting_at: now,
                 last_distill: None,
             }),
         }
@@ -141,12 +142,6 @@ impl ConsolidationTimer {
     pub async fn notify_active(&self) {
         let mut state = self.state.lock().await;
         state.last_active_at = Utc::now();
-    }
-
-    /// Update the pending node count (called periodically by the background task).
-    pub async fn update_pending_count(&self, count: usize) {
-        let mut state = self.state.lock().await;
-        state.pending_count = count;
     }
 
     /// Update the unconsolidated-episode backlog (distiller input, ADR-071 D1).
@@ -174,27 +169,6 @@ impl ConsolidationTimer {
     pub async fn last_distill_result(&self) -> Option<DistillRunRecord> {
         let state = self.state.lock().await;
         state.last_distill.clone()
-    }
-
-    /// Check whether consolidation should run now.
-    pub async fn should_run(&self) -> Option<TriggerReason> {
-        let state = self.state.lock().await;
-        let cfg = self.config.read().unwrap();
-        let now = Utc::now();
-
-        // Check accumulation threshold
-        if state.pending_count >= cfg.accumulation_threshold {
-            return Some(TriggerReason::Accumulation);
-        }
-
-        // Check idle timeout
-        let idle_duration = now - state.last_active_at;
-        let idle_secs = idle_duration.num_seconds();
-        if idle_secs >= cfg.idle_timeout_secs as i64 && state.pending_count > 0 {
-            return Some(TriggerReason::IdleTimeout);
-        }
-
-        None
     }
 
     /// Check whether the EpisodicDistiller should run (ADR-071 D1).
@@ -233,6 +207,30 @@ impl ConsolidationTimer {
         None
     }
 
+    /// Check whether the episodic forgetting scan should run.
+    ///
+    /// Opt-in (`forgetting_enabled`, default off) + interval gate
+    /// (`forgetting_interval_secs`, default 1h) so an enabled scan never
+    /// hits the full Episodic table on every poll tick.
+    pub async fn should_run_forgetting(&self) -> Option<TriggerReason> {
+        let state = self.state.lock().await;
+        let cfg = self.config.read().unwrap();
+        if !cfg.forgetting_enabled {
+            return None;
+        }
+        let since_last = Utc::now() - state.last_forgetting_at;
+        if since_last.num_seconds() < cfg.forgetting_interval_secs as i64 {
+            return None;
+        }
+        Some(TriggerReason::ForgettingInterval)
+    }
+
+    /// Record that the forgetting scan just ran (interval gate).
+    pub async fn mark_forgetting_run(&self) {
+        let mut state = self.state.lock().await;
+        state.last_forgetting_at = Utc::now();
+    }
+
     /// Snapshot the current scheduler config (ADR-071 D6: may differ from
     /// the config the timer was constructed with after a live update).
     pub fn config(&self) -> SchedulerConfig {
@@ -260,13 +258,6 @@ impl ConsolidationTimer {
     pub async fn idle_secs(&self) -> i64 {
         let state = self.state.lock().await;
         (Utc::now() - state.last_active_at).num_seconds()
-    }
-
-    /// Get the current pending node count.
-    /// Used by the HTTP status endpoint.
-    pub async fn pending_count(&self) -> usize {
-        let state = self.state.lock().await;
-        state.pending_count
     }
 
     /// Get the current unconsolidated-episode backlog (ADR-071 D1).
@@ -357,19 +348,9 @@ async fn run_consolidation_loop(
     loop {
         interval.tick().await;
 
-        // Update pending count from the provider (legacy lifecycle input).
-        let pending_count = match provider.get_pending_consolidation_count() {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to count pending nodes for scheduler");
-                continue;
-            }
-        };
-        scheduler.update_pending_count(pending_count).await;
-
         // Update the unconsolidated-episode backlog (distiller input).
         // Only polled when the distiller is enabled (off by default, so a
-        // disabled distiller costs nothing beyond the pending-count query).
+        // disabled distiller costs nothing).
         let distiller_enabled = scheduler.config().distiller_enabled;
         if distiller_enabled {
             let episode_count = match provider.count_unconsolidated_episodes() {
@@ -382,20 +363,23 @@ async fn run_consolidation_loop(
             scheduler.update_episode_count(episode_count).await;
         }
 
-        // ADR-071 D1: the distiller and the legacy lifecycle pass trigger
-        // independently. A tick that satisfies either condition runs its
-        // own pipeline; neither blocks the other.
-        let legacy_trigger = scheduler.should_run().await;
+        // ADR-071 D1 + episodic forgetting: the distiller and the forgetting
+        // scan trigger independently. A tick that satisfies either condition
+        // runs its own pipeline; neither blocks the other. The legacy
+        // Pending-count trigger had no producer since ADR-068 (memory_store
+        // writes episodes only; the distiller promotes straight to Active
+        // nodes) — it is gone.
+        let forgetting_trigger = scheduler.should_run_forgetting().await;
         let distill_trigger = if distiller_enabled {
             scheduler.should_run_distill().await
         } else {
             None
         };
-        if legacy_trigger.is_none() && distill_trigger.is_none() {
+        if forgetting_trigger.is_none() && distill_trigger.is_none() {
             continue;
         }
-        if let Some(reason) = &legacy_trigger {
-            tracing::info!(?reason, pending = pending_count, "Consolidation (legacy lifecycle) triggered");
+        if let Some(reason) = &forgetting_trigger {
+            tracing::info!(?reason, "Episodic forgetting scan triggered");
         }
         if let Some(reason) = &distill_trigger {
             let backlog = scheduler.episode_count().await;
@@ -408,12 +392,6 @@ async fn run_consolidation_loop(
         // worker (ADR-071 W2 — the distiller calls the bridge synchronously
         // from async code).
         let embedding_fn = build_embedding_bridge(embedding_provider.clone());
-
-        // Build offline config from scheduler config.
-        let offline_config = OfflineConsolidationConfig {
-            batch_size: scheduler.config().batch_size,
-            min_pending_age_hours: scheduler.config().min_pending_age_hours,
-        };
 
         // ADR-071 D1: EpisodicDistiller step (off-by-default), triggered by
         // its OWN condition — not by the legacy Pending-node trigger. The
@@ -437,36 +415,31 @@ async fn run_consolidation_loop(
             }
         }
 
-        // Run offline consolidation through the provider trait (legacy
-        // lifecycle only): Pending -> Active/Dormant upgrade and episodic
-        // retention. ADR-068 revision: generalization is retired; Procedural
-        // promotion is owned exclusively by the EpisodicDistiller above.
-        if let Some(reason) = legacy_trigger {
-            match provider
-                .run_offline_consolidation(
-                    &offline_config,
-                    Some(&*llm),
-                    embedding_fn,
-                    None, // gen_config — generalization retired
-                )
-                .await
-            {
+        // Run episodic forgetting (pure time decay) through the provider
+        // trait. Opt-in (`forgetting_enabled`); when disabled the scan is a
+        // no-op and episodic nodes never age out.
+        if forgetting_trigger.is_some() {
+            let cfg = scheduler.config();
+            let decay_config = EpisodicDecayConfig {
+                enabled: true,
+                half_life_days: cfg.forgetting_half_life_days,
+                dormant_threshold: cfg.forgetting_dormant_threshold,
+                archive_days: cfg.forgetting_archive_days,
+            };
+            match provider.run_episodic_decay_scan(&decay_config) {
                 Ok(result) => {
                     tracing::info!(
-                        trigger = ?reason,
-                        upgraded = result.upgraded,
-                        conflicts_resolved = result.conflicts_resolved,
-                        "Consolidation run complete"
+                        to_dormant = result.to_dormant,
+                        purged = result.purged,
+                        "Episodic forgetting scan complete"
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Consolidation run failed");
+                    tracing::warn!(error = %e, "Episodic forgetting scan failed");
                 }
             }
+            scheduler.mark_forgetting_run().await;
         }
-
-        // Notify the provider that consolidation just ran.
-        provider.notify_consolidation_active().await;
 
         // Optional: write a sentinel file for debugging.
         if let Some(ref work_dir) = work_dir {
@@ -693,25 +666,10 @@ mod tests {
         assert!(idle < 5, "Idle should be near 0 after notify_active");
     }
 
-    #[tokio::test]
-    async fn test_timer_accumulation_trigger() {
-        let config = SchedulerConfig {
-            accumulation_threshold: 5,
-            ..Default::default()
-        };
-        let timer = ConsolidationTimer::new(config);
-        timer.update_pending_count(10).await;
-        let trigger = timer.should_run().await;
-        assert_eq!(trigger, Some(TriggerReason::Accumulation));
-    }
-
-    #[tokio::test]
-    async fn test_timer_no_trigger_when_empty() {
-        let timer = ConsolidationTimer::new(SchedulerConfig::default());
-        timer.update_pending_count(0).await;
-        let trigger = timer.should_run().await;
-        assert_eq!(trigger, None);
-    }
+    // Legacy `test_timer_accumulation_trigger` / `test_timer_no_trigger_when_empty`
+    // (Pending-count triggers) were deleted with the `should_run()` /
+    // `update_pending_count()` methods — Pending has no producer since
+    // ADR-068 (ADR-057 §5.3 redesign).
 
     // ── ADR-071 D1: distiller trigger (independent of legacy Pending) ──
 
@@ -856,6 +814,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_forgetting_trigger_disabled_by_default() {
+        // Episodic forgetting is per-agent opt-in (ADR-057 §5.3): the
+        // default scheduler must never fire it, even with the interval
+        // gate wide open.
+        let timer = ConsolidationTimer::new(SchedulerConfig::default());
+        {
+            let mut state = timer.state.lock().await;
+            state.last_forgetting_at = Utc::now() - chrono::TimeDelta::days(30);
+        }
+        assert_eq!(timer.should_run_forgetting().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_forgetting_trigger_interval_gate() {
+        // Enabled + fresh timer → interval not elapsed → no run.
+        let config = SchedulerConfig {
+            forgetting_enabled: true,
+            forgetting_interval_secs: 3600,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        assert_eq!(timer.should_run_forgetting().await, None);
+
+        // mark_forgetting_run resets the gate → still gated on the next tick.
+        timer.mark_forgetting_run().await;
+        assert_eq!(timer.should_run_forgetting().await, None);
+
+        // Backdate the last run → interval open → fires ForgettingInterval.
+        {
+            let mut state = timer.state.lock().await;
+            state.last_forgetting_at = Utc::now() - chrono::TimeDelta::hours(2);
+        }
+        assert_eq!(
+            timer.should_run_forgetting().await,
+            Some(TriggerReason::ForgettingInterval)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forgetting_trigger_live_config_update() {
+        // ADR-071 D6-style live swap: disabled at start → nothing fires;
+        // flipping the switch on must take effect on the next tick without
+        // rebuilding the timer.
+        let timer = ConsolidationTimer::new(SchedulerConfig::default());
+        {
+            let mut state = timer.state.lock().await;
+            state.last_forgetting_at = Utc::now() - chrono::TimeDelta::days(30);
+        }
+        assert_eq!(timer.should_run_forgetting().await, None);
+
+        timer.update_config(SchedulerConfig {
+            forgetting_enabled: true,
+            forgetting_interval_secs: 0, // always open once enabled
+            ..Default::default()
+        });
+        assert_eq!(
+            timer.should_run_forgetting().await,
+            Some(TriggerReason::ForgettingInterval)
+        );
+    }
+
+    #[tokio::test]
     async fn test_consolidation_bg_task_starts_and_stops() {
         let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
             acowork_grafeo::GrafeoStore::new_in_memory().unwrap(),
@@ -936,21 +956,9 @@ mod tests {
             "Idle should be < 5s after notify_active, got {idle_secs}s"
         );
 
-        // Without notify_active, idle should NOT trigger (pending = 0).
-        timer.update_pending_count(0).await;
-        let trigger = timer.should_run().await;
-        assert_eq!(trigger, None, "Should not trigger with 0 pending nodes");
-
-        // With pending nodes but recent activity, should still not trigger
-        // (idle_timeout_secs = 1800, only 1s elapsed).
-        timer.update_pending_count(100).await;
-        let trigger = timer.should_run().await;
-        // Accumulation threshold is 50, pending is 100 -> should trigger.
-        assert_eq!(
-            trigger,
-            Some(TriggerReason::Accumulation),
-            "Should trigger via accumulation when pending >= threshold"
-        );
+        // Legacy Pending-count assertions removed with `should_run()` /
+        // `update_pending_count()` (ADR-057 §5.3 redesign). Idle / backlog
+        // state is still tracked for the distiller's inner gate.
     }
 
     // -----------------------------------------------------------------------

@@ -564,7 +564,10 @@
     "tokens": "tokens",
     "builtinTools": "Builtin Tools ({{count}})",
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
-    "noBuiltinTools": "No builtin tools available."
+    "noBuiltinTools": "No builtin tools available.",
+    "sectionAgentInfo": "Agent Info",
+    "sectionSessionParams": "Session Parameters",
+    "sectionModelParams": "Model Parameters"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",
@@ -758,7 +761,6 @@
     "debugRemoteDesc": "Debug requires a direct local connection to the Agent Runtime. The Desktop App and Gateway must run on the same machine.",
     "connectingDebug": "Connecting to debug server...",
     "debugConnectionLost": "Debug connection lost",
-    "debugSection": "Debug",
     "enterDebug": "Enter Debug",
     "enteringDebug": "Entering Debug...",
     "noAgentDebug": "No agent in debug mode",
@@ -1020,6 +1022,13 @@
     "distillerLastRun": "Last: {{scanned}} episodes → {{promoted}} memories",
     "distillerNeverRun": "Never run",
     "distillerSaveFailed": "Save failed (HTTP {{status}})",
+    "forgettingTitle": "Memory Forgetting",
+    "forgettingEnabled": "Enable memory forgetting",
+    "forgettingHalfLife": "Half-life (days)",
+    "forgettingDormantThreshold": "Dormant threshold",
+    "forgettingArchiveDays": "Archive (days)",
+    "forgettingDisabledHint": "When enabled, episodes decay along a half-life curve: full retrieval weight inside the half-life, then progressively down-weighted, finally dormant and archived.",
+    "forgettingSaveFailed": "Save failed (HTTP {{status}})",
     "distillNow": "Distill now",
     "distillDone": "Distilled {{scanned}} episodes; promoted {{promoted}} memories",
     "distillEmpty": "No new episodes to distill",

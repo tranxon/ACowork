@@ -1937,12 +1937,6 @@ pub async fn start_agent(
                 agent_id
             )));
         }
-        if gw.is_running(&agent_id) {
-            return Err(ApiError::bad_request(&format!(
-                "Agent {} is already running",
-                agent_id
-            )));
-        }
     }
 
     // ADR-055 idempotent fast-path: when the Runtime is already online
@@ -1957,42 +1951,153 @@ pub async fn start_agent(
     // Auto-sleep (`sleeping`) keeps the process alive but suspends the
     // session, so a start must still reach the Node to wake it — only a
     // live (non-sleeping) online state short-circuits.
+    //
+    // INVARIANT: the fast-path is ONLY safe when the broker's
+    // authoritative view (`agent_registry`) AND the local process
+    // table (`running_agents`) agree. The original 2026-09-07 bug was
+    // caused by treating `registry.is_online = true` as sufficient
+    // without checking that `running_agents` already contained the
+    // entry — the result was a 200 on a desynced Gateway whose UI
+    // kept showing the agent as 休眠.
+    //
+    // Reconciliation rule (post-incident):
+    //   registry online ∧ running_agents has entry   → idempotent 200.
+    //   registry online ∧ running_agents MISSING     → DESYNC.
+    //       Self-heal: call `reconcile_running_agents` (which re-derives
+    //       `running_agents` from `agent_registry` — the SoT) and retry
+    //       the fast-path once. If the retry still finds desync, that
+    //       is a structural inconsistency — fall through to the node
+    //       control path so the Node can re-stamp the entry, with a
+    //       structured warning logged for the operator.
+    //   registry sleeping/offline ∧ running_agents has entry → not a
+    //       fast-path candidate; the guard below rejects the duplicate
+    //       start (stop first) until the broker view converges.
+    //   registry sleeping/offline ∧ running_agents MISSING   → not a
+    //       fast-path candidate; fall through to node control.
     if let Some(ref reg) = state.agent_registry {
-        let live_online = {
-            let reg = reg.read().await;
-            reg.is_online(&agent_id) && reg.sleeping_at(&agent_id).is_none()
+        // Single read so we don't race the reconcile loop on
+        // `running_agents` between the snapshot and the entry check.
+        let (live_online, has_entry) = {
+            let reg_guard = reg.read().await;
+            let reg_online = reg_guard.is_online(&agent_id)
+                && reg_guard.sleeping_at(&agent_id).is_none();
+            let gw_guard = state.gateway_state.read().await;
+            let in_running = gw_guard.is_running(&agent_id);
+            (reg_online, in_running)
         };
-        if live_online {
+        if live_online && has_entry {
             tracing::info!(
                 agent_id,
-                "POST /start short-circuited: agent already online (idempotent)"
+                "POST /start short-circuited: agent already online (idempotent, SoT-consistent)"
             );
             return Ok(Json(MessageResponse {
                 message: format!("Agent already running: {}", agent_id),
             }));
         }
+        if live_online && !has_entry {
+            // DESYNC: the broker says the Runtime is up but the Gateway's
+            // local view dropped the entry (the 2026-09-07 symptom).
+            //
+            // Strategy: this is a RECOVERABLE transient. The reconcile
+            // loop should have caught it within `RECONCILE_INTERVAL_SECS`,
+            // but it is reasonable to trigger an on-demand reconcile so
+            // the click feels instant. We fire the reconcile + retry the
+            // fast-path; only if the retry still finds desync do we
+            // surface the inconsistency by falling through to the node
+            // control path (which can re-stamp the entry directly).
+            //
+            // We deliberately do NOT swallow this as a 200 — that was
+            // the bug.
+            tracing::warn!(
+                agent_id,
+                "POST /start: registry online but running_agents missing (desync) — reconciling"
+            );
+            crate::mqtt::dispatch::reconcile_running_agents(
+                &state.gateway_state,
+                reg,
+            )
+            .await;
+            let still_desynced = {
+                let gw_guard = state.gateway_state.read().await;
+                !gw_guard.is_running(&agent_id)
+            };
+            if !still_desynced {
+                tracing::info!(
+                    agent_id,
+                    "POST /start: reconcile restored running_agents entry; idempotent 200"
+                );
+                return Ok(Json(MessageResponse {
+                    message: format!(
+                        "Agent already running: {} (reconciled)",
+                        agent_id
+                    ),
+                }));
+            }
+            tracing::warn!(
+                agent_id,
+                "POST /start: reconcile did NOT restore the entry — falling through to node control to re-stamp"
+            );
+            // Fall through; do NOT return 200.
+        }
+    }
+
+    // Local process table has an entry the broker view does not
+    // consider live-online (registry `sleeping` / `offline`, or no
+    // registry wired): the idempotent fast-path above does not apply.
+    // Reject the duplicate start exactly like the pre-fast-path code
+    // did — a stop (or broker-view convergence) must come first.
+    if state.gateway_state.read().await.is_running(&agent_id) {
+        return Err(ApiError::bad_request(&format!(
+            "Agent {} is already running",
+            agent_id
+        )));
     }
 
     // ADR-055 §6.2: delegate start to the local node via the control
     // plane instead of spawning the Runtime directly.
+    //
+    // Error layering (2026-09-07 incident review):
+    //   - Every error path surfaces a structured `ApiError` (HTTP
+    //     status + machine-readable `StructuredErrorCode` body) so the
+    //     Desktop can render a precise toast instead of a generic
+    //     "something went wrong".
+    //   - TRANSIENT failures (publish hiccup, command timeout) carry a
+    //     `retry_hint`; the client retries automatically with backoff
+    //     and the user sees nothing.
+    //   - STRUCTURAL failures (agent_not_installed on the node side,
+    //     unknown_node, bad-request) carry NO retry hint; the user
+    //     must act (e.g. install the agent package).
     let node_control = state.node_control.clone().ok_or_else(|| {
-        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+        // Broker disabled — there is no control plane. Unrecoverable
+        // for this Gateway instance until the operator re-enables MQTT.
+        ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Node control plane unavailable (MQTT disabled)",
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_control_plane_disabled".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        )
     })?;
     check_node_compatible(&state, &acowork_core::node::local_node_id()).await?;
     let event = node_control
         .start_agent(&acowork_core::node::local_node_id(), &agent_id, req.dev_mode)
         .await
-        .map_err(|e| match e {
-            crate::mqtt::node_control::NodeControlError::Timeout { request_id } => {
-                ApiError::gateway_timeout(&format!(
-                    "Start timed out waiting for node reply (request_id {})",
-                    request_id
-                ))
-            }
-            other => ApiError::internal(&format!("Start failed: {}", other)),
-        })?;
+        .map_err(|e| map_node_control_error("start", &agent_id, e))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
-        .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("Start rejected by node: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                operation_id: None,
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
 
     // Track the running entry in GatewayState (node-hosted, pid 0).
     track_running_agent(&state, &agent_id, req.dev_mode).await;
@@ -2031,6 +2136,123 @@ pub async fn start_agent(
     }))
 }
 
+/// Map a [`crate::mqtt::node_control::NodeControlError`] into a layered
+/// [`ApiError`] (2026-09-07 incident follow-up).
+///
+/// The layering principle (from the incident review):
+///
+/// | Error variant              | Layer | HTTP | StructuredCode            | Retry hint | UX                      |
+/// |----------------------------|-------|------|---------------------------|------------|-------------------------|
+/// | `Timeout`                  | trans | 504  | `HandshakeTimeout`        | yes        | invisible (auto-retry)  |
+/// | `Publish`                  | trans | 503  | `DependencyNotReady`      | yes        | invisible (auto-retry)  |
+/// | `NoClient`                 | struct| 503  | `DependencyNotReady`      | no         | toast: broker disabled  |
+/// | `NodeOffline`              | struct| 503  | `DependencyNotReady`      | no         | toast: node enrolling   |
+/// | `CommandFailed`            | struct| 422  | `OperationExpired`        | no         | toast: node rejected it |
+///
+/// The retry hint (`retry_after_ms` + `retry_count`) asks the Desktop
+/// to re-issue the command automatically. The wire format carries no
+/// backoff multiplier, so the hint is a fixed per-attempt delay (the
+/// Desktop may apply its own scaling between attempts).
+///
+/// `op_name` (`"start"` / `"stop"` / `"restart-debug"`) is included in
+/// the human message so the log/UI can attribute the failure without
+/// reading the structured body.
+fn map_node_control_error(
+    op_name: &str,
+    agent_id: &str,
+    e: crate::mqtt::node_control::NodeControlError,
+) -> ApiError {
+    use crate::mqtt::node_control::NodeControlError as E;
+    use acowork_core::error_codes::{RetryHint, StructuredErrorCode};
+    match e {
+        // TRANSIENT — command round-trip exceeded the deadline. The
+        // node may be slow to recover (sleep/wake, MCP reconnect,
+        // cold-start of a large workspace). The retry hint asks the
+        // Desktop to re-issue automatically; user sees nothing.
+        // retry_after_ms=1500 matches the gateway_command_timeout
+        // (10s) / 2 floor so the first retry lands inside the same
+        // wake window.
+        E::Timeout { request_id } => ApiError::structured(
+            StatusCode::GATEWAY_TIMEOUT,
+            &format!(
+                "{op_name}: node did not answer within the deadline (request_id {request_id})"
+            ),
+            StructuredErrorBody {
+                code: StructuredErrorCode::HandshakeTimeout,
+                phase_detail: Some(format!(
+                    "{op_name}_node_command_timeout agent={agent_id}"
+                )),
+                retry_hint: Some(RetryHint {
+                    retry_after_ms: Some(1500),
+                    retry_count: 5,
+                }),
+                ..Default::default()
+            },
+        ),
+
+        // TRANSIENT — the broker is unreachable from the Gateway side.
+        // Either the publisher transiently dropped or the broker
+        // itself restarted. The retry hint asks the Desktop to
+        // re-issue automatically; user sees nothing.
+        E::Publish(msg) => ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("{op_name}: MQTT publish failed ({msg})"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some(format!("{op_name}_mqtt_publish_transient_failure")),
+                retry_hint: Some(RetryHint {
+                    retry_after_ms: Some(2000),
+                    retry_count: 5,
+                }),
+                ..Default::default()
+            },
+        ),
+
+        // STRUCTURAL — no MQTT client wired (broker disabled in
+        // config). Operator must act.
+        E::NoClient => ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("{op_name}: node control plane unavailable (broker disabled)"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_broker_disabled_in_config".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ),
+
+        // STRUCTURAL — the named node has not announced `NodeReady`
+        // yet (or has been demoted). Client should wait for bootstrap
+        // to complete; no automatic retry because the node's lifecycle
+        // is gated on the bootstrap barrier.
+        E::NodeOffline { node_id } => ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("{op_name}: node '{node_id}' is offline or not yet ready"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some(format!("node_offline node_id={node_id}")),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ),
+
+        // STRUCTURAL — the node replied with an error (e.g.
+        // `agent_not_installed`, `spawn_failed`, `permission_denied`).
+        // This is the node-side definitive answer; retrying would
+        // produce the same answer.
+        E::CommandFailed { agent_id: aid, message } => ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("{op_name}: node rejected command for '{aid}': {message}"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::OperationExpired,
+                phase_detail: Some(format!("{op_name}_command_failed agent={aid} message={message}")),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ),
+    }
+}
+
 /// `POST /api/agents/:id/stop` — stop a running agent
 pub async fn stop_agent(
     State(state): State<AppState>,
@@ -2048,14 +2270,32 @@ pub async fn stop_agent(
 
     // ADR-055 §6.2: delegate stop to the local node.
     let node_control = state.node_control.clone().ok_or_else(|| {
-        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+        ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stop: node control plane unavailable (MQTT disabled)",
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_control_plane_disabled".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        )
     })?;
     let event = node_control
         .stop_agent(&acowork_core::node::local_node_id(), &agent_id, "user")
         .await
-        .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("stop", &agent_id, e))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
-        .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("stop: node rejected command: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
 
     // Pre-emptively drop the running entry (mirrors the old stop path).
     state.gateway_state.write().await.remove_running(&agent_id);
@@ -2121,25 +2361,52 @@ pub async fn restart_agent_in_debug(
 
     // ADR-055 §6.2: restart-in-debug = node stop + node start(dev_mode).
     let node_control = state.node_control.clone().ok_or_else(|| {
-        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+        ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "restart-debug: node control plane unavailable (MQTT disabled)",
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_control_plane_disabled".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        )
     })?;
 
     // Stop current process
     let stop_event = node_control
         .stop_agent(&acowork_core::node::local_node_id(), &agent_id, "debug-restart")
         .await
-        .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("restart-debug:stop", &agent_id, e))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &stop_event)
-        .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("restart-debug: stop before restart failed: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
     state.gateway_state.write().await.remove_running(&agent_id);
 
     // Start with dev_mode=true
     let start_event = node_control
         .start_agent(&acowork_core::node::local_node_id(), &agent_id, true)
         .await
-        .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("restart-debug:start", &agent_id, e))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &start_event)
-        .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("restart-debug: start with dev_mode=true failed: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
     track_running_agent(&state, &agent_id, true).await;
 
     // Bump Gateway's log level to DEBUG so the Settings UI reflects it.
@@ -2779,5 +3046,276 @@ mod tests {
                 "com.acowork.mmm",
             ]
         );
+    }
+
+    // ── 2026-09-07 incident follow-up: error layering contract ──────────
+
+    /// The error layering table from `map_node_control_error`'s
+    /// docstring is the contract the Desktop client depends on for
+    /// retry / toast decisions. Pin every cell at once — a single
+    /// regression in any of the four rows will make the Desktop
+    /// either retry a non-retryable error (UX bug) or surface a
+    /// recoverable one as a permanent failure (visibility bug).
+    #[test]
+    fn map_node_control_error_layers_transient_failures_with_retry_hint() {
+        use crate::mqtt::node_control::NodeControlError;
+        use acowork_core::error_codes::StructuredErrorCode;
+
+        // TRANSIENT — timeout → 504 + HandshakeTimeout + retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::Timeout {
+                request_id: "req-42".to_string(),
+            },
+        );
+        assert_eq!(err.code, 504, "Timeout must map to HTTP 504");
+        assert!(
+            err.error.contains("req-42"),
+            "human message must surface the request_id for log correlation; got: {}",
+            err.error
+        );
+        let s = err.structured.expect("transient errors MUST carry a structured body");
+        assert_eq!(s.code, StructuredErrorCode::HandshakeTimeout);
+        let hint = s.retry_hint.as_ref().expect("transient must carry retry_hint");
+        assert_eq!(hint.retry_after_ms, Some(1500));
+        assert_eq!(hint.retry_count, 5);
+
+        // TRANSIENT — MQTT publish hiccup → 503 + DependencyNotReady + retry
+        let err = map_node_control_error(
+            "stop",
+            "com.acowork.architect",
+            NodeControlError::Publish("client disconnected".to_string()),
+        );
+        assert_eq!(err.code, 503, "Publish must map to HTTP 503");
+        let s = err.structured.expect("transient errors MUST carry a structured body");
+        assert_eq!(s.code, StructuredErrorCode::DependencyNotReady);
+        assert_eq!(s.retry_hint.as_ref().map(|r| r.retry_count), Some(5));
+    }
+
+    /// Structural failures (NodeOffline, CommandFailed, NoClient) must
+    /// surface NO retry_hint — retrying would produce the same answer.
+    /// The Desktop relies on the absence of `retry_hint` to render a
+    /// permanent toast instead of a silent retry loop.
+    #[test]
+    fn map_node_control_error_layers_structural_failures_without_retry_hint() {
+        use crate::mqtt::node_control::NodeControlError;
+        use acowork_core::error_codes::StructuredErrorCode;
+
+        // STRUCTURAL — node offline → 503 + DependencyNotReady, NO retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::NodeOffline {
+                node_id: "node-x".to_string(),
+            },
+        );
+        assert_eq!(err.code, 503);
+        let s = err.structured.expect("structural errors still carry a body for classification");
+        assert_eq!(s.code, StructuredErrorCode::DependencyNotReady);
+        assert!(
+            s.retry_hint.is_none(),
+            "NodeOffline is structural — no retry hint; got: {:?}",
+            s.retry_hint
+        );
+        assert!(
+            s.phase_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("node-x"),
+            "phase_detail must identify the offending node for the operator toast"
+        );
+
+        // STRUCTURAL — broker disabled (NoClient) → 503, NO retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::NoClient,
+        );
+        assert_eq!(err.code, 503);
+        let s = err.structured.expect("structural errors still carry a body for classification");
+        assert_eq!(s.code, StructuredErrorCode::DependencyNotReady);
+        assert!(
+            s.retry_hint.is_none(),
+            "NoClient is structural — no retry hint"
+        );
+
+        // STRUCTURAL — node rejected (CommandFailed) → 422 + OperationExpired, NO retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::CommandFailed {
+                agent_id: "com.acowork.architect".to_string(),
+                message: "agent_not_installed".to_string(),
+            },
+        );
+        assert_eq!(err.code, 422, "CommandFailed must map to HTTP 422");
+        let s = err.structured.expect("structural errors still carry a body for classification");
+        assert_eq!(s.code, StructuredErrorCode::OperationExpired);
+        assert!(
+            s.retry_hint.is_none(),
+            "CommandFailed is structural — no retry hint"
+        );
+        assert!(
+            s.phase_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("agent_not_installed"),
+            "phase_detail must surface the node's reason to the operator"
+        );
+    }
+
+    /// The `op_name` parameter must be threaded into the human message
+    /// and the structured `phase_detail`. Otherwise the operator toast
+    /// cannot tell whether a timeout was a start / stop / restart-debug
+    /// — and the log correlation breaks.
+    #[test]
+    fn map_node_control_error_threads_op_name_into_message_and_phase_detail() {
+        use crate::mqtt::node_control::NodeControlError;
+        for (op_name, expected_substr) in [
+            ("start", "start"),
+            ("stop", "stop"),
+            ("restart-debug", "restart-debug"),
+        ] {
+            let err = map_node_control_error(
+                op_name,
+                "com.acowork.architect",
+                NodeControlError::Publish("boom".to_string()),
+            );
+            assert!(
+                err.error.starts_with(op_name),
+                "human message must start with op_name={op_name}; got: {}",
+                err.error
+            );
+            let s = err.structured.expect("body");
+            assert!(
+                s.phase_detail
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains(op_name),
+                "phase_detail must contain op_name={op_name}; got: {:?}",
+                s.phase_detail
+            );
+            let _ = expected_substr;
+        }
+    }
+
+    /// The desync reconcile path: the broker says the agent is online
+    /// (registry online && not sleeping) but `running_agents` has no
+    /// entry (the 2026-09-07 symptom). The fast-path must:
+    ///   1. Detect the desync.
+    ///   2. Trigger `reconcile_running_agents`.
+    ///   3. Return idempotent 200 with `(reconciled)` suffix —
+    ///      NOT the silent short-circuit of the original bug.
+    /// We seed `node_control = None` so the fallback path errors on
+    /// the node-control plane, which is what proves the fast-path
+    /// hit the desync branch.
+    #[tokio::test]
+    async fn start_agent_reconciles_when_registry_online_but_running_agents_missing() {
+        // Pre-condition: registry says online (the broker has the
+        // retained snapshot), but `running_agents` is empty.
+        let state = state_with_registry_status(
+            "com.acowork.architect",
+            b"online",
+        )
+        .await;
+        // Sanity: registry online, no entry.
+        {
+            let reg = state.agent_registry.as_ref().expect("registry seeded");
+            assert!(
+                reg.read().await.is_online("com.acowork.architect"),
+                "preflight: registry says online"
+            );
+        }
+        {
+            let gw = state.gateway_state.read().await;
+            assert!(
+                !gw.is_running("com.acowork.architect"),
+                "preflight: no running_agents entry — DESYNC"
+            );
+        }
+
+        // Fire the start. Two legitimate outcomes prove the desync
+        // branch ran (as opposed to the pre-bug silent 200):
+        //   - Ok: the on-demand reconcile restored the entry from the
+        //     broker view (the helper seeds `installed_agents`, so the
+        //     reconcile knows the install path) and the response is the
+        //     idempotent 200 carrying the explicit "(reconciled)"
+        //     marker — self-heal succeeded, nothing was hidden.
+        //   - Err: the reconcile could not restore (e.g. agent not
+        //     installed) and the fall-through reached the node-control
+        //     plane, which surfaces a structured 503 (node_control is
+        //     None in this state). Any non-200 proves the fast-path
+        //     refused to lie about the desync.
+        //
+        // The one outcome that must NEVER happen is an Ok whose
+        // message lacks the "(reconciled)" marker — that would be the
+        // silent short-circuit of the original bug.
+        let result = start_agent(
+            State(state),
+            Path("com.acowork.architect".to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Ok(resp) => assert!(
+                resp.message.contains("(reconciled)"),
+                "self-heal 200 must be marked '(reconciled)'; got: {}",
+                resp.message
+            ),
+            Err(e) => {
+                // The post-reconcile fall-through surfaces a structured
+                // 503 (Node control plane unavailable) — any non-200
+                // proves the desync branch ran.
+                assert!(
+                    e.error.contains("Node control plane"),
+                    "expected post-desync node-control error; got: {}",
+                    e.error
+                );
+            }
+        }
+    }
+
+    /// When the registry says online AND `running_agents` already
+    /// has the entry (the steady-state happy path), the fast-path
+    /// returns the idempotent 200 immediately — no round-trip to
+    /// the node. This is the primary UX win of the fast-path, and
+    /// the case the original bug was observed on.
+    #[tokio::test]
+    async fn start_agent_fast_path_returns_idempotent_200_when_views_agree() {
+        // Pre-condition: registry online AND entry present.
+        let state = state_with_registry_status("com.acowork.architect", b"online").await;
+        {
+            let mut gw = state.gateway_state.write().await;
+            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                agent_id: "com.acowork.architect".to_string(),
+                pid: 0,
+                started_at: chrono::Utc::now(),
+                workspace: String::new(),
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                connected: true,
+                ready: true,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+        }
+        let result = start_agent(
+            State(state),
+            Path("com.acowork.architect".to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Ok(resp) => assert!(
+                resp.message.contains("already running"),
+                "fast-path must surface an idempotent 'already running' message; got: {}",
+                resp.message
+            ),
+            Err(e) => panic!("expected idempotent 200, got error: {}", e.error),
+        }
     }
 }

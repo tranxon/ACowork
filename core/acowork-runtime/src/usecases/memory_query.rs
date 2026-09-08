@@ -86,8 +86,6 @@ pub struct MemoryStats {
     /// The desktop Memory panel reads `by_status["Active"]` /
     /// `by_status["Dormant"]` to drive its status cards.
     pub by_status: HashMap<String, u64>,
-    /// Mean decay score across all sampled nodes (0.0..=1.0).
-    pub avg_decay_score: f64,
     /// Vector-index health string (`healthy` / `no_store` / `error: …`).
     pub index_health: String,
     /// Embedding dimension of the persisted HNSW index. 0 if no index.

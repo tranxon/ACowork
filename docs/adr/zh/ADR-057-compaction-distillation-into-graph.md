@@ -28,6 +28,7 @@
 | 日期 | 版本 | 内容 |
 |------|------|------|
 | 2026-XX-XX | v2.0 | 撤销 P0 triples 落地路径（D1/D4/D6/D7/D8/D9）；保留 gap 全景作为路线图，移除 §10/§12 中已撤销实施 |
+| 2026-XX-XX | v3.0 | 遗忘模型重构：经历层改为单一时间衰减（半衰期默认 180 天），新增 §5.3.1；沉淀层暂不衰减；删除 Pending 触发路径 |
 | 2026-XX-XX | v1.x | 初版（含 P0 triples 闭环设计） |
 
 ### 0.2 triples-removed 决策说明
@@ -240,6 +241,33 @@ graph TD
 3. `run_decay_scan` 已由 Gateway Cron 调度，可配置频率。
 
 **动作**：更新 `05-memory.md §5.2` 的"Phase 2 实现说明"，从"按需计算模型"改为"后台扫描模型"，消除设计与实现声明不一致。
+
+### 5.3.1 v3.0 遗忘模型重构：经历层单一时间衰减
+
+**事实**：v3.12 前实际运行的遗忘路径是 `consolidation_bg` 驱动的 `run_episodic_cleanup`——
+consolidated × importance × 7/14 天三维分支，一步到位二值踢出（Active → Dormant），无渐进降级；
+`access_count` 从不自增导致 access_boost 形同虚设；Pending 状态自 ADR-068 起无生产者但死代码残留。
+
+**决策**：遗忘模型收敛为**单一时间衰减**，只回答一个问题"这条经历多久没被想起了"：
+
+```
+retention = exp(-ln2 × age_days / half_life_days)
+```
+
+1. **半衰期是唯一核心参数**，默认 180 天，开放到 `agent_config.json`（`memory_forgetting_*` 4 字段），
+   前端新增"记忆遗忘"卡片（开关默认关闭）；
+2. **渐进降级，不做二值踢出**：检索路径经历层 × retention 渐进降权；retention < `dormant_threshold`（0.1）
+   才 Active → Dormant；Dormant 超过 `archive_days`（90 天）→ PurgeLog 归档（30 天可恢复）；
+3. **沉淀层暂不衰减**：Knowledge / Procedural / Autobiographical 不参与时间衰减（语义过时判定留待后续）；
+4. **清理早期死代码**：删除 `run_episodic_cleanup` / `extract_triples` / `ConsolidationScheduler` /
+   legacy Pending 触发（accumulation / idle-timeout / pending_count）；保留 `NodeStatus::Pending` 变体
+   仅用于旧数据反序列化兼容。
+
+**理由**：越复杂的规则越不稳定，也越没有说服力。对经历层，时间衰减最符合用户直觉——渐变、可解释、
+零魔法数字（仅半衰期一个核心参数，其余为工程阈值）。
+
+**动作**：`docs/design/zh/05-memory.md §5` 已按新模型重写；本 ADR §5.3 的"后台扫描 vs 按需计算"结论
+不变——新引擎仍以后台扫描调度（`consolidation_bg` 周期任务），检索降权在查询路径按同一曲线计算。
 
 ### 5.4 后续阶段归属
 

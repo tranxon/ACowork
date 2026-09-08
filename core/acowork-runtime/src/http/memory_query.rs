@@ -143,7 +143,6 @@ fn empty_stats_output(embed_provider_dim: u64) -> StatsOutput {
         storage_bytes: 0,
         by_type: HashMap::new(),
         by_status: HashMap::new(),
-        avg_decay_score: 0.0,
         index_health: "no_store".to_string(),
         stored_dim: 0,
         nodes_with_embedding: 0,
@@ -214,7 +213,6 @@ pub(crate) fn get_stats(
         storage_bytes: stats.storage_bytes,
         by_type: stats.by_type,
         by_status: stats.by_status,
-        avg_decay_score: stats.avg_decay_score,
         index_health: stats.index_health,
         stored_dim: stats.stored_dim,
         nodes_with_embedding: stats.nodes_with_embedding,
@@ -326,7 +324,6 @@ mod tests {
         assert_eq!(out.storage_bytes, 0);
         assert!(out.by_type.is_empty());
         assert!(out.by_status.is_empty());
-        assert_eq!(out.avg_decay_score, 0.0);
         assert_eq!(out.index_health, "no_store");
         assert_eq!(out.stored_dim, 0);
         assert_eq!(out.nodes_with_embedding, 0);
@@ -343,7 +340,6 @@ mod tests {
             "storage_bytes",
             "by_type",
             "by_status",
-            "avg_decay_score",
             "index_health",
             "stored_dim",
             "nodes_with_embedding",

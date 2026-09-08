@@ -44,6 +44,27 @@ mod tests {
         id.as_u64()
     }
 
+    /// Helper: store an Episodic node with a specific `created_at` age.
+    /// Used by the forgetting time-decay test (ADR-057 §5.3 redesign).
+    fn store_episode_with_age(
+        store: &TestStore,
+        content: &str,
+        embedding: &[f32],
+        age_days: i64,
+    ) -> u64 {
+        let id = store_episode(store, content, embedding);
+        let created =
+            chrono::Utc::now() - chrono::Duration::days(age_days);
+        store.db().set_node_property(
+            NodeId::from(id),
+            "created_at",
+            Value::from(grafeo_common::types::Timestamp::from_micros(
+                created.timestamp_micros(),
+            )),
+        );
+        id
+    }
+
     /// Helper: store a Knowledge node with embedding.
     fn store_knowledge(
         store: &TestStore,
@@ -160,6 +181,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_retrieve_episodic_forgetting_decay() {
+        // ADR-057 §5.3 redesign: with forgetting enabled, Episodic scores
+        // are multiplied by the half-life retention factor, so an old node
+        // ranks below a fresh one even when their raw scores are identical.
+        let store = test_store();
+        let emb = test_embedding();
+        let fresh_id = store_episode(&store, "user discussed rust traits", &emb);
+        let old_id = store_episode_with_age(&store, "user discussed rust traits", &emb, 360);
+
+        // Baseline: forgetting disabled → identical raw scores, order ties.
+        let base_config = MemoryManagerConfig::default();
+        assert!(!base_config.forgetting.enabled);
+        let mut base_query = MemoryQuery {
+            query_text: "rust traits discussion".to_string(),
+            embedding: Some(emb.clone()),
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
+            min_score: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+        let base = MemoryManager::new(base_config)
+            .retrieve(&store as &dyn MemoryProvider, &mut base_query, None)
+            .await
+            .unwrap();
+        let base_scores: Vec<(u64, f64)> = base
+            .memories
+            .iter()
+            .map(|m| (m.node_id, m.score))
+            .collect();
+        // Both nodes present; without decay the old node is not strictly
+        // penalized below the fresh one.
+        assert!(base_scores.iter().any(|(id, _)| *id == old_id));
+
+        // With forgetting enabled (half-life 180d) the 360-day-old node
+        // must score strictly below the fresh one.
+        let mut decayed_config = MemoryManagerConfig::default();
+        decayed_config.forgetting.enabled = true;
+        decayed_config.forgetting.half_life_days = 180;
+        let mut decayed_query = MemoryQuery {
+            query_text: "rust traits discussion".to_string(),
+            embedding: Some(emb),
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
+            min_score: None,
+            abstention_enabled: false,
+            hint_type: HintType::Semantic,
+        };
+        let decayed = MemoryManager::new(decayed_config)
+            .retrieve(&store as &dyn MemoryProvider, &mut decayed_query, None)
+            .await
+            .unwrap();
+        let decayed_scores: Vec<(u64, f64)> = decayed
+            .memories
+            .iter()
+            .map(|m| (m.node_id, m.score))
+            .collect();
+        let fresh_score = decayed_scores
+            .iter()
+            .find(|(id, _)| *id == fresh_id)
+            .map(|(_, s)| *s);
+        let old_score = decayed_scores
+            .iter()
+            .find(|(id, _)| *id == old_id)
+            .map(|(_, s)| *s);
+        assert!(
+            fresh_score.is_some() && old_score.is_some(),
+            "both episodic nodes must be retrievable; got {decayed_scores:?}"
+        );
+        let fresh_score = fresh_score.unwrap();
+        let old_score = old_score.unwrap();
+        assert!(
+            fresh_score > old_score,
+            "old episodic node must be down-ranked by time decay: fresh={fresh_score} old={old_score}"
+        );
+        // Retention for 360d at 180d half-life is 2^-2 = 0.25 → old score
+        // ≈ 0.25 × fresh score (raw scores identical).
+        let ratio = old_score / fresh_score;
+        assert!(
+            (0.15..=0.35).contains(&ratio),
+            "retention ratio out of expected band: {ratio}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_retrieve_abstention() {
         let store = test_store();
         let emb = test_embedding();
@@ -178,6 +286,7 @@ mod tests {
         };
 
         let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         // G9: abstention triggered → prompt must be present.
         assert!(result.abstention_prompt.is_some());

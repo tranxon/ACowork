@@ -570,6 +570,33 @@ impl ApiError {
             structured: Some(Box::new(body)),
         }
     }
+
+    /// Generic structured error constructor (2026-09-07 incident
+    /// follow-up). The closed `StructuredErrorCode` set in
+    /// `acowork-core::error_codes` covers the whole API surface, but
+    /// some endpoints (e.g. `start_agent`) want to attach a code to a
+    /// status code that doesn't have a dedicated helper (`503`,
+    /// `422`, …). This constructor lets the handler pick both
+    /// independently.
+    ///
+    /// The convention is:
+    ///   - `code` = intended HTTP status (`u16`).
+    ///   - `error` = short human-readable line, **safe for end users**
+    ///     (do not leak internal paths or PII).
+    ///   - `structured` = machine-readable protocol body. Callers pick
+    ///     a `StructuredErrorCode` that classifies the failure for
+    ///     client-side retry / rendering decisions.
+    pub fn structured(
+        status: StatusCode,
+        message: &str,
+        body: StructuredErrorBody,
+    ) -> Self {
+        Self {
+            error: message.to_string(),
+            code: status.as_u16(),
+            structured: Some(Box::new(body)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -816,6 +843,99 @@ mod tests {
         let mut state = test_app_state();
         state.operation_store = Some(crate::operation_store::OperationStore::new_shared());
         let _router = build_router(state);
+    }
+
+    // ── 2026-09-07 incident follow-up: structured error layer ─────────
+
+    /// `ApiError::structured` is the generic constructor for endpoints
+    /// that need an HTTP status (`503` / `422` / `504`) without a
+    /// dedicated helper. Pin the wire shape so a future refactor of
+    /// the JSON encoding cannot silently lose the structured body —
+    /// the Desktop's retry / toast logic depends on `structured.code`.
+    #[test]
+    fn api_error_structured_carries_status_message_and_body() {
+        use acowork_core::error_codes::{RetryHint, StructuredErrorCode};
+        use axum::http::StatusCode;
+        let body = acowork_core::error_codes::StructuredErrorBody {
+            code: StructuredErrorCode::HandshakeTimeout,
+            phase_detail: Some("start_node_command_timeout agent=foo".to_string()),
+            retry_hint: Some(RetryHint {
+                retry_after_ms: Some(1500),
+                retry_count: 5,
+            }),
+            ..Default::default()
+        };
+        let err = ApiError::structured(StatusCode::GATEWAY_TIMEOUT, "node did not answer", body);
+        // HTTP layer: status code lifted to top-level `code`.
+        assert_eq!(err.code, 504);
+        assert_eq!(err.error, "node did not answer");
+        // Protocol layer: structured body preserved untouched.
+        let (structured_code, structured_phase_detail, structured_retry_after_ms, structured_retry_count) = {
+            let s = err
+                .structured
+                .as_ref()
+                .expect("structured must be Some when constructed via ::structured()");
+            (
+                s.code,
+                s.phase_detail.clone(),
+                s.retry_hint.as_ref().and_then(|r| r.retry_after_ms),
+                s.retry_hint.as_ref().map(|r| r.retry_count),
+            )
+        };
+        assert_eq!(structured_code, StructuredErrorCode::HandshakeTimeout);
+        assert_eq!(
+            structured_phase_detail.as_deref(),
+            Some("start_node_command_timeout agent=foo")
+        );
+        assert_eq!(structured_retry_after_ms, Some(1500));
+        assert_eq!(structured_retry_count, Some(5));
+        // Wire encoding: status + human + nested structured all present.
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], 504);
+        assert_eq!(json["error"], "node did not answer");
+        assert_eq!(json["structured"]["code"], "handshake_timeout");
+        assert_eq!(json["structured"]["retry_hint"]["retry_count"], 5);
+    }
+
+    /// `ApiError::structured` is the only path that carries
+    /// `structured: Some(_)` for HTTP 503 / 422 / 504 — the legacy
+    /// `internal` / `bad_request` / `service_unavailable` helpers
+    /// intentionally leave it `None`. Pin this contract so a future
+    /// helper consolidation does not accidentally drop the body on
+    /// the wire (the Desktop distinguishes 503-with-body from
+    /// 503-without-body via this field).
+    #[test]
+    fn legacy_api_error_helpers_have_no_structured_body() {
+        use axum::http::StatusCode;
+        // 500 / 400 / 404 / 503 / 504 / 401 / 409 / 422 — none of
+        // these carry a structured body (the closed
+        // `StructuredErrorCode` set has its own dedicated constructors
+        // where a body is meaningful).
+        for err in [
+            ApiError::internal("boom"),
+            ApiError::bad_request("nope"),
+            ApiError::not_found("missing"),
+            ApiError::unauthorized("denied"),
+            ApiError::service_unavailable("down"),
+            ApiError::gateway_timeout("late"),
+            ApiError::conflict("not ready"),
+            ApiError::unprocessable_entity("invalid"),
+        ] {
+            assert!(
+                err.structured.is_none(),
+                "legacy helper must NOT auto-fill a structured body; got {:?} for {} {}",
+                err.structured,
+                err.code,
+                err.error
+            );
+        }
+        // And the dedicated structured helper does.
+        let structured_err = ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mqtt offline",
+            acowork_core::error_codes::StructuredErrorBody::default(),
+        );
+        assert!(structured_err.structured.is_some());
     }
 }
 

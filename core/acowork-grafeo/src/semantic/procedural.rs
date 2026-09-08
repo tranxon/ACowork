@@ -90,6 +90,28 @@ impl GrafeoStore {
         let props = node.to_properties();
         self.update_node(id, props.iter().map(|(k, v)| (k.as_str(), v.clone())))
     }
+
+    /// Get all ProceduralNodes (for dedup checking).
+    pub fn get_all_procedural_nodes(&self) -> Result<Vec<ProceduralNode>> {
+        let graph = self.db.graph_store();
+        let node_ids = graph.nodes_by_label(labels::PROCEDURAL);
+
+        let mut nodes = Vec::new();
+        for id in node_ids {
+            if let Some(n) = self.db.get_node(id) {
+                let props: Vec<(String, Value)> = n
+                    .properties_as_btree()
+                    .into_iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v))
+                    .collect();
+
+                if let Ok(pn) = ProceduralNode::from_properties(id, &props) {
+                    nodes.push(pn);
+                }
+            }
+        }
+        Ok(nodes)
+    }
 }
 
 #[cfg(test)]

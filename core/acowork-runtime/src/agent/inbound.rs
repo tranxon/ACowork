@@ -76,7 +76,7 @@ pub enum UserOp {
     /// `build_chat_request`), and (4) mid-execution AgentLoops via the
     /// inbound fast channel (`AgentLoop::apply_runtime_config` ->
     /// `core.apply_runtime_config`). ADR-052 §3.5.
-    UpdateRuntimeConfig(RuntimeConfigOverrides),
+    UpdateRuntimeConfig(Box<RuntimeConfigOverrides>),
 }
 
 /// Messages that can be injected into the agent loop from external sources.

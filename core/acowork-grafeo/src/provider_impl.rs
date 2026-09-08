@@ -5,18 +5,12 @@
 //! type conversion between `acowork_memory` types (no `id` field) and
 //! grafeo's internal types (with `id: Option<NodeId>`).
 
-use std::sync::Arc;
-
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
-use acowork_memory::consolidation::{
-    GeneralizationConfig, GeneralizationResult,
-    OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig,
-};
 use acowork_memory::provider::MemoryProvider;
 use acowork_memory::{
-    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
-    Episode, KnowledgeNode, KnowledgeSubType, MemoryQualityConfig, MemoryQuery, NodeStatus,
-    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayScanResult,
+    Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQualityConfig, MemoryQuery,
+    NodeStatus, ProceduralNode, SearchResult, StoreHealth, StoreStats,
 };
 use chrono::{DateTime, Utc};
 
@@ -422,29 +416,11 @@ impl MemoryProvider for GrafeoStore {
 
     // ── Forgetting ───────────────────────────────────────────────────────
 
-    fn run_decay_scan(&self, config: &DecayConfig) -> AcoworkResult<DecayScanResult> {
-        let transitioned = self.run_decay_scan(config).map_err(err_to_acowork)?;
-        Ok(DecayScanResult {
-            to_dormant: transitioned as u64,
-            reactivated: 0,
-            purged: 0,
-        })
+
+    fn run_episodic_decay_scan(&self, config: &EpisodicDecayConfig) -> AcoworkResult<DecayScanResult> {
+        GrafeoStore::run_episodic_decay_scan(self, config).map_err(err_to_acowork)
     }
 
-    fn reactivate_node(&self, node_id: u64) -> AcoworkResult<()> {
-        GrafeoStore::reactivate_node(self, NodeId(node_id)).map_err(err_to_acowork)
-    }
-
-    fn purge_expired(&self, max_dormant_age: std::time::Duration) -> AcoworkResult<PurgeResult> {
-        let max_days = (max_dormant_age.as_secs() / 86400) as u32;
-        let purged_entries = self
-            .purge_expired_dormant(max_days)
-            .map_err(err_to_acowork)?;
-        Ok(PurgeResult {
-            purged_count: purged_entries.len() as u64,
-            bytes_freed: 0,
-        })
-    }
 
     // ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -547,28 +523,6 @@ impl MemoryProvider for GrafeoStore {
 
     // ── Experience generalization (Path C) ───────────────────────────────
 
-    async fn run_generalization(
-        &self,
-        _session_id: Option<&str>,
-        embedding_fn: &Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>,
-        config: &GeneralizationConfig,
-    ) -> AcoworkResult<GeneralizationResult> {
-        // Rebind as EmbeddingFn to satisfy grafeo method's type requirement.
-        // The async_trait HRTB desugaring creates a subtle type mismatch;
-        // cloning the Arc into a local variable with explicit type resolves it.
-        let emb_fn: acowork_memory::consolidation::EmbeddingFn = embedding_fn.clone();
-        GrafeoStore::run_generalization(self, None, &emb_fn, config)
-            .await
-            .map_err(err_to_acowork)
-    }
-
-    fn compress_history_nodes(&self, _keep_recent: usize) -> AcoworkResult<usize> {
-        // ADR-068: history compression is gone. The trait method is kept
-        // as a no-op stub for binary compatibility with downstream crates
-        // (test_support, eval, memory_recall). Episodic retention is the
-        // replacement mechanism (mark_consolidated + cleanup).
-        Ok(0)
-    }
 
     // ── Node CRUD ────────────────────────────────────────────────────────
 
@@ -786,54 +740,6 @@ impl MemoryProvider for GrafeoStore {
             scores[i].1 = boosted;
         }
         Ok(())
-    }
-
-    // ── Consolidation lifecycle ──────────────────────────────────────────
-    //
-    // P1 note: The ConsolidationScheduler currently lives in the Runtime
-    // (AgentCore.consolidation_scheduler). These trait methods provide the
-    // interface for future internalization. For now, start/stop/notify are
-    // thin wrappers that store config. The actual scheduling is still
-    // performed by the Runtime's background task (consolidation_bg.rs).
-
-    fn start_consolidation(&self, _config: &SchedulerConfig) -> AcoworkResult<()> {
-        // P1: Config is accepted but scheduling is still managed by the Runtime.
-        // P3 will internalize the scheduler fully.
-        Ok(())
-    }
-
-    fn stop_consolidation(&self) {
-        // P1: No-op. Scheduling is managed by the Runtime.
-    }
-
-    async fn notify_consolidation_active(&self) {
-        // P1: No-op. The Runtime's ConsolidationScheduler handles this.
-    }
-
-    fn get_pending_consolidation_count(&self) -> AcoworkResult<usize> {
-        let pending = self
-            .get_pending_for_consolidation(0, usize::MAX)
-            .map_err(err_to_acowork)?;
-        Ok(pending.len())
-    }
-
-    async fn run_offline_consolidation(
-        &self,
-        offline_config: &OfflineConsolidationConfig,
-        llm: Option<&dyn acowork_memory::consolidation::TripleExtractorLlm>,
-        embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
-        gen_config: Option<&GeneralizationConfig>,
-    ) -> AcoworkResult<OfflineConsolidationResult> {
-        let result = self
-            .run_offline_consolidation_with_generalization(
-                offline_config,
-                llm,
-                embedding_fn,
-                gen_config,
-            )
-            .await
-            .map_err(err_to_acowork)?;
-        Ok(result)
     }
 
     fn apply_quality_config(&self, config: &MemoryQualityConfig) -> AcoworkResult<()> {

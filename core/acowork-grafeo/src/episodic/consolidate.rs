@@ -1,12 +1,14 @@
 //! Consolidation markers and cleanup for episodic memory.
 #![allow(clippy::collapsible_if)]
 
-use chrono::TimeDelta;
+use chrono::{DateTime, TimeDelta, Utc};
 use grafeo_common::types::{NodeId, Value};
 
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-// labels not needed in this module
+use crate::types::labels;
+
+use acowork_memory::types::CollaborationSpan;
 
 impl GrafeoStore {
     /// Mark an episode as consolidated (transferred to semantic layer).
@@ -163,6 +165,40 @@ impl GrafeoStore {
             .as_int64()
             .ok_or_else(|| crate::error::GrafeoError::Memory("count(e) returned non-integer".into()))?;
         Ok(n.max(0) as usize)
+    }
+
+    /// Collaboration span across all episodes (ADR-068 M8).
+    ///
+    /// Returns the earliest stored episode timestamp and the total episode
+    /// count, or `None` when no episodes exist. The 30-day Relationship
+    /// decision lives in the EpisodicDistiller, which consumes these stats
+    /// through the `MemoryProvider::collaboration_span` trait method.
+    pub fn collaboration_span(&self) -> Result<Option<CollaborationSpan>> {
+        // Find the earliest episodic node + total count.
+        let graph = self.db.graph_store();
+        let node_ids = graph.nodes_by_label(labels::EPISODIC);
+
+        let mut earliest_time: Option<DateTime<Utc>> = None;
+        let mut episode_count: u64 = 0;
+
+        for id in node_ids {
+            episode_count += 1;
+            if let Some(n) = self.db.get_node(id)
+                && let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp)
+                && let Some(dt) = DateTime::from_timestamp_micros(ts.as_micros())
+            {
+                match earliest_time {
+                    None => earliest_time = Some(dt),
+                    Some(earliest) if dt < earliest => earliest_time = Some(dt),
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(earliest_time.map(|earliest_episode_at| CollaborationSpan {
+            earliest_episode_at,
+            episode_count,
+        }))
     }
 
     /// Remove old consolidated episodes beyond the retention period.

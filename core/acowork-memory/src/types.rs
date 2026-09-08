@@ -8,7 +8,6 @@
 //! Also includes retrieval result types and storage configuration.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -320,8 +319,6 @@ pub enum NodeStatus {
     Active,
     /// Decayed below threshold — retained but excluded from search.
     Dormant,
-    /// Recently created, pending offline confirmation.
-    Pending,
 }
 
 impl NodeStatus {
@@ -329,7 +326,6 @@ impl NodeStatus {
         match self {
             NodeStatus::Active => "Active",
             NodeStatus::Dormant => "Dormant",
-            NodeStatus::Pending => "Pending",
         }
     }
 }
@@ -340,7 +336,6 @@ impl std::str::FromStr for NodeStatus {
         match s {
             "Active" => Ok(NodeStatus::Active),
             "Dormant" => Ok(NodeStatus::Dormant),
-            "Pending" => Ok(NodeStatus::Pending),
             _ => Err(format!("unknown NodeStatus: {s}")),
         }
     }
@@ -657,39 +652,6 @@ pub struct MemoryContext {
 // Storage Configuration Types
 // ============================================================================
 
-/// Decay configuration for forgetting mechanism.
-#[derive(Debug, Clone)]
-pub struct DecayConfig {
-    /// Decay rate lambda (default 0.03, half-life ~23 days).
-    pub lambda: f32,
-    /// Minimum activity floor (default 0.05).
-    pub floor: f32,
-    /// Access boost per hit (default 0.1).
-    pub access_per_hit: f32,
-    /// Cap for access boost history (default 0.5).
-    pub boost_cap: f32,
-    /// Active -> Dormant threshold (default 0.3).
-    pub dormant_threshold: f32,
-    /// Dormant -> Purge duration (default 90 days).
-    pub purge_after: Duration,
-    /// Minimum importance for purge path 1 (default 0.5).
-    pub purge_importance_threshold: f32,
-}
-
-impl Default for DecayConfig {
-    fn default() -> Self {
-        Self {
-            lambda: 0.03,
-            floor: 0.05,
-            access_per_hit: 0.1,
-            boost_cap: 0.5,
-            dormant_threshold: 0.3,
-            purge_after: Duration::from_secs(90 * 24 * 60 * 60),
-            purge_importance_threshold: 0.5,
-        }
-    }
-}
-
 /// Result of a decay scan operation.
 #[derive(Debug, Clone, Default)]
 pub struct DecayScanResult {
@@ -699,6 +661,68 @@ pub struct DecayScanResult {
     pub reactivated: u64,
     /// Number of nodes purged.
     pub purged: u64,
+}
+
+/// Configuration for episodic memory forgetting (pure time decay).
+///
+/// Episodic nodes are real event records with retrieval value, so
+/// forgetting is **gradual and time-only**: no consolidated/importance
+/// branches, no age cliffs.
+///
+/// The retention curve is a half-life exponential decay:
+///
+/// ```text
+/// retention = exp(-ln2 * age_days / half_life_days)
+/// ```
+///
+/// - Nodes stay fully retrievable while `retention >= dormant_threshold`;
+///   retrieval down-weights by `retention` before that (progressive decay).
+/// - A node becomes Dormant once `retention < dormant_threshold`
+///   (≈ 3.3× half-life with the default 0.1 threshold).
+/// - A Dormant node is archived to the PurgeLog (30-day recovery window)
+///   after `archive_days` of dormancy.
+///
+/// Forgetting is opt-in: `enabled = false` (default) makes the scan a
+/// no-op and episodic nodes never age out.
+#[derive(Debug, Clone)]
+pub struct EpisodicDecayConfig {
+    /// Master switch — forgetting disabled by default.
+    pub enabled: bool,
+    /// Decay half-life in days (default 180).
+    pub half_life_days: u64,
+    /// Retention threshold below which an Active node becomes Dormant
+    /// (default 0.1).
+    pub dormant_threshold: f32,
+    /// Days a Dormant node is retained before archiving to the PurgeLog
+    /// (default 90).
+    pub archive_days: u64,
+}
+
+impl Default for EpisodicDecayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            half_life_days: 180,
+            dormant_threshold: 0.1,
+            archive_days: 90,
+        }
+    }
+}
+
+impl EpisodicDecayConfig {
+    /// Retention factor for a node of the given age in days:
+    /// `exp(-ln2 * age_days / half_life_days)`, clamped to [0.0, 1.0].
+    /// A zero half-life disables decay (returns 1.0).
+    pub fn retention(&self, age_days: f64) -> f64 {
+        if self.half_life_days == 0 {
+            return 1.0;
+        }
+        // Clamp to [0.0, 1.0]: a negative age (clock skew / future timestamp)
+        // must never amplify a node's score beyond its raw retrieval score.
+        (-std::f64::consts::LN_2 * age_days / self.half_life_days as f64)
+            .exp()
+            .clamp(0.0, 1.0)
+    }
 }
 
 /// Result of a purge operation.

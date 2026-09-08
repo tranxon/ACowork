@@ -443,7 +443,10 @@
     "resetAgentSetup": "Agent設定をリセット",
     "reset": "リセット",
     "compressionRatioThreshold": "圧縮率しきい値",
-    "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。"
+    "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。",
+    "sectionAgentInfo": "Agent情報",
+    "sectionSessionParams": "セッションパラメータ",
+    "sectionModelParams": "モデルパラメータ"
   },
   "harness": {
     "tabProviders": "プロバイダー",
@@ -620,7 +623,6 @@
     "debugRemoteDesc": "デバッグにはAgentランタイムへの直接ローカル接続が必要です。デスクトップアプリとゲートウェイは同じマシン上で実行する必要があります。",
     "connectingDebug": "デバッグサーバーに接続中...",
     "debugConnectionLost": "デバッグ接続が切断されました",
-    "debugSection": "デバッグ",
     "enterDebug": "デバッグに入る",
     "enteringDebug": "デバッグに入る...",
     "noAgentDebug": "デバッグモードのAgentはありません",
@@ -922,6 +924,13 @@
     "distillerLastRun": "前回: {{scanned}} 件 → {{promoted}} 件の記憶",
     "distillerNeverRun": "未実行",
     "distillerSaveFailed": "保存失敗（HTTP {{status}}）",
+    "forgettingTitle": "記憶忘却",
+    "forgettingEnabled": "記憶忘却を有効化",
+    "forgettingHalfLife": "半減期（日）",
+    "forgettingDormantThreshold": "休眠しきい値",
+    "forgettingArchiveDays": "アーカイブ（日）",
+    "forgettingDisabledHint": "有効化すると、エピソードは半減期曲線に従って減衰します。半減期内は完全な重みで检索され、その後は徐々に重みを下げ、最終的に休眠してアーカイブされます。",
+    "forgettingSaveFailed": "保存失敗（HTTP {{status}}）",
     "distillNow": "今すぐ蒸留",
     "distillDone": "{{scanned}} 件のエピソードを蒸留し、{{promoted}} 件の記憶を昇格しました",
     "distillEmpty": "蒸留する新しいエピソードはありません",

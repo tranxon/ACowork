@@ -26,7 +26,7 @@ pub use provider::MemoryProvider;
 
 // Re-exports: MemoryAdminService trait (ADR-051 P4, admin/management operations)
 pub use admin::{
-    AdminConsolidateResult, AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
+    AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
     AdminNodeRecord, AdminStats, MemoryAdminService, RebuildStats,
 };
 
@@ -64,10 +64,10 @@ pub use quality::{
 // Re-exports: core memory types
 pub use types::{
     AutobioCategory, AutobiographicalNode, CollaborationSpan, ConflictSignal, ConflictType,
-    ContextSource, DEFAULT_EMBEDDING_DIM, DecayConfig, DecayScanResult, DistilledEpisode, Episode,
-    KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery, NodeStatus,
-    PrivacyLevel, ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics, SearchResult,
-    StoreHealth, StoreStats,
+    ContextSource, DEFAULT_EMBEDDING_DIM, DecayScanResult, DistilledEpisode, Episode,
+    EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery,
+    NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics,
+    SearchResult, StoreHealth, StoreStats,
 };
 
 // Label and edge type constants

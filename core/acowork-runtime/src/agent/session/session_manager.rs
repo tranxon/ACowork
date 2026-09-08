@@ -171,6 +171,14 @@ pub struct RuntimeConfigOverrides {
     pub distiller_accumulation_threshold: Option<usize>,
     /// ADR-071 D4: distiller idle threshold (minutes).
     pub distiller_idle_minutes: Option<u64>,
+    /// Memory forgetting runtime switch (`agent_config.json`). Default off.
+    pub memory_forgetting_enabled: Option<bool>,
+    /// Episodic decay half-life (days).
+    pub memory_forgetting_half_life_days: Option<u64>,
+    /// Retention threshold below which an episodic node becomes Dormant.
+    pub memory_forgetting_dormant_threshold: Option<f32>,
+    /// Days a Dormant node is retained before archiving to the PurgeLog.
+    pub memory_forgetting_archive_days: Option<u64>,
 }
 
 impl RuntimeConfigOverrides {
@@ -189,6 +197,10 @@ impl RuntimeConfigOverrides {
             && self.distiller_interval_minutes.is_none()
             && self.distiller_accumulation_threshold.is_none()
             && self.distiller_idle_minutes.is_none()
+            && self.memory_forgetting_enabled.is_none()
+            && self.memory_forgetting_half_life_days.is_none()
+            && self.memory_forgetting_dormant_threshold.is_none()
+            && self.memory_forgetting_archive_days.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -232,6 +244,18 @@ impl RuntimeConfigOverrides {
         }
         if other.distiller_idle_minutes.is_some() {
             self.distiller_idle_minutes = other.distiller_idle_minutes;
+        }
+        if other.memory_forgetting_enabled.is_some() {
+            self.memory_forgetting_enabled = other.memory_forgetting_enabled;
+        }
+        if other.memory_forgetting_half_life_days.is_some() {
+            self.memory_forgetting_half_life_days = other.memory_forgetting_half_life_days;
+        }
+        if other.memory_forgetting_dormant_threshold.is_some() {
+            self.memory_forgetting_dormant_threshold = other.memory_forgetting_dormant_threshold;
+        }
+        if other.memory_forgetting_archive_days.is_some() {
+            self.memory_forgetting_archive_days = other.memory_forgetting_archive_days;
         }
     }
 
@@ -285,6 +309,18 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.distiller_idle_minutes {
             cfg.distiller_idle_minutes = Some(v);
         }
+        if let Some(v) = self.memory_forgetting_enabled {
+            cfg.memory_forgetting_enabled = Some(v);
+        }
+        if let Some(v) = self.memory_forgetting_half_life_days {
+            cfg.memory_forgetting_half_life_days = Some(v);
+        }
+        if let Some(v) = self.memory_forgetting_dormant_threshold {
+            cfg.memory_forgetting_dormant_threshold = Some(v);
+        }
+        if let Some(v) = self.memory_forgetting_archive_days {
+            cfg.memory_forgetting_archive_days = Some(v);
+        }
     }
 }
 
@@ -309,6 +345,10 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             distiller_interval_minutes: cfg.distiller_interval_minutes,
             distiller_accumulation_threshold: cfg.distiller_accumulation_threshold,
             distiller_idle_minutes: cfg.distiller_idle_minutes,
+            memory_forgetting_enabled: cfg.memory_forgetting_enabled,
+            memory_forgetting_half_life_days: cfg.memory_forgetting_half_life_days,
+            memory_forgetting_dormant_threshold: cfg.memory_forgetting_dormant_threshold,
+            memory_forgetting_archive_days: cfg.memory_forgetting_archive_days,
         }
     }
 }
@@ -1568,7 +1608,7 @@ impl SessionManager {
         // ── Step 2: deliver via send_inbound() fast channel ──
         // Mid-execution AgentLoops pick up the change immediately (the
         // SessionMessage above queues until the next idle boundary).
-        let user_op = UserOp::UpdateRuntimeConfig(overrides.clone());
+        let user_op = UserOp::UpdateRuntimeConfig(Box::new(overrides.clone()));
         let inbound_msg = InboundMessage::UserOperation(user_op);
         for (session_id, handle) in &self.sessions {
             if let Err(e) = handle.send_inbound(inbound_msg.clone()) {

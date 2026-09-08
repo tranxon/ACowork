@@ -12,8 +12,8 @@ use std::time::Duration;
 use acowork_core::error::Result;
 
 use crate::types::{
-    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode, MemoryQuery,
-    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    AutobiographicalNode, DecayScanResult, Episode, EpisodicDecayConfig,
+    KnowledgeNode, MemoryQuery, ProceduralNode, SearchResult, StoreHealth, StoreStats,
 };
 
 /// MemoryStore trait - standardized interface for memory storage backends.
@@ -77,20 +77,16 @@ pub trait MemoryStore: Send + Sync {
 
     // ── Forgetting ───────────────────────────────────────────────────────
 
-    /// Run decay scan with the given configuration.
-    ///
-    /// Implements: decay_score = importance × activity_signal
-    /// where activity_signal = clamp(recency_boost + access_boost, floor, 1.0)
-    fn run_decay_scan(&self, config: &DecayConfig) -> Result<DecayScanResult>;
 
-    /// Reactivate a Dormant node back to Active.
-    fn reactivate_node(&self, node_id: u64) -> Result<()>;
-
-    /// Purge expired Dormant nodes.
+    /// Run episodic forgetting (pure time decay) with the given config.
     ///
-    /// Node is purged if: dormant_age > config.purge_after AND
-    /// importance < config.purge_importance_threshold
-    fn purge_expired(&self, max_dormant_age: Duration) -> Result<PurgeResult>;
+    /// Only touches `Episodic` nodes. When `config.enabled` is false this
+    /// is a no-op returning zeroes. Progressive semantics: Active nodes
+    /// with `retention < dormant_threshold` → Dormant; Dormant nodes
+    /// dormant for `archive_days` → archived to the PurgeLog.
+    fn run_episodic_decay_scan(&self, config: &EpisodicDecayConfig) -> Result<DecayScanResult>;
+
+
 
     // ── Lifecycle ───────────────────────────────────────────────────────
 

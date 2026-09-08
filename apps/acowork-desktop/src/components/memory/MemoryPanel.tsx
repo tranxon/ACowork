@@ -6,6 +6,7 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
 import { MemoryDistillSettings } from "./MemoryDistillSettings";
+import { MemoryForgettingSettings } from "./MemoryForgettingSettings";
 import { AlertTriangle, Info, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
@@ -13,6 +14,7 @@ import { ErrorBox } from "../common/ErrorBox";
 import { Dropdown } from "../common/Dropdown";
 import { ListBox, ExpandableRow } from "../common/list";
 import { subTypeOptions } from "./nodeTypeI18n";
+import { cn } from "../../lib/utils";
 
 export function MemoryPanel() {
   const { t } = useTranslation();
@@ -47,6 +49,7 @@ export function MemoryPanel() {
     fetchStats,
     distill,
     fetchDistillerStatus,
+    fetchForgettingStatus,
     rebuildIndex,
     setFilters,
     setPage,
@@ -90,6 +93,7 @@ export function MemoryPanel() {
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
+    void fetchForgettingStatus(selectedAgentId);
   }, [
     selectedAgentId,
     isAgentRunning,
@@ -97,6 +101,7 @@ export function MemoryPanel() {
     fetchNodes,
     fetchStats,
     fetchDistillerStatus,
+    fetchForgettingStatus,
   ]);
 
   // Re-fetch when filters or pagination change
@@ -114,6 +119,7 @@ export function MemoryPanel() {
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
+    void fetchForgettingStatus(selectedAgentId);
   }, [
     activePanelTab,
     selectedAgentId,
@@ -121,6 +127,7 @@ export function MemoryPanel() {
     fetchNodes,
     fetchStats,
     fetchDistillerStatus,
+    fetchForgettingStatus,
   ]);
 
   // Auto-dismiss consolidate message after 6 seconds
@@ -298,6 +305,16 @@ export function MemoryPanel() {
         distillerStatus={distillerStatus}
       />
 
+      {/* ADR-057 §5.3 redesign: episodic forgetting settings card
+          (enabled switch + half-life / dormant / archive tuning).
+          Reads/writes the four `agent_config.json` forgetting fields via
+          GET/PUT /agents/{id}/config. Sits right below the distill card —
+          both are memory lifecycle control surfaces. */}
+      <MemoryForgettingSettings
+        agentId={selectedAgentId}
+        running={isAgentRunning}
+      />
+
       {/* Error banner */}
       {error && (
         <div className="border-b border-red-200 dark:border-red-900">
@@ -319,11 +336,27 @@ export function MemoryPanel() {
           grammar as Snapshot / Distill cards). A useEffect at the top
           of this component re-opens the card automatically when a node
           is selected, so collapsing the search row never strands the
-          user with a hidden detail view. */}
-      <div className="flex min-h-0 flex-1 flex-col p-3">
+          user with a hidden detail view.
+
+          Height contract: when OPEN the body claims the remaining
+          flex-1 height (so the master-detail list / detail fills the
+          panel). When COLLAPSED the ListBox drops `flex-1` and shrinks
+          back to the header row's natural height — otherwise the
+          title row keeps claiming `flex-1` and the card stays the
+          same size with an empty body, which is the bug we just fixed.
+      */}
+      <div
+        className={cn(
+          "flex min-h-0 flex-col p-3",
+          searchOpen ? "flex-1" : "shrink-0",
+        )}
+      >
         <ListBox
           dividers={false}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className={cn(
+            "flex min-h-0 flex-col overflow-hidden",
+            searchOpen && "flex-1",
+          )}
         >
           <ExpandableRow
             open={searchOpen}

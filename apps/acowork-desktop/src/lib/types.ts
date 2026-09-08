@@ -924,14 +924,25 @@ export interface DistillerStatus {
   last_run: DistillerLastRun | null;
 }
 
+/**
+ * Episodic forgetting state reported by `GET /memory/consolidation/status`
+ * (ADR-057 §5.3 redesign) — the UI "记忆遗忘" card renders this without
+ * polling the manifest.
+ */
+export interface ForgettingStatus {
+  enabled: boolean;
+  half_life_days: number;
+  dormant_threshold: number;
+  archive_days: number;
+  interval_secs: number;
+}
+
 /** Response envelope of `GET /memory/consolidation/status`. */
 export interface ConsolidationStatusResponse {
   idle_secs: number;
-  pending_count: number;
-  idle_timeout_secs: number;
-  accumulation_threshold: number;
   bg_task_running: boolean;
   distiller: DistillerStatus;
+  forgetting: ForgettingStatus;
 }
 
 // ── Skill types ───────────────────────────────────────────────────────

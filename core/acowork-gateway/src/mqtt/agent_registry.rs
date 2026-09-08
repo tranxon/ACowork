@@ -18,13 +18,25 @@ use tokio::sync::RwLock;
 
 /// Lifecycle state of an agent, derived from MQTT retained status messages.
 ///
-/// `online=true` covers both `online` and `sleeping` payloads — both mean
-/// the Runtime is reachable, but only `sleeping` records a timestamp the
-/// Desktop can use to render an "auto-slept at HH:MM" badge distinct from
-/// a manual stop (which leaves `online=false`).
+/// `online=true` covers the `online`, `sleeping` and `degraded`
+/// payloads — all three mean the Runtime's MQTT session is alive
+/// (the process is connected to the broker), which is what the
+/// reconcile loop / Desktop `running` gate care about:
+///
+/// - `sleeping` additionally records a timestamp the Desktop can use
+///   to render an "auto-slept at HH:MM" badge.
+/// - `degraded` means a (re)connect happened but the bootstrap steps
+///   failed — the session is alive but not yet serving. It maps to
+///   `online=true` so the reconcile loop does not fight the dispatch
+///   event path (which keeps degraded agents tracked), while
+///   `ready=false` on the `running_agents` entry surfaces the
+///   not-yet-serving state to the UI.
+/// - A manual stop or a crash leaves `online=false` (the broker
+///   fired the LWT `offline`).
 #[derive(Debug, Clone)]
 pub struct AgentOnlineState {
-    /// Whether the agent is currently reachable (online OR sleeping).
+    /// Whether the agent is currently reachable (online / sleeping /
+    /// degraded — all mean the MQTT session is alive).
     pub online: bool,
     /// Whether the agent auto-slept (vs manually stopped / crashed).
     /// Stamped from the moment the Runtime published the `sleeping`
@@ -54,6 +66,19 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
+    /// Snapshot of every entry the registry currently holds
+    /// (online, sleeping, offline — anything in the map). Used by the
+    /// reconciliation loop in `mqtt::dispatch::reconcile_running_agents`
+    /// to walk the authoritative broker view without locking the
+    /// registry for the entire iteration. The returned vector is a
+    /// pure copy — safe to iterate without holding the read lock.
+    pub fn snapshot(&self) -> Vec<(String, AgentOnlineState)> {
+        self.agents
+            .iter()
+            .map(|(id, s)| (id.clone(), s.clone()))
+            .collect()
+    }
+
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self::default()
@@ -69,6 +94,11 @@ impl AgentRegistry {
     /// (the process is reachable; only the user-facing session has been
     /// suspended) but also stamp `sleeping_at` so the Desktop can render
     /// the auto-slept badge.
+    ///
+    /// `degraded` (bootstrap failed on a (re)connect) is also
+    /// `online=true`: the process is connected, so killing the entry
+    /// would fight the dispatch path; the not-ready state is surfaced
+    /// through `running_agents[id].ready=false`.
     pub fn update_from_mqtt(&mut self, topic: &str, payload: &[u8]) {
         // Parse agent_id from topic: acowork/agents/{agent_id}/status
         let parts: Vec<&str> = topic.split('/').collect();
@@ -141,7 +171,12 @@ impl AgentRegistry {
             }
         };
         let state = payload_str.trim();
-        let online = matches!(state, "online" | "sleeping");
+        // `degraded` counts as online: the Runtime's MQTT session is
+        // alive (bootstrap failed, but the process is connected and
+        // will retry on the next reconnect). Only `offline` — fired
+        // by the broker's LWT after the connection actually dropped —
+        // flips the bit back.
+        let online = matches!(state, "online" | "sleeping" | "degraded");
         let now = Instant::now();
         let sleeping_at_now = Utc::now();
 

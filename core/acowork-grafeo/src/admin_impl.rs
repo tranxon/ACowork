@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use acowork_core::error::{AcoworkError, Result};
 use acowork_memory::admin::{
-    AdminConsolidateResult, AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
+    AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
     AdminNodeRecord, AdminStats, MemoryAdminService, RebuildStats,
 };
 use grafeo_common::types::{NodeId, Value};
@@ -443,7 +443,6 @@ impl MemoryAdminService for GrafeoStore {
                 let mut by_status = aggregate.by_status;
                 by_status.insert("purged".to_string(), stats_snapshot.purged_count as u64);
 
-                let avg_decay_score = aggregate.avg_decay_score as f64;
                 let index_health = "healthy".to_string();
                 let stored_dim = self.embedding_dim() as u64;
                 let nodes_with_embedding = self.count_nodes_with_embedding();
@@ -481,7 +480,6 @@ impl MemoryAdminService for GrafeoStore {
                     storage_bytes: 0,
                     by_type,
                     by_status,
-                    avg_decay_score,
                     index_health,
                     stored_dim,
                     nodes_with_embedding,
@@ -494,33 +492,10 @@ impl MemoryAdminService for GrafeoStore {
                     storage_bytes: 0,
                     by_type: HashMap::new(),
                     by_status: HashMap::new(),
-                    avg_decay_score: 0.0,
                     index_health: format!("error: {}", e),
                     stored_dim: 0,
                     nodes_with_embedding: 0,
                 }
-            }
-        }
-    }
-
-    fn consolidate(&self, force: bool) -> AdminConsolidateResult {
-        let config = acowork_memory::consolidation::OfflineConsolidationConfig {
-            batch_size: 50,
-            min_pending_age_hours: if force { 0 } else { 1 },
-        };
-        match self.run_offline_consolidation(&config) {
-            Ok(result) => AdminConsolidateResult {
-                upgraded: result.upgraded as u64,
-                kept_pending: result.kept_pending as u64,
-                marked_dormant: result.marked_dormant as u64,
-                triples_extracted: result.triples_extracted as u64,
-                procedural_created: result.procedural_created as u64,
-                episodic_cleaned: result.episodic_cleaned as u64,
-                started: true,
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "Consolidation failed");
-                AdminConsolidateResult::default()
             }
         }
     }

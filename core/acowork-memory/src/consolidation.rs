@@ -409,6 +409,21 @@ pub struct SchedulerConfig {
     /// point even when the backlog is below [`Self::distiller_accumulation`]
     /// (ADR-071 D1). Default: 1800 (30 min).
     pub distiller_idle_secs: u64,
+    /// Enable episodic memory forgetting (pure time decay). Default: false
+    /// (OFF — opt-in). When enabled, the background loop runs
+    /// `run_episodic_decay_scan` at most once per `forgetting_interval_secs`.
+    pub forgetting_enabled: bool,
+    /// Episodic decay half-life in days (default 180).
+    pub forgetting_half_life_days: u64,
+    /// Retention threshold below which an episodic node becomes Dormant
+    /// (default 0.1).
+    pub forgetting_dormant_threshold: f32,
+    /// Days a Dormant node is retained before archiving to the PurgeLog
+    /// (default 90).
+    pub forgetting_archive_days: u64,
+    /// Minimum interval between episodic decay scans (seconds, default 3600).
+    /// Guards against a full-table scan every poll tick.
+    pub forgetting_interval_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -423,6 +438,13 @@ impl Default for SchedulerConfig {
             distiller_interval_secs: 3600,
             distiller_accumulation: 50,
             distiller_idle_secs: 1800,
+            forgetting_enabled: crate::types::EpisodicDecayConfig::default().enabled,
+            forgetting_half_life_days: crate::types::EpisodicDecayConfig::default()
+                .half_life_days,
+            forgetting_dormant_threshold: crate::types::EpisodicDecayConfig::default()
+                .dormant_threshold,
+            forgetting_archive_days: crate::types::EpisodicDecayConfig::default().archive_days,
+            forgetting_interval_secs: 3600,
         }
     }
 }
