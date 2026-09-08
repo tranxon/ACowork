@@ -20,15 +20,11 @@ use acowork_core::error::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::consolidation::{
-    EmbeddingFn, GeneralizationConfig, GeneralizationResult,
-    OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
-};
 use crate::quality::MemoryQualityConfig;
 use crate::types::{
-    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayScanResult,
     Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus,
-    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    ProceduralNode, SearchResult, StoreHealth, StoreStats,
 };
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
@@ -158,11 +154,6 @@ pub trait MemoryProvider: Send + Sync {
 
     // ── Forgetting ───────────────────────────────────────────────────────
 
-    /// Run decay scan with the given configuration.
-    ///
-    /// Implements: decay_score = importance × activity_signal
-    /// where activity_signal = clamp(recency_boost + access_boost, floor, 1.0)
-    fn run_decay_scan(&self, config: &DecayConfig) -> Result<DecayScanResult>;
 
     /// Run episodic forgetting (pure time decay) with the given config.
     ///
@@ -176,14 +167,7 @@ pub trait MemoryProvider: Send + Sync {
     ///   PurgeLog (30-day recovery window).
     fn run_episodic_decay_scan(&self, config: &EpisodicDecayConfig) -> Result<DecayScanResult>;
 
-    /// Reactivate a Dormant node back to Active.
-    fn reactivate_node(&self, node_id: u64) -> Result<()>;
 
-    /// Purge expired Dormant nodes.
-    ///
-    /// Node is purged if: dormant_age > config.purge_after AND
-    /// importance < config.purge_importance_threshold
-    fn purge_expired(&self, max_dormant_age: Duration) -> Result<PurgeResult>;
 
     // ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -233,30 +217,6 @@ pub trait MemoryProvider: Send + Sync {
 
     /// Generate a human-readable hint for the pending ambiguous conflict.
     fn generate_confirmation_hint(&self) -> Result<Option<String>>;
-
-    // ── Phase 1: Experience generalization (Path C) ─────────────────────
-
-    /// Run experience generalization: extract behavior patterns from
-    /// repeated episodes and create/boost ProceduralNodes.
-    async fn run_generalization(
-        &self,
-        session_id: Option<&str>,
-        embedding_fn: &EmbeddingFn,
-        config: &GeneralizationConfig,
-    ) -> Result<GeneralizationResult>;
-
-    /// **Deprecated (ADR-068):** old History-node compression is
-    /// superseded by episodic-side retention (`mark_consolidated` +
-    /// cleanup). The trait method is preserved as a no-op for binary
-    /// compatibility with test stubs; the production Grafeo
-    /// implementation in acowork-grafeo has been deleted (M6).
-    #[deprecated(
-        since = "0.4.0",
-        note = "ADR-068: history compression moved into episodic retention; this is a no-op stub"
-    )]
-    fn compress_history_nodes(&self, _keep_recent: usize) -> Result<usize> {
-        Ok(0)
-    }
 
     // ── Phase 1: Node CRUD ──────────────────────────────────────────────
 
@@ -376,33 +336,5 @@ pub trait MemoryProvider: Send + Sync {
         weight: f64,
     ) -> Result<()>;
 
-    // ── Phase 1: Consolidation lifecycle ────────────────────────────────
-    //
-    // ConsolidationScheduler is internal to the Provider implementation.
-    // Different engines may have entirely different consolidation strategies.
-    // The Runtime only controls start/stop/notify via these trait methods.
-
-    /// Start background consolidation (managed internally by the Provider).
-    /// The config is passed by the Runtime, but execution details are
-    /// determined by the Provider.
-    fn start_consolidation(&self, config: &SchedulerConfig) -> Result<()>;
-
-    /// Stop background consolidation.
-    fn stop_consolidation(&self);
-
-    /// Notify the Provider that the agent is active, resetting the idle timer.
-    async fn notify_consolidation_active(&self);
-
-    /// Get the number of pending consolidation nodes (for scheduling decisions).
-    fn get_pending_consolidation_count(&self) -> Result<usize>;
-
-    /// Run one offline consolidation pass.
-    async fn run_offline_consolidation(
-        &self,
-        offline_config: &OfflineConsolidationConfig,
-        llm: Option<&dyn TripleExtractorLlm>,
-        embedding_fn: Option<EmbeddingFn>,
-        gen_config: Option<&GeneralizationConfig>,
-    ) -> Result<OfflineConsolidationResult>;
 
 }

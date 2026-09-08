@@ -141,7 +141,6 @@ pub struct AdminStats {
     pub storage_bytes: u64,
     pub by_type: HashMap<String, u64>,
     pub by_status: HashMap<String, u64>,
-    pub avg_decay_score: f64,
     pub index_health: String,
     /// Embedding dimension stored in the engine's vector indexes.
     pub stored_dim: u64,
@@ -149,27 +148,6 @@ pub struct AdminStats {
     pub nodes_with_embedding: u64,
 }
 
-/// Result of a consolidation trigger.
-///
-/// Carries the full set of counters from `OfflineConsolidationResult`
-/// so the HTTP layer can construct a rich response for the frontend.
-#[derive(Debug, Clone, Default)]
-pub struct AdminConsolidateResult {
-    /// Number of pending knowledge nodes upgraded to Active.
-    pub upgraded: u64,
-    /// Number of pending nodes kept as Pending (insufficient evidence).
-    pub kept_pending: u64,
-    /// Number of pending nodes marked Dormant (low confidence).
-    pub marked_dormant: u64,
-    /// Number of new knowledge triples extracted from episodes (Phase 3).
-    pub triples_extracted: u64,
-    /// Number of new ProceduralNodes created by generalization (Phase 3).
-    pub procedural_created: u64,
-    /// Number of episodic nodes cleaned up (transitioned to Dormant).
-    pub episodic_cleaned: u64,
-    /// Whether the consolidation actually ran (false if store unavailable).
-    pub started: bool,
-}
 
 /// Statistics returned by embedding dimension migration.
 ///
@@ -227,13 +205,6 @@ pub trait MemoryAdminService: Send + Sync {
 
     /// Collect detailed memory statistics for the admin UI.
     fn get_stats(&self) -> AdminStats;
-
-    // ── Consolidation ────────────────────────────────────────────────
-
-    /// Trigger offline memory consolidation.
-    ///
-    /// `force = true` short-circuits the `min_pending_age_hours` guard.
-    fn consolidate(&self, force: bool) -> AdminConsolidateResult;
 
     // ── Embedding migration ──────────────────────────────────────────
 

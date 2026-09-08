@@ -22,7 +22,7 @@ use crate::consolidation::EmbeddingFn;
 use crate::quality::MemoryQualityConfig;
 
 use acowork_core::EmbeddingProvider;
-use crate::types::{DistilledEpisode, NodeStatus};
+use crate::types::{DistilledEpisode, EpisodicDecayConfig, NodeStatus};
 use acowork_core::error::{AcoworkError, Result};
 
 // ---------------------------------------------------------------------------
@@ -85,32 +85,6 @@ pub fn procedural_embedding_for(
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Retrieval-side forgetting configuration (ADR-057 §5.3 redesign).
-///
-/// Episodic memories decay on a half-life curve: a node's search score is
-/// multiplied by `retention = exp(-ln2 × age_days / half_life_days)` before
-/// ranking. Before the half-life the node keeps (almost) full weight;
-/// afterwards it is progressively down-ranked — a gradual fade instead of a
-/// hard binary eviction. Semantic-layer nodes (Knowledge / Procedural /
-/// Autobiographical) are NEVER decayed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RetrievalForgettingConfig {
-    /// Master switch. Mirrors the runtime `memory_forgetting_enabled`
-    /// (default off — forgetting is opt-in).
-    pub enabled: bool,
-    /// Episodic decay half-life in days (default: 180).
-    pub half_life_days: u64,
-}
-
-impl Default for RetrievalForgettingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            half_life_days: 180,
-        }
-    }
-}
-
 /// Configuration for MemoryManager.
 #[derive(Debug, Clone)]
 pub struct MemoryManagerConfig {
@@ -152,7 +126,10 @@ pub struct MemoryManagerConfig {
     /// Retrieval-side episodic time decay (memory forgetting). Default:
     /// disabled. When enabled, Episodic search scores are multiplied by the
     /// half-life retention factor before ranking.
-    pub forgetting: RetrievalForgettingConfig,
+    ///
+    /// The same type is used by the background scan (`EpisodicDecayConfig`),
+    /// so scan-side and retrieval-side semantics can never drift apart.
+    pub forgetting: EpisodicDecayConfig,
     /// Abstention guidance prompt injected when retrieval returns nothing
     /// and `query.abstention_enabled` is true (G9).
     ///
@@ -198,7 +175,7 @@ impl Default for MemoryManagerConfig {
             max_autobio_history_tokens: 100,
             default_k: 10,
             quality: MemoryQualityConfig::default(),
-            forgetting: RetrievalForgettingConfig::default(),
+            forgetting: EpisodicDecayConfig::default(),
             abstention_prompt: None,
             enable_graph_expand: true,
             record_async: true,
@@ -556,28 +533,15 @@ impl MemoryManager {
         // retention factor `exp(-ln2 × age_days / half_life_days)`.
         // Semantic-layer nodes (Knowledge / Procedural / Autobiographical)
         // are never decayed — they are durable knowledge, not event records.
-        if self.config.forgetting.enabled && !best_by_id.is_empty() {
-            let now = chrono::Utc::now();
-            let half_life_days = self.config.forgetting.half_life_days.max(1) as f64;
-            for (node_id, (score, label, _)) in best_by_id.iter_mut() {
-                if label != labels::EPISODIC {
-                    continue;
-                }
-                let age_days = match provider.get_node_created_at(*node_id) {
-                    Ok(Some(ts)) => (now - ts).num_seconds() as f64 / 86400.0,
-                    // No timestamp or error -> keep current score (defensive).
-                    _ => continue,
-                };
-                let retention = (-std::f64::consts::LN_2 * age_days / half_life_days).exp();
-                *score *= retention;
-                tracing::debug!(
-                    node_id,
-                    age_days = format!("{age_days:.1}"),
-                    retention = format!("{retention:.3}"),
-                    "Episodic retrieval time-decay applied"
-                );
+        // Pure scoring logic lives in `apply_retrieval_decay` (unit-tested);
+        // missing timestamps keep the current score.
+        best_by_id = apply_retrieval_decay(best_by_id, &self.config.forgetting, |node_id| {
+            match provider.get_node_created_at(node_id) {
+                Ok(Some(ts)) => Some((chrono::Utc::now() - ts).num_seconds() as f64 / 86400.0),
+                // No timestamp or error -> keep current score (defensive).
+                _ => None,
             }
-        }
+        });
 
         // Build RetrievedMemory list, sorted by score descending.
         let mut memories: Vec<RetrievedMemory> = Vec::new();
@@ -974,6 +938,52 @@ impl MemoryManager {
     }
 }
 
+/// Retrieval-side episodic time-decay (ADR-057 §5.3 redesign).
+///
+/// Multiplies the final score of Episodic nodes by the half-life
+/// retention factor `exp(-ln2 × age_days / half_life_days)` (see
+/// [`EpisodicDecayConfig::retention`], clamped to [0, 1]). Semantic-layer
+/// nodes (Knowledge / Procedural / Autobiographical) are never decayed —
+/// they are durable knowledge, not event records.
+///
+/// `age_days(node_id)` returns the node's age in days; `None` (missing
+/// timestamp or read error) keeps the current score, mirroring the other
+/// post-filters' keep-on-unknown policy.
+///
+/// Kept as a pure module-level function (no provider I/O) so the scoring
+/// branch is directly unit-testable.
+fn apply_retrieval_decay(
+    mut best_by_id: HashMap<u64, (f64, String, String)>,
+    config: &EpisodicDecayConfig,
+    mut age_days: impl FnMut(u64) -> Option<f64>,
+) -> HashMap<u64, (f64, String, String)> {
+    if !config.enabled || best_by_id.is_empty() {
+        return best_by_id;
+    }
+    for (node_id, (score, label, _)) in best_by_id.iter_mut() {
+        if label != labels::EPISODIC {
+            continue;
+        }
+        let age_days = match age_days(*node_id) {
+            Some(age) => age,
+            // No timestamp or error -> keep current score (defensive).
+            None => continue,
+        };
+        // Same half-life formula as the scan-side engine
+        // (`EpisodicDecayConfig::retention`): a zero half-life disables
+        // decay, a future timestamp never amplifies the score.
+        let retention = config.retention(age_days);
+        *score *= retention;
+        tracing::debug!(
+            node_id,
+            age_days = format!("{age_days:.1}"),
+            retention = format!("{retention:.3}"),
+            "Episodic retrieval time-decay applied"
+        );
+    }
+    best_by_id
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1044,6 +1054,93 @@ fn estimate_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retrieval_decay_half_life_episodic_only() {
+        // Episodic at exactly one half-life → score halved; fresh Episodic
+        // ≈ full score; Knowledge never decayed (durable sediment layer).
+        let cfg = EpisodicDecayConfig {
+            enabled: true,
+            half_life_days: 180,
+            dormant_threshold: 0.1,
+            archive_days: 90,
+        };
+        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
+        best.insert(1, (1.0, labels::EPISODIC.to_string(), "hybrid".into()));
+        best.insert(2, (1.0, labels::EPISODIC.to_string(), "hybrid".into()));
+        best.insert(3, (1.0, labels::KNOWLEDGE.to_string(), "hybrid".into()));
+
+        let out = apply_retrieval_decay(best, &cfg, |id| match id {
+            1 => Some(180.0),
+            2 => Some(0.5),
+            _ => Some(999.0),
+        });
+
+        assert!(
+            (out[&1].0 - 0.5).abs() < 1e-6,
+            "half-life Episodic node must be halved, got {}",
+            out[&1].0
+        );
+        assert!(
+            out[&2].0 > 0.99,
+            "fresh Episodic node must keep ~full score, got {}",
+            out[&2].0
+        );
+        assert_eq!(
+            out[&3].0, 1.0,
+            "Knowledge must never be decayed by retrieval-side forgetting"
+        );
+    }
+
+    #[test]
+    fn test_retrieval_decay_disabled_or_unknown_age_keeps_scores() {
+        // enabled = false (default) → no decay at all.
+        let cfg_off = EpisodicDecayConfig::default();
+        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
+        best.insert(1, (0.8, labels::EPISODIC.to_string(), "hybrid".into()));
+        let out = apply_retrieval_decay(best, &cfg_off, |_| Some(100000.0));
+        assert_eq!(out[&1].0, 0.8, "disabled config must be a no-op");
+
+        // enabled with missing/error timestamp → keep current score.
+        let cfg_on = EpisodicDecayConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
+        best.insert(1, (0.8, labels::EPISODIC.to_string(), "hybrid".into()));
+        let out = apply_retrieval_decay(best, &cfg_on, |_| None);
+        assert_eq!(out[&1].0, 0.8, "unknown age must keep current score");
+    }
+
+    #[test]
+    fn test_retrieval_decay_zero_half_life_and_future_clamp() {
+        // Zero half-life disables decay even for ancient nodes.
+        let cfg_zero = EpisodicDecayConfig {
+            enabled: true,
+            half_life_days: 0,
+            ..Default::default()
+        };
+        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
+        best.insert(1, (0.9, labels::EPISODIC.to_string(), "hybrid".into()));
+        let out = apply_retrieval_decay(best, &cfg_zero, |_| Some(100000.0));
+        assert_eq!(out[&1].0, 0.9, "zero half-life must disable decay");
+
+        // Future timestamp (negative age) → retention clamped to [0, 1]:
+        // the score must never be amplified above its original value.
+        let cfg = EpisodicDecayConfig {
+            enabled: true,
+            half_life_days: 180,
+            ..Default::default()
+        };
+        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
+        best.insert(1, (0.5, labels::EPISODIC.to_string(), "hybrid".into()));
+        let out = apply_retrieval_decay(best, &cfg, |_| Some(-50.0));
+        assert!(
+            out[&1].0 <= 0.5 + 1e-9 && out[&1].0 > 0.0,
+            "future timestamp must not amplify score, got {}",
+            out[&1].0
+        );
+    }
 
     #[test]
     fn test_config_defaults() {

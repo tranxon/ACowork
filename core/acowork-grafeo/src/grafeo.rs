@@ -16,8 +16,8 @@ use crate::types::{
 use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::types::{ResultSource, SearchResult};
 use acowork_memory::{
-    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, EpisodicDecayConfig,
-    KnowledgeNode, MemoryQuery, ProceduralNode, PurgeResult, StoreHealth, StoreStats,
+    AutobiographicalNode, DecayScanResult, Episode, EpisodicDecayConfig,
+    KnowledgeNode, MemoryQuery, ProceduralNode, StoreHealth, StoreStats,
 };
 
 use crate::error::Result;
@@ -847,46 +847,12 @@ impl MemoryStore for GrafeoStore {
             .collect())
     }
 
-    fn run_decay_scan(&self, config: &DecayConfig) -> acowork_core::error::Result<DecayScanResult> {
-        // DecayConfig is now the single acowork_memory type (design §10.3);
-        // pass it through directly — no native conversion needed.
-        let transitioned = self
-            .run_decay_scan(config)
-            .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?;
-
-        Ok(DecayScanResult {
-            to_dormant: transitioned as u64,
-            reactivated: 0,
-            purged: 0,
-        })
-    }
-
     fn run_episodic_decay_scan(
         &self,
         config: &EpisodicDecayConfig,
     ) -> acowork_core::error::Result<DecayScanResult> {
         GrafeoStore::run_episodic_decay_scan(self, config)
             .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))
-    }
-
-    fn reactivate_node(&self, node_id: u64) -> acowork_core::error::Result<()> {
-        GrafeoStore::reactivate_node(self, grafeo_common::NodeId(node_id))
-            .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))
-    }
-
-    fn purge_expired(&self, max_dormant_age: Duration) -> acowork_core::error::Result<PurgeResult> {
-        // Convert Duration to days for native method
-        let max_days = (max_dormant_age.as_secs() / 86400) as u32;
-
-        // Use purge_expired_dormant from purge_log module
-        let purged_entries = self
-            .purge_expired_dormant(max_days)
-            .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))?;
-
-        Ok(PurgeResult {
-            purged_count: purged_entries.len() as u64,
-            bytes_freed: 0, // Native method doesn't return this
-        })
     }
 
     fn health_check(&self) -> acowork_core::error::Result<StoreHealth> {

@@ -1608,7 +1608,7 @@ impl SessionManager {
         // ── Step 2: deliver via send_inbound() fast channel ──
         // Mid-execution AgentLoops pick up the change immediately (the
         // SessionMessage above queues until the next idle boundary).
-        let user_op = UserOp::UpdateRuntimeConfig(overrides.clone());
+        let user_op = UserOp::UpdateRuntimeConfig(Box::new(overrides.clone()));
         let inbound_msg = InboundMessage::UserOperation(user_op);
         for (session_id, handle) in &self.sessions {
             if let Err(e) = handle.send_inbound(inbound_msg.clone()) {

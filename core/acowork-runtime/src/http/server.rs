@@ -2486,7 +2486,7 @@ async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfi
     dispatch_agent_level_config(
         state,
         "runtime_config",
-        InboundMessage::UserOperation(UserOp::UpdateRuntimeConfig(overrides.clone())),
+        InboundMessage::UserOperation(UserOp::UpdateRuntimeConfig(Box::new(overrides.clone()))),
     )
     .await;
 }
@@ -4048,7 +4048,6 @@ mod tests {
         assert_eq!(body["storage_bytes"], 0);
         assert_eq!(body["by_type"], serde_json::json!({}));
         assert_eq!(body["by_status"], serde_json::json!({}));
-        assert_eq!(body["avg_decay_score"], 0.0);
         assert_eq!(body["stored_dim"], 0);
         assert_eq!(body["nodes_with_embedding"], 0);
 

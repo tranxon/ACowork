@@ -16,19 +16,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::Duration;
 
 use acowork_core::error::Result;
 use acowork_core::rag::{AnnotatedRagResult, RagProvider, RagResultItem};
-use acowork_memory::consolidation::{
-    GeneralizationConfig, GeneralizationResult,
-    OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
-};
 use acowork_memory::types::{
-    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayScanResult,
     Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus,
-    ProceduralNode, PurgeResult, ResultSource, SearchResult, StoreHealth, StoreStats,
+    ProceduralNode, ResultSource, SearchResult, StoreHealth, StoreStats,
 };
 use acowork_memory::MemoryProvider;
 use acowork_memory::quality::MemoryQualityConfig;
@@ -345,23 +341,11 @@ impl MemoryProvider for InMemoryProvider {
 
     // ── Forgetting ──────────────────────────────────────────────────────
 
-    fn run_decay_scan(&self, _config: &DecayConfig) -> Result<DecayScanResult> {
-        Ok(DecayScanResult::default())
-    }
-
     fn run_episodic_decay_scan(
         &self,
         _config: &EpisodicDecayConfig,
     ) -> Result<DecayScanResult> {
         Ok(DecayScanResult::default())
-    }
-
-    fn reactivate_node(&self, _node_id: u64) -> Result<()> {
-        Ok(())
-    }
-
-    fn purge_expired(&self, _max_dormant_age: Duration) -> Result<PurgeResult> {
-        Ok(PurgeResult::default())
     }
 
     // ── Lifecycle ───────────────────────────────────────────────────────
@@ -466,30 +450,6 @@ impl MemoryProvider for InMemoryProvider {
 
     fn generate_confirmation_hint(&self) -> Result<Option<String>> {
         Ok(None)
-    }
-
-    // ── Experience generalization (Path C) ─────────────────────────────
-
-    async fn run_generalization(
-        &self,
-        _session_id: Option<&str>,
-        _embedding_fn: &Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>,
-        _config: &GeneralizationConfig,
-    ) -> Result<GeneralizationResult> {
-        Ok(GeneralizationResult {
-            patterns: Vec::new(),
-            nodes_created: 0,
-            nodes_boosted: 0,
-            patterns_deduplicated: 0,
-            generalized_at: Utc::now(),
-        })
-    }
-
-    fn compress_history_nodes(&self, _keep_recent: usize) -> Result<usize> {
-        // ADR-068: history compression is gone; episodic retention owns
-        // space reclamation. The trait method is preserved as a no-op for
-        // binary compatibility.
-        Ok(0)
     }
 
     // ── Node CRUD ───────────────────────────────────────────────────────
@@ -600,29 +560,7 @@ impl MemoryProvider for InMemoryProvider {
         Ok(())
     }
 
-    // ── Consolidation lifecycle ────────────────────────────────────────
 
-    fn start_consolidation(&self, _config: &SchedulerConfig) -> Result<()> {
-        Ok(())
-    }
-
-    fn stop_consolidation(&self) {}
-
-    async fn notify_consolidation_active(&self) {}
-
-    fn get_pending_consolidation_count(&self) -> Result<usize> {
-        Ok(0)
-    }
-
-    async fn run_offline_consolidation(
-        &self,
-        _offline_config: &OfflineConsolidationConfig,
-        _llm: Option<&dyn TripleExtractorLlm>,
-        _embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
-        _gen_config: Option<&GeneralizationConfig>,
-    ) -> Result<OfflineConsolidationResult> {
-        Ok(OfflineConsolidationResult::default())
-    }
 }
 
 // ============================================================================

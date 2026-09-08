@@ -106,7 +106,6 @@ pub struct MemoryStatsResponse {
     pub storage_bytes: u64,
     pub by_type: std::collections::HashMap<String, u64>,
     pub by_status: std::collections::HashMap<String, u64>,
-    pub avg_decay_score: f64,
     pub index_health: String,
     /// Embedding dimension of the Grafeo HNSW vector index actually persisted on disk.
     /// 0 if the store has not yet built a vector index.
@@ -202,7 +201,6 @@ mod tests {
             storage_bytes: 4096,
             by_type: std::collections::HashMap::new(),
             by_status: std::collections::HashMap::new(),
-            avg_decay_score: 0.75,
             index_health: "healthy".to_string(),
             stored_dim: 512,
             nodes_with_embedding: 100,

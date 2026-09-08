@@ -19,9 +19,9 @@
 //!   (ADR-068 §3.6). Those tests are therefore read-side contract tests, NOT
 //!   LLM write-path tests; the LLM write path (tool → Episode) is covered by
 //!   the A* tests below and by `memory_adr068_e2e.rs`.
-//! - Forgetting: `run_decay_scan` / `get_dormant_candidates` (FLOOR, day
-//!   unit, BOOST_CAP), `run_offline_consolidation_with_generalization`
-//!   → `run_episodic_cleanup` (three-rule policy).
+//! - Forgetting: the episodic time-decay engine `run_episodic_decay_scan`
+//!   (half-life retention curve; progressive Active → Dormant → PurgeLog —
+//!   ADR-057 §5.3 redesign).
 //! - Graph: `GraphExpandConfig` / `get_expand_thresholds` (G11), edge weight
 //!   auto-computation via `create_memory_edge` + `compute_edge_weight` (G12).
 //!
@@ -34,11 +34,8 @@
 //!   B2  export_includes_private_when_requested                      (P1-2 export)
 //!   C1  retrieve_empty_injects_abstention_prompt                    (P2 G9)
 //!   C2  retrieve_identity_hint_reaches_knowledge                    (P2 G10)
-//!   C3  retrieve_excludes_dormant_keeps_pending                     (ADR-062 D1)
-//!   D1  decay_formula_floor_dayunit_cap                             (P1-1 formula)
-//!   D2  decay_scan_high_importance_survives                         (P1-1 scan)
-//!   D3  decay_scan_low_importance_dormant                           (P1-1 scan)
-//!   D4  episodic_cleanup_three_rules                                (P2 G13)
+//!   C3  retrieve_excludes_dormant_keeps_active                     (ADR-062 D1)
+//!   D4  episodic_decay_progressive_lifecycle                        (ADR-057 §5.3)
 //!   E1  graph_expand_thresholds_aligned                             (P2 G11)
 //!   E2  edge_weight_auto_computed                                   (P2 G12)
 //!   E3  edge_weight_explicit_not_overridden                         (P2 G12)
@@ -58,14 +55,13 @@ use acowork_core::packaging::PackageOptions;
 use acowork_core::tools::traits::Tool;
 use acowork_core::EmbeddingProvider;
 
-use acowork_grafeo::forgetting::compute_decay_score;
 use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::spreading::{GraphExpandConfig, get_expand_thresholds};
 use acowork_grafeo::types::KnowledgeNode as GrafeoKnowledgeNode;
 
 use acowork_memory::{
-    DecayConfig, HintType, KnowledgeSubType, MemoryManager, MemoryManagerConfig, MemoryProvider,
-    MemoryQuery, NodeStatus, OfflineConsolidationConfig, PrivacyLevel, labels,
+    EpisodicDecayConfig, HintType, KnowledgeSubType, MemoryManager, MemoryManagerConfig,
+    MemoryProvider, MemoryQuery, NodeStatus, PrivacyLevel, labels,
 };
 
 use acowork_runtime::memory::MemorySessionHandle;
@@ -543,20 +539,17 @@ async fn retrieve_identity_hint_reaches_knowledge() {
     );
 }
 
-/// C3 (ADR-062 D1): retrieval excludes Dormant nodes but keeps Active and
-/// Pending nodes.
+/// C3 (ADR-062 D1): retrieval excludes Dormant nodes but keeps Active ones.
 ///
-/// A node is stored (Active), verified retrievable, aged + decayed to
-/// Dormant, and must then disappear from the same query's results. A
-/// separate low-confidence node kept as Pending must remain retrievable
-/// (Pending nodes participate in retrieval and are naturally down-ranked
-/// by confidence — ADR-062 §3.3).
+/// A node is stored (Active), verified retrievable, transitioned to Dormant,
+/// and must then disappear from the same query's results while a second
+/// Active node stays retrievable. The Dormant transition itself is exercised
+/// by D4 below — this test pins the read-side contract.
 ///
-/// Sediment data is seeded directly (ADR-068 — see file header). Node
-/// statuses mirror what the write path used to produce before ADR-068
-/// (confidence ≥ direct_active_threshold → Active, below → Pending).
+/// Sediment data is seeded directly (ADR-068 — see file header), including
+/// the status field the decay scan writes.
 #[tokio::test]
-async fn retrieve_excludes_dormant_keeps_pending() {
+async fn retrieve_excludes_dormant_keeps_active() {
     let e2e = MemoryE2e::new();
 
     // ── Node A: high-confidence Active, low importance → decays to Dormant ──
@@ -571,7 +564,7 @@ async fn retrieve_excludes_dormant_keeps_pending() {
         )
         .await;
 
-    // ── Node B: low-confidence → Pending, stays retrievable ──
+    // ── Node B: Active, stays retrievable ──
     let b_id = e2e
         .seed_knowledge(
             "User may prefer cycling to work",
@@ -579,7 +572,7 @@ async fn retrieve_excludes_dormant_keeps_pending() {
             0.6,
             0.5,
             PrivacyLevel::Personal,
-            NodeStatus::Pending,
+            NodeStatus::Active,
         )
         .await;
 
@@ -590,7 +583,7 @@ async fn retrieve_excludes_dormant_keeps_pending() {
         q
     };
 
-    // Sanity: both retrievable before decay (A is Active, B is Pending).
+    // Sanity: both retrievable while Active.
     let before_a = manager
         .retrieve(
             &*e2e.store,
@@ -614,20 +607,15 @@ async fn retrieve_excludes_dormant_keeps_pending() {
         .expect("retrieve B before");
     assert!(
         before_b.memories.iter().any(|m| m.node_id == b_id),
-        "node B must be retrievable while Pending"
+        "node B must be retrievable while Active"
     );
 
-    // Age A 30 days + decay scan → Dormant.
+    // Transition A to Dormant (write side exercised by D4).
     e2e.store.db().set_node_property(
         NodeId::new(a_id),
-        "created_at",
-        Value::from(Timestamp::from_micros(micros_days_ago(30))),
+        "status",
+        Value::from(NodeStatus::Dormant.as_str()),
     );
-    let transitioned = e2e
-        .store
-        .run_decay_scan(&DecayConfig::default())
-        .expect("decay scan ok");
-    assert_eq!(transitioned, 1, "node A must transition to Dormant");
 
     // After: A excluded, B (Pending) still returned.
     let after_a = manager
@@ -658,7 +646,7 @@ async fn retrieve_excludes_dormant_keeps_pending() {
         .expect("retrieve B after");
     assert!(
         after_b.memories.iter().any(|m| m.node_id == b_id),
-        "Pending node B must remain retrievable, got: {:?}",
+        "Active node B must remain retrievable, got: {:?}",
         after_b
             .memories
             .iter()
@@ -668,55 +656,83 @@ async fn retrieve_excludes_dormant_keeps_pending() {
 }
 
 // ============================================================================
-// D series — forgetting (P1-1 decay formula/scan, P2 G13 episodic cleanup)
+// D series — forgetting (P1-1 decay formula/scan, ADR-057 §5.3 episodic decay)
 // ============================================================================
 
-/// D1 (P1-1 formula): verifies the three decay-formula corrections:
-/// FLOOR lower bound, recency in *days* (not hours), and BOOST_CAP.
+/// D4 (ADR-057 §5.3 redesign): `run_episodic_decay_scan` drives the single
+/// time-decay lifecycle over Episodic nodes — very old Active episodes
+/// (retention < dormant_threshold) → Dormant; Dormant episodes dormant past
+/// `archive_days` → archived to the PurgeLog; fresh episodes and the
+/// sediment layer (Knowledge) are never touched.
 #[test]
-fn decay_formula_floor_dayunit_cap() {
-    let cfg = DecayConfig::default();
-
-    // (a) FLOOR: even an extremely old, never-accessed node scores
-    //     `importance * floor`, never 0 (lower bound 0.05).
-    let very_old = compute_decay_score(&cfg, 0.5, 100_000.0, 0);
-    let floor_expected = 0.5 * cfg.floor;
-    assert!(
-        (very_old - floor_expected).abs() < 1e-6,
-        "FLOOR must bind: got {very_old}, expected ~{floor_expected}"
-    );
-
-    // (b) DAY unit: 1 day of decay → exp(-lambda * 1) ≈ 0.9704 (lambda 0.03).
-    //     If recency were in hours this would be exp(-0.72) ≈ 0.4868.
-    let one_day = compute_decay_score(&cfg, 1.0, 1.0, 0);
-    let day_expected = 1.0 * (-0.03_f64).exp();
-    assert!(
-        (one_day - day_expected as f32).abs() < 1e-4,
-        "recency must be in days: got {one_day}, expected ~{day_expected}"
-    );
-    assert!(
-        one_day > 0.8,
-        "day-unit recency keeps recent memory hot (got {one_day})"
-    );
-
-    // (c) BOOST_CAP: many recent accesses are capped at `boost_cap`.
-    let many_hits = compute_decay_score(&cfg, 1.0, 10.0, 10_000);
-    let capped_access = cfg.boost_cap; // min(access_per_hit * hits, boost_cap)
-    let capped_expected = 1.0 * (((-0.03_f64 * 10.0).exp() + capped_access as f64) as f32).min(1.0);
-    assert!(
-        (many_hits - capped_expected).abs() < 1e-4,
-        "BOOST_CAP must cap access: got {many_hits}, expected ~{capped_expected}"
-    );
-    assert!(many_hits <= 1.0, "score never exceeds 1.0");
-}
-
-/// D2 (P1-1 scan): high-importance knowledge survives `run_decay_scan` even
-/// after 30 days without access.
-#[tokio::test]
-async fn decay_scan_high_importance_survives() {
+fn episodic_decay_progressive_lifecycle() {
     let e2e = MemoryE2e::new();
+    let cfg = EpisodicDecayConfig {
+        enabled: true,
+        half_life_days: 180,
+        dormant_threshold: 0.1,
+        archive_days: 90,
+    };
 
-    let id = e2e
+    // Case 1: very old Active episode (~3.9× half-life → retention < 0.1)
+    // → Dormant on the next scan.
+    let old_active = e2e
+        .store
+        .store_node(
+            labels::EPISODIC,
+            [("content", Value::from("a very old event record"))],
+        )
+        .expect("store_node ok");
+    e2e.store
+        .db()
+        .set_node_property(
+            old_active,
+            "created_at",
+            Value::from(Timestamp::from_micros(micros_days_ago(700))),
+        );
+
+    // Case 2: Dormant for 100 days (past archive_days = 90) → PurgeLog.
+    let dormant_old = e2e
+        .store
+        .store_node(
+            labels::EPISODIC,
+            [("content", Value::from("dormant event past archive deadline"))],
+        )
+        .expect("store_node ok");
+    e2e.store
+        .db()
+        .set_node_property(
+            dormant_old,
+            "status",
+            Value::from(NodeStatus::Dormant.as_str()),
+        );
+    e2e.store
+        .db()
+        .set_node_property(
+            dormant_old,
+            "dormant_since",
+            Value::from(Timestamp::from_micros(micros_days_ago(100))),
+        );
+
+    // Case 3: fresh episode (retention ≈ 0.96) stays Active.
+    let fresh = e2e
+        .store
+        .store_node(
+            labels::EPISODIC,
+            [("content", Value::from("a recent event record"))],
+        )
+        .expect("store_node ok");
+    e2e.store
+        .db()
+        .set_node_property(
+            fresh,
+            "created_at",
+            Value::from(Timestamp::from_micros(micros_days_ago(10))),
+        );
+
+    // Case 4: sediment-layer (Knowledge) node as old as case 1 — the scan
+    // must never touch non-Episodic labels.
+    let knowledge = e2e
         .store
         .store_node(
             labels::KNOWLEDGE,
@@ -728,125 +744,18 @@ async fn decay_scan_high_importance_survives() {
         .expect("store_node ok");
     e2e.store
         .db()
-        .set_node_property(id, "created_at", Value::from(Timestamp::from_micros(micros_days_ago(30))));
-
-    let transitioned = e2e
-        .store
-        .run_decay_scan(&DecayConfig::default())
-        .expect("decay scan ok");
-    assert_eq!(transitioned, 0, "high importance must survive decay");
-
-    let node = e2e.store.db().get_node(id).expect("node exists");
-    let status = node
-        .get_property("status")
-        .and_then(Value::as_str)
-        .unwrap_or("Active");
-    assert_eq!(status, "Active", "high-importance node stays Active");
-}
-
-/// D3 (P1-1 scan): low-importance knowledge goes Dormant after 30 days.
-#[tokio::test]
-async fn decay_scan_low_importance_dormant() {
-    let e2e = MemoryE2e::new();
-
-    let id = e2e
-        .store
-        .store_node(
-            labels::KNOWLEDGE,
-            [
-                ("content", Value::from("A trivial detail")),
-                ("importance", Value::from(0.1f64)),
-            ],
-        )
-        .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(id, "created_at", Value::from(Timestamp::from_micros(micros_days_ago(30))));
-
-    let transitioned = e2e
-        .store
-        .run_decay_scan(&DecayConfig::default())
-        .expect("decay scan ok");
-    assert_eq!(transitioned, 1, "low importance must be transitioned");
-
-    let node = e2e.store.db().get_node(id).expect("node exists");
-    let status = node
-        .get_property("status")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    assert_eq!(status, "Dormant", "low-importance node goes Dormant");
-}
-
-/// D4 (P2 G13): `run_episodic_cleanup` applies all three rules —
-/// consolidated>7d → Dormant; unconsolidated>14d + low importance → Dormant;
-/// unconsolidated>14d + high importance → kept Active + `needs_consolidation`.
-#[tokio::test]
-async fn episodic_cleanup_three_rules() {
-    let e2e = MemoryE2e::new();
-
-    // Rule 1: consolidated episode, 30 days old → Dormant.
-    let r1 = e2e
-        .store
-        .store_node(
-            labels::EPISODIC,
-            [("content", Value::from("consolidated old episode"))],
-        )
-        .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(r1, "consolidated", Value::from(true));
-    e2e.store
-        .db()
-        .set_node_property(r1, "created_at", Value::from(Timestamp::from_micros(micros_days_ago(30))));
-
-    // Rule 2: unconsolidated, 30 days old, low importance → Dormant.
-    let r2 = e2e
-        .store
-        .store_node(
-            labels::EPISODIC,
-            [("content", Value::from("unconsolidated low value episode"))],
-        )
-        .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(r2, "consolidated", Value::from(false));
-    e2e.store
-        .db()
-        .set_node_property(r2, "importance", Value::from(0.1f64));
-    e2e.store
-        .db()
-        .set_node_property(r2, "created_at", Value::from(Timestamp::from_micros(micros_days_ago(30))));
-
-    // Rule 3: unconsolidated, 30 days old, high importance → kept + flagged.
-    let r3 = e2e
-        .store
-        .store_node(
-            labels::EPISODIC,
-            [("content", Value::from("unconsolidated important episode"))],
-        )
-        .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(r3, "consolidated", Value::from(false));
-    e2e.store
-        .db()
-        .set_node_property(r3, "importance", Value::from(0.9f64));
-    e2e.store
-        .db()
-        .set_node_property(r3, "created_at", Value::from(Timestamp::from_micros(micros_days_ago(30))));
+        .set_node_property(
+            knowledge,
+            "created_at",
+            Value::from(Timestamp::from_micros(micros_days_ago(700))),
+        );
 
     let result = e2e
         .store
-        .run_offline_consolidation_with_generalization(
-            &OfflineConsolidationConfig::default(),
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("consolidation ok");
-
-    assert_eq!(result.episodic_cleaned, 2, "rules 1+2 dormancy count");
+        .run_episodic_decay_scan(&cfg)
+        .expect("episodic decay scan ok");
+    assert_eq!(result.to_dormant, 1, "only the old Active episode goes Dormant");
+    assert_eq!(result.purged, 1, "only the stale Dormant episode is archived");
 
     let status = |id: NodeId| -> String {
         e2e.store
@@ -859,16 +768,25 @@ async fn episodic_cleanup_three_rules() {
             .to_string()
     };
 
-    assert_eq!(status(r1), "Dormant", "rule 1: consolidated old → Dormant");
-    assert_eq!(status(r2), "Dormant", "rule 2: unconsolidated low value → Dormant");
-    assert_eq!(status(r3), "Active", "rule 3: unconsolidated high value → kept Active");
-
-    let r3_node = e2e.store.db().get_node(r3).expect("node exists");
-    let needs_consolidation = r3_node
-        .get_property("needs_consolidation")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    assert!(needs_consolidation, "rule 3: flagged for priority consolidation");
+    assert_eq!(
+        status(old_active),
+        NodeStatus::Dormant.as_str(),
+        "old episode transitions Active → Dormant"
+    );
+    assert_eq!(
+        status(fresh),
+        NodeStatus::Active.as_str(),
+        "fresh episode must stay Active"
+    );
+    assert_eq!(
+        status(knowledge),
+        NodeStatus::Active.as_str(),
+        "sediment layer must never be decayed by the episodic scan"
+    );
+    assert!(
+        e2e.store.db().get_node(dormant_old).is_none(),
+        "stale Dormant episode must be archived (node deleted; PurgeLog holds it)"
+    );
 }
 
 // ============================================================================

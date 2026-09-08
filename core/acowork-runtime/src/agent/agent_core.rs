@@ -21,6 +21,7 @@ use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
 use acowork_memory::admin::MemoryAdminService;
 use acowork_memory::consolidation::SchedulerConfig;
+use acowork_memory::types::EpisodicDecayConfig;
 use acowork_memory::MemoryProvider;
 
 use crate::config::RuntimeConfig;
@@ -1034,6 +1035,15 @@ impl AgentCore {
                 "runtime config: memory forgetting settings updated — rebuilding consolidation pipeline if running"
             );
             self.update_consolidation_scheduler_config_if_running();
+            // ADR-057 §5.3 redesign: `memory_recall` reads its
+            // MemoryManagerConfig from the shared MemorySessionHandle
+            // (auto-inject builds a fresh manager each turn, so it was
+            // already live after the core update above). Refresh the handle
+            // so the retrieval-side time-decay takes effect for in-flight
+            // sessions immediately instead of at the next runtime restart.
+            if let Some(session) = &self.memory_session {
+                session.set_memory_config(self.memory_manager_config());
+            }
         }
     }
 
@@ -1167,17 +1177,15 @@ impl AgentCore {
             auto_inject_enabled: manifest_auto_inject.unwrap_or(false),
             // Retrieval-side forgetting: runtime agent_config.json layer
             // (forgetting_enabled / half_life_days) → system defaults.
-            // Shares the same half-life as the scan-side decay so both
-            // paths use one consistent curve (ADR-057 §5.3 redesign).
-            forgetting: acowork_memory::manager::RetrievalForgettingConfig {
-                enabled: self
-                    .forgetting_runtime
-                    .enabled
-                    .unwrap_or(false),
+            // Reuses the scan-side `EpisodicDecayConfig` so both paths share
+            // one type + one retention curve (ADR-057 §5.3 redesign).
+            forgetting: EpisodicDecayConfig {
+                enabled: self.forgetting_runtime.enabled.unwrap_or(false),
                 half_life_days: self
                     .forgetting_runtime
                     .half_life_days
-                    .unwrap_or(180),
+                    .unwrap_or_else(|| EpisodicDecayConfig::default().half_life_days),
+                ..EpisodicDecayConfig::default()
             },
             ..MemoryManagerConfig::default()
         }
@@ -1441,10 +1449,6 @@ impl AgentCore {
         let (timer, bg_task) = start_consolidation_pipeline(params);
         self.consolidation_bg_task = Some(bg_task);
         self.consolidation_timer = Some(timer);
-        // ADR-051 C3: Also notify the provider to start its internal consolidation.
-        if let Some(ref provider) = self.memory_provider {
-            let _ = provider.start_consolidation(&SchedulerConfig::default());
-        }
         tracing::info!("Consolidation background pipeline started");
     }
 
@@ -1453,11 +1457,6 @@ impl AgentCore {
         // timer so consolidation doesn't run during active use.
         if let Some(ref timer) = self.consolidation_timer {
             timer.notify_active().await;
-        }
-        // Also notify the Provider (for engines that manage their own
-        // scheduling internally). GrafeoStore's impl is a no-op today.
-        if let Some(ref provider) = self.memory_provider {
-            provider.notify_consolidation_active().await;
         }
     }
 
@@ -2659,6 +2658,47 @@ mod tests {
         assert!(
             !core.init_memory_manager().config().auto_inject_enabled,
             "manifest opt-out must disable auto-inject"
+        );
+    }
+
+    #[test]
+    fn test_forgetting_live_update_refreshes_session_handle_config() {
+        // ADR-057 §5.3 redesign: toggling memory forgetting via a live
+        // runtime-config PUT must refresh the shared `MemorySessionHandle`
+        // config — the `memory_recall` tool reads it from there (whereas
+        // auto-inject builds a fresh manager per turn). Without this
+        // refresh an in-flight session would keep the boot-time config
+        // (forgetting OFF) until the next runtime restart.
+        let mut core = make_core_with_memory_toml("");
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
+        core.memory_session = Some(handle.clone());
+        assert!(
+            handle.memory_config().is_none(),
+            "handle config is unset until memory init"
+        );
+
+        // Simulate the memory-panel PUT: forgetting ON, half-life 90 days.
+        let overrides = RuntimeConfigOverrides {
+            memory_forgetting_enabled: Some(true),
+            memory_forgetting_half_life_days: Some(90),
+            ..Default::default()
+        };
+        core.apply_runtime_config(&overrides);
+
+        let cfg = handle
+            .memory_config()
+            .expect("handle config must be refreshed after the forgetting PUT");
+        assert!(
+            cfg.forgetting.enabled,
+            "retrieval-side decay must become live without a restart"
+        );
+        assert_eq!(cfg.forgetting.half_life_days, 90);
+
+        // Auto-inject reads the same settings straight from the core.
+        assert!(core.init_memory_manager().config().forgetting.enabled);
+        assert_eq!(
+            core.init_memory_manager().config().forgetting.half_life_days,
+            90
         );
     }
 

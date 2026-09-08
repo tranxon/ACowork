@@ -1337,10 +1337,10 @@ fn assert_round_schema_intact(msgs: &[ChatMessage], label: &str) {
         let mut missing: Vec<&str> = calls.iter().map(|c| c.id.as_str()).collect();
         let mut j = i + 1;
         while j < msgs.len() && msgs[j].role == MessageRole::Tool {
-            if let Some(id) = msgs[j].tool_call_id.as_deref() {
-                if let Some(pos) = missing.iter().position(|w| *w == id) {
-                    missing.remove(pos);
-                }
+            if let Some(id) = msgs[j].tool_call_id.as_deref()
+                && let Some(pos) = missing.iter().position(|w| *w == id)
+            {
+                missing.remove(pos);
             }
             j += 1;
         }

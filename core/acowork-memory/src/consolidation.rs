@@ -438,10 +438,12 @@ impl Default for SchedulerConfig {
             distiller_interval_secs: 3600,
             distiller_accumulation: 50,
             distiller_idle_secs: 1800,
-            forgetting_enabled: false,
-            forgetting_half_life_days: 180,
-            forgetting_dormant_threshold: 0.1,
-            forgetting_archive_days: 90,
+            forgetting_enabled: crate::types::EpisodicDecayConfig::default().enabled,
+            forgetting_half_life_days: crate::types::EpisodicDecayConfig::default()
+                .half_life_days,
+            forgetting_dormant_threshold: crate::types::EpisodicDecayConfig::default()
+                .dormant_threshold,
+            forgetting_archive_days: crate::types::EpisodicDecayConfig::default().archive_days,
             forgetting_interval_secs: 3600,
         }
     }

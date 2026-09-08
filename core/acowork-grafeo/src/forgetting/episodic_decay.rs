@@ -19,10 +19,11 @@
 //! Forgetting is opt-in: `EpisodicDecayConfig::enabled = false` (default)
 //! makes the scan a no-op. Only `Episodic` nodes are touched — the
 //! sediment layer (Knowledge / Procedural / Autobiographical) is
-//! intentionally excluded and keeps the multiplicative `run_decay_scan`
-//! (retained for future use).
+//! intentionally excluded: semantic nodes are durable knowledge, not event
+//! records, and are never aged out by time decay.
 
 use chrono::{DateTime, Utc};
+use grafeo_common::types::{NodeId, Value};
 use grafeo_core::graph::lpg::Node;
 
 use crate::error::Result;
@@ -81,13 +82,21 @@ impl GrafeoStore {
                     .map(|ds| (now - ds).num_days())
                     .unwrap_or(0);
                 if dormant_days >= config.archive_days as i64 {
+                    // Preserve the node's recorded importance on the
+                    // purge-log entry (surfaced by recovery/audit UIs);
+                    // nodes without an importance property keep 0.0.
+                    let importance = node
+                        .properties
+                        .get(&"importance".into())
+                        .and_then(|v| v.as_float64())
+                        .unwrap_or(0.0) as f32;
                     self.purge_node(
                         node_id,
                         labels::EPISODIC,
                         &node.properties,
                         PurgeReason::TimeExpired {
                             dormant_days: dormant_days as u32,
-                            importance: 0.0,
+                            importance,
                         },
                     )?;
                     result.purged += 1;
@@ -96,6 +105,23 @@ impl GrafeoStore {
         }
 
         Ok(result)
+    }
+
+    /// Transition a node from Active to Dormant.
+    ///
+    /// Updates the `status` property and records `dormant_since`.
+    pub fn transition_to_dormant(&self, node_id: NodeId) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as i64;
+        let ts = grafeo_common::types::Timestamp::from_micros(now);
+
+        self.db
+            .set_node_property(node_id, "status", Value::from("Dormant"));
+        self.db
+            .set_node_property(node_id, "dormant_since", Value::from(ts));
+        Ok(())
     }
 }
 
@@ -112,6 +138,7 @@ fn age_days_from_props(node: &Node, now: DateTime<Utc>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forgetting::purge_log::{PURGE_LOG_LABEL, PurgeLogEntry};
     use grafeo_common::types::{NodeId, Value};
     use crate::types::NodeStatus;
 
@@ -190,6 +217,11 @@ mod tests {
     fn dormant_nodes_archived_after_deadline() {
         let store = test_store();
         let id = create_episodic(&store, 1800.0);
+        // Record the node's importance — the purge-log entry must carry it
+        // through (not a hard-coded 0.0).
+        store
+            .db()
+            .set_node_property(id, "importance", Value::from(0.7f64));
         // Transition to Dormant with an old dormant_since.
         store.transition_to_dormant(id).unwrap();
         let ds = Utc::now() - chrono::Duration::days(200);
@@ -209,6 +241,43 @@ mod tests {
         let result = store.run_episodic_decay_scan(&cfg).unwrap();
         assert_eq!(result.to_dormant, 0, "already dormant");
         assert_eq!(result.purged, 1, "old dormant node archived");
+        assert!(
+            store.db().get_node(id).is_none(),
+            "archived node must be removed from the main graph"
+        );
+
+        // The archive must be a recoverable PurgeLog entry carrying the
+        // original node id, label, and importance.
+        let purge_ids = store.db().graph_store().nodes_by_label(PURGE_LOG_LABEL);
+        assert_eq!(purge_ids.len(), 1, "exactly one PurgeLog entry expected");
+        let purge_node = store
+            .db()
+            .get_node(purge_ids[0])
+            .expect("purge log node exists");
+        let props: Vec<(String, Value)> = purge_node
+            .properties
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        let entry = PurgeLogEntry::from_properties(purge_ids[0], &props)
+            .expect("purge log entry must decode");
+        assert_eq!(entry.node_id, id, "purge log must reference the node");
+        assert_eq!(entry.label, labels::EPISODIC);
+        match entry.purge_reason {
+            PurgeReason::TimeExpired {
+                dormant_days,
+                importance,
+            } => {
+                assert!(
+                    (199..=201).contains(&dormant_days),
+                    "dormant_days = {dormant_days}"
+                );
+                assert!(
+                    (importance - 0.7).abs() < 1e-6,
+                    "importance must be read from the node, got {importance}"
+                );
+            }
+        }
     }
 
     #[test]

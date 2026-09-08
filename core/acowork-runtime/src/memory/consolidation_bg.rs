@@ -441,9 +441,6 @@ async fn run_consolidation_loop(
             scheduler.mark_forgetting_run().await;
         }
 
-        // Notify the provider that consolidation just ran.
-        provider.notify_consolidation_active().await;
-
         // Optional: write a sentinel file for debugging.
         if let Some(ref work_dir) = work_dir {
             let sentinel = work_dir.join(".consolidation_last_run");
@@ -814,6 +811,68 @@ mod tests {
         }
         // Interval open + idle open, but no backlog → no run.
         assert_eq!(timer.should_run_distill().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_forgetting_trigger_disabled_by_default() {
+        // Episodic forgetting is per-agent opt-in (ADR-057 §5.3): the
+        // default scheduler must never fire it, even with the interval
+        // gate wide open.
+        let timer = ConsolidationTimer::new(SchedulerConfig::default());
+        {
+            let mut state = timer.state.lock().await;
+            state.last_forgetting_at = Utc::now() - chrono::TimeDelta::days(30);
+        }
+        assert_eq!(timer.should_run_forgetting().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_forgetting_trigger_interval_gate() {
+        // Enabled + fresh timer → interval not elapsed → no run.
+        let config = SchedulerConfig {
+            forgetting_enabled: true,
+            forgetting_interval_secs: 3600,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        assert_eq!(timer.should_run_forgetting().await, None);
+
+        // mark_forgetting_run resets the gate → still gated on the next tick.
+        timer.mark_forgetting_run().await;
+        assert_eq!(timer.should_run_forgetting().await, None);
+
+        // Backdate the last run → interval open → fires ForgettingInterval.
+        {
+            let mut state = timer.state.lock().await;
+            state.last_forgetting_at = Utc::now() - chrono::TimeDelta::hours(2);
+        }
+        assert_eq!(
+            timer.should_run_forgetting().await,
+            Some(TriggerReason::ForgettingInterval)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forgetting_trigger_live_config_update() {
+        // ADR-071 D6-style live swap: disabled at start → nothing fires;
+        // flipping the switch on must take effect on the next tick without
+        // rebuilding the timer.
+        let timer = ConsolidationTimer::new(SchedulerConfig::default());
+        {
+            let mut state = timer.state.lock().await;
+            state.last_forgetting_at = Utc::now() - chrono::TimeDelta::days(30);
+        }
+        assert_eq!(timer.should_run_forgetting().await, None);
+
+        timer.update_config(SchedulerConfig {
+            forgetting_enabled: true,
+            forgetting_interval_secs: 0, // always open once enabled
+            ..Default::default()
+        });
+        assert_eq!(
+            timer.should_run_forgetting().await,
+            Some(TriggerReason::ForgettingInterval)
+        );
     }
 
     #[tokio::test]

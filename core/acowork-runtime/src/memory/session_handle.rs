@@ -91,7 +91,12 @@ impl MemorySessionHandle {
         self.embedding_provider.clone()
     }
 
-    /// Set the agent's memory manager config (called once at memory init).
+    /// Set the agent's memory manager config.
+    ///
+    /// Called at memory init AND whenever a live runtime-config update
+    /// changes retrieval-affecting settings (e.g. the memory-forgetting
+    /// toggle, ADR-057 §5.3) so the `memory_recall` tool observes the same
+    /// config as auto-inject without a restart.
     pub fn set_memory_config(&self, config: MemoryManagerConfig) {
         if let Ok(mut guard) = self.memory_config.write() {
             *guard = Some(config);

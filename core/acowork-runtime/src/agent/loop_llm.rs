@@ -444,15 +444,11 @@ impl AgentLoop {
                         // that cannot fit the window.
                         let model_name = self.resolve_current_model(context_builder);
                         let before = self.session.history.token_count();
-                        if let Err(compact_err) =
-                            self.compact_history_if_needed(&model_name, true).await
-                        {
-                            // Compaction failure is explicit and terminal —
-                            // surface it (non-retryable → GiveUp → Idle)
-                            // instead of retrying a request that cannot fit
-                            // the window or silently looping.
-                            return Err(compact_err);
-                        }
+                        // Compaction failure is explicit and terminal —
+                        // surface it (non-retryable → GiveUp → Idle)
+                        // instead of retrying a request that cannot fit
+                        // the window or silently looping.
+                        self.compact_history_if_needed(&model_name, true).await?;
                         let after = self.session.history.token_count();
                         if after < before {
                             tracing::info!(

@@ -918,9 +918,6 @@ export interface ForgettingStatus {
 /** Response envelope of `GET /memory/consolidation/status`. */
 export interface ConsolidationStatusResponse {
   idle_secs: number;
-  pending_count: number;
-  idle_timeout_secs: number;
-  accumulation_threshold: number;
   bg_task_running: boolean;
   distiller: DistillerStatus;
   forgetting: ForgettingStatus;

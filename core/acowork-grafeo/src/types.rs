@@ -953,7 +953,7 @@ mod tests {
             source_episode_ids: Vec::new(),
             promotion_metadata: None,
             embedding: None,
-            status: NodeStatus::Pending,
+            status: NodeStatus::Active,
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: HashMap::new(),
@@ -965,7 +965,7 @@ mod tests {
         let restored = KnowledgeNode::from_properties(NodeId::new(4), &props).unwrap();
 
         assert_eq!(restored.sub_type, KnowledgeSubType::Preference);
-        assert_eq!(restored.status, NodeStatus::Pending);
+        assert_eq!(restored.status, NodeStatus::Active);
         assert!(restored.source_episode_id.is_none());
         assert!(restored.embedding.is_none());
     }
@@ -1148,7 +1148,7 @@ mod tests {
 
     #[test]
     fn test_node_status_roundtrip() {
-        for variant in [NodeStatus::Active, NodeStatus::Dormant, NodeStatus::Pending] {
+        for variant in [NodeStatus::Active, NodeStatus::Dormant] {
             let s = variant.as_str();
             let parsed: NodeStatus = s.parse().unwrap();
             assert_eq!(parsed, variant);

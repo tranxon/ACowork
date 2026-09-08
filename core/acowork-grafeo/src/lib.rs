@@ -39,10 +39,8 @@ pub use conflict::{
     detect_conflict,
 };
 pub use consolidation::{
-    BehaviorPattern, ConflictCandidate, ConflictResolutionDetail, EmbeddingFn,
-    GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,
-    MemoryStoreResult, OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory,
-    ProcessResult, SchedulerConfig, TripleExtractorLlm,
+    ConflictCandidate, ConflictResolutionDetail, LlmMessage, LlmResponse, MemoryStoreInput,
+    MemoryStoreResult, ProcessResult, SchedulerConfig, TripleExtractorLlm,
 };
 pub use engineering::{
     CapacityConfig, CapacityStatus, ConcurrencyConfig, EmbeddingLevel, HealthCheckResult,
@@ -50,7 +48,6 @@ pub use engineering::{
 pub use error::{GrafeoError, Result};
 pub use eval::{EvalConfig, EvalDimension, EvalResult, run_eval};
 pub use export::FilteredNode;
-pub use forgetting::DecayConfig;
 pub use grafeo::GrafeoStore;
 pub use grafeo::RebuildStats;
 pub use index_config::{
