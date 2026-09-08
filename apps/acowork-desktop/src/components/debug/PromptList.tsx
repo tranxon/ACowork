@@ -220,18 +220,20 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
 
   return (
     <div data-testid="prompt-list" className="m-3">
-      {/* Top — ToolsTab-style section label above the card. */}
-      <span className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-        {t("prompts.title")}
-      </span>
-
       {/* Card — shared right-panel block surface (ListBox on
           bg-panel-block). The header row stays INSIDE the card: an
           ExpandableRow whose chevron + count badge toggle the body; the
           reload button (trailing slot) stops propagation so it does not
           toggle. The body uses a thin border-t to separate from the
-          header when open. */}
-      <ListBox className="mt-1" dividers={false}>
+          header when open.
+
+          Title policy: the card title is rendered ONCE, in the
+          ExpandableRow header (`t("prompts.title")`). A previous draft
+          also rendered the same label as a ToolsTab-style span ABOVE
+          the card; that was redundant once the header owns the title,
+          so it was removed — every level-1 collapsible card on the
+          right panel now reads its title from the header only. */}
+      <ListBox dividers={false}>
         <ExpandableRow
           open={open}
           onToggle={() => setOpen((v) => !v)}

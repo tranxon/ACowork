@@ -14,6 +14,7 @@ import { ErrorBox } from "../common/ErrorBox";
 import { Dropdown } from "../common/Dropdown";
 import { ListBox, ExpandableRow } from "../common/list";
 import { subTypeOptions } from "./nodeTypeI18n";
+import { cn } from "../../lib/utils";
 
 export function MemoryPanel() {
   const { t } = useTranslation();
@@ -44,7 +45,6 @@ export function MemoryPanel() {
     consolidateMessage,
     migrationInProgress,
     distillerStatus,
-    forgettingStatus,
     fetchNodes,
     fetchStats,
     distill,
@@ -313,7 +313,6 @@ export function MemoryPanel() {
       <MemoryForgettingSettings
         agentId={selectedAgentId}
         running={isAgentRunning}
-        forgettingStatus={forgettingStatus}
       />
 
       {/* Error banner */}
@@ -337,11 +336,27 @@ export function MemoryPanel() {
           grammar as Snapshot / Distill cards). A useEffect at the top
           of this component re-opens the card automatically when a node
           is selected, so collapsing the search row never strands the
-          user with a hidden detail view. */}
-      <div className="flex min-h-0 flex-1 flex-col p-3">
+          user with a hidden detail view.
+
+          Height contract: when OPEN the body claims the remaining
+          flex-1 height (so the master-detail list / detail fills the
+          panel). When COLLAPSED the ListBox drops `flex-1` and shrinks
+          back to the header row's natural height — otherwise the
+          title row keeps claiming `flex-1` and the card stays the
+          same size with an empty body, which is the bug we just fixed.
+      */}
+      <div
+        className={cn(
+          "flex min-h-0 flex-col p-3",
+          searchOpen ? "flex-1" : "shrink-0",
+        )}
+      >
         <ListBox
           dividers={false}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className={cn(
+            "flex min-h-0 flex-col overflow-hidden",
+            searchOpen && "flex-1",
+          )}
         >
           <ExpandableRow
             open={searchOpen}

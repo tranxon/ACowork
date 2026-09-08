@@ -248,7 +248,16 @@ export function MemoryDistillSettings({
     // card on the right panel. The trailing Switch owns enable AND the
     // auto expand/collapse (see `handleToggle`), so the user never has
     // to first enable then click the title row.
-    <div className="p-3">
+    //
+    // `border-b` on the wrapper is the shared vertical hairline that
+    // separates this card from the 记忆遗忘 card below — same zinc-200 /
+    // zinc-800 tone as the stats-grid hairline at the top of the panel
+    // and the hairline between 记忆遗忘 and 记忆搜索. The wrapper owns
+    // its own border (not the inner ListBox) so the line spans the
+    // full panel width and the spacing above / below the hairline is
+    // always the wrapper's `p-3` on each side — uniform across the
+    // three cards.
+    <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
       <ListBox dividers={false}>
         <ExpandableRow
           open={expanded}
