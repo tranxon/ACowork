@@ -1275,7 +1275,7 @@ async fn track_running_agent_for_status(
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
-        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+        node_id: acowork_core::node::local_node_id(),
         connected: true,
         // `ready` defaults to false; the ready topic handler upgrades
         // it the moment `ready=true` is observed. The Desktop's
@@ -1355,7 +1355,7 @@ pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &Shar
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace,
-                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                node_id: acowork_core::node::local_node_id(),
                 connected: true,
                 ready: false,
                 dev_mode: false,
@@ -2296,7 +2296,7 @@ mod tests {
                         dev: false,
                         skills: Default::default(),
                     },
-                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    node_id: acowork_core::node::local_node_id(),
                 },
             );
         }
@@ -2419,7 +2419,7 @@ mod tests {
                         dev: false,
                         skills: Default::default(),
                     },
-                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    node_id: acowork_core::node::local_node_id(),
                 },
             );
         }
@@ -2473,7 +2473,7 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now() - chrono::Duration::seconds(60),
                 workspace: String::new(),
-                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                node_id: acowork_core::node::local_node_id(),
                 connected: true,
                 ready: true,
                 dev_mode: false,
@@ -2514,7 +2514,7 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                node_id: acowork_core::node::local_node_id(),
                 connected: true,
                 ready: false,
                 dev_mode: false,

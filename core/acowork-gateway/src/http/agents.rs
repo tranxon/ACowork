@@ -3292,7 +3292,7 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                node_id: acowork_core::node::local_node_id(),
                 connected: true,
                 ready: true,
                 dev_mode: false,
