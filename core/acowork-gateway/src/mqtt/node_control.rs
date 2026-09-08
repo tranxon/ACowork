@@ -27,7 +27,14 @@ use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
 /// Timeout for a node command round-trip. Covers network + Runtime
 /// startup latency on the node; the Gateway surfaces a timeout error
 /// so callers can retry idempotently.
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Kept at 10s (was 30s): the HTTP `/start` handler awaits this inline,
+/// so a Node that is slow to reply (e.g. recovering right after a host
+/// suspend/resume) used to leave the Desktop hanging for 30s with zero
+/// feedback. 10s still covers a genuine Runtime spawn while bounding
+/// worst-case UI latency; the POST /start idempotent fast-path already
+/// short-circuits the common "already running" case.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Error type for node control-plane operations.
 #[derive(Debug, thiserror::Error)]

@@ -415,6 +415,47 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let agent_id_for_log = agent_id.clone();
         tokio::spawn(async move {
             let mut gw = state_for_ready.write().await;
+            // ADR-055 node-hosted lifecycle: a Runtime that announces
+            // `ready` without having been started through POST /start
+            // (e.g. started by the Node at boot, or restarted after a
+            // reconnect) never enters `running_agents`, so its ready
+            // signal used to be dropped silently and the Desktop's
+            // `running && ready` gate never opened. Auto-track it as
+            // node-hosted (pid = 0) so GET /api/agents surfaces the
+            // live state and POST /start can short-circuit idempotently
+            // instead of paying a control/start round-trip.
+            if !gw.running_agents.contains_key(&agent_id_for_log) {
+                let workspace = gw
+                    .installed_agents
+                    .get(&agent_id_for_log)
+                    .map(|i| {
+                        std::path::PathBuf::from(&i.install_path)
+                            .join("workspace")
+                            .to_string_lossy()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                gw.add_running(crate::gateway::state::RunningAgentInfo {
+                    agent_id: agent_id_for_log.clone(),
+                    pid: 0,
+                    started_at: chrono::Utc::now(),
+                    workspace,
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                    connected: true,
+                    ready,
+                    dev_mode: false,
+                    debug_state: crate::gateway::state::DebugState::Disabled,
+                    debug_port: None,
+                    workspace_config_json: None,
+                    current_embed_dim: None,
+                    migration: None,
+                });
+                tracing::info!(
+                    agent_id = %agent_id_for_log,
+                    ready,
+                    "Auto-tracked node-hosted Runtime from ready signal (pid=0)"
+                );
+            }
             gw.set_agent_ready(&agent_id_for_log, ready);
             tracing::info!(
                 agent_id = %agent_id_for_log,
@@ -1250,6 +1291,86 @@ mod tests {
         // handle_plaintext_message spawns a tokio task; wait for it.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(node_reg.read().await.is_online("local"));
+    }
+
+    #[tokio::test]
+    async fn test_ready_topic_auto_tracks_node_hosted_runtime() {
+        let http_reg = crate::http::proxy::new_shared_registry();
+        let agent_reg = crate::mqtt::agent_registry::new_shared_registry();
+        let node_reg = crate::mqtt::node_registry::new_shared_registry();
+        let state = test_state();
+
+        // A node-hosted Runtime announces `ready` without having been
+        // started through POST /start — it must be auto-tracked as
+        // pid=0 so GET /api/agents surfaces `running && ready` and
+        // POST /start can short-circuit idempotently.
+        handle_plaintext_message(
+            "acowork/agents/com.acowork.senior-engineer/ready",
+            b"true",
+            &DispatchContext {
+                runtime_http_registry: http_reg.clone(),
+                agent_registry: agent_reg.clone(),
+                node_registry: node_reg.clone(),
+                state: state.clone(),
+                ..Default::default()
+            },
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let gw = state.read().await;
+        let entry = gw
+            .running_agents
+            .get("com.acowork.senior-engineer")
+            .expect("node-hosted Runtime must be auto-tracked from its ready signal");
+        assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
+        assert!(entry.ready, "tracked ready must mirror the MQTT payload");
+        assert!(
+            entry.connected,
+            "auto-tracked Runtime is connected per the ready signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ready_false_keeps_auto_tracked_runtime() {
+        let http_reg = crate::http::proxy::new_shared_registry();
+        let agent_reg = crate::mqtt::agent_registry::new_shared_registry();
+        let node_reg = crate::mqtt::node_registry::new_shared_registry();
+        let state = test_state();
+
+        // A runtime that later reports not-ready must stay tracked but
+        // flip `ready` to false (the Gateway never spuriously removes a
+        // node-hosted entry on a transient not-ready signal).
+        handle_plaintext_message(
+            "acowork/agents/com.acowork.senior-engineer/ready",
+            b"true",
+            &DispatchContext {
+                runtime_http_registry: http_reg.clone(),
+                agent_registry: agent_reg.clone(),
+                node_registry: node_reg.clone(),
+                state: state.clone(),
+                ..Default::default()
+            },
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle_plaintext_message(
+            "acowork/agents/com.acowork.senior-engineer/ready",
+            b"false",
+            &DispatchContext {
+                runtime_http_registry: http_reg.clone(),
+                agent_registry: agent_reg.clone(),
+                node_registry: node_reg.clone(),
+                state: state.clone(),
+                ..Default::default()
+            },
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let gw = state.read().await;
+        let entry = gw
+            .running_agents
+            .get("com.acowork.senior-engineer")
+            .expect("node-hosted Runtime must remain tracked after not-ready");
+        assert!(!entry.ready, "ready must mirror the latest MQTT payload");
     }
 
     #[tokio::test]

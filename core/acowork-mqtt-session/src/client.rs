@@ -181,6 +181,31 @@ impl<B: MqttClientHandler> MqttClient<B> {
                 }
             };
 
+            // ADR-065 wake-recovery hardening: incoming PUBLISH handlers
+            // are dispatched to a dedicated serial consumer task instead
+            // of being awaited inline on the event-loop poll task.
+            //
+            // `on_publish` implementations do real work — the Runtime
+            // persists `acowork/global/*` catalogs to disk (sync fs
+            // writes), the Gateway routes agent status, etc. A slow
+            // publish handler used to stall the entire event loop: no
+            // further MQTT events were polled, the outgoing queue filled
+            // up, and every publish (state relay, heartbeats, replies)
+            // blocked behind it — the process looked "sleeping" for tens
+            // of seconds after a host suspend/resume (2026-09-07
+            // incident). Ordering is preserved (single consumer) and the
+            // unbounded channel needs no backpressure because control
+            // traffic is small; the consumer task dies with the poll
+            // task via the sender's drop.
+            let (publish_tx, mut publish_rx) =
+                tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+            let publish_handler = Arc::clone(&task_handler_poll);
+            tokio::spawn(async move {
+                while let Some((topic, payload)) = publish_rx.recv().await {
+                    publish_handler.on_publish(&topic, &payload).await;
+                }
+            });
+
             loop {
                 let mut consecutive_failures: u32 = 0;
                 let mut fatal_streak: u32 = 0;
@@ -206,9 +231,19 @@ impl<B: MqttClientHandler> MqttClient<B> {
                         event_result = eventloop.poll() => {
                             match event_result {
                                 Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                                    task_handler_poll
-                                        .on_publish(&publish.topic, &publish.payload)
-                                        .await;
+                                    // Non-blocking hand-off to the serial
+                                    // publish consumer (see the channel
+                                    // setup above). `send` only fails when
+                                    // the consumer task has exited — log at
+                                    // debug, never stall the poll loop.
+                                    if publish_tx
+                                        .send((publish.topic, publish.payload.to_vec()))
+                                        .is_err()
+                                    {
+                                        tracing::debug!(
+                                            "MQTT publish consumer task exited; dropping incoming publish"
+                                        );
+                                    }
                                 }
                                 Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                                     set_state(SessionState::Connected);

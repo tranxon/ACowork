@@ -2212,7 +2212,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-xl border border-right-panel bg-right-panel">
+        <div className="mx-3 mb-3 rounded-xl border border-chat-input-border bg-right-panel">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
