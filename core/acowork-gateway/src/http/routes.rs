@@ -66,6 +66,11 @@ pub struct AppState {
     /// (install / provider write / identity write) from `Accepted` to
     /// a terminal state, keyed by `operation_id`.
     pub operation_store: Option<crate::operation_store::SharedOperationStore>,
+    /// Peer-IP allowlist (security backstop, `[security].allowed_node_ips`).
+    /// Populated at boot from the Gateway config; empty = allow everyone.
+    /// Enforced by the `ip_allowlist_middleware` for requests that carry a
+    /// real `ConnectInfo` (i.e. every request that arrived over TCP).
+    pub ip_allowlist: crate::security::IpAllowlist,
 }
 
 impl AppState {
@@ -86,6 +91,7 @@ impl AppState {
             node_registry: None,
             bootstrap_registry: None,
             operation_store: None,
+            ip_allowlist: crate::security::IpAllowlist::default(),
         }
     }
 }
@@ -114,11 +120,67 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
     response
 }
 
+/// Peer-IP allowlist enforcement (security backstop).
+///
+/// Reads `AppState::ip_allowlist` (populated at boot from
+/// `[security].allowed_node_ips`). Empty list → pass-through (default).
+///
+/// The peer IP comes from Axum's `ConnectInfo<SocketAddr>` extension,
+/// which is only attached when the router is served via
+/// `into_make_service_with_connect_info::<SocketAddr>()` (see
+/// `crate::http::server::start_http_server`). Requests that arrive
+/// **without** ConnectInfo (in-process tests, internal callers that
+/// invoke the router directly) are trusted and pass through — they are
+/// already on a trusted code path; the allowlist exists to gate
+/// *network* peers, and every network peer goes through the TCP
+/// listener that supplies ConnectInfo.
+///
+/// A blocked peer receives `403 Forbidden` with a JSON body and a WARN
+/// log line (IP + URI), so an operator can detect scan / probe traffic.
+pub(crate) async fn ip_allowlist_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let allowlist = &state.ip_allowlist;
+    if allowlist.is_empty() {
+        return next.run(req).await;
+    }
+    // Peek at the request for the log line without consuming it.
+    let uri = req.uri().to_string();
+    match req
+        .extensions()
+        .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0)
+    {
+        // Real network connection: enforce the allowlist.
+        Some(peer) if allowlist.allows_socket(peer) => next.run(req).await,
+        Some(peer) => {
+            tracing::warn!(
+                peer = %peer.ip(),
+                uri = %uri,
+                "blocked by security.allowed_node_ips (HTTP)"
+            );
+            let body = axum::Json(serde_json::json!({
+                "error": "forbidden",
+                "detail": "peer IP not allowed by gateway security policy",
+            }));
+            (StatusCode::FORBIDDEN, body).into_response()
+        }
+        // No ConnectInfo — trusted in-process path.
+        None => next.run(req).await,
+    }
+}
+
 /// Build the HTTP router with all routes.
 ///
 /// ADR-064: PM 不再内嵌（`nest_service` 已删除），`/api/pm/*` 由
 /// [`crate::http::pm_proxy::pm_proxy_routes`] 反向代理到独立进程。
 pub fn build_router(state: AppState) -> Router {
+    // Peer-IP allowlist middleware needs the state again after
+    // `.with_state(state)` moves it — clone up front.
+    let allowlist_state = state.clone();
+
     // CORS — permissive for all deployments.
     //
     // `CorsLayer::permissive()` alone — deliberately WITHOUT
@@ -194,6 +256,13 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
+        // Peer-IP allowlist — outermost layer so it gates *every*
+        // route (including /health and unknown paths). Empty list =
+        // pass-through. See `ip_allowlist_middleware`.
+        .layer(middleware::from_fn_with_state(
+            allowlist_state,
+            ip_allowlist_middleware,
+        ))
 }
 
 // ── Health check (liveness-only) ─────────────────────────────────────
@@ -506,6 +575,8 @@ impl ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
 
     fn test_app_state() -> AppState {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -534,6 +605,109 @@ mod tests {
         assert_eq!(resp.status, "ok");
         assert!(!resp.version.is_empty());
         assert!(resp.port > 0);
+    }
+
+    /// Peer-IP allowlist middleware: empty list = pass-through.
+    #[tokio::test]
+    async fn allowlist_empty_passes_everything() {
+        let mut state = test_app_state();
+        state.ip_allowlist = crate::security::IpAllowlist::default(); // empty
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Peer-IP allowlist middleware: allowed peer passes.
+    #[tokio::test]
+    async fn allowlist_allows_permitted_peer() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let mut request = request;
+        let peer: std::net::SocketAddr = "192.168.1.20:54321".parse().unwrap();
+        request.extensions_mut().insert(
+            axum::extract::connect_info::ConnectInfo(peer),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Peer-IP allowlist middleware: blocked peer gets 403 — even on /health.
+    #[tokio::test]
+    async fn allowlist_blocks_disallowed_peer_with_403() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let mut request = request;
+        let peer: std::net::SocketAddr = "203.0.113.9:54321".parse().unwrap();
+        request.extensions_mut().insert(
+            axum::extract::connect_info::ConnectInfo(peer),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Peer-IP allowlist middleware: loopback is always allowed even when
+    /// the list is restrictive.
+    #[tokio::test]
+    async fn allowlist_always_allows_loopback() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let mut request = request;
+        let peer: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        request.extensions_mut().insert(
+            axum::extract::connect_info::ConnectInfo(peer),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Peer-IP allowlist middleware: in-process requests without
+    /// ConnectInfo (internal callers, direct router tests) pass through —
+    /// the allowlist gates *network* peers only.
+    #[tokio::test]
+    async fn allowlist_passes_request_without_connect_info() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        // NOTE: no ConnectInfo extension inserted.
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

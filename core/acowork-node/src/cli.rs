@@ -35,18 +35,27 @@ pub enum Command {
     /// Start the node daemon (foreground). Auto-enrolls when
     /// identity.json does not exist yet — one command = deployed.
     Start {
-        /// Gateway MQTT broker host.
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_HOST", default_value = "127.0.0.1")]
-        gateway_host: String,
-        /// Gateway MQTT broker port.
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_PORT", default_value = "19875")]
-        gateway_mqtt_port: u16,
+        /// Gateway MQTT broker `HOST:PORT` (required).
+        #[arg(long, value_name = "HOST:PORT", required = true)]
+        gateway: String,
+        /// This node's public address `HOST:PORT` (advertise host +
+        /// reverse-proxy port). Default: the machine's first non-loopback
+        /// IPv4 (fallback `127.0.0.1`) + `19900`. The proxy always binds
+        /// `0.0.0.0`; this value is what gets registered on the Gateway.
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+        /// Reverse-proxy port override (default 19900; used by the
+        /// Gateway when spawning a second node instance on the same
+        /// machine). Prefer `--addr HOST:PORT` for explicit control.
+        #[arg(long, env = "ACOWORK_NODE_PROXY_PORT")]
+        proxy_port: Option<u16>,
         /// Node name (slug). Default: derived from the hostname at
         /// first start; ignored when identity.json already exists.
         #[arg(long, env = "ACOWORK_NODE_NAME")]
         name: Option<String>,
-        /// Node data directory (default: $HOME/.acowork/acowork-node).
-        #[arg(long, env = "ACOWORK_NODE_HOME")]
+        /// Node data / work directory (default: $HOME/.acowork/acowork-node).
+        /// `--work-dir` is an alias with identical semantics.
+        #[arg(long, visible_alias = "work-dir", env = "ACOWORK_NODE_HOME")]
         home: Option<PathBuf>,
         /// Agent package install directory (default: {home}/packages).
         /// Set by the Gateway when spawning the local node to keep the
@@ -59,30 +68,26 @@ pub enum Command {
         /// Maximum concurrent Runtime processes (§6.18).
         #[arg(long, env = "ACOWORK_NODE_MAX_AGENTS", default_value = "16")]
         max_agents: u32,
-        /// ADR-055 §6.3: the address other machines use to reach this
-        /// node's reverse proxy (default 127.0.0.1 = single machine).
-        #[arg(long, env = "ACOWORK_NODE_ADVERTISE_HOST", default_value = "127.0.0.1")]
-        advertise_host: String,
-        /// Reverse-proxy bind address (§6.4, default 0.0.0.0).
-        #[arg(long, env = "ACOWORK_NODE_PROXY_BIND", default_value = "0.0.0.0")]
-        proxy_bind: String,
-        /// Reverse-proxy TCP port (§6.4, default 19900).
-        #[arg(long, env = "ACOWORK_NODE_PROXY_PORT", default_value = "19900")]
-        proxy_port: u16,
         /// Node-local LSP relay TCP port (ADR-055 §6.7, default 19878).
         #[arg(long, env = "ACOWORK_NODE_LSP_RELAY_PORT", default_value = "19878")]
         lsp_relay_port: u16,
+        /// Internal spawn marker: set ONLY by the Gateway when it
+        /// spawns its own-machine node (hidden from help). Lets the
+        /// Gateway's orphan cleanup identify its own children without
+        /// reserving a name — the node's name stays the machine
+        /// hostname slug either way. No behavioural effect on the node.
+        #[arg(long, hide = true)]
+        gateway_managed: bool,
     },
     /// Register the node identity against a Gateway without staying
     /// resident (script / bulk-deployment friendly; idempotent).
     Enroll {
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_HOST", default_value = "127.0.0.1")]
-        gateway_host: String,
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_PORT", default_value = "19875")]
-        gateway_mqtt_port: u16,
+        /// Gateway MQTT broker `HOST:PORT` (required).
+        #[arg(long, value_name = "HOST:PORT", required = true)]
+        gateway: String,
         #[arg(long, env = "ACOWORK_NODE_NAME")]
         name: Option<String>,
-        #[arg(long, env = "ACOWORK_NODE_HOME")]
+        #[arg(long, visible_alias = "work-dir", env = "ACOWORK_NODE_HOME")]
         home: Option<PathBuf>,
         #[arg(long, env = "ACOWORK_NODE_PACKAGES_DIR")]
         packages_dir: Option<PathBuf>,
@@ -106,12 +111,11 @@ pub enum Command {
     Rename {
         /// New node name (slug).
         new_name: String,
-        #[arg(long, env = "ACOWORK_NODE_HOME")]
+        #[arg(long, visible_alias = "work-dir", env = "ACOWORK_NODE_HOME")]
         home: Option<PathBuf>,
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_HOST", default_value = "127.0.0.1")]
-        gateway_host: String,
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_PORT", default_value = "19875")]
-        gateway_mqtt_port: u16,
+        /// Gateway MQTT broker `HOST:PORT` (required).
+        #[arg(long, value_name = "HOST:PORT", required = true)]
+        gateway: String,
         #[arg(long, env = "ACOWORK_NODE_PACKAGES_DIR")]
         packages_dir: Option<PathBuf>,
     },
@@ -121,12 +125,11 @@ pub enum Command {
         /// Skip the graceful drain and go offline immediately.
         #[arg(long)]
         force: bool,
-        #[arg(long, env = "ACOWORK_NODE_HOME")]
+        #[arg(long, visible_alias = "work-dir", env = "ACOWORK_NODE_HOME")]
         home: Option<PathBuf>,
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_HOST", default_value = "127.0.0.1")]
-        gateway_host: String,
-        #[arg(long, env = "ACOWORK_NODE_GATEWAY_PORT", default_value = "19875")]
-        gateway_mqtt_port: u16,
+        /// Gateway MQTT broker `HOST:PORT` (required).
+        #[arg(long, value_name = "HOST:PORT", required = true)]
+        gateway: String,
         #[arg(long, env = "ACOWORK_NODE_PACKAGES_DIR")]
         packages_dir: Option<PathBuf>,
     },
@@ -187,22 +190,51 @@ pub enum ServiceCommands {
     },
 }
 
+/// Parse the mandatory `--gateway HOST:PORT` argument (MQTT broker).
+fn split_gateway(s: &str) -> Result<(String, u16), NodeError> {
+    let hp =
+        acowork_core::addr::parse_host_port(s, acowork_core::defaults::GATEWAY_MQTT_PORT)
+            .map_err(|e| NodeError::Config(format!("invalid --gateway '{s}': {e}")))?;
+    Ok((hp.host, hp.port))
+}
+
+/// Parse the optional `--addr HOST:PORT` (this node's proxy address).
+fn split_addr(s: &str) -> Result<(String, u16), NodeError> {
+    let hp = acowork_core::addr::parse_host_port(s, acowork_core::node::NODE_PROXY_PORT)
+        .map_err(|e| NodeError::Config(format!("invalid --addr '{s}': {e}")))?;
+    Ok((hp.host, hp.port))
+}
+
 impl Cli {
     pub fn run(self) -> Result<(), NodeError> {
         match self.command {
             Some(Command::Start {
-                gateway_host,
-                gateway_mqtt_port,
+                gateway,
+                addr,
+                proxy_port: proxy_port_override,
                 name,
                 home,
                 packages_dir,
                 token,
                 max_agents,
-                advertise_host,
-                proxy_bind,
-                proxy_port,
                 lsp_relay_port,
+                gateway_managed: _,
             }) => {
+                let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
+                // Public address: explicit `--addr`, else the machine's
+                // first non-loopback IPv4 (fallback loopback) + default
+                // proxy port. The proxy always binds 0.0.0.0. A granular
+                // `--proxy-port` (internal second-instance override) wins
+                // over the port carried by `--addr`.
+                let (advertise_host, default_proxy_port) = match addr {
+                    Some(a) => split_addr(&a)?,
+                    None => (
+                        acowork_core::addr::detect_non_loopback_ipv4()
+                            .unwrap_or_else(|| "127.0.0.1".to_string()),
+                        acowork_core::node::NODE_PROXY_PORT,
+                    ),
+                };
+                let proxy_port = proxy_port_override.unwrap_or(default_proxy_port);
                 let config = NodeConfig {
                     home: resolve_home(home.as_deref()),
                     packages_dir,
@@ -212,7 +244,6 @@ impl Cli {
                     token,
                     max_agents,
                     advertise_host,
-                    proxy_bind,
                     proxy_port,
                     lsp_relay_port,
                     ..NodeConfig::default()
@@ -225,13 +256,13 @@ impl Cli {
                 rt.block_on(NodeControlPlane::run(config))
             }
             Some(Command::Enroll {
-                gateway_host,
-                gateway_mqtt_port,
+                gateway,
                 name,
                 home,
                 packages_dir,
                 token,
             }) => {
+                let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
                 let config = NodeConfig {
                     home: resolve_home(home.as_deref()),
                     packages_dir,
@@ -293,10 +324,10 @@ impl Cli {
             Some(Command::Rename {
                 new_name,
                 home,
-                gateway_host,
-                gateway_mqtt_port,
+                gateway,
                 packages_dir,
             }) => {
+                let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
                 let config = NodeConfig {
                     home: resolve_home(home.as_deref()),
                     packages_dir,
@@ -314,10 +345,10 @@ impl Cli {
             Some(Command::Leave {
                 force,
                 home,
-                gateway_host,
-                gateway_mqtt_port,
+                gateway,
                 packages_dir,
             }) => {
+                let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
                 let config = NodeConfig {
                     home: resolve_home(home.as_deref()),
                     packages_dir,
@@ -578,24 +609,47 @@ fn init_tracing(config: &NodeConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_parse_start() {
         let cli = Cli::parse_from([
             "acowork-node", "start",
-            "--gateway-host", "192.168.1.10",
-            "--gateway-mqtt-port", "19875",
+            "--gateway", "192.168.1.10:19875",
             "--name", "gpu-server",
         ]);
         match cli.command {
-            Some(Command::Start { gateway_host, gateway_mqtt_port, name, .. }) => {
-                assert_eq!(gateway_host, "192.168.1.10");
-                assert_eq!(gateway_mqtt_port, 19875);
+            Some(Command::Start { gateway, name, addr, .. }) => {
+                assert_eq!(gateway, "192.168.1.10:19875");
                 assert_eq!(name.as_deref(), Some("gpu-server"));
+                assert!(addr.is_none());
             }
             _ => panic!("Expected Start"),
         }
+    }
+
+    #[test]
+    fn cli_parse_start_work_dir_alias() {
+        let cli = Cli::parse_from([
+            "acowork-node", "start",
+            "--gateway", "127.0.0.1:19875",
+            "--work-dir", "/tmp/node-home",
+        ]);
+        match cli.command {
+            Some(Command::Start { home, .. }) => {
+                assert_eq!(home.as_deref(), Some(std::path::Path::new("/tmp/node-home")));
+            }
+            _ => panic!("Expected Start"),
+        }
+    }
+
+    #[test]
+    fn cli_parse_start_defaults_gateway_required() {
+        // A missing --gateway is a CLI error (remote boot is explicit).
+        let err = Cli::command()
+            .try_get_matches_from(["acowork-node", "start"])
+            .unwrap_err();
+        assert!(err.to_string().contains("--gateway"));
     }
 
     #[test]
@@ -614,13 +668,15 @@ mod tests {
     }
 
     #[test]
-    fn cli_parse_enroll_env_and_flags() {
+    fn cli_parse_enroll_gateway() {
         let cli = Cli::parse_from([
-            "acowork-node", "enroll", "--gateway-host", "10.0.0.1", "--token", "tok_x",
+            "acowork-node", "enroll",
+            "--gateway", "10.0.0.1:19875",
+            "--token", "tok_x",
         ]);
         match cli.command {
-            Some(Command::Enroll { gateway_host, token, .. }) => {
-                assert_eq!(gateway_host, "10.0.0.1");
+            Some(Command::Enroll { gateway, token, .. }) => {
+                assert_eq!(gateway, "10.0.0.1:19875");
                 assert_eq!(token.as_deref(), Some("tok_x"));
             }
             _ => panic!("Expected Enroll"),
@@ -663,18 +719,30 @@ mod tests {
 
     #[test]
     fn cli_parse_rename() {
-        let cli = Cli::parse_from(["acowork-node", "rename", "gpu-2"]);
+        let cli = Cli::parse_from([
+            "acowork-node", "rename", "gpu-2",
+            "--gateway", "127.0.0.1:19875",
+        ]);
         match cli.command {
-            Some(Command::Rename { new_name, .. }) => assert_eq!(new_name, "gpu-2"),
+            Some(Command::Rename { new_name, gateway, .. }) => {
+                assert_eq!(new_name, "gpu-2");
+                assert_eq!(gateway, "127.0.0.1:19875");
+            }
             _ => panic!("Expected Rename"),
         }
     }
 
     #[test]
     fn cli_parse_leave_force() {
-        let cli = Cli::parse_from(["acowork-node", "leave", "--force"]);
+        let cli = Cli::parse_from([
+            "acowork-node", "leave", "--force",
+            "--gateway", "127.0.0.1:19875",
+        ]);
         match cli.command {
-            Some(Command::Leave { force, .. }) => assert!(force),
+            Some(Command::Leave { force, gateway, .. }) => {
+                assert!(force);
+                assert_eq!(gateway, "127.0.0.1:19875");
+            }
             _ => panic!("Expected Leave"),
         }
     }

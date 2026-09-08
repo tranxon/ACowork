@@ -1457,7 +1457,7 @@ pub async fn install_agent(
     if package_bytes.is_empty() {
         return Err(ApiError::bad_request("Package file is empty"));
     }
-    let node_id = node_id.unwrap_or_else(|| acowork_core::node::LOCAL_NODE_ID.to_string());
+    let node_id = node_id.unwrap_or_else(acowork_core::node::local_node_id);
 
     // Persist the source into the package registry and build the download
     // URL the node will use (advertise_host = the address other machines
@@ -1585,7 +1585,7 @@ async fn register_package_in_registry(
         // make the download fail with connection refused whenever the
         // listener is 127.0.0.1-only. Remote nodes get the advertise
         // host, which is what they can actually route to.
-        let url_host = if node_id == acowork_core::node::LOCAL_NODE_ID {
+        let url_host = if node_id == acowork_core::node::local_node_id() {
             // A wildcard bind must still be dialed via loopback.
             if config.http.host == "0.0.0.0" || config.http.host == "::" {
                 "127.0.0.1"
@@ -1670,7 +1670,7 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
-        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+        node_id: acowork_core::node::local_node_id(),
         connected: false,
         ready: false,
         dev_mode,
@@ -1897,7 +1897,7 @@ pub async fn uninstall_agent(
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
     let event = node_control
-        .uninstall_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id)
+        .uninstall_agent(&acowork_core::node::local_node_id(), &agent_id)
         .await
         .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
@@ -1978,9 +1978,9 @@ pub async fn start_agent(
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
-    check_node_compatible(&state, acowork_core::node::LOCAL_NODE_ID).await?;
+    check_node_compatible(&state, &acowork_core::node::local_node_id()).await?;
     let event = node_control
-        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, req.dev_mode)
+        .start_agent(&acowork_core::node::local_node_id(), &agent_id, req.dev_mode)
         .await
         .map_err(|e| match e {
             crate::mqtt::node_control::NodeControlError::Timeout { request_id } => {
@@ -2051,7 +2051,7 @@ pub async fn stop_agent(
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
     let event = node_control
-        .stop_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, "user")
+        .stop_agent(&acowork_core::node::local_node_id(), &agent_id, "user")
         .await
         .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
@@ -2126,7 +2126,7 @@ pub async fn restart_agent_in_debug(
 
     // Stop current process
     let stop_event = node_control
-        .stop_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, "debug-restart")
+        .stop_agent(&acowork_core::node::local_node_id(), &agent_id, "debug-restart")
         .await
         .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &stop_event)
@@ -2135,7 +2135,7 @@ pub async fn restart_agent_in_debug(
 
     // Start with dev_mode=true
     let start_event = node_control
-        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, true)
+        .start_agent(&acowork_core::node::local_node_id(), &agent_id, true)
         .await
         .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
     crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &start_event)
@@ -2575,7 +2575,7 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                node_id: acowork_core::node::local_node_id(),
                 connected: true,
                 ready: true,
                 dev_mode: false,

@@ -137,6 +137,8 @@ Gateway handles these directly, without needing the Runtime subprocess online. C
 
 Package-level CRUD and publishing. Packages are installed to `<packages_dir>`, and Gateway maintains a manifest in `installed_agents`.
 
+> `<packages_dir>` defaults to `<node_home>/packages` (`ACOWORK_NODE_HOME` env → `$HOME/.acowork/acowork-node` → `./.acowork-node`), giving local and standalone Node agents the same layout. File operations actually execute on the Node side; Gateway only exposes the HTTP API and maintains the manifest. See [ADR-055 §6.11 / §6.20](../adr/zh/ADR-055-remote-runtime-node-topology.md) and [runbook `single-machine-remote-topology.md`](../runbooks/single-machine-remote-topology.md).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/agents` | List all installed Agents (including status, avatar, mqtt_online, etc.) |

@@ -478,7 +478,7 @@ pub async fn run_cron_scheduler(
                         continue;
                     };
                     match node_control
-                        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, false)
+                        .start_agent(&acowork_core::node::local_node_id(), &agent_id, false)
                         .await
                     {
                         Ok(event) => {

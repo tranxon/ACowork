@@ -1,18 +1,21 @@
 //! Local Node Agent supervisor (ADR-055 §6.11, Phase 2a).
 //!
 //! D1: single topology protocol — the Gateway's own machine is just
-//! another node (`node_id = "local"`). The Gateway spawns it as a
-//! sibling binary at startup (after the MQTT broker is ready) and
-//! supervises it:
+//! another node, named by its machine hostname slug (unified naming
+//! rule: every node defaults to the hostname, whether Gateway-spawned
+//! or remotely self-started). The Gateway spawns it as a sibling
+//! binary at startup (after the MQTT broker is ready) and supervises
+//! it:
 //!
 //! 1. **Orphan cleanup** — a local node orphaned by a previous
 //!    Gateway run (Gateway crashed / was killed) is SIGTERM'd before
 //!    spawning a fresh one. Detection mirrors
 //!    `cleanup_orphaned_runtimes`: process-list scan for
 //!    `acowork-node` whose cmdline carries our spawn markers
-//!    (`--name local --gateway-mqtt-port {our port}`). The reserved
-//!    name `local` is exclusively Gateway-spawned (§6.12), so this
-//!    never touches user-managed nodes on the same machine.
+//!    (`--gateway-managed --gateway {host}:{port}`). The
+//!    `--gateway-managed` marker is set ONLY by the Gateway, so this
+//!    never touches user-managed nodes on the same machine — the name
+//!    itself is a plain hostname slug with no reserved value.
 //! 2. **Reuse window** — the Gateway client is already subscribed to
 //!    `acowork/nodes/+/status`; wait a short window for a retained
 //!    `online` — an externally-managed local node (e.g. systemd) is
@@ -39,8 +42,11 @@ use tokio::sync::RwLock;
 use crate::mqtt::node_control::NodeControlClient;
 use crate::mqtt::node_registry::SharedNodeRegistry;
 
-/// Reserved local node id (§6.11 / §6.12).
-const LOCAL_NODE_ID: &str = acowork_core::node::LOCAL_NODE_ID;
+/// Node id of the Gateway's own-machine node — the machine hostname
+/// slug (same value the Node derives at first start without `--name`).
+fn local_node_id() -> String {
+    acowork_core::node::local_node_id()
+}
 
 /// How long to wait for a retained `online` from an already-running
 /// local node before spawning our own. The Gateway client re-subscribes
@@ -162,13 +168,14 @@ pub(crate) fn find_procs_by_cmdline(pattern: &str) -> Vec<(u32, String)> {
 
 /// Kill orphaned local-node processes from a previous Gateway run.
 ///
-/// Marker: cmdline contains `acowork-node`, `--name local`, and our
-/// MQTT port. pgrep-less environments (Windows): skipped (returns 0)
-/// — same limitation as `cleanup_orphaned_runtimes`; Windows-specific
+/// Marker: cmdline contains `acowork-node`, our internal
+/// `--gateway-managed` spawn marker, and our `--gateway {host}:{port}`
+/// value. pgrep-less environments (Windows): skipped (returns 0) —
+/// same limitation as `cleanup_orphaned_runtimes`; Windows-specific
 /// verification is a Phase 2b gate item.
-fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
+fn cleanup_orphaned_local_nodes(mqtt_host: &str, mqtt_port: u16) -> usize {
     let my_pid = std::process::id();
-    let port_marker = format!("--gateway-mqtt-port {mqtt_port}");
+    let gateway_marker = format!("--gateway {mqtt_host}:{mqtt_port}");
 
     let pids: Vec<u32> = find_procs_by_cmdline("acowork-node")
         .into_iter()
@@ -176,7 +183,7 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
             if pid == my_pid {
                 return None;
             }
-            if cmdline.contains("--name local") && cmdline.contains(&port_marker) {
+            if cmdline.contains("--gateway-managed") && cmdline.contains(&gateway_marker) {
                 Some(pid)
             } else {
                 None
@@ -218,9 +225,9 @@ pub async fn ensure_local_node(
     proxy_port: Option<u16>,
     lsp_relay_port: Option<u16>,
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
-    // Step 1: kill orphans from a previous Gateway run (they point at
-    // OUR port, and the reserved `local` name is Gateway-exclusive).
-    let orphans = cleanup_orphaned_local_nodes(mqtt_port);
+    // Step 1: kill orphans from a previous Gateway run (they carry our
+    // `--gateway-managed` marker — user-managed nodes never match).
+    let orphans = cleanup_orphaned_local_nodes(mqtt_host, mqtt_port);
     if orphans > 0 {
         // Avoid a spawn race with the dying process. Retained state is
         // not a concern: the in-memory broker died with the old
@@ -233,7 +240,7 @@ pub async fn ensure_local_node(
     let deadline = tokio::time::Instant::now() + REUSE_WINDOW;
     let mut reused = false;
     while tokio::time::Instant::now() < deadline {
-        if node_registry.read().await.is_online(LOCAL_NODE_ID) {
+        if node_registry.read().await.is_online(&local_node_id()) {
             tracing::info!("Local node agent already online — reusing it");
             reused = true;
             break;
@@ -272,15 +279,17 @@ async fn spawn_and_supervise(
     lsp_relay_port: Option<u16>,
 ) -> std::io::Result<()> {
     let bin = node_binary();
-    if !bin.exists() {
-        tracing::warn!(
-            binary = %bin.display(),
-            "acowork-node binary not found — local node agent disabled \
-             (build the workspace to enable the node topology)"
-        );
-        return Ok(());
-    }
-
+    // Note: previously this function silently returned Ok(()) when
+    // the binary was missing. That branch was removed when the
+    // `--no-spawn-local-node` flag / `[local_node] enabled = false`
+    // config option became the proper opt-out — silently disabling
+    // spawn on a missing binary obscured build problems and made the
+    // topology non-deterministic.
+    //
+    // If you want a Gateway that does NOT auto-spawn a local node,
+    // pass `--no-spawn-local-node` (or set `[local_node] enabled =
+    // false` in `gateway.toml`). Otherwise the sibling `acowork-node`
+    // binary must be present alongside `acowork-gateway`.
     let mut child = spawn_node_child(
         &bin,
         mqtt_host,
@@ -314,7 +323,7 @@ async fn spawn_and_supervise(
             if supervisor.stopping.load(Ordering::SeqCst) {
                 return;
             }
-            if node_registry.read().await.is_online(LOCAL_NODE_ID) {
+            if node_registry.read().await.is_online(&local_node_id()) {
                 tracing::info!("Local node agent online again (external) — not respawning");
                 return;
             }
@@ -334,7 +343,7 @@ async fn spawn_and_supervise(
                         if supervisor.stopping.load(Ordering::SeqCst) {
                             return;
                         }
-                        if node_registry.read().await.is_online(LOCAL_NODE_ID) {
+                        if node_registry.read().await.is_online(&local_node_id()) {
                             tracing::info!(
                                 "Local node agent online (external) — supervisor standing down"
                             );
@@ -354,10 +363,12 @@ async fn spawn_and_supervise(
     Ok(())
 }
 
-/// Spawn the `acowork-node start` child with the spawn markers used
-/// by orphan cleanup (`--name local --gateway-mqtt-port {port}`).
-/// `token` (ADR-055 Phase 5a) is the pre-issued local node credential,
-/// forwarded as `--token` when MQTT auth is enabled.
+/// Spawn the `acowork-node start` child with the internal spawn marker
+/// used by orphan cleanup (`--gateway-managed --gateway {host}:{port}`).
+/// No `--name` is passed: the node defaults to its machine hostname
+/// slug (unified naming rule). `token` (ADR-055 Phase 5a) is the
+/// pre-issued local node credential, forwarded as `--token` when MQTT
+/// auth is enabled.
 fn spawn_node_child(
     bin: &std::path::Path,
     mqtt_host: &str,
@@ -370,12 +381,9 @@ fn spawn_node_child(
     let mut cmd = Command::new(bin);
     cmd.args([
         "start",
-        "--gateway-host",
-        mqtt_host,
-        "--gateway-mqtt-port",
-        &mqtt_port.to_string(),
-        "--name",
-        LOCAL_NODE_ID,
+        "--gateway",
+        &format!("{mqtt_host}:{mqtt_port}"),
+        "--gateway-managed",
         "--packages-dir",
         packages_dir,
     ]);
@@ -707,7 +715,7 @@ pub async fn install_agent_via_mqtt(
     // The download URL must be reachable from the target node: the
     // loopback-bound local node dials the HTTP bind host, remote nodes
     // the advertise host (ADR-055 D3).
-    let url_host = if dispatch.node_id == acowork_core::node::LOCAL_NODE_ID {
+    let url_host = if dispatch.node_id == local_node_id() {
         if dispatch.http_host == "0.0.0.0" || dispatch.http_host == "::" {
             "127.0.0.1"
         } else {
@@ -761,7 +769,7 @@ pub async fn upgrade_agent_via_mqtt(
 
     // Same host selection as install: the local node dials the bind
     // host, remote nodes the advertise host (ADR-055 D3).
-    let url_host = if dispatch.node_id == acowork_core::node::LOCAL_NODE_ID {
+    let url_host = if dispatch.node_id == local_node_id() {
         if dispatch.http_host == "0.0.0.0" || dispatch.http_host == "::" {
             "127.0.0.1"
         } else {
