@@ -1,21 +1,39 @@
-//! macOS: post-wake display signal via `NSWorkspaceDidWakeNotification`.
+//! macOS: post-wake display signals via `NSWorkspaceDidWakeNotification`
+//! and a CoreGraphics display-reconfiguration callback.
 //!
-//! On macOS, `NSWorkspace` posts `NSWorkspaceDidWakeNotification` to
-//! `[NSWorkspace sharedWorkspace].notificationCenter` when the system
-//! resumes from sleep. The notification is the AppKit analogue of
-//! Windows' `GUID_MONITOR_POWER_ON` (delivered via the WndProc subclass
-//! in `win_wndproc.rs`) and is the right event to feed into
-//! `wake_recovery::signal_display_ready()`: it arrives after the
-//! display stack has come back, and the post-wake webview reload
-//! converges on the same code path as Windows and Linux.
+//! macOS has **two** distinct wake paths, and each needs its own signal
+//! source because AppKit/CoreGraphics only fire the relevant hook for
+//! one of them:
 //!
-//! Without this signal source, macOS recovery falls back to the
+//! 1. **System sleep/wake** — `NSWorkspace` posts
+//!    `NSWorkspaceDidWakeNotification` to
+//!    `[NSWorkspace sharedWorkspace].notificationCenter` when the system
+//!    resumes from sleep. This is the AppKit analogue of Windows'
+//!    `GUID_MONITOR_POWER_ON` (delivered via the WndProc subclass in
+//!    `win_wndproc.rs`).
+//! 2. **Display sleep/wake** (display off, system still running — e.g.
+//!    the 2026-09-08 real-world case: `Display is turned off` at
+//!    08:21, `Display is turned on` at 10:15, no system sleep in
+//!    between) — `NSWorkspaceDidWakeNotification` is **not** posted for
+//!    this case, yet the WKWebView compositor can stall on the wake
+//!    edge exactly like a system wake: the window keeps showing only
+//!    its vibrancy background while JS heartbeats continue. CoreGraphics
+//!    invokes the display-reconfiguration callback (registered via
+//!    `CGDisplayRegisterReconfigurationCallback`) on display
+//!    power-state changes, which closes that gap.
+//!
+//! Both feed the same `wake_recovery::signal_display_ready()` entry
+//! point: it arrives after the display stack has come back, and the
+//! post-wake webview reload converges on the same code path as Windows
+//! and Linux.
+//!
+//! Without these signal sources, macOS recovery falls back to the
 //! cross-platform `Focused(true)` (gained only when the user clicks
 //! the window) plus the 5 s `wake_recovery` timeout — both of which
 //! converge correctly via the reload/verify/retry loop in
 //! `recover_from_wake`, but the first reload lands a few seconds later
-//! than on Windows. The WndProc `GUID_MONITOR_POWER_ON` analogue is
-//! what closes that gap.
+//! than on Windows. The WndProc `GUID_MONITOR_POWER_ON` analogues are
+//! what close that gap.
 //!
 //! # Threading
 //!
@@ -29,6 +47,15 @@
 //! block and a stack block is invalid after its declaring function
 //! returns. `block2::StackBlock::new(...).copy()` is the canonical
 //! idiom for that.
+//!
+//! The CoreGraphics reconfiguration callback (a plain C function
+//! pointer) is invoked by CoreGraphics on one of its own background
+//! threads, not the main thread. Its body only calls
+//! `wake_recovery::signal_display_ready()`, which is documented as
+//! safe from any thread (a mutex write + `notify_one`), so no main
+//! thread hop is needed. Registration, however, must run on the main
+//! thread — CoreGraphics requirement, satisfied because Tauri's
+//! `setup` hook runs there.
 //!
 //! # Failure modes
 //!
@@ -55,6 +82,68 @@
 //! does not surface a system-wake event to NSApplication at all. The
 //! only programmatic way to observe a system wake on macOS is
 //! `NSWorkspace`'s notification center, which is what we use here.
+
+// ── CoreGraphics display-reconfiguration callback (display sleep/wake) ─────
+//
+// Minimal FFI for the two CoreGraphics entry points we need. The
+// project already follows this pattern in `win_wndproc.rs` (bare
+// `extern` declarations instead of pulling in a binding crate), and
+// the surface here is tiny: one registration call, one state query.
+//
+// `CGDisplayRegisterReconfigurationCallback` installs a callback that
+// CoreGraphics invokes on *any* display configuration change, including
+// display power-state transitions (sleep/wake). `CGDisplayIsAsleep`
+// queries the current power state, which lets us react only on the
+// wake edge — entering sleep must NOT trigger a recovery reload.
+
+/// `CGDirectDisplayID` — `uint32_t` (CGDirectDisplay.h).
+type CGDirectDisplayID = u32;
+
+/// `CGDisplayChangeSummaryFlags` — `uint64_t` (CGDisplayConfiguration.h).
+type CGDisplayChangeSummaryFlags = u64;
+
+/// `CGError` — `int32_t`; `kCGErrorSuccess == 0`.
+type CGError = i32;
+
+/// `CGDisplayReconfigurationCallBack` — the callback signature
+/// `CGDisplayRegisterReconfigurationCallback` accepts.
+type CGDisplayReconfigurationCallBack = unsafe extern "C" fn(
+    display: CGDirectDisplayID,
+    flags: CGDisplayChangeSummaryFlags,
+    user_info: *mut std::ffi::c_void,
+);
+
+const K_CG_ERROR_SUCCESS: CGError = 0;
+
+unsafe extern "C" {
+    fn CGMainDisplayID() -> CGDirectDisplayID;
+    /// Returns `boolean_t` (0 / 1): non-zero means the display is asleep.
+    fn CGDisplayIsAsleep(display: CGDirectDisplayID) -> i32;
+    fn CGDisplayRegisterReconfigurationCallback(
+        callback: CGDisplayReconfigurationCallBack,
+        user_info: *mut std::ffi::c_void,
+    ) -> CGError;
+}
+
+/// CoreGraphics reconfiguration callback.
+///
+/// Invoked on a CoreGraphics background thread on every display
+/// configuration change. We forward only the wake edge to
+/// `wake_recovery::signal_display_ready()` (safe from any thread):
+/// when the display is back on after having been asleep, the WKWebView
+/// compositor may need the same post-wake reload that a system wake
+/// triggers via `NSWorkspaceDidWakeNotification`.
+unsafe extern "C" fn display_reconfig_callback(
+    _display: CGDirectDisplayID,
+    _flags: CGDisplayChangeSummaryFlags,
+    _user_info: *mut std::ffi::c_void,
+) {
+    // `boolean_t`: 0 == display on, non-zero == display asleep.
+    let asleep = unsafe { CGDisplayIsAsleep(CGMainDisplayID()) != 0 };
+    if !asleep {
+        crate::wake_recovery::signal_display_ready();
+    }
+}
 
 /// Install an `NSWorkspace.didWakeNotification` observer that feeds
 /// `wake_recovery::signal_display_ready()` on every system wake.
@@ -173,5 +262,32 @@ pub fn install() {
             "Failed to install macOS NSWorkspace wake observer: {e} - post-wake display signal \
              falls back to Focused(true) + 5s timeout (recover_from_wake still converges)"
         ),
+    }
+
+    // ── Display-sleep source: CGDisplay reconfiguration callback ──────────
+    // `NSWorkspaceDidWakeNotification` only fires on *system* sleep/wake.
+    // A pure display sleep (display off, system still running — the
+    // 2026-09-08 real-world case) posts no such notification, yet the
+    // WKWebView compositor can stall on the wake edge exactly like a
+    // system wake. CoreGraphics invokes the reconfiguration callback on
+    // display power-state changes, covering that gap. Registration must
+    // run on the main thread (CoreGraphics requirement); the callback
+    // itself runs on a CoreGraphics background thread and only calls
+    // `signal_display_ready()` (thread-safe by design).
+    //
+    // The callback is never unregistered — like the NSWorkspace
+    // observer, it must live for the whole process lifetime.
+    let cg_err = unsafe {
+        CGDisplayRegisterReconfigurationCallback(display_reconfig_callback, std::ptr::null_mut())
+    };
+    if cg_err == K_CG_ERROR_SUCCESS {
+        tracing::info!(
+            "macOS CGDisplay reconfiguration callback registered (display sleep/wake signal source)"
+        );
+    } else {
+        tracing::warn!(
+            "CGDisplayRegisterReconfigurationCallback failed (CGError={cg_err}) - display-sleep \
+             wake recovery unavailable; system-wake NSWorkspace source still applies"
+        );
     }
 }

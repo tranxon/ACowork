@@ -33,6 +33,8 @@ mod win_wndproc;
 mod macos_workspace;
 #[cfg(target_os = "linux")]
 mod linux_logind;
+#[cfg(target_os = "linux")]
+mod linux_screensaver;
 use state::AppState;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -1016,6 +1018,33 @@ pub fn run() {
                             "Linux logind wake observer not installed: {e} - post-wake display \
                              signal falls back to Focused(true) + 5s timeout (recover_from_wake \
                              still converges)"
+                        );
+                    }
+                });
+            }
+
+            // ── Linux: ScreenSaver ActiveChanged(false) edge observer ────
+            // Covers the display-sleep gap that logind's
+            // `PrepareForSleep` cannot see: a pure display sleep (DPMS
+            // off, system still running) broadcasts no logind signal,
+            // yet the webview compositor can stall on the wake edge
+            // exactly like a system wake. The DE's screen-saver service
+            // (GNOME / KDE / xscreensaver / ...) emits
+            // `org.freedesktop.ScreenSaver.ActiveChanged(false)` on the
+            // session bus when the display comes back; we feed that
+            // into the same `wake_recovery::signal_display_ready()`
+            // trigger. Best-effort: DEs without the interface simply
+            // never signal, and the existing logind + Focused(true)
+            // paths are unaffected. See `linux_screensaver` for the
+            // D-Bus path / signal / message body details.
+            #[cfg(target_os = "linux")]
+            {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::linux_screensaver::install().await {
+                        tracing::warn!(
+                            "Linux ScreenSaver display-wake observer not installed: {e} - \
+                             display-sleep recovery falls back to Focused(true) + 5s timeout \
+                             (recover_from_wake still converges)"
                         );
                     }
                 });
