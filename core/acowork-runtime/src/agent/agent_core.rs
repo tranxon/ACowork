@@ -152,6 +152,12 @@ pub struct AgentCore {
     /// (`distiller_enabled` / `distiller_model` / …) and applied when the
     /// consolidation pipeline starts or is rebuilt.
     pub(crate) distiller_runtime: DistillerRuntimeSettings,
+    /// Episodic forgetting runtime settings (`agent_config.json`). Layer 1
+    /// of the forgetting config chain (defaults live in
+    /// [`acowork_memory::EpisodicDecayConfig::default`]). Written by the
+    /// memory-panel PUT (`memory_forgetting_*`) and applied when the
+    /// consolidation pipeline starts or is rebuilt.
+    pub(crate) forgetting_runtime: ForgettingRuntimeSettings,
     /// Context window cap from manifest.toml [llm].context_window (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
@@ -341,6 +347,22 @@ pub(crate) struct DistillerRuntimeSettings {
     pub idle_minutes: Option<u64>,
 }
 
+/// Runtime settings for episodic memory forgetting, projected from
+/// `agent_config.json` (the Desktop "记忆遗忘" card writes them). `None` =
+/// "not set at runtime → fall through to system defaults". Forgetting is
+/// opt-in: `enabled` defaults to false.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ForgettingRuntimeSettings {
+    /// Master switch (default off).
+    pub enabled: Option<bool>,
+    /// Episodic decay half-life in days.
+    pub half_life_days: Option<u64>,
+    /// Retention threshold below which an episodic node becomes Dormant.
+    pub dormant_threshold: Option<f32>,
+    /// Days a Dormant node is retained before archiving to the PurgeLog.
+    pub archive_days: Option<u64>,
+}
+
 /// Map a manifest `[memory.distiller]` section to a [`DistillerConfig`].
 ///
 /// ADR-068 M4/M7: fields that are absent keep the `DistillerConfig` defaults;
@@ -486,6 +508,7 @@ impl AgentCore {
             context_window_override: None,
             compression_ratio_threshold: None,
             distiller_runtime: DistillerRuntimeSettings::default(),
+            forgetting_runtime: ForgettingRuntimeSettings::default(),
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
@@ -971,6 +994,47 @@ impl AgentCore {
             );
             self.update_consolidation_scheduler_config_if_running();
         }
+        // Memory forgetting runtime settings. Each `Some` overwrites the
+        // stored value; `None` leaves the previous runtime value alone —
+        // matching the distiller partial-PUT semantics above. When anything
+        // changed and the consolidation pipeline is running, hot-swap the
+        // scheduler policy (the forgetting scan gate re-reads config each
+        // tick, so the change takes effect on the next poll).
+        let mut forgetting_changed = false;
+        if let Some(v) = overrides.memory_forgetting_enabled
+            && self.forgetting_runtime.enabled != Some(v)
+        {
+            self.forgetting_runtime.enabled = Some(v);
+            forgetting_changed = true;
+        }
+        if let Some(v) = overrides.memory_forgetting_half_life_days
+            && self.forgetting_runtime.half_life_days != Some(v)
+        {
+            self.forgetting_runtime.half_life_days = Some(v);
+            forgetting_changed = true;
+        }
+        if let Some(v) = overrides.memory_forgetting_dormant_threshold
+            && self.forgetting_runtime.dormant_threshold != Some(v)
+        {
+            self.forgetting_runtime.dormant_threshold = Some(v);
+            forgetting_changed = true;
+        }
+        if let Some(v) = overrides.memory_forgetting_archive_days
+            && self.forgetting_runtime.archive_days != Some(v)
+        {
+            self.forgetting_runtime.archive_days = Some(v);
+            forgetting_changed = true;
+        }
+        if forgetting_changed {
+            tracing::info!(
+                enabled = ?self.forgetting_runtime.enabled,
+                half_life_days = ?self.forgetting_runtime.half_life_days,
+                dormant_threshold = ?self.forgetting_runtime.dormant_threshold,
+                archive_days = ?self.forgetting_runtime.archive_days,
+                "runtime config: memory forgetting settings updated — rebuilding consolidation pipeline if running"
+            );
+            self.update_consolidation_scheduler_config_if_running();
+        }
     }
 
     pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
@@ -1101,6 +1165,20 @@ impl AgentCore {
         MemoryManagerConfig {
             quality: self.memory_quality_config(),
             auto_inject_enabled: manifest_auto_inject.unwrap_or(false),
+            // Retrieval-side forgetting: runtime agent_config.json layer
+            // (forgetting_enabled / half_life_days) → system defaults.
+            // Shares the same half-life as the scan-side decay so both
+            // paths use one consistent curve (ADR-057 §5.3 redesign).
+            forgetting: acowork_memory::manager::RetrievalForgettingConfig {
+                enabled: self
+                    .forgetting_runtime
+                    .enabled
+                    .unwrap_or(false),
+                half_life_days: self
+                    .forgetting_runtime
+                    .half_life_days
+                    .unwrap_or(180),
+            },
             ..MemoryManagerConfig::default()
         }
     }
@@ -1186,6 +1264,25 @@ impl AgentCore {
             distiller_idle_secs: minutes_to_secs(self.distiller_runtime.idle_minutes)
                 .or_else(|| manifest.and_then(|m| m.idle_minutes.map(|v| v.saturating_mul(60))))
                 .unwrap_or(default.distiller_idle_secs),
+            // Episodic forgetting: Layer 1 runtime overrides (agent_config.json)
+            // → system defaults (no manifest section — forgetting is a
+            // runtime-only, opt-in feature).
+            forgetting_enabled: self
+                .forgetting_runtime
+                .enabled
+                .unwrap_or(default.forgetting_enabled),
+            forgetting_half_life_days: self
+                .forgetting_runtime
+                .half_life_days
+                .unwrap_or(default.forgetting_half_life_days),
+            forgetting_dormant_threshold: self
+                .forgetting_runtime
+                .dormant_threshold
+                .unwrap_or(default.forgetting_dormant_threshold),
+            forgetting_archive_days: self
+                .forgetting_runtime
+                .archive_days
+                .unwrap_or(default.forgetting_archive_days),
             ..default
         }
     }
@@ -1611,6 +1708,7 @@ impl Clone for AgentCore {
             context_window_override: self.context_window_override,
             compression_ratio_threshold: self.compression_ratio_threshold,
             distiller_runtime: self.distiller_runtime.clone(),
+            forgetting_runtime: self.forgetting_runtime.clone(),
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
@@ -2192,10 +2290,8 @@ mod tests {
             "Idle should be < 5s after notify_consolidation_active, got {idle_secs}s"
         );
 
-        // Verify should_run does NOT trigger via idle (recently active, 0 pending).
-        timer.update_pending_count(0).await;
-        let trigger = timer.should_run().await;
-        assert_eq!(trigger, None, "Should not trigger with 0 pending and recent activity");
+        // Legacy `should_run()` Pending-trigger assertion removed with the
+        // method (ADR-057 §5.3 redesign — Pending has no producer).
 
         // Clean up: abort the bg task.
         if let Some(bg) = core.consolidation_bg_task.take() {

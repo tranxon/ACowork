@@ -27,8 +27,8 @@ use acowork_memory::consolidation::{
 };
 use acowork_memory::types::{
     AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
-    Episode, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode,
-    PurgeResult, ResultSource, SearchResult, StoreHealth, StoreStats,
+    Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus,
+    ProceduralNode, PurgeResult, ResultSource, SearchResult, StoreHealth, StoreStats,
 };
 use acowork_memory::MemoryProvider;
 use acowork_memory::quality::MemoryQualityConfig;
@@ -346,6 +346,13 @@ impl MemoryProvider for InMemoryProvider {
     // ── Forgetting ──────────────────────────────────────────────────────
 
     fn run_decay_scan(&self, _config: &DecayConfig) -> Result<DecayScanResult> {
+        Ok(DecayScanResult::default())
+    }
+
+    fn run_episodic_decay_scan(
+        &self,
+        _config: &EpisodicDecayConfig,
+    ) -> Result<DecayScanResult> {
         Ok(DecayScanResult::default())
     }
 

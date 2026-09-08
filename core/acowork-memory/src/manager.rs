@@ -85,6 +85,32 @@ pub fn procedural_embedding_for(
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// Retrieval-side forgetting configuration (ADR-057 §5.3 redesign).
+///
+/// Episodic memories decay on a half-life curve: a node's search score is
+/// multiplied by `retention = exp(-ln2 × age_days / half_life_days)` before
+/// ranking. Before the half-life the node keeps (almost) full weight;
+/// afterwards it is progressively down-ranked — a gradual fade instead of a
+/// hard binary eviction. Semantic-layer nodes (Knowledge / Procedural /
+/// Autobiographical) are NEVER decayed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalForgettingConfig {
+    /// Master switch. Mirrors the runtime `memory_forgetting_enabled`
+    /// (default off — forgetting is opt-in).
+    pub enabled: bool,
+    /// Episodic decay half-life in days (default: 180).
+    pub half_life_days: u64,
+}
+
+impl Default for RetrievalForgettingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            half_life_days: 180,
+        }
+    }
+}
+
 /// Configuration for MemoryManager.
 #[derive(Debug, Clone)]
 pub struct MemoryManagerConfig {
@@ -123,6 +149,10 @@ pub struct MemoryManagerConfig {
     /// the same config (ADR-062 §4.1). `Default` mirrors current behaviour
     /// ("zero configuration = current behaviour").
     pub quality: MemoryQualityConfig,
+    /// Retrieval-side episodic time decay (memory forgetting). Default:
+    /// disabled. When enabled, Episodic search scores are multiplied by the
+    /// half-life retention factor before ranking.
+    pub forgetting: RetrievalForgettingConfig,
     /// Abstention guidance prompt injected when retrieval returns nothing
     /// and `query.abstention_enabled` is true (G9).
     ///
@@ -168,6 +198,7 @@ impl Default for MemoryManagerConfig {
             max_autobio_history_tokens: 100,
             default_k: 10,
             quality: MemoryQualityConfig::default(),
+            forgetting: RetrievalForgettingConfig::default(),
             abstention_prompt: None,
             enable_graph_expand: true,
             record_async: true,
@@ -517,6 +548,34 @@ impl MemoryManager {
                         entry.0 = boosted_score;
                     }
                 }
+            }
+        }
+
+        // Episodic time-decay (memory forgetting, ADR-057 §5.3 redesign):
+        // multiply the final score of Episodic nodes by the half-life
+        // retention factor `exp(-ln2 × age_days / half_life_days)`.
+        // Semantic-layer nodes (Knowledge / Procedural / Autobiographical)
+        // are never decayed — they are durable knowledge, not event records.
+        if self.config.forgetting.enabled && !best_by_id.is_empty() {
+            let now = chrono::Utc::now();
+            let half_life_days = self.config.forgetting.half_life_days.max(1) as f64;
+            for (node_id, (score, label, _)) in best_by_id.iter_mut() {
+                if label != labels::EPISODIC {
+                    continue;
+                }
+                let age_days = match provider.get_node_created_at(*node_id) {
+                    Ok(Some(ts)) => (now - ts).num_seconds() as f64 / 86400.0,
+                    // No timestamp or error -> keep current score (defensive).
+                    _ => continue,
+                };
+                let retention = (-std::f64::consts::LN_2 * age_days / half_life_days).exp();
+                *score *= retention;
+                tracing::debug!(
+                    node_id,
+                    age_days = format!("{age_days:.1}"),
+                    retention = format!("{retention:.3}"),
+                    "Episodic retrieval time-decay applied"
+                );
             }
         }
 

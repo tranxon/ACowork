@@ -29,6 +29,7 @@ use crate::consolidation::triple_extraction::TripleExtractorLlm;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::types::{KnowledgeNode, NodeStatus, labels};
+use acowork_memory::types::EpisodicDecayConfig;
 
 // ---------------------------------------------------------------------------
 // Configuration & Result (re-exported from acowork-memory)
@@ -121,11 +122,17 @@ impl GrafeoStore {
         // single producer with a full audit trail. The raw span stats the
         // distiller needs are exposed via `GrafeoStore::collaboration_span`.
 
-        // Step 7: Run episodic forgetting scan.
-        // Per design §2: consolidated episodes > 7 days old are candidates for
-        // decay → Dormant. Unconsolidated > 14 days with importance < 0.3 → Dormant.
-        // Unconsolidated > 14 days with importance >= 0.3 → keep and trigger offline consolidation.
-        result.episodic_cleaned = self.run_episodic_cleanup()?;
+        // Step 7: Run episodic forgetting via the new time-decay engine
+        // (ADR-057 §5.3 redesign). The old 7/14-day binary rule
+        // (`run_episodic_cleanup`) is deleted — episodic nodes now decay on
+        // a single half-life curve (`run_episodic_decay_scan`), the same
+        // engine the runtime consolidation loop schedules. Default config:
+        // this legacy path is a manual/admin trigger, so it runs the decay
+        // scan with the system defaults (the runtime applies the per-agent
+        // `agent_config.json` overrides).
+        let decay_config = EpisodicDecayConfig::default();
+        let decay_result = self.run_episodic_decay_scan(&decay_config)?;
+        result.episodic_cleaned = (decay_result.to_dormant + decay_result.purged) as usize;
 
         Ok(result)
     }
@@ -283,93 +290,6 @@ impl GrafeoStore {
     // codebase, so any skill with >= 5 failures was flagged at 0% success.
     // Removed along with the runtime channel (memory write-entrypoint
     // decisions, see docs/memory-write-entrypoints.md).
-
-    /// Run episodic memory cleanup based on design §2 forgetting rules.
-    ///
-    /// Unlike the general `run_decay_scan()` which uses the multiplicative
-    /// decay formula on all labels, this method applies episodic-specific
-    /// rules with explicit consolidated/unconsolidated distinction:
-    ///
-    /// - **Consolidated** episodes older than 7 days → Dormant
-    ///   (knowledge already extracted; episode is redundant)
-    /// - **Unconsolidated** episodes older than 14 days with importance < 0.3 → Dormant
-    ///   (low-value and stale; unlikely to yield useful knowledge)
-    /// - **Unconsolidated** episodes older than 14 days with importance >= 0.3 → keep Active
-    ///   (high-value but missed consolidation; will be picked up next cycle)
-    /// - **Unconsolidated** episodes older than 14 days with importance >= 0.3 → mark
-    ///   `needs_consolidation = true` in metadata so the next consolidation cycle
-    ///   prioritizes them.
-    ///
-    /// Returns the number of episodic nodes transitioned to Dormant.
-    fn run_episodic_cleanup(&self) -> Result<usize> {
-        let now = Utc::now();
-        let mut transitioned = 0usize;
-
-        let graph = self.db.graph_store();
-        let node_ids = graph.nodes_by_label(labels::EPISODIC);
-
-        for node_id in node_ids {
-            if let Some(node) = self.db.get_node(node_id) {
-                // Skip non-Active nodes.
-                if let Some(Value::String(s)) = node.properties.get(&"status".into())
-                    && s.as_str() != NodeStatus::Active.as_str() {
-                        continue;
-                    }
-
-                // Read consolidated flag.
-                let is_consolidated = node
-                    .get_property("consolidated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-
-                // Read importance (default 0.5 if not set).
-                let importance = node
-                    .get_property("importance")
-                    .and_then(|v| v.as_float64())
-                    .unwrap_or(0.5) as f32;
-
-                // Compute age in days.
-                let created_at = node
-                    .get_property("created_at")
-                    .and_then(|v| v.as_timestamp());
-                let age_days = created_at
-                    .and_then(|ts| {
-                        DateTime::from_timestamp_micros(ts.as_micros())
-                            .map(|dt| (now - dt).num_days())
-                    })
-                    .unwrap_or(0);
-
-                // Apply design §2 rules.
-                let should_dormant = if is_consolidated && age_days > 7 {
-                    // Consolidated + > 7 days → Dormant.
-                    true
-                } else if !is_consolidated && age_days > 14 {
-                    if importance < 0.3 {
-                        // Unconsolidated + > 14 days + low importance → Dormant.
-                        true
-                    } else {
-                        // Unconsolidated + > 14 days + high importance → keep Active,
-                        // but mark for priority consolidation.
-                        self.db.set_node_property(
-                            node_id,
-                            "needs_consolidation",
-                            Value::from(true),
-                        );
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if should_dormant {
-                    self.transition_to_dormant(node_id)?;
-                    transitioned += 1;
-                }
-            }
-        }
-
-        Ok(transitioned)
-    }
 
     // ADR-057 C7: `apply_knowledge_updates` (deleted). The Step-2 LLM
     // triple-extraction pipeline it served has been removed; new triples are
@@ -634,181 +554,8 @@ mod tests {
 
 
     // =====================================================================
-    // Test: run_episodic_cleanup — consolidated + old → Dormant (§2 rule 1)
-    // =====================================================================
-
-    #[test]
-    fn test_episodic_cleanup_consolidated_old_to_dormant() {
-        let store = test_store();
-        let old = Utc::now() - TimeDelta::days(30);
-
-        let id = store
-            .store_node(
-                labels::EPISODIC,
-                [("content", Value::from("consolidated old episode"))],
-            )
-            .unwrap();
-        store
-            .db()
-            .set_node_property(id, "status", Value::from("Active"));
-        store
-            .db()
-            .set_node_property(id, "consolidated", Value::from(true));
-        store
-            .db()
-            .set_node_property(id, "importance", Value::from(0.9f64));
-        store.db().set_node_property(
-            id,
-            "created_at",
-            Value::from(grafeo_common::types::Timestamp::from_micros(
-                old.timestamp_micros(),
-            )),
-        );
-
-        let transitioned = store.run_episodic_cleanup().unwrap();
-        assert_eq!(transitioned, 1);
-
-        let node = store.db.get_node(id).unwrap();
-        let status = node
-            .get_property("status")
-            .and_then(|v| v.as_str())
-            .unwrap();
-        assert_eq!(status, "Dormant");
-    }
-
-    // =====================================================================
-    // Test: run_episodic_cleanup — unconsolidated + old + low importance
-    //       → Dormant (§2 rule 2)
-    // =====================================================================
-
-    #[test]
-    fn test_episodic_cleanup_unconsolidated_old_low_importance_to_dormant() {
-        let store = test_store();
-        let old = Utc::now() - TimeDelta::days(30);
-
-        let id = store
-            .store_node(
-                labels::EPISODIC,
-                [("content", Value::from("low value stale episode"))],
-            )
-            .unwrap();
-        store
-            .db()
-            .set_node_property(id, "status", Value::from("Active"));
-        store
-            .db()
-            .set_node_property(id, "consolidated", Value::from(false));
-        store
-            .db()
-            .set_node_property(id, "importance", Value::from(0.1f64));
-        store.db().set_node_property(
-            id,
-            "created_at",
-            Value::from(grafeo_common::types::Timestamp::from_micros(
-                old.timestamp_micros(),
-            )),
-        );
-
-        let transitioned = store.run_episodic_cleanup().unwrap();
-        assert_eq!(transitioned, 1);
-
-        let node = store.db.get_node(id).unwrap();
-        let status = node
-            .get_property("status")
-            .and_then(|v| v.as_str())
-            .unwrap();
-        assert_eq!(status, "Dormant");
-    }
-
-    // =====================================================================
-    // Test: run_episodic_cleanup — unconsolidated + old + high importance
-    //       → keep Active + needs_consolidation (§2 rule 3)
-    // =====================================================================
-
-    #[test]
-    fn test_episodic_cleanup_unconsolidated_old_high_importance_kept() {
-        let store = test_store();
-        let old = Utc::now() - TimeDelta::days(30);
-
-        let id = store
-            .store_node(
-                labels::EPISODIC,
-                [("content", Value::from("high value stale episode"))],
-            )
-            .unwrap();
-        store
-            .db()
-            .set_node_property(id, "status", Value::from("Active"));
-        store
-            .db()
-            .set_node_property(id, "consolidated", Value::from(false));
-        store
-            .db()
-            .set_node_property(id, "importance", Value::from(0.8f64));
-        store.db().set_node_property(
-            id,
-            "created_at",
-            Value::from(grafeo_common::types::Timestamp::from_micros(
-                old.timestamp_micros(),
-            )),
-        );
-
-        let transitioned = store.run_episodic_cleanup().unwrap();
-        assert_eq!(transitioned, 0, "high-value episode should be kept");
-
-        let node = store.db.get_node(id).unwrap();
-        let status = node
-            .get_property("status")
-            .and_then(|v| v.as_str())
-            .unwrap();
-        assert_eq!(status, "Active", "should stay Active");
-        let needs = node
-            .get_property("needs_consolidation")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        assert!(needs, "should be marked for priority consolidation");
-    }
-
-    // =====================================================================
-    // Test: run_episodic_cleanup — recent episodes are untouched
-    // =====================================================================
-
-    #[test]
-    fn test_episodic_cleanup_recent_episode_kept() {
-        let store = test_store();
-        let recent = Utc::now() - TimeDelta::hours(1);
-
-        let id = store
-            .store_node(
-                labels::EPISODIC,
-                [("content", Value::from("recent episode"))],
-            )
-            .unwrap();
-        store
-            .db()
-            .set_node_property(id, "status", Value::from("Active"));
-        store
-            .db()
-            .set_node_property(id, "consolidated", Value::from(false));
-        store
-            .db()
-            .set_node_property(id, "importance", Value::from(0.9f64));
-        store.db().set_node_property(
-            id,
-            "created_at",
-            Value::from(grafeo_common::types::Timestamp::from_micros(
-                recent.timestamp_micros(),
-            )),
-        );
-
-        let transitioned = store.run_episodic_cleanup().unwrap();
-        assert_eq!(transitioned, 0);
-
-        let node = store.db.get_node(id).unwrap();
-        let status = node
-            .get_property("status")
-            .and_then(|v| v.as_str())
-            .unwrap();
-        assert_eq!(status, "Active");
-    }
+    // Note: the legacy `run_episodic_cleanup` tests (7/14-day binary rules)
+    // were deleted with the function — episodic forgetting now uses the
+    // single half-life curve in `run_episodic_decay_scan` (ADR-057 §5.3
+    // redesign, covered by `forgetting::episodic_decay` tests).
 }

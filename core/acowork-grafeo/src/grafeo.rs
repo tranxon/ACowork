@@ -16,8 +16,8 @@ use crate::types::{
 use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::types::{ResultSource, SearchResult};
 use acowork_memory::{
-    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode, MemoryQuery,
-    ProceduralNode, PurgeResult, StoreHealth, StoreStats,
+    AutobiographicalNode, DecayConfig, DecayScanResult, Episode, EpisodicDecayConfig,
+    KnowledgeNode, MemoryQuery, ProceduralNode, PurgeResult, StoreHealth, StoreStats,
 };
 
 use crate::error::Result;
@@ -859,6 +859,14 @@ impl MemoryStore for GrafeoStore {
             reactivated: 0,
             purged: 0,
         })
+    }
+
+    fn run_episodic_decay_scan(
+        &self,
+        config: &EpisodicDecayConfig,
+    ) -> acowork_core::error::Result<DecayScanResult> {
+        GrafeoStore::run_episodic_decay_scan(self, config)
+            .map_err(|e| acowork_core::error::AcoworkError::Memory(e.to_string()))
     }
 
     fn reactivate_node(&self, node_id: u64) -> acowork_core::error::Result<()> {

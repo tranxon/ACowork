@@ -2190,6 +2190,10 @@ async fn put_agent_config(
         req.distiller_interval_minutes,
         req.distiller_accumulation_threshold,
         req.distiller_idle_minutes,
+        req.memory_forgetting_enabled,
+        req.memory_forgetting_half_life_days,
+        req.memory_forgetting_dormant_threshold,
+        req.memory_forgetting_archive_days,
     );
     let svc = state
         .agent_config
@@ -2341,6 +2345,19 @@ struct UpdateAgentConfigRequest {
     /// ADR-071 D4: distiller idle threshold (minutes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distiller_idle_minutes: Option<serde_json::Value>,
+    /// Memory forgetting runtime switch (记忆遗忘 card). Absent =
+    /// leave the on-disk value alone (partial PUT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_forgetting_enabled: Option<serde_json::Value>,
+    /// Episodic decay half-life in days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_forgetting_half_life_days: Option<serde_json::Value>,
+    /// Retention threshold below which an episodic node becomes Dormant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_forgetting_dormant_threshold: Option<serde_json::Value>,
+    /// Days a Dormant node is retained before archiving to PurgeLog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_forgetting_archive_days: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {
@@ -3327,7 +3344,6 @@ async fn get_consolidation_status(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let idle_secs = timer.idle_secs().await;
-    let pending = timer.pending_count().await;
     let episode_count = timer.episode_count().await;
     let secs_since_distill = timer.secs_since_distill().await;
     let last_distill = timer.last_distill_result().await;
@@ -3349,9 +3365,6 @@ async fn get_consolidation_status(
 
     Ok(Json(serde_json::json!({
         "idle_secs": idle_secs,
-        "pending_count": pending,
-        "idle_timeout_secs": config.idle_timeout_secs,
-        "accumulation_threshold": config.accumulation_threshold,
         "bg_task_running": true,
         // ADR-071 D1/D2: distiller trigger state.
         "distiller": {
@@ -3362,6 +3375,14 @@ async fn get_consolidation_status(
             "accumulation_threshold": config.distiller_accumulation,
             "idle_secs": config.distiller_idle_secs,
             "last_run": last_run,
+        },
+        // ADR-057 §5.3 redesign: episodic forgetting state.
+        "forgetting": {
+            "enabled": config.forgetting_enabled,
+            "half_life_days": config.forgetting_half_life_days,
+            "dormant_threshold": config.forgetting_dormant_threshold,
+            "archive_days": config.forgetting_archive_days,
+            "interval_secs": config.forgetting_interval_secs,
         },
     })))
 }
@@ -6208,9 +6229,6 @@ mod tests {
         assert_eq!(resp.status(), 200, "consolidation status should be 200");
         let body: serde_json::Value = resp.json().await.unwrap();
         assert!(body["idle_secs"].is_i64(), "should have idle_secs");
-        assert_eq!(body["pending_count"], 0);
-        assert_eq!(body["idle_timeout_secs"], 1800);
-        assert_eq!(body["accumulation_threshold"], 50);
         assert_eq!(body["bg_task_running"], true);
         // ADR-071 D2: distiller trigger state surfaced for the UI card.
         assert_eq!(body["distiller"]["enabled"], false);
@@ -6218,6 +6236,9 @@ mod tests {
         assert!(body["distiller"]["interval_secs"].is_u64());
         assert_eq!(body["distiller"]["accumulation_threshold"], 50);
         assert_eq!(body["distiller"]["idle_secs"], 1800);
+        // ADR-057 §5.3 redesign: episodic forgetting state.
+        assert_eq!(body["forgetting"]["enabled"], false);
+        assert_eq!(body["forgetting"]["half_life_days"], 180);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

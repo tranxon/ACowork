@@ -701,6 +701,64 @@ pub struct DecayScanResult {
     pub purged: u64,
 }
 
+/// Configuration for episodic memory forgetting (pure time decay).
+///
+/// Episodic nodes are real event records with retrieval value, so
+/// forgetting is **gradual and time-only**: no consolidated/importance
+/// branches, no age cliffs.
+///
+/// The retention curve is a half-life exponential decay:
+///
+/// ```text
+/// retention = exp(-ln2 * age_days / half_life_days)
+/// ```
+///
+/// - Nodes stay fully retrievable while `retention >= dormant_threshold`;
+///   retrieval down-weights by `retention` before that (progressive decay).
+/// - A node becomes Dormant once `retention < dormant_threshold`
+///   (≈ 3.3× half-life with the default 0.1 threshold).
+/// - A Dormant node is archived to the PurgeLog (30-day recovery window)
+///   after `archive_days` of dormancy.
+///
+/// Forgetting is opt-in: `enabled = false` (default) makes the scan a
+/// no-op and episodic nodes never age out.
+#[derive(Debug, Clone)]
+pub struct EpisodicDecayConfig {
+    /// Master switch — forgetting disabled by default.
+    pub enabled: bool,
+    /// Decay half-life in days (default 180).
+    pub half_life_days: u64,
+    /// Retention threshold below which an Active node becomes Dormant
+    /// (default 0.1).
+    pub dormant_threshold: f32,
+    /// Days a Dormant node is retained before archiving to the PurgeLog
+    /// (default 90).
+    pub archive_days: u64,
+}
+
+impl Default for EpisodicDecayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            half_life_days: 180,
+            dormant_threshold: 0.1,
+            archive_days: 90,
+        }
+    }
+}
+
+impl EpisodicDecayConfig {
+    /// Retention factor for a node of the given age in days:
+    /// `exp(-ln2 * age_days / half_life_days)`, clamped to [0.0, 1.0].
+    /// A zero half-life disables decay (returns 1.0).
+    pub fn retention(&self, age_days: f64) -> f64 {
+        if self.half_life_days == 0 {
+            return 1.0;
+        }
+        (-std::f64::consts::LN_2 * age_days / self.half_life_days as f64).exp()
+    }
+}
+
 /// Result of a purge operation.
 #[derive(Debug, Clone, Default)]
 pub struct PurgeResult {

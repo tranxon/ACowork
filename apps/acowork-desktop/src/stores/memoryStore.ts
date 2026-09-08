@@ -7,6 +7,7 @@ import type {
   ConsolidationStatusResponse,
   DistillResponse,
   DistillerStatus,
+  ForgettingStatus,
 } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import {
@@ -58,6 +59,14 @@ interface MemoryStore {
   distillerStatus: DistillerStatus | null;
 
   /**
+   * Runtime episodic forgetting state (ADR-057 §5.3 redesign) —
+   * `GET /memory/consolidation/status` `forgetting` payload. `null` until
+   * the first successful fetch. Drives the "记忆遗忘" card (enabled switch
+   * reflects the runtime state).
+   */
+  forgettingStatus: ForgettingStatus | null;
+
+  /**
    * Set while a "Rebuild Index" migration is in flight for the currently
    * selected agent. Driven by the same harness /api/embedding-models/{id}/
    * start-migration endpoint the Harness tab already uses — we just call it
@@ -89,6 +98,12 @@ interface MemoryStore {
    * status in place (the card falls back to agent_config-driven state).
    */
   fetchDistillerStatus: (agentId: string) => Promise<void>;
+  /**
+   * Fetch the runtime episodic forgetting state — `GET /memory/
+   * consolidation/status` `forgetting` payload (ADR-057 §5.3 redesign).
+   * Best-effort: failures leave the previous status in place.
+   */
+  fetchForgettingStatus: (agentId: string) => Promise<void>;
   /**
    * Rebuild the Grafeo HNSW vector index for `agentId` using the currently
    * active embedding model. Re-embeds every node so that mismatched-dim stores
@@ -122,6 +137,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   error: null,
   consolidateMessage: null,
   distillerStatus: null,
+  forgettingStatus: null,
   migrationInProgress: false,
 
   fetchNodes: async (agentId) => {
@@ -248,6 +264,23 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     }
   },
 
+  fetchForgettingStatus: async (agentId) => {
+    try {
+      const res = await with503Retry(
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/memory/consolidation/status`,
+          ),
+        { tag: `MemoryStore.fetchForgettingStatus(${agentId})`, logger: log },
+      );
+      if (!res.ok) return;
+      const data: ConsolidationStatusResponse = await res.json();
+      set({ forgettingStatus: data.forgetting });
+    } catch {
+      // Best-effort — the card still works from agent_config alone.
+    }
+  },
+
   rebuildIndex: async (agentId: string) => {
     // Guard: cancel any in-flight poll before starting a new rebuild.
     if (rebuildPollingTimer) {
@@ -338,6 +371,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       error: null,
       consolidateMessage: null,
       distillerStatus: null,
+      forgettingStatus: null,
       migrationInProgress: false,
     });
   },

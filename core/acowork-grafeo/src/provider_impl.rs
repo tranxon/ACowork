@@ -15,8 +15,8 @@ use acowork_memory::consolidation::{
 use acowork_memory::provider::MemoryProvider;
 use acowork_memory::{
     AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
-    Episode, KnowledgeNode, KnowledgeSubType, MemoryQualityConfig, MemoryQuery, NodeStatus,
-    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQualityConfig, MemoryQuery,
+    NodeStatus, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
 use chrono::{DateTime, Utc};
 
@@ -429,6 +429,10 @@ impl MemoryProvider for GrafeoStore {
             reactivated: 0,
             purged: 0,
         })
+    }
+
+    fn run_episodic_decay_scan(&self, config: &EpisodicDecayConfig) -> AcoworkResult<DecayScanResult> {
+        GrafeoStore::run_episodic_decay_scan(self, config).map_err(err_to_acowork)
     }
 
     fn reactivate_node(&self, node_id: u64) -> AcoworkResult<()> {

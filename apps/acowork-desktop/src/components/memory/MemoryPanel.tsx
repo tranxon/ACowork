@@ -6,6 +6,7 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
 import { MemoryDistillSettings } from "./MemoryDistillSettings";
+import { MemoryForgettingSettings } from "./MemoryForgettingSettings";
 import { AlertTriangle, Info, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
@@ -43,10 +44,12 @@ export function MemoryPanel() {
     consolidateMessage,
     migrationInProgress,
     distillerStatus,
+    forgettingStatus,
     fetchNodes,
     fetchStats,
     distill,
     fetchDistillerStatus,
+    fetchForgettingStatus,
     rebuildIndex,
     setFilters,
     setPage,
@@ -90,6 +93,7 @@ export function MemoryPanel() {
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
+    void fetchForgettingStatus(selectedAgentId);
   }, [
     selectedAgentId,
     isAgentRunning,
@@ -97,6 +101,7 @@ export function MemoryPanel() {
     fetchNodes,
     fetchStats,
     fetchDistillerStatus,
+    fetchForgettingStatus,
   ]);
 
   // Re-fetch when filters or pagination change
@@ -114,6 +119,7 @@ export function MemoryPanel() {
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
+    void fetchForgettingStatus(selectedAgentId);
   }, [
     activePanelTab,
     selectedAgentId,
@@ -121,6 +127,7 @@ export function MemoryPanel() {
     fetchNodes,
     fetchStats,
     fetchDistillerStatus,
+    fetchForgettingStatus,
   ]);
 
   // Auto-dismiss consolidate message after 6 seconds
@@ -296,6 +303,17 @@ export function MemoryPanel() {
         agentId={selectedAgentId}
         running={isAgentRunning}
         distillerStatus={distillerStatus}
+      />
+
+      {/* ADR-057 §5.3 redesign: episodic forgetting settings card
+          (enabled switch + half-life / dormant / archive tuning).
+          Reads/writes the four `agent_config.json` forgetting fields via
+          GET/PUT /agents/{id}/config. Sits right below the distill card —
+          both are memory lifecycle control surfaces. */}
+      <MemoryForgettingSettings
+        agentId={selectedAgentId}
+        running={isAgentRunning}
+        forgettingStatus={forgettingStatus}
       />
 
       {/* Error banner */}

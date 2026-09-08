@@ -1385,9 +1385,9 @@ mod tests {
     use acowork_memory::consolidation::LlmResponse;
     use acowork_memory::types::{AutobioCategory, CollaborationSpan, MemoryQuery, SearchResult};
     use acowork_memory::{
-        DecayConfig, DecayScanResult, GeneralizationConfig, GeneralizationResult,
-        MemoryQualityConfig, OfflineConsolidationConfig, OfflineConsolidationResult,
-        PurgeResult, SchedulerConfig, StoreHealth, StoreStats,
+        DecayConfig, DecayScanResult, EpisodicDecayConfig, GeneralizationConfig,
+        GeneralizationResult, MemoryQualityConfig, OfflineConsolidationConfig,
+        OfflineConsolidationResult, PurgeResult, SchedulerConfig, StoreHealth, StoreStats,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1620,6 +1620,12 @@ mod tests {
             Ok(vec![])
         }
         fn run_decay_scan(&self, _c: &DecayConfig) -> acowork_core::error::Result<DecayScanResult> {
+            unreachable!()
+        }
+        fn run_episodic_decay_scan(
+            &self,
+            _c: &EpisodicDecayConfig,
+        ) -> acowork_core::error::Result<DecayScanResult> {
             unreachable!()
         }
         fn reactivate_node(&self, _id: u64) -> acowork_core::error::Result<()> {

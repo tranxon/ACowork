@@ -359,7 +359,7 @@ impl GrafeoStore {
     }
 
     /// Internal: purge a single node and create a purge log.
-    fn purge_node(
+    pub(crate) fn purge_node(
         &self,
         node_id: NodeId,
         label: &str,

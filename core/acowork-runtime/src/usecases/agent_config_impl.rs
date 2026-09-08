@@ -168,6 +168,18 @@ fn apply_field_patch(cfg: &mut AgentConfig, field: ConfigField, op: &FieldPatch<
         ConfigField::DistillerIdleMinutes => {
             cfg.distiller_idle_minutes = patch_typed::<u64>(field, op);
         }
+        ConfigField::MemoryForgettingEnabled => {
+            cfg.memory_forgetting_enabled = patch_typed::<bool>(field, op);
+        }
+        ConfigField::MemoryForgettingHalfLifeDays => {
+            cfg.memory_forgetting_half_life_days = patch_typed::<u64>(field, op);
+        }
+        ConfigField::MemoryForgettingDormantThreshold => {
+            cfg.memory_forgetting_dormant_threshold = patch_typed::<f32>(field, op);
+        }
+        ConfigField::MemoryForgettingArchiveDays => {
+            cfg.memory_forgetting_archive_days = patch_typed::<u64>(field, op);
+        }
     }
 }
 
@@ -374,6 +386,10 @@ mod tests {
             Some(serde_json::json!(30)), // distiller_interval_minutes
             Some(serde_json::json!(null)), // distiller_accumulation_threshold -> Clear
             None,                          // distiller_idle_minutes absent -> skip
+            None,                          // memory_forgetting_* absent -> skip (4)
+            None,
+            None,
+            None,
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
@@ -384,5 +400,39 @@ mod tests {
         assert!(fields.contains(&(ConfigField::DistillerIntervalMinutes, &FieldPatch::Set(serde_json::json!(30)))));
         assert!(fields.contains(&(ConfigField::DistillerAccumulationThreshold, &FieldPatch::Clear)));
         assert!(!fields.iter().any(|(f, _)| *f == ConfigField::DistillerIdleMinutes));
+    }
+
+    /// Memory forgetting: `from_request_fields` maps absent/null/value
+    /// onto skip/Clear/Set for the four forgetting wire fields.
+    #[test]
+    fn test_forgetting_wire_to_patch_translation() {
+        let body = PutAgentConfigBody::from_request_fields(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // distiller_enabled absent
+            None, // distiller_model absent
+            None, // distiller_interval_minutes absent
+            None, // distiller_accumulation_threshold absent
+            None, // distiller_idle_minutes absent
+            Some(serde_json::json!(true)), // memory_forgetting_enabled
+            Some(serde_json::json!(180)), // memory_forgetting_half_life_days
+            Some(serde_json::json!(null)), // memory_forgetting_dormant_threshold -> Clear
+            None,                          // memory_forgetting_archive_days absent -> skip
+        );
+
+        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
+            body.patches.iter().map(|p| (p.field, &p.op)).collect();
+        assert_eq!(fields.len(), 3, "two present/clear + one absent -> three patches");
+        assert!(fields.contains(&(ConfigField::MemoryForgettingEnabled, &FieldPatch::Set(serde_json::json!(true)))));
+        assert!(fields.contains(&(ConfigField::MemoryForgettingHalfLifeDays, &FieldPatch::Set(serde_json::json!(180)))));
+        assert!(fields.contains(&(ConfigField::MemoryForgettingDormantThreshold, &FieldPatch::Clear)));
+        assert!(!fields.iter().any(|(f, _)| *f == ConfigField::MemoryForgettingArchiveDays));
     }
 }

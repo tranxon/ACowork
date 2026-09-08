@@ -13,6 +13,7 @@
 //! - `purge_log`: Purge logging with 30-day recovery window.
 
 pub mod decay;
+pub mod episodic_decay;
 pub mod purge_log;
 pub mod scan;
 

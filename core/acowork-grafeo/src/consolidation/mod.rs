@@ -35,7 +35,5 @@ pub use instant::{
     ProcessResult,
 };
 pub use offline::{ConflictResolutionResult, OfflineConsolidationConfig, OfflineConsolidationResult};
-pub use scheduler::{ConsolidationRun, ConsolidationScheduler, SchedulerConfig, TriggerReason};
-pub use triple_extraction::{
-    ExtractedTriple, ExtractionResult, LlmMessage, LlmResponse, TripleExtractorLlm,
-};
+pub use scheduler::SchedulerConfig;
+pub use triple_extraction::{LlmMessage, LlmResponse, TripleExtractorLlm};

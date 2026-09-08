@@ -39,11 +39,10 @@ pub use conflict::{
     detect_conflict,
 };
 pub use consolidation::{
-    BehaviorPattern, ConflictCandidate, ConsolidationRun, ConsolidationScheduler,
-    ConflictResolutionDetail, EmbeddingFn, GeneralizationConfig, GeneralizationResult,
-    LlmMessage, LlmResponse, MemoryStoreInput, MemoryStoreResult,
-    OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory, ProcessResult,
-    SchedulerConfig, TripleExtractorLlm, TriggerReason,
+    BehaviorPattern, ConflictCandidate, ConflictResolutionDetail, EmbeddingFn,
+    GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,
+    MemoryStoreResult, OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory,
+    ProcessResult, SchedulerConfig, TripleExtractorLlm,
 };
 pub use engineering::{
     CapacityConfig, CapacityStatus, ConcurrencyConfig, EmbeddingLevel, HealthCheckResult,

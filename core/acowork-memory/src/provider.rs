@@ -27,8 +27,8 @@ use crate::consolidation::{
 use crate::quality::MemoryQualityConfig;
 use crate::types::{
     AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayConfig, DecayScanResult,
-    Episode, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult,
-    SearchResult, StoreHealth, StoreStats,
+    Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus,
+    ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
@@ -163,6 +163,18 @@ pub trait MemoryProvider: Send + Sync {
     /// Implements: decay_score = importance × activity_signal
     /// where activity_signal = clamp(recency_boost + access_boost, floor, 1.0)
     fn run_decay_scan(&self, config: &DecayConfig) -> Result<DecayScanResult>;
+
+    /// Run episodic forgetting (pure time decay) with the given config.
+    ///
+    /// Only touches `Episodic` nodes (the沉淀层 is intentionally excluded).
+    /// When `config.enabled` is false this is a no-op returning zeroes.
+    ///
+    /// Progressive semantics (no age cliff):
+    /// - `retention = exp(-ln2 * age_days / half_life_days)`
+    /// - Active nodes with `retention < dormant_threshold` → Dormant.
+    /// - Dormant nodes dormant for `archive_days` → archived to the
+    ///   PurgeLog (30-day recovery window).
+    fn run_episodic_decay_scan(&self, config: &EpisodicDecayConfig) -> Result<DecayScanResult>;
 
     /// Reactivate a Dormant node back to Active.
     fn reactivate_node(&self, node_id: u64) -> Result<()>;
