@@ -70,7 +70,7 @@ $step = 0
 if ($Start -or $Stop) {
     # Step: Stop running processes
     $step++
-    Write-Host "[$step/$totalSteps] Stopping running Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, and Doc processes..." -ForegroundColor Yellow
+    Write-Host "[$step/$totalSteps] Stopping running Desktop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, and Doc processes..." -ForegroundColor Yellow
 
     $gatewayProcs = Get-Process -Name "acowork-gateway" -ErrorAction SilentlyContinue
     $runtimeProcs = Get-Process -Name "acowork-runtime" -ErrorAction SilentlyContinue
@@ -87,6 +87,24 @@ if ($Start -or $Stop) {
     # killed Gateway would keep running with the old broker connection — kill it
     # explicitly to keep the stop step idempotent.
     $nodeProcs   = Get-Process -Name "acowork-node"   -ErrorAction SilentlyContinue
+
+    # The ACowork Desktop app (Tauri) embeds the Gateway as a sidecar. On
+    # Windows the Tauri shell does NOT cascade-kill its sidecar, so killing
+    # only the Gateway leaves the Desktop process alive — and within seconds
+    # Desktop will respawn a fresh Gateway, which in turn spawns Node +
+    # LSP Relay (ADR-055 §6.11). Those children hold file locks on their
+    # .exe files, so subsequent cargo builds silently fail with
+    # "Access is denied" (os error 5) when trying to replace those
+    # binaries. Kill the Desktop FIRST so it cannot respawn anything we
+    # are about to terminate below.
+    $desktopProcs = Get-Process -Name "acowork-desktop" -ErrorAction SilentlyContinue
+    if ($desktopProcs) {
+        Write-Host "  Found Desktop processes: $($desktopProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-desktop" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Desktop stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No Desktop process running." -ForegroundColor Gray
+    }
 
     if ($gatewayProcs) {
         Write-Host "  Found Gateway processes: $($gatewayProcs.Id -join ', ')" -ForegroundColor Gray
@@ -255,7 +273,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-gateway")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -278,7 +296,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-runtime")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -327,7 +345,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-embed")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -354,7 +372,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-lsp-relay")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -384,7 +402,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-node")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -412,7 +430,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-pm")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -441,7 +459,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-doc")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }

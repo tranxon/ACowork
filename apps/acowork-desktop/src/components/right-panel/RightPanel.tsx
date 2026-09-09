@@ -47,6 +47,12 @@ interface RightPanelProps {
 // Stable empty array reference to avoid Zustand selector infinite loop
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
+// Monaco-style top-edge shadow for the right panel: the tab content area
+// shows a soft gradient under the title bar's hairline whenever the active
+// tab's primary scroll container is scrolled away from the very top. Dead-
+// zone threshold keeps the shadow from flickering on tiny scrollTop jitter.
+const RIGHT_PANEL_TOP_SHADOW_THRESHOLD_PX = 4;
+
 export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: RightPanelProps & { width: number }) {
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
@@ -192,6 +198,55 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
   const hasPendingPatches = sessionDebugState?.hasPendingPatches ?? false;
   const autoConnectAttempted = useRef(false);
   const prevAgentId = useRef<string | null>(null);
+
+  // ── Monaco-style top-edge shadow ───────────────────────────────
+  // Drives the gradient overlay under the title hairline. Unlike the chat
+  // (single scroll container), each right-panel tab owns its own primary
+  // scroll root (marked `data-tab-scroll`), some nested inside child
+  // components, and they mount lazily per tab. We attach a native scroll
+  // listener DIRECTLY to each marked root — a direct listener always fires
+  // when that element scrolls (no reliance on capture propagation), and
+  // because it is bound to the marked roots only, nested popups/dropdowns
+  // can't flip the shadow. A MutationObserver keeps listeners attached
+  // across tab switches and lazy-mounted tab content. Reset on tab switch
+  // — the freshly shown tab starts at its top, and a stale `true` from the
+  // previous tab would otherwise flash until the first scroll event.
+  const [rightPanelScrolled, setRightPanelScrolled] = useState(false);
+  const rpScrollAreaRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const root = rpScrollAreaRef.current;
+    if (!root) return;
+
+    const attached = new WeakSet<Element>();
+    const onMarkedScroll = (e: Event) => {
+      const t = e.target as HTMLElement;
+      setRightPanelScrolled(t.scrollTop > RIGHT_PANEL_TOP_SHADOW_THRESHOLD_PX);
+    };
+    const sync = () => {
+      root.querySelectorAll<HTMLElement>("[data-tab-scroll]").forEach((el) => {
+        if (!attached.has(el)) {
+          el.addEventListener("scroll", onMarkedScroll);
+          attached.add(el);
+        }
+      });
+    };
+    sync();
+    const mo = new MutationObserver(sync);
+    mo.observe(root, { childList: true, subtree: true });
+    return () => {
+      mo.disconnect();
+      root.querySelectorAll("[data-tab-scroll]").forEach((el) => {
+        if (attached.has(el)) {
+          el.removeEventListener("scroll", onMarkedScroll);
+          attached.delete(el);
+        }
+      });
+    };
+  }, []);
+  useEffect(() => {
+    setRightPanelScrolled(false);
+  }, [activeTab]);
+
 
   // Debug section expansion / editing state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
@@ -342,11 +397,23 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           with the top-left. The resize handle sits ABOVE it (absolute at
           -left-1), so it must stay outside this clipping box or it would be
           cut off and resizing would break. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-right-panel">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-right-panel-border bg-right-panel">
       {/* Tab title header */}
       <div className="border-b border-right-panel-border px-3 pt-[11px] pb-[7px] text-xs font-medium text-zinc-500 dark:text-zinc-400">
         {t(`rightPanel.${activeTab}`)}
       </div>
+
+      {/* Tab content area — relative wrapper owns the Monaco-style top-edge
+          shadow overlay (driven by rightPanelScrolled) and the capture-phase
+          scroll listener that feeds it. Each tab keeps its own flex-1 scroll
+          root sizing unchanged. */}
+      <div ref={rpScrollAreaRef} className="relative flex min-h-0 flex-1 flex-col">
+        {rightPanelScrolled && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/5 to-transparent dark:from-black/40"
+          />
+        )}
 
       {/* ── Debug tab content ─────────────────────────────────────── */}
       {/* Restructured: the debug tab always renders an action block
@@ -366,7 +433,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                connected                    → state + snapshots + prompts
                                               + compression history */}
       {activeTab === "debug" && (
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-right-panel">
+        <div data-tab-scroll className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-right-panel">
           {/* ADR-063 §3.7 — package prompt override editor. Always
               visible at the TOP of the Debug tab, BEFORE the
               "no agent running" placeholder, the action block, and
@@ -673,7 +740,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
 
       {/* ── Status tab content ───────────────────────────────────── */}
       {activeTab === "status" && (
-        <div className="flex-1 overflow-y-auto bg-right-panel p-3">
+        <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3">
           {/* Session Status — level-1 collapsible card matching the
               Tools-tab "Builtin Tools" grammar: the clickable header
               row (chevron + title) toggles the whole stats body, which
@@ -975,6 +1042,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
         <WorkspaceExplorer />
       </div>
       </div>
+      </div> {/* end: tab content area wrapper */}
     </div>
 
   );

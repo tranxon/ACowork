@@ -612,7 +612,7 @@ export function AgentSetupTab() {
   const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
+    <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
       {/* ── Card 1: Agent Info ────────────────────────────────
           Avatar picker + display name. Level-1 collapsible card
           matching the Status-tab Session/Agent Status and

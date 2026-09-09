@@ -205,7 +205,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-3">
+      <div data-tab-scroll className="flex-1 overflow-y-auto p-3">
         {/* Full content */}
         <div className="mb-3">
           <h3 className="mb-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400">{t("memoryNodeDetail.content")}</h3>

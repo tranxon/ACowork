@@ -1,23 +1,44 @@
 //! Build script for the ACowork desktop app.
 //!
 //! Before invoking `tauri_build::build()`, this script copies the core
-//! workspace binaries (gateway, runtime, embed) and the ONNX runtime DLL
-//! into a `bin/` staging directory inside `src-tauri/`. This allows
-//! `tauri.conf.json` to reference a fixed local path instead of fragile
-//! `target/{profile}/` glob patterns that break on a fresh clone.
+//! workspace binaries (gateway, runtime, embed, pm, node, lsp-relay,
+//! doc) and the ONNX runtime DLL into a `bin/` staging directory inside
+//! `src-tauri/`. This allows `tauri.conf.json` to reference a fixed local
+//! path instead of fragile `target/{profile}/` glob patterns that break
+//! on a fresh clone.
 //!
 //! The `beforeDevCommand` / `beforeBuildCommand` in `tauri.conf.json` are
 //! responsible for building the core workspace first, so the binaries
 //! already exist in `target/{profile}/` by the time this script runs.
+//!
+//! **Why node / lsp-relay / doc MUST be in [`BINARIES`]:**
+//! `tauri_build::build()` copies every entry of `bundle.resources`
+//! (`"bin/*": "./"`) from `src-tauri/bin/` into the dev resource dir
+//! (`target/{profile}/`, the same directory the Desktop-spawned Gateway
+//! runs from). If those three binaries were NOT refreshed here, a stale
+//! copy dropped into `bin/` by an earlier release packaging run would
+//! be copied BACK over the freshly built workspace binaries on every
+//! `tauri dev` — the Gateway then spawns an outdated `acowork-node` /
+//! `acowork-lsp-relay` / `acowork-doc` sibling and breaks on CLI arg
+//! incompatibilities.
 
 use std::path::PathBuf;
 
 /// Binaries to copy from the workspace target directory.
+///
+/// Must include every binary that the Gateway spawns as a sibling
+/// (node, lsp-relay, doc) and every binary the Desktop bundles as a
+/// `bin/*` resource — otherwise the reverse copy performed by
+/// `tauri_build::build()` (resources → target/{profile}) resurrects
+/// stale binaries from `src-tauri/bin/` over the fresh workspace build.
 const BINARIES: &[&str] = &[
     "acowork-gateway",
     "acowork-runtime",
     "acowork-embed",
     "acowork-pm",
+    "acowork-node",
+    "acowork-lsp-relay",
+    "acowork-doc",
 ];
 
 fn main() {
