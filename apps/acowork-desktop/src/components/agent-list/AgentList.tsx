@@ -391,7 +391,7 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col shrink-0 bg-nav-surface rounded-xl"
+      className="flex flex-col shrink-0 bg-nav-surface rounded-xl border-r border-agentlist-border"
       style={{ width: width ?? 240 }}
     >
       {/* Header — search input */}

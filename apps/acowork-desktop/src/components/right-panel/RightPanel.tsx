@@ -344,7 +344,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           cut off and resizing would break. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-right-panel">
       {/* Tab title header */}
-      <div className="border-b border-zinc-200 px-3 pt-[11px] pb-[7px] text-xs font-medium text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+      <div className="border-b border-right-panel-border px-3 pt-[11px] pb-[7px] text-xs font-medium text-zinc-500 dark:text-zinc-400">
         {t(`rightPanel.${activeTab}`)}
       </div>
 
@@ -378,7 +378,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           {/* Divider — full panel-width hairline separating the PROMPT
               override area (above) from the debug controls (below). Matches
               the workspace/memory panel divider style. */}
-          <div className="my-2 border-t border-zinc-200 dark:border-zinc-800" />
+          <div className="my-2 border-t border-right-panel-border" />
 
           {!selectedAgent?.running ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
@@ -817,7 +817,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           {/* Divider — full panel-width hairline separating the Session
               Status card (above) from the Agent Status card (below).
               Matches the workspace/memory panel divider style. */}
-          <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+          <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
           {/* Agent Status — level-1 collapsible card, same grammar as
               the Session Status card above. */}

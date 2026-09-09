@@ -39,13 +39,30 @@
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
-  --color-chat-input-border: hsl(0 0% 93%);
+  --color-chat-input-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — chat input box outline (matches the
      right-panel section divider hairlines like `border-zinc-200` on
      RightPanel's tab header / section dividers, so the input reads
      as part of the layout instead of disappearing into
      `bg-right-panel`. Independent from --color-chat-border — tweak
      here without touching the CodeBlock/Mermaid wrapper border. */
+  --color-right-panel-border: hsl(240 5.9% 90.6%);
+  /* = zinc-200, #e4e4e7 — right-panel outer/divider hairline (light).
+     Used by RightPanel.tsx (tab header bottom border, section
+     dividers) and any future right-side surface borders. Mirrors
+     --color-chat-input-border so the chat input box reads as part of
+     the same layout grid. Consumers write `border-right-panel-border`
+     with no `dark:` prefix needed — the .dark block below flips the
+     value. Independent from --color-chat-border (which drives
+     CodeBlock/Mermaid wrappers). */
+  --color-agentlist-border: hsl(240 5.9% 90.6%);
+  /* = zinc-200, #e4e4e7 — left AgentList panel outer hairline (light).
+     Used by AppLayout.tsx / AgentList.tsx for the sidebar container
+     outline. Same value as --color-right-panel-border so the two
+     panel frames stay visually symmetric; tweak independently if
+     one side needs more/less contrast against its surface
+     (`bg-nav-surface` vs `bg-right-panel`). Consumers write
+     `border-agentlist-border` with no `dark:` prefix needed. */
   --color-chat-badge: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
@@ -375,6 +392,12 @@
      right-panel section divider hairlines `dark:border-zinc-800` on
      RightPanel's tab header / section dividers). Independent from
      --color-chat-border. */
+  --color-right-panel-border: hsl(0 0% 13%);
+  /* = zinc-800, #27272a — right-panel outer/divider hairline (dark).
+     Auto-flips the @theme light value above. */
+  --color-agentlist-border: hsl(0 0% 13%);
+  /* = zinc-800, #27272a — left AgentList panel outer hairline (dark).
+     Auto-flips the @theme light value above. */
   --color-chat-badge: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);

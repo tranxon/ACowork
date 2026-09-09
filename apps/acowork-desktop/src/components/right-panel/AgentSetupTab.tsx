@@ -800,7 +800,7 @@ export function AgentSetupTab() {
           Agent Info card (above) from the Session Parameters
           card (below). Matches the workspace/memory panel
           divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+      <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* ── Card 2: Session Parameters ─────────────────────────
           Iteration / session-count / approval / idle /
@@ -1003,7 +1003,7 @@ export function AgentSetupTab() {
       {/* Divider — full panel-width hairline separating the
           Session Parameters card (above) from the Model
           Parameters card (below). */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+      <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* ── Card 3: Model Parameters ───────────────────────────
           max_output_tokens / context_window / temperature.
@@ -1114,7 +1114,7 @@ export function AgentSetupTab() {
           </div>
         </ExpandableRow>
       </ListBox>
-<div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+<div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
       <div className="flex items-center gap-3">

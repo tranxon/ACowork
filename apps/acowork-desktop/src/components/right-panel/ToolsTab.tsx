@@ -566,7 +566,7 @@ export function ToolsTab() {
       {/* Divider — full panel-width hairline separating the functional
           blocks (Builtin Tools / Web Search / MCP). Matches the
           workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+      <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* Web Search Providers card — same Debug-panel collapsible
           style as the Builtin Tools card above. */}
@@ -647,7 +647,7 @@ export function ToolsTab() {
       {/* Divider — full panel-width hairline separating the functional
           blocks (Builtin Tools / Web Search / MCP). Matches the
           workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+      <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* MCP Servers card — the group is a level-1 collapsible card
           like the Debug-panel snapshot list; each server renders as a
