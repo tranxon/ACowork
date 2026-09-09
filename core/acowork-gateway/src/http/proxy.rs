@@ -177,6 +177,14 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/memory/consolidation/status",
             get(proxy_consolidation_status),
         )
+        // ADR-071 D2: manual EpisodicDistiller trigger — Desktop
+        // "立即沉淀" button. Forces a one-shot distiller pass via
+        // Runtime's `POST /memory/distill`. Status codes are passed
+        // through unchanged (200 / 409 / 500 / 503).
+        .route(
+            "/api/agents/{id}/memory/distill",
+            post(proxy_memory_distill),
+        )
         .route(
             "/api/agents/{id}/rag/status",
             get(proxy_rag_status),
@@ -529,6 +537,34 @@ async fn proxy_consolidation_status(
     headers: HeaderMap,
 ) -> Response {
     proxy_to_runtime(&state, &id, "/memory/consolidation/status", "", &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/memory/distill` to
+/// Runtime's `POST /memory/distill` (ADR-071 D2).
+///
+/// Triggers one immediate `EpisodicDistiller` pass on the Runtime
+/// side, bypassing the periodic gate (interval / backlog / idle).
+/// The body is empty — the Runtime handler accepts no payload —
+/// but the route is intentionally registered as `POST` to match
+/// the existing distiller trigger contract. Status codes from the
+/// Runtime (200 / 409 / 500 / 503) are passed through unchanged so
+/// the frontend's existing error mapping (`DistillResponse` /
+/// `409 distiller is disabled` / `503 not ready`) keeps working.
+async fn proxy_memory_distill(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/memory/distill",
+        "",
+        reqwest::Method::POST,
+        None,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/rag/status` to Runtime.
@@ -2809,6 +2845,135 @@ mod tests {
             resp.status().is_server_error(),
             "expected 5xx on unreachable runtime, got {}",
             resp.status()
+        );
+    }
+
+    /// ADR-071 D2: `POST /api/agents/{id}/memory/distill` ("立即沉淀")
+    /// must forward the request as `POST /memory/distill` to the
+    /// Runtime, return 200 and pass the Runtime's `DistillResponse`
+    /// body through verbatim.
+    ///
+    /// Regression guard for the "Distill failed · HTTP 404" bug:
+    /// the route was missing from `proxy_routes()` so Axum returned
+    /// 404 before any reverse-proxy happened.
+    #[tokio::test]
+    async fn distill_route_forwards_post_to_runtime_memory_distill_endpoint() {
+        use tower::util::ServiceExt;
+
+        // ── Mock Runtime: returns a real-shaped DistillResponse ──
+        let received: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_for_server = received.clone();
+        let runtime_app = axum::Router::new().route(
+            "/memory/distill",
+            axum::routing::post(
+                move |req: axum::extract::Request| async move {
+                    let method = req.method().to_string();
+                    let uri = req.uri().to_string();
+                    let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                        .await
+                        .unwrap_or_default();
+                    received_for_server.lock().unwrap().push(format!(
+                        "{} {} body={}",
+                        method,
+                        uri,
+                        String::from_utf8_lossy(&body)
+                    ));
+                    // Mimic acowork-runtime `post_memory_distill` success body
+                    // (server.rs `post_memory_distill`).
+                    axum::Json(serde_json::json!({
+                        "started": true,
+                        "episodes_scanned": 3,
+                        "facts_promoted": 1,
+                        "preferences_promoted": 0,
+                        "relations_promoted": 0,
+                        "procedures_promoted": 0,
+                        "autobio_promoted": 0,
+                        "episodes_marked_consolidated": 3,
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, runtime_app).await.unwrap();
+        });
+
+        let (state, _registry) =
+            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let app = super::proxy_routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/com.acowork.architect/memory/distill")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body_json["started"], serde_json::Value::Bool(true));
+        assert_eq!(body_json["facts_promoted"], serde_json::json!(1));
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "exactly one request forwarded");
+        // Path prefix is rewritten: `/api/agents/{id}/memory/distill` →
+        // `/memory/distill`. Method stays POST.
+        assert!(
+            got[0].starts_with("POST /memory/distill body="),
+            "request must be rewritten to POST /memory/distill, got: {}",
+            got[0]
+        );
+    }
+
+    /// When the agent is not registered (Runtime not yet up, or
+    /// already shut down) the proxy must return 503 with
+    /// `Retry-After: 2` so the frontend's `with503Retry` honors
+    /// the boot-window cadence — same contract as the health route.
+    #[tokio::test]
+    async fn distill_route_returns_503_when_agent_not_registered() {
+        use tower::util::ServiceExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-distill-proxy-unreg-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(gw_state)),
+            std::sync::Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        state.runtime_http_registry = Some(registry);
+        let app = super::proxy_routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/com.acowork.never-registered/memory/distill")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            Some("2"),
+            "503 must carry Retry-After: 2 to match the boot-window cadence"
         );
     }
 }

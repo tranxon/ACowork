@@ -51,10 +51,10 @@ if ($Profile -eq "debug") {
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
 # Step count:
-#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Copy resources, Start (9)
-#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Copy resources      (8)
-#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Copy resources (7)
-$totalSteps = if ($Start) { 9 } elseif ($Stop) { 8 } else { 7 }
+#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, Copy resources, Start (10)
+#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, Copy resources      (9)
+#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, Copy resources (8)
+$totalSteps = if ($Start) { 10 } elseif ($Stop) { 9 } else { 8 }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "ACowork Core Build Script" -ForegroundColor Cyan
@@ -70,7 +70,7 @@ $step = 0
 if ($Start -or $Stop) {
     # Step: Stop running processes
     $step++
-    Write-Host "[$step/$totalSteps] Stopping running Gateway, Runtime, Embed, LSP Relay, and Node Agent processes..." -ForegroundColor Yellow
+    Write-Host "[$step/$totalSteps] Stopping running Desktop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, and Doc processes..." -ForegroundColor Yellow
 
     $gatewayProcs = Get-Process -Name "acowork-gateway" -ErrorAction SilentlyContinue
     $runtimeProcs = Get-Process -Name "acowork-runtime" -ErrorAction SilentlyContinue
@@ -87,6 +87,24 @@ if ($Start -or $Stop) {
     # killed Gateway would keep running with the old broker connection — kill it
     # explicitly to keep the stop step idempotent.
     $nodeProcs   = Get-Process -Name "acowork-node"   -ErrorAction SilentlyContinue
+
+    # The ACowork Desktop app (Tauri) embeds the Gateway as a sidecar. On
+    # Windows the Tauri shell does NOT cascade-kill its sidecar, so killing
+    # only the Gateway leaves the Desktop process alive — and within seconds
+    # Desktop will respawn a fresh Gateway, which in turn spawns Node +
+    # LSP Relay (ADR-055 §6.11). Those children hold file locks on their
+    # .exe files, so subsequent cargo builds silently fail with
+    # "Access is denied" (os error 5) when trying to replace those
+    # binaries. Kill the Desktop FIRST so it cannot respawn anything we
+    # are about to terminate below.
+    $desktopProcs = Get-Process -Name "acowork-desktop" -ErrorAction SilentlyContinue
+    if ($desktopProcs) {
+        Write-Host "  Found Desktop processes: $($desktopProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-desktop" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Desktop stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No Desktop process running." -ForegroundColor Gray
+    }
 
     if ($gatewayProcs) {
         Write-Host "  Found Gateway processes: $($gatewayProcs.Id -join ', ')" -ForegroundColor Gray
@@ -139,6 +157,20 @@ if ($Start -or $Stop) {
         Write-Host "  PM stopped." -ForegroundColor Green
     } else {
         Write-Host "  No PM process running." -ForegroundColor Gray
+    }
+
+    # The Doc service mirrors the PM pattern (ADR-064). It is a standalone
+    # process (`acowork-doc`) spawned by the Gateway supervisor and listens on
+    # port 18081 by default. The ADR-018 watchdog self-exit lags on Windows,
+    # so kill it explicitly to keep the stop step idempotent and to release
+    # 18081 before the next start.
+    $docProcs = Get-Process -Name "acowork-doc" -ErrorAction SilentlyContinue
+    if ($docProcs) {
+        Write-Host "  Found Doc processes: $($docProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-doc" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Doc stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No Doc process running." -ForegroundColor Gray
     }
 
     # Ensure embed port 18080 is released before starting a new gateway.
@@ -208,6 +240,28 @@ if ($Start -or $Stop) {
         Write-Host "  WARNING: Port 18082 still in use after 3s" -ForegroundColor Red
     }
 
+    # Ensure Doc port 18081 is released (ADR-064 standalone process). Same
+    # rationale as the PM port block above: a stale doc from a killed Gateway
+    # would hold the default port and shift the new doc to 18082+.
+    $docPortLine = netstat -ano 2>$null | Select-String ":18081\s" | Select-Object -First 1
+    if ($docPortLine) {
+        $pidFromPort = ($docPortLine.Line -split '\s+')[-1]
+        if ($pidFromPort -match '^\d+$') {
+            Write-Host "  Port 18081 held by PID $pidFromPort — force-killing" -ForegroundColor Gray
+            Stop-Process -Id $pidFromPort -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $docPortWaited = 0
+    while ($docPortWaited -lt 6) {
+        $stillUp = netstat -ano 2>$null | Select-String ":18081\s"
+        if (-not $stillUp) { break }
+        Start-Sleep -Milliseconds 500
+        $docPortWaited++
+    }
+    if ($docPortWaited -ge 6) {
+        Write-Host "  WARNING: Port 18081 still in use after 3s" -ForegroundColor Red
+    }
+
     Write-Host ""
 }
 
@@ -219,7 +273,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-gateway")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -242,7 +296,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-runtime")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -291,7 +345,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-embed")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -318,7 +372,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-lsp-relay")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -348,7 +402,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-node")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -376,7 +430,7 @@ try {
     $cargoArgs = @("build")
     if ($Profile -eq "release") { $cargoArgs += "--release" }
     $cargoArgs += @("-p", "acowork-pm")
-    & cargo @cargoArgs 2>&1 | ForEach-Object {
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
         if ($_ -match "error" -or $_ -match "Compiling") {
             Write-Host "  $_" -ForegroundColor Gray
         }
@@ -387,6 +441,35 @@ try {
     Write-Host "  PM service build completed." -ForegroundColor Green
 } catch {
     Write-Host "  PM service build failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+
+# Step: Build Doc service (standalone binary, sibling of acowork-gateway.exe)
+#
+# Mirrors the PM service above: the Doc service is a standalone process
+# (`acowork-doc`), located via `current_exe().parent().join("acowork-doc.exe")`
+# — so the binary MUST sit next to acowork-gateway.exe. Without it the Gateway
+# supervisor logs "acowork-doc binary not found" and `/api/doc/*` returns 503
+# (document library unavailable).
+$step++
+Write-Host "[$step/$totalSteps] Building Doc service ($Profile mode)..." -ForegroundColor Yellow
+try {
+    $cargoArgs = @("build")
+    if ($Profile -eq "release") { $cargoArgs += "--release" }
+    $cargoArgs += @("-p", "acowork-doc")
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
+        if ($_ -match "error" -or $_ -match "Compiling") {
+            Write-Host "  $_" -ForegroundColor Gray
+        }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "  Doc service build completed." -ForegroundColor Green
+} catch {
+    Write-Host "  Doc service build failed: $_" -ForegroundColor Red
     exit 1
 }
 

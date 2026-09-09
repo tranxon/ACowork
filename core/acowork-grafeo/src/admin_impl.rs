@@ -167,16 +167,20 @@ impl MemoryAdminService for GrafeoStore {
                         continue;
                     }
 
-                    // Sub-type filter (Knowledge / Autobiographical only).
-                    // Episodic and Procedural labels have no `sub_type`
-                    // property, so the filter is *only* applied to labels
-                    // that actually carry one. This matches the panel UX:
-                    // the sub-filter dropdown is only offered when the
-                    // primary type is Knowledge or Autobiographical, and
-                    // asking for sub_type=X with `type=Episodic` must NOT
-                    // hide Episodic rows.
+                    // Sub-type filter (Knowledge / Autobiographical / Episodic).
+                    // Episodic nodes carry a `knowledge_subtype` property as a
+                    // distillation routing hint (ADR-068 §3.4.2: `Fact` /
+                    // `Preference` / `Relation` / `Procedure`) and the memory
+                    // panel surfaces it as a secondary drill-down alongside the
+                    // Knowledge / Autobiographical sub-filters. Procedural
+                    // nodes have no secondary classification, so the filter is
+                    // only applied to labels that actually carry one. Asking
+                    // for `sub_type=X` with `type=Procedural` must NOT hide
+                    // Procedural rows.
                     if !params.sub_type.is_empty()
-                        && (*label == labels::KNOWLEDGE || *label == labels::AUTOBIOGRAPHICAL)
+                        && (*label == labels::KNOWLEDGE
+                            || *label == labels::AUTOBIOGRAPHICAL
+                            || *label == labels::EPISODIC)
                     {
                         let node_sub_type = extract_sub_type(label, &n);
                         match node_sub_type {
@@ -534,7 +538,13 @@ impl MemoryAdminService for GrafeoStore {
 /// - `Autobiographical`: reads the `category` property — the memory panel
 ///   surfaces this as the `Autobiographical` sub-filter (`Identity` /
 ///   `Capability` / `Limitation` / `Preference` / `History` / `Relationship`).
-/// - `Episodic` / `Procedural`: returns `None` (no secondary classification).
+/// - `Episodic`: reads the `knowledge_subtype` property, the distillation
+///   routing tag set at write time by `memory_store` (ADR-068 §3.4.2:
+///   `Fact` / `Preference` / `Relation` / `Procedure`). Older episodes
+///   written before the tag existed simply omit it and surface as
+///   `None`. The memory panel uses this as the `Episodic` sub-filter so
+///   users can drill into "episodes tagged as Preference" etc.
+/// - `Procedural`: returns `None` (no secondary classification).
 ///
 /// Returns `None` if the property is missing — older nodes written before
 /// the field was tracked will simply lack the sub-filter UI affordance.
@@ -542,6 +552,7 @@ fn extract_sub_type(label: &str, n: &Node) -> Option<String> {
     let property_name = match label {
         "Knowledge" => "sub_type",
         "Autobiographical" => "category",
+        "Episodic" => "knowledge_subtype",
         _ => return None,
     };
     n.get_property(property_name)
@@ -636,8 +647,10 @@ mod tests {
     }
 
     /// Seed two Knowledge nodes with different sub_types, one
-    /// Autobiographical Limitation node, and one Episodic node. Returns
-    /// the store so each test can run in isolation.
+    /// Autobiographical Limitation node, and two Episodic nodes (one with
+    /// a `knowledge_subtype` tag, one without — the latter represents
+    /// older episodes written before the tag existed). Returns the store
+    /// so each test can run in isolation.
     fn seed_mixed_store() -> GrafeoStore {
         let store = test_store();
 
@@ -677,13 +690,26 @@ mod tests {
             )
             .unwrap();
 
-        // Episodic — never has a sub_type
+        // Episodic / knowledge_subtype=Fact — the tagged branch.
         store
             .store_node(
                 labels::EPISODIC,
                 [
                     ("role", Value::from("user")),
-                    ("content", Value::from("hello")),
+                    ("content", Value::from("Rust has ownership")),
+                    ("knowledge_subtype", Value::from("Fact")),
+                ],
+            )
+            .unwrap();
+
+        // Episodic / knowledge_subtype=Preference — the tagged branch.
+        store
+            .store_node(
+                labels::EPISODIC,
+                [
+                    ("role", Value::from("user")),
+                    ("content", Value::from("I prefer no_std")),
+                    ("knowledge_subtype", Value::from("Preference")),
                 ],
             )
             .unwrap();
@@ -741,7 +767,8 @@ mod tests {
     #[test]
     fn list_nodes_sub_type_empty_is_no_filter() {
         let store = seed_mixed_store();
-        // Empty sub_type must not filter — should return all 4 seeded nodes.
+        // Empty sub_type must not filter — should return all 5 seeded nodes
+        // (2 Knowledge + 1 Autobiographical + 2 Episodic).
         let out = store.list_nodes(&AdminListNodesParams {
             page: 1,
             size: 100,
@@ -750,7 +777,7 @@ mod tests {
             keyword: String::new(),
             time_range: "all".to_string(),
         });
-        assert_eq!(out.total, 4, "empty sub_type must behave as no filter");
+        assert_eq!(out.total, 5, "empty sub_type must behave as no filter");
     }
 
     #[test]
@@ -770,21 +797,39 @@ mod tests {
     }
 
     #[test]
-    fn list_nodes_sub_type_against_episodic_is_ignored() {
+    fn list_nodes_sub_type_episodic_filters_by_knowledge_subtype() {
         let store = seed_mixed_store();
-        // Episodic nodes have no sub-classification, so any sub_type filter
-        // must let them through — the panel uses sub_type only to drill into
-        // Knowledge / Autobiographical, never to filter Episodic out.
+        // Episodic nodes carry `knowledge_subtype` (ADR-068 §3.4.2) which
+        // the memory panel surfaces as a sub-filter drill-down. Asking
+        // for `sub_type=Preference` with `node_type=Episodic` must return
+        // only the tagged-Preference episode.
         let out = store.list_nodes(&AdminListNodesParams {
             page: 1,
             size: 100,
             node_type: "Episodic".to_string(),
-            sub_type: "anything".to_string(),
+            sub_type: "Preference".to_string(),
             keyword: String::new(),
             time_range: "all".to_string(),
         });
-        assert_eq!(out.total, 1, "sub_type filter must not affect Episodic nodes");
+        assert_eq!(out.total, 1, "sub_type=Preference must match exactly one episode");
         assert_eq!(out.nodes[0].node_type, "Episodic");
+        assert_eq!(out.nodes[0].sub_type.as_deref(), Some("Preference"));
+    }
+
+    #[test]
+    fn list_nodes_sub_type_episodic_drops_untagged_episodes() {
+        let store = seed_mixed_store();
+        // No filter — both seeded Episodic nodes must surface (one tagged
+        // Fact, one tagged Preference).
+        let out_all = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: "Episodic".to_string(),
+            sub_type: String::new(),
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out_all.total, 2, "all seeded episodes must surface when sub_type is empty");
     }
 
     // ── audit_embedding_health ───────────────────────────────────────

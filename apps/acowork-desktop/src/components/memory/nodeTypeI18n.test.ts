@@ -1,6 +1,6 @@
 // Unit tests for `nodeTypeI18n.ts`. These cover the i18n key resolution
 // for the secondary sub-filter the panel offers when the primary type is
-// Knowledge or Autobiographical.
+// Knowledge / Autobiographical / Episodic.
 //
 // The tests use a stub `t()` that returns the input key, so we only
 // assert the key-lookup behaviour (which is the contract the locale
@@ -73,13 +73,34 @@ describe("subTypeLabel", () => {
     );
   });
 
+  it("maps every Episodic knowledge_subtype to its i18n key", () => {
+    // ADR-068 §3.4.2 — Episode nodes carry `knowledge_subtype` as a
+    // distillation routing tag; the panel surfaces it as a sub-filter so
+    // users can drill into "episodes tagged as Preference" etc.
+    expect(subTypeLabel(identityT, "Episodic", "Fact")).toBe(
+      "memoryPanel.subTypeEpisodicFact",
+    );
+    expect(subTypeLabel(identityT, "Episodic", "Preference")).toBe(
+      "memoryPanel.subTypeEpisodicPreference",
+    );
+    expect(subTypeLabel(identityT, "Episodic", "Relation")).toBe(
+      "memoryPanel.subTypeEpisodicRelation",
+    );
+    expect(subTypeLabel(identityT, "Episodic", "Procedure")).toBe(
+      "memoryPanel.subTypeEpisodicProcedure",
+    );
+  });
+
   it("returns the raw sub_type for unsupported (node_type, sub_type) pairs", () => {
-    // Episodic never has a sub_type — the lookup must not silently return
-    // a key from a different label.
-    expect(subTypeLabel(identityT, "Episodic", "Fact")).toBe("Fact");
-    // Same string under a label that doesn't carry it.
+    // Same string under a label that doesn't carry it (Procedural has no
+    // sub-classification at all). The lookup must not silently return a
+    // key from a different label.
     expect(subTypeLabel(identityT, "Procedural", "Preference")).toBe(
       "Preference",
+    );
+    // Unknown sub_type string — render the raw value rather than blank.
+    expect(subTypeLabel(identityT, "Episodic", "UnknownTag")).toBe(
+      "UnknownTag",
     );
   });
 
@@ -120,8 +141,22 @@ describe("subTypeOptions", () => {
     );
   });
 
+  it("returns the four Episodic knowledge_subtypes in declared order", () => {
+    // The enum mirrors `Knowledge` because an episode tagged with
+    // `knowledge_subtype=X` is the distiller's input for promoting a `X`
+    // node into the semantic layer (ADR-068 §3.4.2).
+    const opts = subTypeOptions(identityT, "Episodic");
+    expect(opts.map((o) => o.value)).toEqual([
+      "Fact",
+      "Preference",
+      "Relation",
+      "Procedure",
+    ]);
+    expect(opts[0].label).toBe("memoryPanel.subTypeEpisodicFact");
+    expect(opts[3].label).toBe("memoryPanel.subTypeEpisodicProcedure");
+  });
+
   it("returns an empty list for labels without sub-classification", () => {
-    expect(subTypeOptions(identityT, "Episodic")).toEqual([]);
     expect(subTypeOptions(identityT, "Procedural")).toEqual([]);
     expect(subTypeOptions(identityT, "UnknownLabel")).toEqual([]);
   });

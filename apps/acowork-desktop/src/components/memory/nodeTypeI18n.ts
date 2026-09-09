@@ -27,16 +27,24 @@ export function useNodeTypeLabel(): (nodeType: string) => string {
 
 // ── Sub-classification (secondary filter) ────────────────────────────
 //
-// `sub_type` is the string returned by the backend inside a Knowledge or
-// Autobiographical node. It is *context-free* — the same string can
-// appear under different `node_type`s with different meanings (e.g.
-// "Preference" is a Knowledge sub_type AND an Autobiographical category).
-// The panel therefore passes the parent `nodeType` so the i18n lookup
-// stays unambiguous.
+// `sub_type` is the string returned by the backend inside a Knowledge /
+// Autobiographical / Episodic node. It is *context-free* — the same
+// string can appear under different `node_type`s with different meanings
+// (e.g. "Preference" is a Knowledge sub_type AND an Autobiographical
+// category AND an Episodic distillation-routing tag). The panel
+// therefore passes the parent `nodeType` so the i18n lookup stays
+// unambiguous.
 //
 // Knowledge:         `Fact` | `Preference` | `Relation` | `Procedure`
 // Autobiographical:  `Identity` | `Capability` | `Limitation`
 //                    | `Preference` | `History` | `Relationship`
+// Episodic:          `Fact` | `Preference` | `Relation` | `Procedure`
+//                    — read from the `knowledge_subtype` property
+//                    (ADR-068 §3.4.2 distillation routing tag). The
+//                    enum mirrors `Knowledge` because an Episode that
+//                    has been tagged with `knowledge_subtype=X` is the
+//                    distiller's input for promoting a `X` node into
+//                    the semantic layer.
 
 const SUB_TYPE_I18N_KEYS: Record<string, Record<string, string>> = {
   Knowledge: {
@@ -52,6 +60,12 @@ const SUB_TYPE_I18N_KEYS: Record<string, Record<string, string>> = {
     Preference: "memoryPanel.subTypeAutobiographicalPreference",
     History: "memoryPanel.subTypeAutobiographicalHistory",
     Relationship: "memoryPanel.subTypeAutobiographicalRelationship",
+  },
+  Episodic: {
+    Fact: "memoryPanel.subTypeEpisodicFact",
+    Preference: "memoryPanel.subTypeEpisodicPreference",
+    Relation: "memoryPanel.subTypeEpisodicRelation",
+    Procedure: "memoryPanel.subTypeEpisodicProcedure",
   },
 };
 

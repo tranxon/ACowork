@@ -10,6 +10,7 @@ import { shouldShowAgentAvatar, shouldShowTrailingAgentHeader } from "./avatarAn
 import type { ChatListAdapterV2 } from "./chatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
 import { StreamingSourceBlock } from "./StreamingSourceBlock";
+import { EmptyState } from "./EmptyState";
 // ADR-050 post-C5 fix: StreamingSourceBlock is used by VML to render
 // isLive assistant blocks (streaming preview).  Thought streaming
 // previews are still rendered inside ExploreBlock via ThinkBlock.
@@ -519,9 +520,7 @@ export const VirtualMessageList = React.forwardRef<
       )}
 
       {!loadError && !isLoadingSession && messages.length === 0 && (
-        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
-          Start a conversation
-        </div>
+        <EmptyState />
       )}
 
       {/* Virtualized message list */}

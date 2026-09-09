@@ -612,7 +612,7 @@ export function AgentSetupTab() {
   const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
+    <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
       {/* ── Card 1: Agent Info ────────────────────────────────
           Avatar picker + display name. Level-1 collapsible card
           matching the Status-tab Session/Agent Status and
@@ -800,7 +800,7 @@ export function AgentSetupTab() {
           Agent Info card (above) from the Session Parameters
           card (below). Matches the workspace/memory panel
           divider style. */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+      <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* ── Card 2: Session Parameters ─────────────────────────
           Iteration / session-count / approval / idle /
@@ -1003,7 +1003,7 @@ export function AgentSetupTab() {
       {/* Divider — full panel-width hairline separating the
           Session Parameters card (above) from the Model
           Parameters card (below). */}
-      <div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+      <div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* ── Card 3: Model Parameters ───────────────────────────
           max_output_tokens / context_window / temperature.
@@ -1114,7 +1114,7 @@ export function AgentSetupTab() {
           </div>
         </ExpandableRow>
       </ListBox>
-<div className="-mx-3 my-2 border-t border-zinc-200 dark:border-zinc-800" />
+<div className="-mx-3 my-2 border-t border-right-panel-border" />
 
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
       <div className="flex items-center gap-3">

@@ -99,5 +99,20 @@ else
     echo -e "${YELLOW}      Without it, /api/pm/* returns 503 (PM unavailable).${NC}"
 fi
 
+# Bundle Doc service binary (sibling of acowork-gateway, ADR-064).
+# Mirrors the PM service above: the Gateway supervisor locates it via
+# `current_exe().parent().join("acowork-doc")`; without this copy the Doc
+# supervisor logs "acowork-doc binary not found" and `/api/doc/*` returns 503
+# (document library unavailable).
+DOC_BIN="$WORKSPACE_ROOT/target/release/acowork-doc"
+if [ -f "$DOC_BIN" ]; then
+    cp "$DOC_BIN" "$BIN_DIR/acowork-doc"
+    echo -e "${GREEN}Bundled Doc service binary: $DOC_BIN${NC}"
+else
+    echo -e "${YELLOW}WARN: acowork-doc not found at $DOC_BIN.${NC}"
+    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Without it, /api/doc/* returns 503 (Doc unavailable).${NC}"
+fi
+
 cd "$DESKTOP_DIR"
 npm run tauri build
