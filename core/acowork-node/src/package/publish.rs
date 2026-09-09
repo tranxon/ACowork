@@ -41,10 +41,10 @@ pub struct CheckItem {
 
 /// Run all publish-preparation checks against an installed agent.
 ///
-/// ADR-073: the target is located by instance identity (`instance_id`,
+/// ADR-073: the target is located by instance identity (`instance_id`);
+/// package `agent_id` is not needed for lookup.
 pub fn prepare_publish(
     instance_id: &str,
-    agent_id: &str,
     clean: bool,
     state: &mut NodeState,
 ) -> Result<PrepareResult> {
@@ -564,7 +564,7 @@ model = "gpt-4"
         create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
 
         let result =
-            prepare_publish("inst-com.test.weather", "com.test.weather", false, &mut state)
+            prepare_publish("inst-com.test.weather", false, &mut state)
                 .unwrap();
         assert!(
             result.errors.is_empty(),
@@ -621,7 +621,7 @@ temperature = 0.7
         });
 
         let result =
-            prepare_publish("inst-com.test.invalid", "com.test.invalid", false, &mut state)
+            prepare_publish("inst-com.test.invalid", false, &mut state)
                 .unwrap();
         assert!(
             !result.warnings.is_empty() || !result.errors.is_empty(),
@@ -683,7 +683,7 @@ model = "gpt-4"
             manifest,
         });
 
-        let result = prepare_publish("inst-com.test.dev", "com.test.dev", true, &mut state).unwrap();
+        let result = prepare_publish("inst-com.test.dev", true, &mut state).unwrap();
         assert!(result.cleaned, "Should have performed cleanup");
         assert!(
             !state.installed_agents["inst-com.test.dev"].manifest.dev,

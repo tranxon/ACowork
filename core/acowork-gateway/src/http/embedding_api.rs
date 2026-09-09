@@ -94,8 +94,8 @@ pub struct SelectModelRequest {
 /// Agent info returned when dimension change requires migration.
 #[derive(Debug, Serialize)]
 pub struct MigrationAgentEntry {
-    /// Agent ID
-    pub agent_id: String,
+    /// ADR-073: instance identity (UUID) — the canonical addressing key.
+    pub instance_id: String,
     /// Agent display name
     pub name: String,
     /// Whether this agent is currently running (must be running for migration)
@@ -124,9 +124,9 @@ pub struct SelectModelMigrationResponse {
 /// Request for starting migration.
 #[derive(Debug, Deserialize)]
 pub struct StartMigrationRequest {
-    /// Agent IDs to migrate (empty or absent = all running agents)
+    /// ADR-073: instance IDs to migrate (empty or absent = all running agents)
     #[serde(default)]
-    pub agent_ids: Vec<String>,
+    pub instance_ids: Vec<String>,
 }
 
 // ── Route handlers ─────────────────────────────────────────────────────
@@ -377,7 +377,7 @@ pub async fn select_model(
                     .running_agents
                     .values()
                     .map(|info| MigrationAgentEntry {
-                        agent_id: info.agent_id.clone(),
+                        instance_id: info.instance_id.clone(),
                         name: info.agent_id.clone(), // Name resolved later by frontend
                         is_running: true,
                         has_active_sessions: false, // Unknown until agent is queried
@@ -399,7 +399,7 @@ pub async fn select_model(
                 for (aid, info) in &gw.installed_agents {
                     if !running_ids.contains(aid.as_str()) {
                         all_agents.push(MigrationAgentEntry {
-                            agent_id: aid.clone(),
+                            instance_id: aid.clone(),
                             name: info.name.clone(),
                             is_running: false,
                             has_active_sessions: false,
@@ -731,7 +731,7 @@ pub async fn get_migration_progress(
         .filter_map(|info| {
             info.migration.as_ref().map(|m| {
                 serde_json::json!({
-                    "agent_id": info.agent_id,
+                    "instance_id": info.instance_id,
                     "request_id": m.request_id,
                     "target_model_id": m.target_model_id,
                     "target_dimension": m.target_dimension,
@@ -775,7 +775,7 @@ pub async fn start_migration(
     tracing::info!(
         target: "migration_diag",
         model_id = %model_id,
-        requested_agent_ids = ?req.agent_ids,
+        requested_instance_ids = ?req.instance_ids,
         "start_migration: entry"
     );
 
@@ -839,10 +839,40 @@ pub async fn start_migration(
     );
 
     // 2. Enumerate target agents (requested ids, or all running agents).
-    let target_ids: Vec<String> = if req.agent_ids.is_empty() {
+    //
+    //    ADR-073: the running-agents table is keyed by INSTANCE id and the
+    //    migration state is recorded per instance. Requested ids are
+    //    matched strictly against that table — a package `agent_id` or an
+    //    unknown/stopped instance is a caller bug and fails the whole
+    //    request loudly (400) instead of silently skipping agents the user
+    //    explicitly asked to migrate.
+    let target_ids: Vec<String> = if req.instance_ids.is_empty() {
         gw.running_agents.keys().cloned().collect()
     } else {
-        req.agent_ids.clone()
+        let unknown: Vec<&String> = req
+            .instance_ids
+            .iter()
+            .filter(|id| !gw.running_agents.contains_key(*id))
+            .collect();
+        if !unknown.is_empty() {
+            tracing::warn!(
+                target: "migration_diag",
+                model_id = %model_id,
+                unknown = ?unknown,
+                "start_migration: rejected — requested ids are not running instances"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "model_id": model_id,
+                    "status": "error",
+                    "message": "requested ids are not running agent instances (expected instance UUIDs)",
+                    "unknown_instance_ids": unknown,
+                })),
+            )
+                .into_response();
+        }
+        req.instance_ids.clone()
     };
     let running_agents_count = gw.running_agents.len();
     let running_agents_keys: Vec<String> = gw.running_agents.keys().cloned().collect();
@@ -1043,7 +1073,7 @@ pub async fn start_migration(
         });
 
         results.push(serde_json::json!({
-            "agent_id": agent_id,
+            "instance_id": agent_id,
             "status": "queued",
             "message": "Migration enqueued; poll /api/embedding-models/migration-progress for progress",
         }));

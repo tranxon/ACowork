@@ -520,7 +520,6 @@ async fn handle_command(
             let mut node = state.write().await;
             match crate::package::publish::prepare_publish(
                 &cmd.instance_id,
-                &cmd.agent_id,
                 cmd.clean,
                 &mut node,
             ) {
