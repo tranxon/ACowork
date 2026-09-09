@@ -822,7 +822,11 @@ message FsChange {
 /// Control command (sid in payload for routing).
 /// Topic: acowork/agents/{id}/sessions/control/{cmd}
 message ControlCommand {
-  string agent_id = 1;
+  // ADR-073: the identity carried here is the INSTANCE id (the control
+  // topic is already instance-scoped; this field mirrors it on the wire).
+  // Package `agent_id` is category/display metadata and is never sent
+  // on the control path.
+  string instance_id = 1;
   oneof command {
     CreateSession       create_session        = 10;
     DeleteSession       delete_session        = 11;
