@@ -557,7 +557,7 @@ sequenceDiagram
     Note over DA,RT: Key: Gateway is not in the middle as a forwarder
 
     DA->>TB: invoke('send_message', {agent_id, sid, content: "Hello"})
-    TB->>BROKER: PUBLISH acowork/agents/{id}/sessions/control/message (payload: ControlCommand{agent_id, sid, message_id, content})
+    TB->>BROKER: PUBLISH acowork/agents/{id}/sessions/control/message (payload: ControlCommand{instance_id, sid, message_id, content})
     BROKER->>RT: (Runtime already SUB sessions/control/#)
 
     Note over RT: Runtime starts LLM inference

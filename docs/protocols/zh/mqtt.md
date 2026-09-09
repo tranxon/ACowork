@@ -558,7 +558,7 @@ sequenceDiagram
     Note over DA,RT: 关键：Gateway 不在中间做转发
 
     DA->>TB: invoke('send_message', {agent_id, sid, content: "你好"})
-    TB->>BROKER: PUBLISH acowork/agents/{id}/sessions/control/message (payload: ControlCommand{agent_id, sid, message_id, content})
+    TB->>BROKER: PUBLISH acowork/agents/{id}/sessions/control/message (payload: ControlCommand{instance_id, sid, message_id, content})
     BROKER->>RT: (Runtime 已 SUB sessions/control/#)
 
     Note over RT: Runtime 开始 LLM 推理
