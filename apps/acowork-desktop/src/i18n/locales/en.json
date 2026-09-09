@@ -277,7 +277,8 @@
     "errorFailedToStartDebugAgent": "Failed to start debug agent: {{error}}",
     "errorFailedToRestartInDebug": "Failed to restart in debug: {{error}}",
     "errorFailedToStopAgent": "Failed to stop agent: {{error}}",
-    "errorFailedToUninstallAgent": "Failed to uninstall agent: {{error}}"
+    "errorFailedToUninstallAgent": "Failed to uninstall agent: {{error}}",
+    "node": "Node"
   },
   "cloneDialog": {
     "skeleton": "Skeleton",

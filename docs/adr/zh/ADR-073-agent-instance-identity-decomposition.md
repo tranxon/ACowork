@@ -29,7 +29,7 @@
 - `core/acowork-runtime/src/startup/`（启动参数 `--agent-instance-id` 替换 `--agent-id`；Runtime 上报 topic 全部用 `{instance_id}`）
 - `core/acowork-runtime/src/mqtt/`（topic 构造与订阅路径）
 - `core/acowork-node/src/`（control plane topic；install 命令带 `instance_id`）
-- `apps/acowork-desktop/src/stores/agentStore.ts` + `components/agents/`（agent list UI 改实例视图 + 包视图折叠）
+- `apps/acowork-desktop/src/stores/agentStore.ts` + `components/agent-list/`（实例视图 + multi-node 按 node 分组折叠）
 
 ---
 
@@ -432,14 +432,14 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 
 ### 决策 10：Desktop UI
 
-| 视图 | 默认 | 实现 |
+| 视图 | 触发条件 | 实现 |
 |---|---|---|
-| **实例视图**（推荐默认） | ✅ | 每行一个 instance；列：`instance_id`（短码）+ `agent_id` + `node_id` + display_name + 状态 |
-| **包视图** | 折叠视图 | 按 `agent_id` 折叠：标题 `com.acowork.senior-engineer (3 instances)`，展开显示 3 个实例 |
-| **Node 视图** | 筛选切换 | 按 `node_id` 过滤 |
-| **重命名** | display_name | 改名 = 改 display_name 字段；不影响 `agent_id` / `instance_id` |
+| **Local 视图**（单 Gateway 默认） | `gatewayMode === "local"` 或 `nodes.length === 0` | 每行一个 instance；列：instance_id 短码 + agent_id + display_name + 状态；同包多实例时附加 `(node_id 前 10)` 徽标区分 |
+| **Remote 视图**（多节点模式） | `gatewayMode === "remote"` 且 `nodes.length >= 1` | 按 `node_id` 分组：每组顶部插入 `NodeGroupHeader`（1/3 item 高度窄条，**无背景色、无边框**，仅分割线 + 折叠箭头 + node 名称），默认展开，点击切换；组内 item 布局与 Local 视图完全一致 |
 
-**Alias 概念取消**：原考虑的"instance alias"取消——用户重命名走 manifest 的 `display_name` 字段即可，不需要再增加一层身份字段。
+视图模式由 `gatewayMode` 自动判断，用户不手动切换。
+
+**Alias 概念取消**：原考虑的"instance alias"取消——用户重命名走 manifest 的 `display_name` 字段即可，不需要再增加一层身份字段。原方案中的「包视图（按 agent_id 折叠）」取消——多包场景天然按多节点分组已足够清晰，再叠加一层包折叠反而冗余。
 
 ---
 
@@ -459,7 +459,7 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 1. **proto 变更**：DataEnvelope 多处加 `instance_id` / `node_id` 字段；需要 `prost` 重新生成。
 2. **改动面广**：横跨 acowork-core / acowork-runtime / acowork-node / acowork-gateway / acowork-desktop 5 个 crate，每 crate 都要 audit 一遍 `agent_id` 字符串用法。
 3. **Node 侧 packages_dir 结构变更**：`{packages_dir}/{agent_id}/` → `{packages_dir}/{agent_id}/{uuid}/`，Node 的 package 发现/恢复逻辑（`restore_installed_agents` 等）需遍历二级目录。
-4. **包视图 UX 工作量**：Desktop 折叠视图、跨 Node 拖拽、display_name 重命名 UI 都要做。
+4. **Remote 视图 UX**：Desktop 按 node 分组折叠的窄条 header 实现 + 默认展开/点击折叠交互；组内 item 布局与 Local 视图复用，避免双套样式维护。
 5. **首次安装生成 UUID** 让安装包在文件系统层多一层目录，路径略深（用户不可见，影响小）。
 
 ### 5.3 回滚
@@ -503,10 +503,11 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 - `src/bootstrap/orchestrator.rs`：注册表初始化路径
 
 ### 6.5 apps/acowork-desktop
-- `src/stores/agentStore.ts`：实例视图 + 包视图切换
-- `src/components/agents/AgentList.tsx`：默认实例视图
-- `src/components/agents/PackageGroupView.tsx`：包折叠视图
-- `src/lib/types.ts`：`AgentListItem` 类型增 instance_id / agent_id / node_id 三字段
+- `src/lib/types.ts`：`AgentInfo` / `AgentDetail` 类型增 `instance_id` / `node_id` 字段
+- `src/stores/agentStore.ts`：所有内部寻址改以 `instance_id` 为 key；同包多实例在 Local 视图下用 `(node_id 前 10)` 徽标区分
+- `src/components/agent-list/AgentList.tsx`：根据 `gatewayMode` 自动渲染两套布局
+  - `local` 模式：当前布局不变（每行一个 instance，多实例显示徽标）
+  - `remote` 模式：按 `node_id` 分组，每组顶部插入 `NodeGroupHeader`（1/3 item 高度窄条，无背景色无边框，仅分割线 + 折叠箭头 + node 名称），默认展开，点击切换
 - rename 流程：编辑 display_name 即可
 
 ---
@@ -536,10 +537,9 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 
 ### 7.4 Desktop UX
 
-- 实例列表正确显示 instance_id 短码
-- 包视图正确折叠
+- Local 视图：实例列表正确显示 instance_id 短码 + 多实例徽标
+- Remote 视图：按 node 分组 + 折叠条默认展开 + 点击折叠/展开
 - display_name 重命名后 MQTT retained `config` topic 携带新名称
-- 跨 Node 拖拽（mock）验证 node_id 字段更新
 
 ---
 
@@ -561,8 +561,8 @@ gantt
     /api/agents/* 路由 + AgentListResponse:p6, after p5, 3d
     install 命令 payload 改造 (instance_id + package_url) :p7, after p6, 1d
     section Phase 5: Desktop UI
-    实例视图 + 包视图                      :p8, after p7, 4d
-    rename + 跨 Node 拖拽                 :p9, after p8, 2d
+    Local 视图 + 多实例徽标                :p8, after p7, 2d
+    Remote 视图按 node 折叠                :p9, after p8, 2d
     section Phase 6: 集成测试
     e2e 多 Node 拓扑                      :p10, after p9, 3d
 ```

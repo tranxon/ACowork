@@ -276,7 +276,8 @@
     "errorFailedToStartDebugAgent": "デバッグモードでの Agent 起動に失敗しました：{{error}}",
     "errorFailedToRestartInDebug": "デバッグ再起動に失敗しました：{{error}}",
     "errorFailedToStopAgent": "Agent の停止に失敗しました：{{error}}",
-    "errorFailedToUninstallAgent": "Agent のアンインストールに失敗しました：{{error}}"
+    "errorFailedToUninstallAgent": "Agent のアンインストールに失敗しました：{{error}}",
+    "node": "Node"
   },
   "cloneDialog": {
     "skeleton": "スケルトン",

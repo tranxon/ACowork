@@ -40,15 +40,21 @@ pub struct CheckItem {
 }
 
 /// Run all publish-preparation checks against an installed agent.
+///
+/// ADR-073: the target is located by instance identity (`instance_id`,
 pub fn prepare_publish(
+    instance_id: &str,
     agent_id: &str,
     clean: bool,
     state: &mut NodeState,
 ) -> Result<PrepareResult> {
+    // ADR-073: the install table is keyed by instance identity.
+    let key = instance_id.to_string();
+
     let info = state
         .installed_agents
-        .get(agent_id)
-        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?;
+        .get(&key)
+        .ok_or_else(|| NodeError::AgentNotFound(key.clone()))?;
 
     // Clone paths to avoid borrow conflicts with mutation below
     let install_path = Path::new(&info.install_path).to_path_buf();
@@ -311,8 +317,8 @@ pub fn prepare_publish(
             let mut manifest = {
                 let info = state
                     .installed_agents
-                    .get(agent_id)
-                    .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?
+                    .get(&key)
+                    .ok_or_else(|| NodeError::AgentNotFound(key.clone()))?
                     .clone();
                 info.manifest.clone()
             };
@@ -331,7 +337,7 @@ pub fn prepare_publish(
             });
 
             // Update in-memory manifest
-            if let Some(info) = state.installed_agents.get_mut(agent_id) {
+            if let Some(info) = state.installed_agents.get_mut(&key) {
                 info.manifest = manifest;
             }
         }
@@ -374,17 +380,24 @@ pub fn prepare_publish(
 // ── S4.3: Publish build ───────────────────────────────────────────────
 
 /// Build a .agent package from an installed agent directory.
+///
+/// ADR-073: the target is located by instance identity (`instance_id`,
+/// falling back to the package id for legacy commands).
 pub fn build_package(
+    instance_id: &str,
     agent_id: &str,
     output_dir: &Path,
     sign: bool,
     key_dir: Option<&Path>,
     state: &NodeState,
 ) -> Result<BuildResult> {
+    // ADR-073: the install table is keyed by instance identity.
+    let key = instance_id.to_string();
+
     let info = state
         .installed_agents
-        .get(agent_id)
-        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?;
+        .get(&key)
+        .ok_or_else(|| NodeError::AgentNotFound(key.clone()))?;
 
     let agent_dir = Path::new(&info.install_path);
     if !agent_dir.exists() {
@@ -530,6 +543,7 @@ model = "gpt-4"
         .unwrap();
 
         state.add_installed(InstalledAgent {
+            instance_id: format!("inst-{agent_id}"),
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -549,7 +563,9 @@ model = "gpt-4"
         let mut state = NodeState::new(16);
         create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
 
-        let result = prepare_publish("com.test.weather", false, &mut state).unwrap();
+        let result =
+            prepare_publish("inst-com.test.weather", "com.test.weather", false, &mut state)
+                .unwrap();
         assert!(
             result.errors.is_empty(),
             "Unexpected errors: {:?}",
@@ -596,6 +612,7 @@ temperature = 0.7
         )
         .unwrap();
         state.add_installed(InstalledAgent {
+            instance_id: "inst-com.test.invalid".to_string(),
             agent_id: "com.test.invalid".to_string(),
             version: "1.0.0".to_string(),
             name: "Test".to_string(),
@@ -603,7 +620,9 @@ temperature = 0.7
             manifest,
         });
 
-        let result = prepare_publish("com.test.invalid", false, &mut state).unwrap();
+        let result =
+            prepare_publish("inst-com.test.invalid", "com.test.invalid", false, &mut state)
+                .unwrap();
         assert!(
             !result.warnings.is_empty() || !result.errors.is_empty(),
             "Should have warnings or errors for missing prompts and empty fields"
@@ -656,6 +675,7 @@ model = "gpt-4"
         )
         .unwrap();
         state.add_installed(InstalledAgent {
+            instance_id: "inst-com.test.dev".to_string(),
             agent_id: "com.test.dev".to_string(),
             version: "1.0.0".to_string(),
             name: "Dev Agent".to_string(),
@@ -663,10 +683,10 @@ model = "gpt-4"
             manifest,
         });
 
-        let result = prepare_publish("com.test.dev", true, &mut state).unwrap();
+        let result = prepare_publish("inst-com.test.dev", "com.test.dev", true, &mut state).unwrap();
         assert!(result.cleaned, "Should have performed cleanup");
         assert!(
-            !state.installed_agents["com.test.dev"].manifest.dev,
+            !state.installed_agents["inst-com.test.dev"].manifest.dev,
             "dev should be cleared"
         );
 
@@ -685,7 +705,9 @@ model = "gpt-4"
         let mut state = NodeState::new(16);
         create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
 
-        let result = build_package("com.test.weather", &output_dir, false, None, &state).unwrap();
+        let result =
+            build_package("inst-com.test.weather", "com.test.weather", &output_dir, false, None, &state)
+                .unwrap();
         assert!(result.output_path.ends_with(".agent"));
         assert!(result.file_size > 0);
         assert!(!result.signed);
@@ -699,6 +721,7 @@ model = "gpt-4"
         let state = NodeState::new(16);
 
         let result = build_package(
+            "",
             "com.test.nonexistent",
             Path::new("/tmp"),
             false,

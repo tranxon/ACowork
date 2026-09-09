@@ -42,6 +42,12 @@ fn fresh_broker_port() -> u16 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+// ADR-073: every test runs exactly one Runtime per broker, so one shared
+// instance identity is sufficient here. The Runtime MQTT client id and
+// all `acowork/agents/{id}/...` topics are keyed on this instance id;
+// the package `agent_id` fields above are kept only as display payload.
+const TEST_INSTANCE_ID: &str = "6d3f0c2a-9b1e-4c7a-a5d8-2e4f6b8a0c1d";
+
 // ═══════════════════════════════════════════════════════════════════════
 // Test 1: Broker starts in separate thread
 // ═══════════════════════════════════════════════════════════════════════
@@ -79,6 +85,7 @@ fn integration_gateway_and_runtime_connect() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.agent",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Test Agent",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -135,6 +142,7 @@ fn integration_control_message_flow() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.agent",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Test",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -166,7 +174,7 @@ fn integration_control_message_flow() {
                 params_json: String::new(),
             })),
         };
-        gw.publish_control_command("com.test.agent", cmd)
+        gw.publish_control_command(TEST_INSTANCE_ID, cmd)
             .await
             .expect("publish");
 
@@ -226,6 +234,7 @@ fn integration_control_stop_flow() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.agent",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Test",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -253,7 +262,7 @@ fn integration_control_stop_flow() {
                 reason: String::new(),
             })),
         };
-        gw.publish_control_command("com.test.agent", cmd).await.unwrap();
+        gw.publish_control_command(TEST_INSTANCE_ID, cmd).await.unwrap();
 
         // 10s timeout (was 2s, raised after ADR-044 Phase 2 fixed the
         // cross-test port bind). Parallel `cargo test` runs 5 brokers
@@ -282,7 +291,7 @@ fn integration_control_stop_flow() {
                     // a parallel broker poll forward race.
                     let _ = gw
                         .publish_control_command(
-                            "com.test.agent",
+                            TEST_INSTANCE_ID,
                             ControlCommand {
                                 agent_id: "com.test.agent".into(),
                                 command: Some(Command::Stop(mqtt_proto::Stop {
@@ -328,6 +337,7 @@ fn integration_multiple_messages() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.agent",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Test",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -359,7 +369,7 @@ fn integration_multiple_messages() {
                     params_json: String::new(),
                 })),
             };
-            gw.publish_control_command("com.test.agent", cmd).await.unwrap();
+            gw.publish_control_command(TEST_INSTANCE_ID, cmd).await.unwrap();
         }
 
         let mut received = Vec::new();
@@ -413,6 +423,7 @@ fn integration_lwt_offline_on_disconnect() {
                     host: "127.0.0.1",
                     port,
                     agent_id: "com.test.lwt",
+                    instance_id: TEST_INSTANCE_ID,
                     agent_name: "LWT Agent",
                     agent_version: "1.0.0",
                     avatar: None,
@@ -456,14 +467,14 @@ fn integration_lwt_offline_on_disconnect() {
         opts.set_keep_alive(Duration::from_secs(5));
         let (client, mut events) = rumqttc::AsyncClient::new(opts, 10);
 
-        client.subscribe("acowork/agents/com.test.lwt/status", rumqttc::QoS::AtLeastOnce)
+        client.subscribe(&format!("acowork/agents/{}/status", TEST_INSTANCE_ID), rumqttc::QoS::AtLeastOnce)
             .await.unwrap();
 
         let status = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 match events.poll().await {
                     Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
-                        if p.topic.contains("/com.test.lwt/status") {
+                        if p.topic.contains(&format!("/{}/status", TEST_INSTANCE_ID)) {
                             return String::from_utf8_lossy(&p.payload).to_string();
                         }
                     }
@@ -526,6 +537,7 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.catalog",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Catalog Test",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -694,6 +706,7 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.providers",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Provider Test",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -853,6 +866,7 @@ fn integration_searches_retained_persists_to_agent_search_json() {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.searches",
+                instance_id: TEST_INSTANCE_ID,
                 agent_name: "Search Test",
                 agent_version: "1.0.0",
                 avatar: None,

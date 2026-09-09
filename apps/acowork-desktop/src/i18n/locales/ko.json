@@ -275,7 +275,8 @@
     "errorFailedToStartDebugAgent": "디버그 Agent 시작 실패: {{error}}",
     "errorFailedToRestartInDebug": "디버그 재시작 실패: {{error}}",
     "errorFailedToStopAgent": "Agent 중지 실패: {{error}}",
-    "errorFailedToUninstallAgent": "Agent 제거 실패: {{error}}"
+    "errorFailedToUninstallAgent": "Agent 제거 실패: {{error}}",
+    "node": "Node"
   },
   "cloneDialog": {
     "skeleton": "스켈레톤",

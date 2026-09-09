@@ -1,8 +1,10 @@
 //! Agent Registry (ADR-033 Phase 1 scaffolding).
 //!
-//! Tracks agent online status based on MQTT `agents/{id}/status` Retained
-//! messages. In Phase 1, this is a minimal in-memory map. In Phase 2+,
-//! it replaces the gRPC `()` as the source of truth for
+//! Tracks agent-instance online status based on MQTT
+//! `acowork/agents/{instance_id}/status` Retained messages. ADR-073: the
+//! topic variable is the INSTANCE identity (UUID), so the registry key
+//! is an instance id — two instances of the same package never collide.
+//! In Phase 2+, it replaces the gRPC `()` as the source of truth for
 //! which agents are online.
 //!
 //! See `docs/zh/protocols/mqtt.md` §3.2 and §8.1 (Will Message).
@@ -51,8 +53,19 @@ pub struct AgentOnlineState {
     /// the Desktop can show "Last active at HH:MM" without keeping its
     /// own clock.
     pub sleeping_at: Option<DateTime<Utc>>,
-    /// The agent_id extracted from the topic.
+    /// ADR-073: the INSTANCE identity this entry tracks — the registry
+    /// key. Read from the topic variable (`acowork/agents/{instance_id}/status`)
+    /// for plaintext statuses, or from the envelope `instance_id` field
+    /// when present. Never the package id.
+    pub instance_id: String,
+    /// Package identity (`AgentStatus.agent_id`), present only when the
+    /// status arrived as a DataEnvelope carrying it. Empty for
+    /// plaintext statuses / gateway loopback — display & diagnostics
+    /// only, NEVER a lookup key (ADR-073).
     pub agent_id: String,
+    /// ADR-073: current location (`AgentStatus.node_id`) from the
+    /// envelope. Empty for plaintext statuses. Positional metadata only.
+    pub node_id: String,
 }
 
 /// In-memory registry of agent online status.
@@ -86,8 +99,11 @@ impl AgentRegistry {
 
     /// Update an agent's status from an MQTT message.
     ///
-    /// `topic` should match `acowork/agents/{agent_id}/status`.
-    /// `payload` should be one of "online", "sleeping", "offline" (UTF-8 text).
+    /// `topic` should match `acowork/agents/{instance_id}/status`
+    /// (ADR-073: the path variable is the INSTANCE identity).
+    /// `payload` is either plain text ("online" / "sleeping" /
+    /// "offline" / "degraded") or a protobuf `DataEnvelope<AgentStatus>`
+    /// (the dispatch loopback / a structured publisher).
     ///
     /// `sleeping` is the Runtime's auto-sleep signal — see
     /// `acowork-runtime::agent::idle_watcher`. We treat it as `online=true`
@@ -100,14 +116,14 @@ impl AgentRegistry {
     /// would fight the dispatch path; the not-ready state is surfaced
     /// through `running_agents[id].ready=false`.
     pub fn update_from_mqtt(&mut self, topic: &str, payload: &[u8]) {
-        // Parse agent_id from topic: acowork/agents/{agent_id}/status
+        // Parse the instance id from the topic: acowork/agents/{instance_id}/status
         let parts: Vec<&str> = topic.split('/').collect();
         if parts.len() != 4 || parts[0] != "acowork" || parts[1] != "agents" || parts[3] != "status" {
             tracing::warn!(topic, "Invalid agent status topic format");
             return;
         }
 
-        let agent_id = parts[2].to_string();
+        let topic_instance_id = parts[2].to_string();
         let payload_str = match std::str::from_utf8(payload) {
             Ok(s) => s,
             Err(_) => {
@@ -126,32 +142,45 @@ impl AgentRegistry {
                         else {
                             tracing::warn!(
                                 topic,
-                                agent_id = %parts[2],
+                                instance_id = %parts[2],
                                 "agent status loopback envelope carries no AgentStatus payload"
                             );
                             return;
                         };
+                        // ADR-073: the envelope may carry the instance
+                        // identity in `instance_id` (structured shape;
+                        // the dispatch loopback sets agent_id to "" and
+                        // puts the identity here). Prefer it; fall back
+                        // to the topic variable only for legacy
+                        // envelopes that predate the field.
+                        let instance_id = if status.instance_id.is_empty() {
+                            topic_instance_id.clone()
+                        } else {
+                            status.instance_id.clone()
+                        };
                         let now = Instant::now();
                         let sleeping_at = if status.sleeping {
                             self.agents
-                                .get(&status.agent_id)
+                                .get(&instance_id)
                                 .and_then(|s| s.sleeping_at)
                                 .or(Some(Utc::now()))
                         } else {
                             None
                         };
                         self.agents.insert(
-                            status.agent_id.clone(),
+                            instance_id.clone(),
                             AgentOnlineState {
                                 online: status.online,
                                 sleeping: status.sleeping,
                                 last_updated: now,
                                 sleeping_at,
+                                instance_id,
                                 agent_id: status.agent_id,
+                                node_id: status.node_id,
                             },
                         );
                         tracing::debug!(
-                            agent_id = %parts[2],
+                            instance_id = %parts[2],
                             online = status.online,
                             sleeping = status.sleeping,
                             "Agent registry updated from MQTT (protobuf loopback)"
@@ -161,7 +190,7 @@ impl AgentRegistry {
                     Err(decode_err) => {
                         tracing::warn!(
                             topic,
-                            agent_id = %parts[2],
+                            instance_id = %parts[2],
                             error = %decode_err,
                             "agent status payload is neither UTF-8 nor a DataEnvelope — ignoring"
                         );
@@ -184,7 +213,7 @@ impl AgentRegistry {
         // clear it on any non-sleeping status so the badge resets.
         let previous_sleeping_at = self
             .agents
-            .get(&agent_id)
+            .get(&topic_instance_id)
             .and_then(|s| s.sleeping_at);
         let sleeping_at = if state == "sleeping" {
             Some(previous_sleeping_at.unwrap_or(sleeping_at_now))
@@ -192,40 +221,44 @@ impl AgentRegistry {
             None
         };
 
+        // Plaintext status carries no package/location metadata — the
+        // registry keys on the topic's instance id (ADR-073).
         self.agents.insert(
-            agent_id.clone(),
+            topic_instance_id.clone(),
             AgentOnlineState {
                 online,
                 sleeping: state == "sleeping",
                 last_updated: now,
                 sleeping_at,
-                agent_id,
+                instance_id: topic_instance_id,
+                agent_id: String::new(),
+                node_id: String::new(),
             },
         );
 
         tracing::debug!(
-            agent_id = %parts[2],
+            instance_id = %parts[2],
             state = %state,
             online,
             "Agent registry updated from MQTT"
         );
     }
 
-    /// Check if an agent is online.
-    pub fn is_online(&self, agent_id: &str) -> bool {
+    /// Check if an agent instance is online (keyed by instance identity).
+    pub fn is_online(&self, instance_id: &str) -> bool {
         self.agents
-            .get(agent_id)
+            .get(instance_id)
             .map(|s| s.online)
             .unwrap_or(false)
     }
 
-    /// Get the `sleeping_at` UTC timestamp for an agent, if it is currently
-    /// in the `sleeping` state. Used by `/api/agents` to surface the
-    /// auto-sleep timestamp on the Desktop side without round-tripping to
-    /// the Runtime.
-    pub fn sleeping_at(&self, agent_id: &str) -> Option<DateTime<Utc>> {
+    /// Get the `sleeping_at` UTC timestamp for an agent instance, if it
+    /// is currently in the `sleeping` state. Used by `/api/agents` to
+    /// surface the auto-sleep timestamp on the Desktop side without
+    /// round-tripping to the Runtime.
+    pub fn sleeping_at(&self, instance_id: &str) -> Option<DateTime<Utc>> {
         self.agents
-            .get(agent_id)
+            .get(instance_id)
             .and_then(|s| if s.sleeping { s.sleeping_at } else { None })
     }
 
@@ -249,10 +282,10 @@ impl AgentRegistry {
         self.agents.values().filter(|s| s.online).count()
     }
 
-    /// Remove an agent from the registry (e.g. on uninstall).
+    /// Remove an agent instance from the registry (e.g. on uninstall).
     #[allow(dead_code)]
-    pub fn remove(&mut self, agent_id: &str) {
-        self.agents.remove(agent_id);
+    pub fn remove(&mut self, instance_id: &str) {
+        self.agents.remove(instance_id);
     }
 }
 
@@ -308,12 +341,103 @@ mod tests {
                 agent_id: "com.example".to_string(),
                 online: true,
                 sleeping: false,
+                // ADR-073: empty instance/node identity = legacy envelope
+                // (the registry keys on the topic's instance id anyway).
+                instance_id: String::new(),
+                node_id: String::new(),
             })),
         };
         let bytes = envelope.encode_to_vec();
         let mut registry = AgentRegistry::new();
         registry.update_from_mqtt("acowork/agents/com.example/status", &bytes);
         assert!(registry.is_online("com.example"));
+        assert_eq!(registry.online_count(), 1);
+    }
+
+    #[test]
+    fn test_loopback_envelope_with_instance_id_keys_by_instance_not_agent_id() {
+        // ADR-073 regression: `dispatch.rs` re-publishes plaintext status
+        // as a DataEnvelope with agent_id EMPTY and the identity in
+        // `instance_id`. The registry must key on the instance id — keying
+        // on the old agent_id field would collapse every loopback into a
+        // single "" entry and instances would read offline after a
+        // retained replay (broker/Gateway restart).
+        use acowork_core::mqtt_proto::{data_envelope, AgentStatus as AgentStatusProto, DataEnvelope};
+        use prost::Message as _;
+        let uuid = "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c";
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
+                agent_id: String::new(),
+                online: true,
+                sleeping: false,
+                instance_id: uuid.to_string(),
+                node_id: "node-a".to_string(),
+            })),
+        };
+        let bytes = envelope.encode_to_vec();
+        let mut registry = AgentRegistry::new();
+        registry.update_from_mqtt(&format!("acowork/agents/{uuid}/status"), &bytes);
+
+        assert!(registry.is_online(uuid), "instance must be online");
+        assert!(
+            !registry.is_online(""),
+            "the loopback must NOT create an empty-key entry"
+        );
+        assert_eq!(registry.online_count(), 1);
+        let state = registry.agents.get(uuid).expect("entry keyed by instance id");
+        assert_eq!(state.instance_id, uuid);
+        assert_eq!(state.agent_id, "", "plaintext loopback carries no package id");
+        assert_eq!(state.node_id, "node-a");
+    }
+
+    #[test]
+    fn test_two_instances_same_package_are_independent() {
+        // ADR-073: the same package installed twice publishes on two
+        // instance-scoped topics. The online registry must keep the
+        // entries independent — offline for one must never flip the other.
+        use acowork_core::mqtt_proto::{data_envelope, AgentStatus as AgentStatusProto, DataEnvelope};
+        use prost::Message as _;
+        let uuid_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let uuid_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let mut registry = AgentRegistry::new();
+        for (uuid, node) in [(uuid_a, "node-a"), (uuid_b, "node-b")] {
+            let envelope = DataEnvelope {
+                version: 1,
+                payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
+                    agent_id: "com.foo.bar".to_string(),
+                    online: true,
+                    sleeping: false,
+                    instance_id: uuid.to_string(),
+                    node_id: node.to_string(),
+                })),
+            };
+            let bytes = envelope.encode_to_vec();
+            registry.update_from_mqtt(&format!("acowork/agents/{uuid}/status"), &bytes);
+        }
+        assert!(registry.is_online(uuid_a) && registry.is_online(uuid_b));
+        assert_eq!(registry.online_count(), 2);
+        assert_eq!(
+            registry.agents.get(uuid_a).map(|s| s.agent_id.as_str()),
+            Some("com.foo.bar"),
+            "package id preserved as metadata on both entries"
+        );
+
+        // B goes offline (crash / LWT) — A must stay online.
+        let offline = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
+                agent_id: "com.foo.bar".to_string(),
+                online: false,
+                sleeping: false,
+                instance_id: uuid_b.to_string(),
+                node_id: "node-b".to_string(),
+            })),
+        };
+        let bytes = offline.encode_to_vec();
+        registry.update_from_mqtt(&format!("acowork/agents/{uuid_b}/status"), &bytes);
+        assert!(!registry.is_online(uuid_b), "B must be offline");
+        assert!(registry.is_online(uuid_a), "A must be unaffected");
         assert_eq!(registry.online_count(), 1);
     }
 

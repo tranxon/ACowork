@@ -477,8 +477,25 @@ pub async fn run_cron_scheduler(
                         );
                         continue;
                     };
+                    // ADR-073: resolve the instance identity for the
+                    // control topic (the cron trigger key may be a
+                    // package id from a legacy config).
+                    let (instance_id, resolved_agent_id) = {
+                        let gw = gateway_state.read().await;
+                        match gw.resolve_installed_key(&agent_id) {
+                            Some(inst) => {
+                                let resolved = gw
+                                    .installed(&inst)
+                                    .map(|i| i.agent_id.clone())
+                                    .unwrap_or_else(|| agent_id.clone());
+                                (inst, resolved)
+                            }
+                            None => (agent_id.clone(), agent_id.clone()),
+                        }
+                    };
+                    let agent_id = resolved_agent_id;
                     match node_control
-                        .start_agent(&acowork_core::node::local_node_id(), &agent_id, false)
+                        .start_agent(&acowork_core::node::local_node_id(), &instance_id, &agent_id, false)
                         .await
                     {
                         Ok(event) => {

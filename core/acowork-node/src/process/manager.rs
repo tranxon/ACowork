@@ -72,16 +72,20 @@ impl ProcessManager {
     /// the long-lived daemon path.
     pub async fn start_agent(
         &mut self,
+        instance_id: &str,
         agent_id: &str,
         state: &SharedNodeState,
         dev_mode: bool,
         wire_reaper: bool,
     ) -> Result<()> {
+        // ADR-073: the process table is keyed by instance identity.
+        let key = instance_id.to_string();
+
         // Check if already running
         {
             let node = state.read().await;
-            if node.is_running(agent_id) {
-                return Err(NodeError::AgentAlreadyRunning(agent_id.to_string()));
+            if node.is_running(&key) {
+                return Err(NodeError::AgentAlreadyRunning(key.clone()));
             }
         }
 
@@ -89,8 +93,8 @@ impl ProcessManager {
         let info = {
             let node = state.read().await;
             node.installed_agents
-                .get(agent_id)
-                .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?
+                .get(&key)
+                .ok_or_else(|| NodeError::AgentNotFound(key.clone()))?
                 .clone()
         };
 
@@ -120,6 +124,7 @@ impl ProcessManager {
             None
         };
         let child = match spawn_agent_process(
+            &key,
             agent_id,
             &info.install_path,
             &workspace,
@@ -153,6 +158,7 @@ impl ProcessManager {
         let pid = child.id();
 
         state.write().await.add_agent(AgentSlot {
+            instance_id: key.clone(),
             agent_id: agent_id.to_string(),
             pid,
             started_at: chrono::Utc::now(),
@@ -163,7 +169,8 @@ impl ProcessManager {
         });
 
         tracing::info!(
-            "Started agent: {} (PID: {}, http_port: {})",
+            "Started agent instance: {} ({}, PID: {}, http_port: {})",
+            key,
             agent_id,
             pid,
             http_port
@@ -174,21 +181,23 @@ impl ProcessManager {
     /// Stop a running agent Runtime process.
     pub async fn stop_agent(
         &mut self,
+        instance_id: &str,
         agent_id: &str,
         state: &SharedNodeState,
     ) -> Result<()> {
+        let key = instance_id.to_string();
         let running = {
             let node = state.read().await;
             node.agents
-                .get(agent_id)
-                .ok_or_else(|| NodeError::AgentNotRunning(agent_id.to_string()))?
+                .get(&key)
+                .ok_or_else(|| NodeError::AgentNotRunning(key.clone()))?
                 .clone()
         };
 
         // Pre-emptively remove the entry so a subsequent kill failure
         // (e.g. PID already gone via idle auto-sleep) does NOT leave a
         // stale record. The reaper will find nothing and quietly exit.
-        state.write().await.remove_agent(agent_id);
+        state.write().await.remove_agent(&key);
 
         // Release the reserved ports so later starts can reuse them.
         // If the process survives a failed kill, the bind probe in
@@ -209,7 +218,7 @@ impl ProcessManager {
             );
         }
 
-        tracing::info!("Stopped agent: {} (was PID: {})", agent_id, running.pid);
+        tracing::info!("Stopped agent: {} (was PID: {})", key, running.pid);
         Ok(())
     }
 
@@ -275,12 +284,14 @@ impl ProcessManager {
                 );
                 continue;
             }
+            let key = c.instance_id.clone();
             let workspace = installed
-                .get(&c.agent_id)
+                .get(&key)
                 .map(|info| PathBuf::from(&info.install_path).join("workspace"))
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             state.write().await.add_agent(AgentSlot {
+                instance_id: key.clone(),
                 agent_id: c.agent_id.clone(),
                 pid: c.pid,
                 started_at: chrono::Utc::now(),
@@ -290,12 +301,13 @@ impl ProcessManager {
                 http_port: c.http_port,
             });
             tracing::info!(
+                instance_id = %key,
                 agent_id = %c.agent_id,
                 pid = c.pid,
                 http_port = c.http_port,
                 "Re-adopted orphan Runtime into node process table"
             );
-            adopted.push(c.agent_id);
+            adopted.push(key);
         }
         adopted
     }
@@ -334,7 +346,9 @@ mod tests {
             None,
         );
         let state: SharedNodeState = Arc::new(RwLock::new(crate::state::NodeState::new(16)));
-        let result = mgr.start_agent("com.test.unknown", &state, false, false).await;
+        let result = mgr
+            .start_agent("", "com.test.unknown", &state, false, false)
+            .await;
         assert!(result.is_err());
     }
 
@@ -350,7 +364,7 @@ mod tests {
             None,
         );
         let state: SharedNodeState = Arc::new(RwLock::new(crate::state::NodeState::new(16)));
-        let result = mgr.stop_agent("com.test.unknown", &state).await;
+        let result = mgr.stop_agent("", "com.test.unknown", &state).await;
         assert!(result.is_err());
     }
 }

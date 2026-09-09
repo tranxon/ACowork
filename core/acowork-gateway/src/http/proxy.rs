@@ -1605,7 +1605,20 @@ pub(crate) async fn proxy_to_runtime_with_method(
 
     let endpoint = {
         let reg = registry.read().await;
-        reg.get_endpoint(id)
+        let direct = reg.get_endpoint(id);
+        match direct {
+            Some(ep) => Some(ep),
+            None => {
+                // ADR-073: legacy callers may still address by package
+                // id. Resolve to the instance key and retry the
+                // registry once (single-instance back-compat; multi-
+                // instance callers must use instance ids).
+                let gw = state.gateway_state.read().await;
+                let resolved = gw.resolve_installed_key(id);
+                drop(gw);
+                resolved.and_then(|key| reg.get_endpoint(&key))
+            }
+        }
     };
 
     let endpoint = match endpoint {
@@ -1706,6 +1719,11 @@ pub(crate) async fn proxy_to_runtime_with_method(
 /// has not enrolled yet — callers treat that as "no credential to
 /// attach" rather than an error.
 ///
+/// ADR-073: `id` may be an instance identity or a legacy package id;
+/// the resolve helpers fall back to package lookup so reverse-proxied
+/// traffic addresses the right node even when the caller still speaks
+/// the old identity.
+///
 /// Deliberately NOT gated on `mqtt.auth_enabled`: the node enforces
 /// this token on its HTTP proxy whenever IT holds one (acowork-node
 /// proxy/mod.rs), regardless of the broker auth flag, so the Gateway
@@ -1718,10 +1736,9 @@ async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> 
     let gw = state.gateway_state.read().await;
     let broker_auth = gw.mqtt_broker_auth.as_ref()?;
     let node_id = gw
-        .installed_agents
-        .get(agent_id)
+        .installed(agent_id)
         .map(|a| a.node_id.as_str())
-        .or_else(|| gw.running_agents.get(agent_id).map(|a| a.node_id.as_str()))?;
+        .or_else(|| gw.running(agent_id).map(|a| a.node_id.as_str()))?;
     let store = broker_auth.node_tokens.lock().ok()?;
     store.get_token(node_id).map(str::to_string)
 }
@@ -1758,7 +1775,18 @@ pub(crate) async fn send_runtime_json(
 
     let endpoint = {
         let reg = registry.read().await;
-        reg.get_endpoint(id)
+        let direct = reg.get_endpoint(id);
+        match direct {
+            Some(ep) => Some(ep),
+            None => {
+                // ADR-073: legacy package-id addressing fallback — see
+                // `proxy_to_runtime_with_method` for the rationale.
+                let gw = state.gateway_state.read().await;
+                let resolved = gw.resolve_installed_key(id);
+                drop(gw);
+                resolved.and_then(|key| reg.get_endpoint(&key))
+            }
+        }
     };
 
     let endpoint = endpoint.ok_or_else(|| {
@@ -2352,6 +2380,7 @@ mod tests {
         {
             let mut gw = shared_state.write().await;
             gw.add_running(RunningAgentInfo {
+                instance_id: "com.test.proxy".to_string(),
                 agent_id: "com.test.proxy".to_string(),
                 pid: 9999,
                 started_at: chrono::Utc::now(),
@@ -2418,6 +2447,7 @@ mod tests {
         {
             let mut gw = shared_state.write().await;
             gw.add_running(RunningAgentInfo {
+                instance_id: "com.test.proxy_disable".to_string(),
                 agent_id: "com.test.proxy_disable".to_string(),
                 pid: 9999,
                 started_at: chrono::Utc::now(),

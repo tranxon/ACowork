@@ -120,7 +120,14 @@ pub fn agent_routes() -> Router<AppState> {
 /// Agent list entry
 #[derive(Serialize)]
 pub struct AgentListResponse {
+    /// ADR-073: instance identity (UUID v4, immutable, gateway-assigned
+    /// on install). The primary key of every agent-scoped registry.
+    pub instance_id: String,
+    /// ADR-073: package identity (from manifest, immutable).
     pub agent_id: String,
+    /// ADR-073: current location (node hosting this instance; mutable
+    /// on migration). Positional metadata only — never a registry key.
+    pub node_id: String,
     pub name: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -187,7 +194,12 @@ pub struct AgentListResponse {
 /// Agent detail response
 #[derive(Serialize)]
 pub struct AgentDetailResponse {
+    /// ADR-073: instance identity (UUID v4, immutable).
+    pub instance_id: String,
+    /// ADR-073: package identity (from manifest).
     pub agent_id: String,
+    /// ADR-073: current location (mutable on migration).
+    pub node_id: String,
     pub name: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -236,7 +248,13 @@ pub struct AgentModelResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-/// `GET /api/agents` — list all installed agents.
+/// `GET /api/agents` — list all installed agent instances.
+///
+/// ADR-073: every entry is an INSTANCE (one install action). A single
+/// package may appear multiple times with distinct `instance_id`s.
+/// Optional query filters:
+/// - `?agent_id=com.foo`  → package view: all instances of that package
+/// - `?node_id=node-a`    → all instances currently hosted on that node
 ///
 /// Sort order (sidebar contract):
 /// 1. System agent (`com.acowork.system`) is always pinned to the top.
@@ -244,7 +262,18 @@ pub struct AgentModelResponse {
 /// 3. Within each group, agents with `last_interaction_at` come first
 ///    sorted newest-first; agents that have never been interacted with
 ///    sink to the bottom of their group, ordered alphabetically by name.
-pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListResponse>> {
+#[derive(Debug, Deserialize)]
+pub struct AgentListQuery {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+pub async fn list_agents(
+    State(state): State<AppState>,
+    Query(query): Query<AgentListQuery>,
+) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
 
     // ADR-033: Read MQTT-based online status from AgentRegistry as a sub-status.
@@ -260,6 +289,10 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
         .installed_agents
         .values()
         .map(|info| {
+            // ADR-073: registries are keyed by INSTANCE identity. Resolve
+            // via the instance key (with legacy package-id fallback) so a
+            // package with multiple instances never cross-reads state.
+            let running_info = gw.running(&info.instance_id);
             // Verify the process is actually alive (not just in running_agents).
             // pid=0 marks an ADR-055 node-hosted Runtime auto-tracked from its
             // MQTT ready signal — there is no local Gateway-side process to
@@ -268,7 +301,6 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             // by the MQTT LWT registry (`acowork/agents/{id}/status`), and a
             // dead Runtime flips to `offline`, which clears the entry via
             // `remove_running` in dispatch.rs.
-            let running_info = gw.running_agents.get(&info.agent_id);
             let actually_running = running_info
                 .map(|r| r.pid == 0 || is_process_alive(r.pid))
                 .unwrap_or(false);
@@ -280,16 +312,16 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             // path that ADR-040 removed, and is never updated. Fall back to
             // the legacy field when the registry is unavailable (tests).
             let connected = running_info.map(|r| r.connected).unwrap_or(false)
-                || mqtt_online_set.contains(&info.agent_id);
+                || mqtt_online_set.contains(&info.instance_id);
             let ready = running_info.map(|r| r.ready).unwrap_or(false);
             let last_interaction_at = gw
-                .get_interaction(&info.agent_id)
+                .get_interaction(&info.instance_id)
                 .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
             // ADR-017: Use manifest avatar for list (gRPC query would be too slow).
             let (eff_avatar, eff_builtin, _) =
                 resolve_avatar_from_manifest(&info.manifest);
             let mqtt_online = if state.agent_registry.is_some() {
-                Some(mqtt_online_set.contains(&info.agent_id))
+                Some(mqtt_online_set.contains(&info.instance_id))
             } else {
                 None
             };
@@ -302,14 +334,16 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 .as_ref()
                 .and_then(|reg| {
                     match reg.try_read() {
-                        Ok(guard) => guard.sleeping_at(&info.agent_id).map(|t| {
+                        Ok(guard) => guard.sleeping_at(&info.instance_id).map(|t| {
                             t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
                         }),
                         Err(_) => None,
                     }
                 });
             AgentListResponse {
+                instance_id: info.instance_id.clone(),
                 agent_id: info.agent_id.clone(),
+                node_id: info.node_id.clone(),
                 name: info.name.clone(),
                 display_name: info.manifest.display_name.clone(),
                 role: info.manifest.role.clone(),
@@ -330,9 +364,23 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             }
         })
         .collect();
+    // ADR-073: optional query filters (package view / node view).
+    if query.agent_id.is_some() || query.node_id.is_some() {
+        agents.retain(|a| {
+            let pkg_ok = query
+                .agent_id
+                .as_deref()
+                .is_none_or(|pkg| a.agent_id == pkg);
+            let node_ok = query
+                .node_id
+                .as_deref()
+                .is_none_or(|n| a.node_id == n);
+            pkg_ok && node_ok
+        });
+    }
     // Diagnostic: if senior-engineer is running, log its ready state
     // to help trace why frontend polls may not see ready=true promptly.
-    if let Some(sr) = gw.running_agents.get("com.acowork.senior-engineer") {
+    if let Some(sr) = gw.running("com.acowork.senior-engineer") {
         tracing::info!(
             "[DIAG] list_agents: senior-engineer running=true ready={} connected={}",
             sr.ready,
@@ -377,21 +425,25 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
 }
 
 /// `GET /api/agents/:id` — get agent detail
+///
+/// ADR-073: `:id` is the INSTANCE identity (with legacy package-id
+/// fallback via the resolve helpers).
 pub async fn get_agent_detail(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentDetailResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let info = gw
-        .installed_agents
-        .get(&agent_id)
+        .installed(&agent_id)
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
-    let running_info = gw.running_agents.get(&agent_id);
-    // Verify the process is actually alive
+    let running_info = gw.running(&agent_id);
+    // Verify the process is actually alive. pid=0 marks an ADR-055
+    // node-hosted Runtime whose liveness is guaranteed by the MQTT LWT
+    // registry, not a local process probe.
     let actually_running = running_info
         .as_ref()
-        .map(|r| is_process_alive(r.pid))
+        .map(|r| r.pid == 0 || is_process_alive(r.pid))
         .unwrap_or(false);
     let connected = running_info.map(|r| r.connected).unwrap_or(false);
     let ready = running_info.map(|r| r.ready).unwrap_or(false);
@@ -399,7 +451,9 @@ pub async fn get_agent_detail(
     let (eff_avatar, eff_builtin, _) =
         resolve_avatar_from_manifest(&info.manifest);
     let resp = AgentDetailResponse {
+        instance_id: info.instance_id.clone(),
         agent_id: info.agent_id.clone(),
+        node_id: info.node_id.clone(),
         name: info.name.clone(),
         display_name: info.manifest.display_name.clone(),
         role: info.manifest.role.clone(),
@@ -668,8 +722,32 @@ fn is_plausible_builtin_avatar_id(value: &str) -> bool {
 /// full gRPC roundtrip when the agent is running.
 ///
 /// Returns `(avatar, builtin_avatar, source)`.
-fn resolve_avatar_from_manifest(
-    manifest: &AgentManifest,
+/// Resolve an HTTP route variable (`{id}`) to the canonical instance
+/// identity + package identity pair.
+///
+/// ADR-073: the route variable is semantically an INSTANCE identity, but
+/// legacy clients (and the System Agent bootstrap) may still address an
+/// agent by its package id. The install table resolves either: an exact
+/// instance-key hit wins; otherwise the first installed instance of that
+/// package is used.
+pub(crate) async fn resolve_agent_identity(
+    state: &AppState,
+    id: &str,
+) -> (String, String) {
+    let gw = state.gateway_state.read().await;
+    match gw.resolve_installed_key(id) {
+        Some(inst) => {
+            let aid = gw
+                .installed(&inst)
+                .map(|i| i.agent_id.clone())
+                .unwrap_or_else(|| id.to_string());
+            (inst, aid)
+        }
+        None => (id.to_string(), id.to_string()),
+    }
+}
+
+fn resolve_avatar_from_manifest(    manifest: &AgentManifest,
 ) -> (Option<String>, Option<String>, &'static str) {
     if manifest.avatar.is_some() || manifest.builtin_avatar.is_some() {
         return (manifest.avatar.clone(), manifest.builtin_avatar.clone(), "manifest");
@@ -1466,6 +1544,12 @@ pub async fn install_agent(
         register_package_in_registry(&state, &package_bytes, &node_id).await?;
     let agent_id = manifest.agent_id.clone();
 
+    // ADR-073 决策 5: the Gateway generates the instance identity at
+    // install time. It decides the node-side landing directory
+    // `{agent_id}/{instance_id}/` and the Runtime's
+    // `--agent-instance-id`; the node never invents it.
+    let instance_id = uuid::Uuid::new_v4().to_string();
+
     // Dispatch the asynchronous install (fire-and-forget). Completion is
     // observed via the node's retained installed inventory, not here.
     let node_control = state
@@ -1514,7 +1598,10 @@ pub async fn install_agent(
     // Completed/Failed. The ack carries the operation_id so the client
     // can correlate the async outcome.
     let record = OperationRecord::new(expected_version.unwrap_or(0));
-    let ack = OperationAck::from_record(&record);
+    let mut ack = OperationAck::from_record(&record);
+    // ADR-073: surface the gateway-generated instance identity in the
+    // install ack so the client can address the instance immediately.
+    ack.instance_id = Some(instance_id.clone());
     let operation_id = record.operation_id.clone();
     if let Some(store) = state.operation_store.as_ref() {
         store.insert(record);
@@ -1523,6 +1610,7 @@ pub async fn install_agent(
     node_control
         .install_agent_by_url(
             &node_id,
+            &instance_id,
             &agent_id,
             &package_url,
             gateway_dev_mode(&state).await,
@@ -1653,20 +1741,35 @@ pub(crate) fn extract_manifest_from_package(
 /// Track a node-hosted running agent in `GatewayState` after a
 /// successful node start (ADR-055 §6.2). `pid` is 0 — the Gateway
 /// observes liveness via MQTT status/ready topics, not the PID.
+/// `agent_id` may be either an instance id (UUID) or a package id
+/// (ADR-073); it is resolved to the instance identity first.
 async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
+    // Resolve everything from an immutable snapshot first; the write
+    // lock is only taken for the final upsert (avoids E0502).
+    let (instance_id, resolved_agent_id, workspace) = {
+        let gw = state.gateway_state.read().await;
+        let instance_id = gw
+            .resolve_installed_key(agent_id)
+            .unwrap_or_else(|| agent_id.to_string());
+        let info = gw.installed(&instance_id);
+        let resolved_agent_id = info
+            .map(|i| i.agent_id.clone())
+            .unwrap_or_else(|| agent_id.to_string());
+        let workspace = info
+            .map(|i| {
+                std::path::PathBuf::from(&i.install_path)
+                    .join("workspace")
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        (instance_id, resolved_agent_id, workspace)
+    };
+
     let mut gw = state.gateway_state.write().await;
-    let workspace = gw
-        .installed_agents
-        .get(agent_id)
-        .map(|i| {
-            std::path::PathBuf::from(&i.install_path)
-                .join("workspace")
-                .to_string_lossy()
-                .to_string()
-        })
-        .unwrap_or_default();
     gw.add_running(crate::gateway::state::RunningAgentInfo {
-        agent_id: agent_id.to_string(),
+        instance_id,
+        agent_id: resolved_agent_id,
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
@@ -1738,10 +1841,24 @@ pub async fn clone_agent(
 
     // Route to the node hosting the source agent (ADR-055 §6.6 L2-5 —
     // clone is a node-local operation on the source's node).
+    // ADR-073: the route variable may be an instance identity or a
+    // legacy package id — resolve to the canonical instance key.
+    let (instance_id, resolved_agent_id) = {
+        let gw = state.gateway_state.read().await;
+        match gw.resolve_installed_key(&agent_id) {
+            Some(inst) => {
+                let aid = gw
+                    .installed(&inst)
+                    .map(|i| i.agent_id.clone())
+                    .unwrap_or_else(|| agent_id.clone());
+                (inst, aid)
+            }
+            None => (agent_id.clone(), agent_id.clone()),
+        }
+    };
     let node_id = {
         let gw = state.gateway_state.read().await;
-        gw.installed_agents
-            .get(&agent_id)
+        gw.installed(&instance_id)
             .map(|i| i.node_id.clone())
             .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
     };
@@ -1757,10 +1874,16 @@ pub async fn clone_agent(
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     check_node_compatible(&state, &node_id).await?;
     let event = node_control
-        .clone_agent(&node_id, &agent_id, &req.new_agent_id, mode)
+        .clone_agent(
+            &node_id,
+            &instance_id,
+            &resolved_agent_id,
+            &req.new_agent_id,
+            mode,
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;
 
     // The node reports the new install_path via result_json (JSON).
@@ -1829,12 +1952,26 @@ pub async fn upgrade_agent(
     }
 
     // Upgrade targets an existing agent — default to the node hosting it.
+    // ADR-073: resolve the route variable (instance or legacy package id)
+    // to the canonical instance key.
+    let (instance_id, resolved_agent_id) = {
+        let gw = state.gateway_state.read().await;
+        match gw.resolve_installed_key(&agent_id) {
+            Some(inst) => {
+                let aid = gw
+                    .installed(&inst)
+                    .map(|i| i.agent_id.clone())
+                    .unwrap_or_else(|| agent_id.clone());
+                (inst, aid)
+            }
+            None => (agent_id.clone(), agent_id.clone()),
+        }
+    };
     let node_id = match node_id {
         Some(n) => n,
         None => {
             let gw = state.gateway_state.read().await;
-            gw.installed_agents
-                .get(&agent_id)
+            gw.installed(&instance_id)
                 .map(|i| i.node_id.clone())
                 .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
         }
@@ -1844,10 +1981,10 @@ pub async fn upgrade_agent(
     // agent_id matches the upgrade target.
     let (manifest, package_url) =
         register_package_in_registry(&state, &package_bytes, &node_id).await?;
-    if manifest.agent_id != agent_id {
+    if manifest.agent_id != resolved_agent_id {
         return Err(ApiError::bad_request(&format!(
             "Package agent_id '{}' does not match upgrade target '{}'",
-            manifest.agent_id, agent_id
+            manifest.agent_id, resolved_agent_id
         )));
     }
 
@@ -1858,14 +1995,23 @@ pub async fn upgrade_agent(
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     check_node_compatible(&state, &node_id).await?;
     node_control
-        .upgrade_agent_by_url(&node_id, &agent_id, &package_url, gateway_dev_mode(&state).await)
+        .upgrade_agent_by_url(
+            &node_id,
+            &instance_id,
+            &resolved_agent_id,
+            &package_url,
+            gateway_dev_mode(&state).await,
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Upgrade dispatch failed: {}", e)))?;
 
     Ok((
         StatusCode::ACCEPTED,
         Json(MessageResponse {
-            message: format!("Upgrade dispatched to node '{}': {}", node_id, agent_id),
+            message: format!(
+                "Upgrade dispatched to node '{}': {}",
+                node_id, resolved_agent_id
+            ),
         }),
     ))
 }
@@ -1896,19 +2042,25 @@ pub async fn uninstall_agent(
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await;
     let event = node_control
-        .uninstall_agent(&acowork_core::node::local_node_id(), &agent_id)
+        .uninstall_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
 
     // Drop the installed entry immediately (the node's retained clear is
     // the eventual-consistency backstop for a fresh Gateway).
-    state.gateway_state.write().await.remove_installed(&agent_id);
+    state.gateway_state.write().await.remove_installed(&instance_id);
 
     Ok(Json(MessageResponse {
-        message: format!("Agent uninstalled: {}", agent_id),
+        message: format!("Agent uninstalled: {}", resolved_agent_id),
     }))
 }
 
@@ -2082,11 +2234,19 @@ pub async fn start_agent(
         )
     })?;
     check_node_compatible(&state, &acowork_core::node::local_node_id()).await?;
+    // ADR-073: route the command to the instance identity.
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await;
     let event = node_control
-        .start_agent(&acowork_core::node::local_node_id(), &agent_id, req.dev_mode)
+        .start_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            req.dev_mode,
+        )
         .await
-        .map_err(|e| map_node_control_error("start", &agent_id, e))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| map_node_control_error("start", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::structured(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("Start rejected by node: {}", e),
@@ -2100,7 +2260,7 @@ pub async fn start_agent(
         ))?;
 
     // Track the running entry in GatewayState (node-hosted, pid 0).
-    track_running_agent(&state, &agent_id, req.dev_mode).await;
+    track_running_agent(&state, &instance_id, req.dev_mode).await;
 
     // When starting in debug mode, bump Gateway's log level to DEBUG
     // so the Settings UI reflects the effective log level.
@@ -2281,11 +2441,18 @@ pub async fn stop_agent(
             },
         )
     })?;
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await;
     let event = node_control
-        .stop_agent(&acowork_core::node::local_node_id(), &agent_id, "user")
+        .stop_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            "user",
+        )
         .await
-        .map_err(|e| map_node_control_error("stop", &agent_id, e))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| map_node_control_error("stop", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::structured(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("stop: node rejected command: {}", e),
@@ -2374,11 +2541,18 @@ pub async fn restart_agent_in_debug(
     })?;
 
     // Stop current process
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await;
     let stop_event = node_control
-        .stop_agent(&acowork_core::node::local_node_id(), &agent_id, "debug-restart")
+        .stop_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            "debug-restart",
+        )
         .await
-        .map_err(|e| map_node_control_error("restart-debug:stop", &agent_id, e))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &stop_event)
+        .map_err(|e| map_node_control_error("restart-debug:stop", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &stop_event)
         .map_err(|e| ApiError::structured(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("restart-debug: stop before restart failed: {}", e),
@@ -2393,10 +2567,15 @@ pub async fn restart_agent_in_debug(
 
     // Start with dev_mode=true
     let start_event = node_control
-        .start_agent(&acowork_core::node::local_node_id(), &agent_id, true)
+        .start_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            true,
+        )
         .await
-        .map_err(|e| map_node_control_error("restart-debug:start", &agent_id, e))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &start_event)
+        .map_err(|e| map_node_control_error("restart-debug:start", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &start_event)
         .map_err(|e| ApiError::structured(
             StatusCode::UNPROCESSABLE_ENTITY,
             &format!("restart-debug: start with dev_mode=true failed: {}", e),
@@ -2678,8 +2857,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {
-        acowork_core::AgentManifest {
+    fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {        acowork_core::AgentManifest {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -2705,6 +2883,15 @@ mod tests {
         }
     }
 
+    /// Build an AppState with an empty GatewayState (no registry —
+    /// `list_agents` degrades gracefully when `agent_registry` is None).
+    fn test_state() -> AppState {
+        let gw = Arc::new(RwLock::new(GatewayState::new(
+            "/tmp/acowork-list-test-vault",
+        )));
+        AppState::new(gw, Arc::new(HttpAuth::new(false)))
+    }
+
     /// Build an AppState with `agent_id` installed and the MQTT agent
     /// registry seeded with the given status payload. `node_control` is
     /// left `None` so a handler that fails to short-circuit errors with
@@ -2718,6 +2905,7 @@ mod tests {
             g.installed_agents.insert(
                 agent_id.to_string(),
                 AgentInfo {
+                    instance_id: agent_id.to_string(),
                     agent_id: agent_id.to_string(),
                     version: "1.0.0".to_string(),
                     name: "Test Agent".to_string(),
@@ -2838,6 +3026,7 @@ mod tests {
         {
             let mut gw = state.gateway_state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
+                instance_id: "com.acowork.senior-engineer".to_string(),
                 agent_id: "com.acowork.senior-engineer".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),
@@ -2854,7 +3043,14 @@ mod tests {
             });
         }
 
-        let Json(resp) = list_agents(State(state)).await;
+        let Json(resp) = list_agents(
+            State(state),
+            Query(AgentListQuery {
+                agent_id: None,
+                node_id: None,
+            }),
+        )
+        .await;
         let entry = resp
             .iter()
             .find(|a| a.agent_id == "com.acowork.senior-engineer")
@@ -2870,11 +3066,105 @@ mod tests {
         );
     }
 
+    /// ADR-073: a single package may be installed as MULTIPLE instances
+    /// (same Node or cross-Node). `GET /api/agents` must return one
+    /// entry per instance (distinct `instance_id`), and the
+    /// `?agent_id=` / `?node_id=` filters must slice that list without
+    /// collapsing duplicates.
+    #[tokio::test]
+    async fn list_agents_lists_same_package_instances_and_filters_by_package_and_node() {
+        let state = test_state();
+        {
+            let mut gw = state.gateway_state.write().await;
+            // Two instances of the same package, on two different nodes.
+            for (inst, node) in [
+                ("inst-a1", "node-a"),
+                ("inst-a2", "node-b"),
+            ] {
+                gw.add_installed(crate::gateway::state::AgentInfo {
+                    instance_id: inst.to_string(),
+                    agent_id: "com.foo.bar".to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "Foo Bar".to_string(),
+                    install_path: format!("/tmp/pkg/{}", inst),
+                    manifest: test_manifest("com.foo.bar"),
+                    node_id: node.to_string(),
+                });
+            }
+            // A different package for the node filter cross-check.
+            gw.add_installed(crate::gateway::state::AgentInfo {
+                instance_id: "inst-b1".to_string(),
+                agent_id: "com.foo.baz".to_string(),
+                version: "1.0.0".to_string(),
+                name: "Foo Baz".to_string(),
+                install_path: "/tmp/pkg/inst-b1".to_string(),
+                manifest: test_manifest("com.foo.baz"),
+                node_id: "node-b".to_string(),
+            });
+        }
+
+        // Unfiltered: one entry per INSTANCE, never collapsed by agent_id.
+        let Json(all) = list_agents(
+            State(state.clone()),
+            Query(AgentListQuery {
+                agent_id: None,
+                node_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(all.len(), 3, "3 instances must be listed, none collapsed");
+        let foo_instances: Vec<_> = all
+            .iter()
+            .filter(|a| a.agent_id == "com.foo.bar")
+            .map(|a| a.instance_id.clone())
+            .collect();
+        // HashMap iteration order is unspecified — compare as sets.
+        let mut sorted_instances = foo_instances.clone();
+        sorted_instances.sort();
+        assert_eq!(
+            sorted_instances,
+            vec!["inst-a1".to_string(), "inst-a2".to_string()],
+            "both instances of the same package must survive the list"
+        );
+
+        // Package view: ?agent_id=com.foo.bar → exactly its 2 instances.
+        let Json(pkg_view) = list_agents(
+            State(state.clone()),
+            Query(AgentListQuery {
+                agent_id: Some("com.foo.bar".to_string()),
+                node_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(pkg_view.len(), 2, "package filter returns both instances");
+        assert!(
+            pkg_view.iter().all(|a| a.agent_id == "com.foo.bar"),
+            "package filter must not leak other packages"
+        );
+
+        // Node view: ?node_id=node-b → the 2 instances hosted there.
+        let Json(node_view) = list_agents(
+            State(state),
+            Query(AgentListQuery {
+                agent_id: None,
+                node_id: Some("node-b".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(node_view.len(), 2, "node filter returns node-b instances");
+        assert!(
+            node_view.iter().all(|a| a.node_id == "node-b"),
+            "node filter must not leak other nodes"
+        );
+    }
+
     #[test]
     fn test_agent_list_response_serialization() {
 
         let resp = AgentListResponse {
+            instance_id: "inst-com.example.weather".to_string(),
             agent_id: "com.example.weather".to_string(),
+            node_id: "local".to_string(),
             name: "Weather Agent".to_string(),
             display_name: None,
             role: None,
@@ -2895,6 +3185,17 @@ mod tests {
         assert!(json.contains("com.example.weather"));
         assert!(json.contains("Weather Agent"));
         assert!(json.contains("icon-05"));
+        // ADR-073: three-layer identity surfaces on every list entry.
+        assert!(
+            json.contains("\"instance_id\":\"inst-com.example.weather\""),
+            "instance_id must serialise; got: {}",
+            json
+        );
+        assert!(
+            json.contains("\"node_id\":\"local\""),
+            "node_id must serialise; got: {}",
+            json
+        );
         // last_interaction_at is None and skipped on serialization.
         assert!(!json.contains("last_interaction_at"));
         // sleeping_at is None and skipped on serialization.
@@ -2954,7 +3255,11 @@ mod tests {
 
     fn entry(id: &str, name: &str, running: bool, ts: Option<&str>) -> AgentListResponse {
         AgentListResponse {
+            // ADR-073: legacy identity shape (instance == package) — the
+            // sort contract keys off `agent_id`, so keep both equal here.
+            instance_id: id.to_string(),
             agent_id: id.to_string(),
+            node_id: "local".to_string(),
             name: name.to_string(),
             display_name: None,
             role: None,
@@ -3288,6 +3593,7 @@ mod tests {
         {
             let mut gw = state.gateway_state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
+                instance_id: "com.acowork.architect".to_string(),
                 agent_id: "com.acowork.architect".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),

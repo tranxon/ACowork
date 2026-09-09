@@ -252,6 +252,9 @@ pub struct IdleWatcherConfig {
     pub effective_timeout_secs: u64,
     /// Agent ID — used purely for log enrichment.
     pub agent_id: String,
+    /// ADR-073: instance identity — used to publish the `"sleeping"`
+    /// status on `acowork/agents/{instance_id}/status`.
+    pub instance_id: String,
     /// MQTT client — the watcher publishes the `"sleeping"` status
     /// payload and calls `disconnect()` before exiting.
     pub mqtt_client: RuntimeMqttClient,
@@ -459,7 +462,7 @@ pub(crate) async fn run_watcher(
             "Idle watcher: timeout reached, initiating auto-sleep",
         );
 
-        if let Err(e) = publish_sleeping(&config.mqtt_client, &config.agent_id).await {
+        if let Err(e) = publish_sleeping(&config.mqtt_client, &config.instance_id).await {
             warn!(
                 agent_id = %config.agent_id,
                 error = %e,
@@ -490,9 +493,9 @@ pub(crate) async fn run_watcher(
 /// Publish the `"sleeping"` payload to the agent status retained topic.
 async fn publish_sleeping(
     mqtt_client: &RuntimeMqttClient,
-    agent_id: &str,
+    instance_id: &str,
 ) -> Result<(), crate::mqtt::RuntimeMqttClientError> {
-    let topic = format!("acowork/agents/{}/status", agent_id);
+    let topic = format!("acowork/agents/{}/status", instance_id);
     mqtt_client
         .publish_raw(&topic, b"sleeping", MqttQoS::AtLeastOnce, true)
         .await

@@ -71,22 +71,30 @@ pub fn node_events_topic(node_id: &str) -> String {
     format!("acowork/nodes/{node_id}/events")
 }
 
-/// Topic: `acowork/nodes/{node_id}/agents/{agent_id}/control/{cmd}`
+/// Topic: `acowork/nodes/{node_id}/agents/{instance_id}/control/{cmd}`
 /// (Gateway → Node lifecycle command).
-pub fn node_agent_control_topic(node_id: &str, agent_id: &str, cmd: &str) -> String {
-    format!("acowork/nodes/{node_id}/agents/{agent_id}/control/{cmd}")
+///
+/// ADR-073: the path variable is the INSTANCE identity, not the package
+/// id. The Gateway addresses a specific runtime instance on the node.
+pub fn node_agent_control_topic(node_id: &str, instance_id: &str, cmd: &str) -> String {
+    format!("acowork/nodes/{node_id}/agents/{instance_id}/control/{cmd}")
 }
 
-/// Topic: `acowork/nodes/{node_id}/agents/{agent_id}/events`
+/// Topic: `acowork/nodes/{node_id}/agents/{instance_id}/events`
 /// (per-agent NodeEvent results).
-pub fn node_agent_events_topic(node_id: &str, agent_id: &str) -> String {
-    format!("acowork/nodes/{node_id}/agents/{agent_id}/events")
+///
+/// ADR-073: the path variable is the INSTANCE identity.
+pub fn node_agent_events_topic(node_id: &str, instance_id: &str) -> String {
+    format!("acowork/nodes/{node_id}/agents/{instance_id}/events")
 }
 
-/// Topic: `acowork/nodes/{node_id}/agents/{agent_id}/installed`
+/// Topic: `acowork/nodes/{node_id}/agents/{instance_id}/installed`
 /// (per-agent installed-package inventory, Retained — ADR-055 §6.5).
-pub fn node_agent_installed_topic(node_id: &str, agent_id: &str) -> String {
-    format!("acowork/nodes/{node_id}/agents/{agent_id}/installed")
+///
+/// ADR-073: the path variable is the INSTANCE identity; the payload
+/// carries `agent_id` (package) + `instance_id` (instance).
+pub fn node_agent_installed_topic(node_id: &str, instance_id: &str) -> String {
+    format!("acowork/nodes/{node_id}/agents/{instance_id}/installed")
 }
 
 /// Topic: `acowork/nodes/{node_id}/lsps` (AvailableLsps envelope,

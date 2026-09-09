@@ -67,13 +67,20 @@ async fn wait_for_retained_publish(
     panic!("did not receive retained publish on '{}' within {:?}", target_topic, budget);
 }
 
-async fn connect_runtime(port: u16, agent_id: &str) -> RuntimeMqttClient {
+/// Connect a test Runtime and return it together with the ADR-073
+/// instance id it bound (the caller keys its subscriber topic on that id).
+async fn connect_runtime(port: u16, agent_id: &str) -> (RuntimeMqttClient, String) {
     let cache = new_shared_cache();
     let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-    RuntimeMqttClient::connect(MqttConnectConfig {
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let client = RuntimeMqttClient::connect(MqttConnectConfig {
         host: "127.0.0.1",
         port,
         agent_id,
+        // ADR-073: the broker client id and the `.../config` snapshot
+        // topic are keyed on the instance id — the package `agent_id` is
+        // display/payload only.
+        instance_id: &instance_id,
         agent_name: "Test Agent",
         agent_version: "1.0.0",
         avatar: None,
@@ -91,7 +98,10 @@ async fn connect_runtime(port: u16, agent_id: &str) -> RuntimeMqttClient {
         work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
         username: None,
         password: None,
-    }).await.expect("RuntimeMqttClient connect")
+    })
+    .await
+    .expect("RuntimeMqttClient connect");
+    (client, instance_id)
 }
 
 // Test 1 — Publish round-trips over a real broker
@@ -100,14 +110,14 @@ async fn e2e_publish_delivers_retained_agent_config() {
     let port = fresh_broker_port();
     let broker = start_broker("127.0.0.1", port).expect("broker start");
 
-    let runtime = connect_runtime(port, "com.test.e2e.agent").await;
+    let (runtime, instance_id) = connect_runtime(port, "com.test.e2e.agent").await;
     let publisher = MqttAgentConfigPublisher::from_runtime_client(&runtime);
     assert_eq!(publisher.agent_id(), "com.test.e2e.agent");
 
     let mut opts = MqttOptions::new("test:subscriber", "127.0.0.1", port);
     opts.set_keep_alive(Duration::from_secs(5));
     let (sub_client, mut eventloop) = AsyncClient::new(opts, 10);
-    let target = format!("acowork/agents/{}/config", "com.test.e2e.agent");
+    let target = format!("acowork/agents/{}/config", instance_id);
     sub_client.subscribe(&target, QoS::AtLeastOnce).await.expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -131,7 +141,7 @@ async fn e2e_retained_snapshot_arrives_to_late_subscriber() {
     let port = fresh_broker_port();
     let broker = start_broker("127.0.0.1", port).expect("broker start");
 
-    let runtime = connect_runtime(port, "com.test.retained").await;
+    let (runtime, instance_id) = connect_runtime(port, "com.test.retained").await;
     let publisher = MqttAgentConfigPublisher::from_runtime_client(&runtime);
 
     publisher.publish(r#"{"active_mcp_servers":["pm"]}"#.to_string()).await;
@@ -140,7 +150,7 @@ async fn e2e_retained_snapshot_arrives_to_late_subscriber() {
     let mut opts = MqttOptions::new("test:late", "127.0.0.1", port);
     opts.set_keep_alive(Duration::from_secs(5));
     let (_sub_client, mut eventloop) = AsyncClient::new(opts, 10);
-    let target = "acowork/agents/com.test.retained/config".to_string();
+    let target = format!("acowork/agents/{}/config", instance_id);
     _sub_client.subscribe(&target, QoS::AtLeastOnce).await.expect("subscribe");
 
     let ac = wait_for_retained_publish(&mut eventloop, &target, Duration::from_secs(5)).await;
@@ -163,7 +173,7 @@ async fn e2e_publish_without_broker_is_graceful() {
     let broker = start_broker("127.0.0.1", port).expect("broker start");
 
     // Construct runtime and publisher against a healthy broker first.
-    let runtime = connect_runtime(port, "com.test.no-broker").await;
+    let (runtime, _instance_id) = connect_runtime(port, "com.test.no-broker").await;
     let publisher = MqttAgentConfigPublisher::from_runtime_client(&runtime);
 
     // Now drop the broker — the runtime's EventLoop sees a disconnect

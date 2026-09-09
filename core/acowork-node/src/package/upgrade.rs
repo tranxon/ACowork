@@ -12,23 +12,32 @@ use crate::error::{NodeError, Result};
 use crate::state::NodeState;
 
 /// Upgrade a .agent package (signature fingerprint consistency check required)
+///
+/// ADR-073: the target is located by instance identity (`instance_id`,
+/// falling back to the package id for legacy commands); the upgrade
+/// preserves the instance identity and re-installs under
+/// `{install_dir}/{agent_id}/{instance_id}/`.
 pub fn upgrade_package(
+    instance_id: &str,
     agent_id: &str,
     new_package_path: &Path,
     install_dir: &Path,
     state: &mut NodeState,
     dev_mode: bool,
 ) -> Result<()> {
+    // ADR-073: the install table is keyed by instance identity.
+    let key = instance_id.to_string();
+
     // Check if agent is currently installed
     let old_info = state
         .installed_agents
-        .get(agent_id)
-        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?
+        .get(&key)
+        .ok_or_else(|| NodeError::AgentNotFound(key.clone()))?
         .clone();
 
     // Check if agent is running
-    if state.is_running(agent_id) {
-        return Err(NodeError::AgentAlreadyRunning(agent_id.to_string()));
+    if state.is_running(&key) {
+        return Err(NodeError::AgentAlreadyRunning(key.clone()));
     }
 
     // Parse new manifest to check agent_id consistency
@@ -48,7 +57,7 @@ pub fn upgrade_package(
     // Remove old install directory (except preserved dirs)
     if old_install_path.exists() {
         let temp_base =
-            std::env::temp_dir().join(format!("acowork-upgrade-{}", agent_id.replace('.', "-")));
+            std::env::temp_dir().join(format!("acowork-upgrade-{}", key.replace('.', "-")));
         std::fs::create_dir_all(&temp_base).ok();
 
         if data_dir.exists() {
@@ -62,8 +71,8 @@ pub fn upgrade_package(
         std::fs::remove_dir_all(old_install_path)
             .map_err(|e| NodeError::Package(format!("Failed to remove old install: {}", e)))?;
 
-        // Re-create and restore preserved dirs
-        let new_install_path = install_dir.join(agent_id);
+        // Re-create and restore preserved dirs (ADR-073 two-level layout)
+        let new_install_path = install_dir.join(agent_id).join(&key);
         std::fs::create_dir_all(&new_install_path).ok();
 
         if temp_base.join("data").exists() {
@@ -78,13 +87,15 @@ pub fn upgrade_package(
     }
 
     // Remove from state temporarily
-    state.remove_installed(agent_id);
+    state.remove_installed(&key);
 
-    // Install new package (upgrade inherits dev_mode from caller context)
-    let new_info = install_package(new_package_path, install_dir, state, dev_mode)?;
+    // Install new package (upgrade inherits dev_mode from caller context;
+    // the instance identity is preserved across the upgrade).
+    let new_info = install_package(new_package_path, install_dir, state, dev_mode, &key)?;
 
     tracing::info!(
-        "Upgraded agent: {} from v{} to v{}",
+        "Upgraded agent instance: {} ({} from v{} to v{})",
+        key,
         agent_id,
         old_info.version,
         new_info.version
@@ -150,6 +161,7 @@ mod tests {
     fn test_upgrade_not_installed() {
         let mut state = NodeState::new(16);
         let result = upgrade_package(
+            "",
             "com.test.unknown",
             Path::new("/tmp/nonexistent.agent"),
             Path::new("/tmp/installed"),
@@ -187,18 +199,21 @@ mod tests {
         )
         .unwrap();
         state.add_installed(InstalledAgent {
+            instance_id: "inst-weather".to_string(),
             agent_id: "com.test.weather".to_string(),
             version: "1.0.0".to_string(),
             name: "Weather".to_string(),
             install_path: temp_dir
                 .join("installed")
                 .join("com.test.weather")
+                .join("inst-weather")
                 .to_string_lossy()
                 .to_string(),
             manifest,
         });
 
         let result = upgrade_package(
+            "inst-weather",
             "com.test.weather",
             &zip_path,
             &temp_dir.join("installed"),

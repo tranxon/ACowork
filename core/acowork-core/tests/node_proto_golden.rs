@@ -157,6 +157,7 @@ fn node_start_stop_command_wire_shape() {
             acowork_core::mqtt_proto::NodeStart {
                 agent_id: "com.example".to_string(),
                 dev_mode: true,
+                instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
             },
         )),
     };
@@ -179,6 +180,7 @@ fn node_start_stop_command_wire_shape() {
             acowork_core::mqtt_proto::NodeStop {
                 agent_id: "com.example".to_string(),
                 reason: "user_requested".to_string(),
+                instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
             },
         )),
     };
@@ -206,6 +208,7 @@ fn node_clone_upgrade_publish_command_wire_shape() {
                 agent_id: "com.example".to_string(),
                 new_agent_id: "com.example.clone".to_string(),
                 mode: "full".to_string(),
+                instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
             },
         )),
     };
@@ -232,6 +235,7 @@ fn node_clone_upgrade_publish_command_wire_shape() {
                 package_url: "http://gw/api/packages/com.example/download".to_string(),
                 local_path: String::new(),
                 dev_mode: false,
+                instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
             },
         )),
     };
@@ -255,6 +259,7 @@ fn node_clone_upgrade_publish_command_wire_shape() {
             acowork_core::mqtt_proto::NodePublishPrepare {
                 agent_id: "com.example".to_string(),
                 clean: true,
+                instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
             },
         )),
     };
@@ -279,6 +284,7 @@ fn node_clone_upgrade_publish_command_wire_shape() {
                 output_dir: String::new(),
                 sign: true,
                 key_dir: "/keys".to_string(),
+                instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
             },
         )),
     };

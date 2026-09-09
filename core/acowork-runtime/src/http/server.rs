@@ -4436,6 +4436,8 @@ mod tests {
             host: "127.0.0.1",
             port,
             agent_id: "com.test.agent",
+            // ADR-073: instance key for broker client id + config topic.
+            instance_id: "5f4e3d2c-1b0a-4a98-8765-4321fedcba09",
             agent_name: "Test Agent",
             agent_version: "1.0.0",
             avatar: None,
@@ -4466,7 +4468,7 @@ mod tests {
         let mut sub_opts = MqttOptions::new("test:handler-sub", "127.0.0.1", port);
         sub_opts.set_keep_alive(std::time::Duration::from_secs(5));
         let (sub_client, mut eventloop) = AsyncClient::new(sub_opts, 10);
-        let target = "acowork/agents/com.test.agent/config".to_string();
+        let target = "acowork/agents/5f4e3d2c-1b0a-4a98-8765-4321fedcba09/config".to_string();
         sub_client
             .subscribe(&target, QoS::AtLeastOnce)
             .await

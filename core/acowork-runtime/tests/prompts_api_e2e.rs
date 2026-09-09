@@ -97,8 +97,8 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
 // ── list ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_list_prompts_returns_all_9_with_overridden_false() {
-    let (port, temp_dir) = spawn_server("list-all-9").await;
+async fn test_list_prompts_returns_all_8_with_overridden_false() {
+    let (port, temp_dir) = spawn_server("list-all-8").await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{}/agents/{}/prompts", port, AGENT_ID))
         .await
@@ -111,8 +111,8 @@ async fn test_list_prompts_returns_all_9_with_overridden_false() {
     let prompts = body["prompts"].as_array().expect("prompts must be an array");
     assert_eq!(
         prompts.len(),
-        9,
-        "ADR-063 §3.2 contract: 9 overridable prompts must always be advertised"
+        8,
+        "PROMPT_ENTRIES contract: 8 entries must always be advertised (7 OVERRIDABLE_PROMPTS + required system.md). See ADR-068 (grafeo 3 removed) + ADR-071 (2 distiller added)."
     );
 
     // Every entry must be `overridden=false, size_bytes=0` because the
@@ -145,7 +145,7 @@ async fn test_list_prompts_returns_all_9_with_overridden_false() {
         );
     }
 
-    // Spot-check the 9 names by sorting the response — keeps the test
+    // Spot-check the 8 names by sorting the response — keeps the test
     // resilient to reordering of `PROMPT_ENTRIES` in prompts.rs.
     let mut names: Vec<&str> = prompts
         .iter()
@@ -157,15 +157,14 @@ async fn test_list_prompts_returns_all_9_with_overridden_false() {
         vec![
             "abstention",
             "compact-template",
-            "conflict-classification",
-            "extraction",
-            "fallback",
-            "generalization",
+            "distiller-extraction",
+            "distiller-judge",
             "search",
             "summary",
+            "system",
             "title",
         ],
-        "the 9 names must be exactly the canonical set"
+        "the 8 names must be exactly the canonical set"
     );
 
     // Cleanup so the per-test temp dir doesn't accumulate.
@@ -190,19 +189,19 @@ async fn test_get_prompt_unknown_name_returns_404_with_canonical_list() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "unknown_prompt");
-    // The error message lists the 9 canonical names so operators can
-    // see what they should have typed.
+    // The error message lists every PROMPT_ENTRIES name (the required
+    // `system.md` dialog section + the 7 OVERRIDABLE_PROMPTS), so
+    // operators can see what they should have typed.
     let msg = body["message"].as_str().unwrap_or("");
     for canonical in [
+        "system",
         "summary",
-        "fallback",
         "search",
         "compact-template",
         "title",
-        "extraction",
-        "conflict-classification",
-        "generalization",
         "abstention",
+        "distiller-extraction",
+        "distiller-judge",
     ] {
         assert!(
             msg.contains(canonical),
@@ -508,8 +507,10 @@ async fn test_agent_id_mismatch_returns_404() {
 #[tokio::test]
 async fn test_put_does_not_mutate_other_prompts_overridden_state() {
     // After PUTting prompt A, listing must report `overridden=true`
-    // ONLY for A; the other 8 must remain `overridden=false`. This
-    // pins down that PUT does not accidentally re-touch sibling files.
+    // ONLY for A; the other 7 must remain `overridden=false` (8 PROMPT_ENTRIES
+    // total: required `system.md` + 7 OVERRIDABLE_PROMPTS, per
+    // ADR-068 + ADR-071). This pins down that PUT does not
+    // accidentally re-touch sibling files.
     let (port, _temp) = spawn_server("put-isolation").await;
     let client = reqwest::Client::new();
 

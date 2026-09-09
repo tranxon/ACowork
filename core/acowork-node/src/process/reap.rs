@@ -29,6 +29,9 @@ pub struct RuntimeCandidate {
     pub pid: u32,
     /// Agent id (`--agent-id`).
     pub agent_id: String,
+    /// Instance identity (`--agent-instance-id`, ADR-073). Empty for
+    /// Runtimes spawned before the ADR-073 flag existed.
+    pub instance_id: String,
     /// Loopback HTTP port the Runtime listens on (`--http-port`). This
     /// is required for the reverse proxy's `{id} → port` mapping.
     pub http_port: u16,
@@ -50,6 +53,7 @@ pub struct RuntimeCandidate {
 /// table slot.
 pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate> {
     let mut agent_id: Option<String> = None;
+    let mut instance_id: Option<String> = None;
     let mut http_port: Option<u16> = None;
     let mut dev_mode = false;
     let mut mqtt_port: Option<u16> = None;
@@ -59,6 +63,10 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
         match args[i].as_str() {
             "--agent-id" => {
                 agent_id = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--agent-instance-id" => {
+                instance_id = args.get(i + 1).cloned();
                 i += 2;
             }
             "--http-port" => {
@@ -82,6 +90,7 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
     Some(RuntimeCandidate {
         pid,
         agent_id,
+        instance_id: instance_id.unwrap_or_default(),
         http_port,
         dev_mode,
         mqtt_port,
@@ -96,6 +105,10 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
 /// for the operator / a `start` command to sort out; we do not
 /// SIGKILL unadopted processes on a best-effort scan).
 ///
+/// ADR-073: the install table is keyed by instance identity; a
+/// candidate matches when its `instance_id` (falling back to the
+/// package id for legacy spawns) is present.
+///
 /// Returns `(adopt, skip)` — the skip set is for diagnostics only.
 pub fn classify_candidates(
     candidates: Vec<RuntimeCandidate>,
@@ -103,7 +116,14 @@ pub fn classify_candidates(
 ) -> (Vec<RuntimeCandidate>, Vec<RuntimeCandidate>) {
     candidates
         .into_iter()
-        .partition(|c| installed.contains_key(&c.agent_id))
+        .partition(|c| {
+            let key = if c.instance_id.is_empty() {
+                c.agent_id.as_str()
+            } else {
+                c.instance_id.as_str()
+            };
+            installed.contains_key(key)
+        })
 }
 
 /// Scan the local process list for `acowork-runtime` processes and
@@ -329,8 +349,9 @@ mod tests {
     fn classify_adopts_installed_and_skips_unknown() {
         let mut installed: HashMap<String, InstalledAgent> = HashMap::new();
         installed.insert(
-            "com.example.keep".to_string(),
+            "inst-keep".to_string(),
             InstalledAgent {
+                instance_id: "inst-keep".to_string(),
                 agent_id: "com.example.keep".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Keep".to_string(),
@@ -343,6 +364,7 @@ mod tests {
             RuntimeCandidate {
                 pid: 10,
                 agent_id: "com.example.keep".to_string(),
+                instance_id: "inst-keep".to_string(),
                 http_port: 19901,
                 dev_mode: false,
                 mqtt_port: None,
@@ -350,6 +372,7 @@ mod tests {
             RuntimeCandidate {
                 pid: 11,
                 agent_id: "com.example.stale".to_string(),
+                instance_id: String::new(),
                 http_port: 19902,
                 dev_mode: false,
                 mqtt_port: None,

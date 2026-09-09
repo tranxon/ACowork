@@ -321,6 +321,10 @@ pub struct MqttConnectConfig<'a> {
     pub host: &'a str,
     pub port: u16,
     pub agent_id: &'a str,
+    /// ADR-073: instance identity (UUID v4) used for every
+    /// `acowork/agents/{instance_id}/...` topic and the broker
+    /// client id. Required — no fallback to `agent_id`.
+    pub instance_id: &'a str,
     pub agent_name: &'a str,
     pub agent_version: &'a str,
     pub avatar: Option<&'a str>,
@@ -459,8 +463,11 @@ pub struct RuntimeMqttClient {
     /// methods obtain a clone via `self.client().await`, ensuring they
     /// always use the current handle.
     shared_client: Arc<Mutex<AsyncClient>>,
-    /// The agent_id this client represents.
+    /// The agent_id this client represents (PACKAGE identity).
     agent_id: String,
+    /// ADR-073: instance identity (UUID v4) used for topic construction.
+    /// Falls back to `agent_id` for standalone / test mode.
+    instance_id: String,
     /// Cached inputs needed to re-run `run_bootstrap` on every
     /// (re)connect. See `docs/adr/zh/ADR-039-mqtt-client-lifecycle.md`.
     bootstrap_data: Arc<BootstrapData>,
@@ -478,6 +485,7 @@ impl Clone for RuntimeMqttClient {
             inner: self.inner.clone(),
             shared_client: Arc::clone(&self.shared_client),
             agent_id: self.agent_id.clone(),
+            instance_id: self.instance_id.clone(),
             bootstrap_data: Arc::clone(&self.bootstrap_data),
         }
     }
@@ -491,6 +499,11 @@ impl Clone for RuntimeMqttClient {
 /// subsequent `ConnAck`. See ADR-039.
 struct BootstrapData {
     agent_id: String,
+    /// ADR-073: instance identity (UUID v4) for topic construction.
+    instance_id: String,
+    /// ADR-073: current location (node hosting this Runtime). Empty for
+    /// standalone / Gateway-spawned runtimes. Populated from `--node-id`.
+    node_id: Option<String>,
     agent_name: String,
     agent_version: String,
     avatar: String,
@@ -940,27 +953,34 @@ impl RuntimeMqttClient {
     pub async fn connect(
         cfg: MqttConnectConfig<'_>,
     ) -> Result<Self, RuntimeMqttClientError> {
-        let client_id = format!("agent:{}", cfg.agent_id);
+        // ADR-073: the broker client id identifies THIS RUNTIME INSTANCE.
+        // Two instances of the same package must never share a client id
+        // (the broker would disconnect one); the package `agent_id` is
+        // therefore never used here.
+        let instance_id = cfg.instance_id;
+        let client_id = format!("agent:{}", instance_id);
 
         // ADR-039: cache every input needed to re-run bootstrap on every
         // (re)connect (status/meta/config publish + persistent subscriptions).
         let bootstrap_data = Arc::new(BootstrapData {
             agent_id: cfg.agent_id.to_string(),
+            instance_id: instance_id.to_string(),
+            node_id: cfg.node_id.map(|s| s.to_string()),
             agent_name: cfg.agent_name.to_string(),
             agent_version: cfg.agent_version.to_string(),
             avatar: cfg.avatar.unwrap_or("").to_string(),
             builtin_avatar: cfg.builtin_avatar.unwrap_or("").to_string(),
             config_json: cfg.config_json.to_string(),
-            status_topic: format!("acowork/agents/{}/status", cfg.agent_id),
-            meta_topic: format!("acowork/agents/{}/meta", cfg.agent_id),
-            config_topic: format!("acowork/agents/{}/config", cfg.agent_id),
+            status_topic: format!("acowork/agents/{}/status", instance_id),
+            meta_topic: format!("acowork/agents/{}/meta", instance_id),
+            config_topic: format!("acowork/agents/{}/config", instance_id),
             control_filter: format!(
                 "acowork/agents/{}/sessions/control/#",
-                cfg.agent_id
+                instance_id
             ),
             control_filter_prefix: format!(
                 "acowork/agents/{}/sessions/control/",
-                cfg.agent_id
+                instance_id
             ),
             node_lsps_topic: cfg
                 .node_id
@@ -968,7 +988,7 @@ impl RuntimeMqttClient {
             node_info_topic: cfg
                 .node_id
                 .map(acowork_core::node::node_info_topic),
-            ready_topic: format!("acowork/agents/{}/ready", cfg.agent_id),
+            ready_topic: format!("acowork/agents/{}/ready", instance_id),
             ready_ever: std::sync::atomic::AtomicBool::new(false),
         });
 
@@ -1063,6 +1083,7 @@ impl RuntimeMqttClient {
             inner,
             shared_client,
             agent_id: cfg.agent_id.to_string(),
+            instance_id: instance_id.to_string(),
             bootstrap_data,
         };
 
@@ -1115,6 +1136,9 @@ impl RuntimeMqttClient {
             version: data.agent_version.clone(),
             avatar: data.avatar.clone(),
             builtin_avatar: data.builtin_avatar.clone(),
+            // ADR-073: instance + location metadata.
+            instance_id: data.instance_id.clone(),
+            node_id: data.node_id.clone().unwrap_or_default(),
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -1130,6 +1154,9 @@ impl RuntimeMqttClient {
         let config = AgentConfig {
             agent_id: data.agent_id.clone(),
             config_json: data.config_json.clone(),
+            // ADR-073: instance + location metadata.
+            instance_id: data.instance_id.clone(),
+            node_id: data.node_id.clone().unwrap_or_default(),
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -1273,7 +1300,7 @@ impl RuntimeMqttClient {
 
     /// Publish agent status (online/offline) as a plain text Retained message.
     pub async fn publish_status(&self, online: bool) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/status", self.agent_id);
+        let topic = format!("acowork/agents/{}/status", self.instance_id);
         let payload = if online { "online" } else { "offline" };
         self.client().await
             .publish(topic, QoS::AtLeastOnce, true, payload)
@@ -1305,7 +1332,7 @@ impl RuntimeMqttClient {
         self.bootstrap_data
             .ready_ever
             .store(ready, std::sync::atomic::Ordering::Release);
-        let topic = format!("acowork/agents/{}/ready", self.agent_id);
+        let topic = format!("acowork/agents/{}/ready", self.instance_id);
         let payload = if ready { "true" } else { "false" };
         self.client().await
             .publish(topic, QoS::AtLeastOnce, true, payload)
@@ -1380,7 +1407,7 @@ impl RuntimeMqttClient {
     ) -> Result<(), RuntimeMqttClientError> {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
-            self.agent_id, session_id, event_type
+            self.instance_id, session_id, event_type
         );
         // Session messages are QoS 0 (fire-and-forget for streaming events)
         self.publish_envelope(&topic, envelope, MqttQoS::AtMostOnce, false)
@@ -1394,7 +1421,7 @@ impl RuntimeMqttClient {
         event_type: &str,
         envelope: &DataEnvelope,
     ) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/sessions/{}", self.agent_id, event_type);
+        let topic = format!("acowork/agents/{}/sessions/{}", self.instance_id, event_type);
         self.publish_envelope(&topic, envelope, MqttQoS::AtLeastOnce, false)
             .await
     }
@@ -1402,6 +1429,11 @@ impl RuntimeMqttClient {
     /// Get the agent_id this client represents.
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    /// ADR-073: get the instance identity used for topic construction.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Get a clone of the inner AsyncClient.
@@ -1438,7 +1470,7 @@ impl RuntimeMqttClient {
     /// [`Self::shutdown`] explicitly.
     pub async fn shutdown(&self) {
         let client = self.client().await;
-        let status_topic = format!("acowork/agents/{}/status", self.agent_id);
+        let status_topic = format!("acowork/agents/{}/status", self.instance_id);
         let _ = client
             .publish(status_topic, QoS::AtLeastOnce, true, "offline")
             .await;
@@ -1463,6 +1495,8 @@ pub type SharedRuntimeMqttClient = Arc<Mutex<RuntimeMqttClient>>;
 #[derive(Clone)]
 pub struct MqttChunkPublisher {
     agent_id: String,
+    /// ADR-073: instance identity for topic construction.
+    instance_id: String,
     shared_client: Arc<Mutex<AsyncClient>>,
 }
 
@@ -1471,6 +1505,7 @@ impl MqttChunkPublisher {
     pub fn from_runtime_client(client: &RuntimeMqttClient) -> Self {
         Self {
             agent_id: client.agent_id().to_string(),
+            instance_id: client.instance_id().to_string(),
             shared_client: Arc::clone(&client.shared_client),
         }
     }
@@ -1485,17 +1520,23 @@ impl MqttChunkPublisher {
         &self.agent_id
     }
 
+    /// ADR-073: return the instance identity used for topic construction.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     /// Clear a retained `messages/{event_type}` event for a session.
     ///
     /// Publishes a zero-byte payload with `retain = true` to the
-    /// `acowork/agents/{id}/sessions/{sid}/messages/{event_type}` topic.
+    /// `acowork/agents/{instance_id}/sessions/{sid}/messages/{event_type}`
+    /// topic.
     /// Per MQTT spec this deletes the previously stored retained message,
     /// preventing a reconnecting Desktop from receiving stale blocking
     /// events (tool approval / ask question) from a previous turn.
     pub async fn clear_retained_event(&self, session_id: &str, event_type: &str) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
-            self.agent_id, session_id, event_type
+            self.instance_id, session_id, event_type
         );
         if let Err(e) = self
             .client()
@@ -1520,7 +1561,7 @@ impl MqttChunkPublisher {
         event_type: &str,
         envelope: &DataEnvelope,
     ) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/sessions/{}", self.agent_id, event_type);
+        let topic = format!("acowork/agents/{}/sessions/{}", self.instance_id, event_type);
         let bytes = prost::Message::encode_to_vec(envelope);
         self.client().await
             .publish(topic, QoS::AtLeastOnce, false, bytes)
@@ -1551,7 +1592,7 @@ impl MqttChunkPublisher {
         };
         let topic = format!(
             "acowork/agents/{}/sessions/{}/opened",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.client().await
@@ -1581,7 +1622,7 @@ impl MqttChunkPublisher {
         };
         let topic = format!(
             "acowork/agents/{}/sessions/{}/not_opened",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.client().await
@@ -1623,7 +1664,7 @@ impl MqttChunkPublisher {
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/config",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let envelope = DataEnvelope {
             version: 1,
@@ -1660,7 +1701,7 @@ impl MqttChunkPublisher {
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/state",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let envelope = DataEnvelope {
             version: 1,
@@ -1715,7 +1756,7 @@ impl MqttChunkPublisher {
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
-            self.agent_id, session_id, event_type
+            self.instance_id, session_id, event_type
         );
         if let Err(e) = self
             .client()
@@ -2341,6 +2382,9 @@ mod tests {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.agent",
+                // ADR-073: broker client id + topics are keyed on the
+                // instance id (two instances of one package may coexist).
+                instance_id: "aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d",
                 agent_name: "Test Agent",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -2372,7 +2416,7 @@ mod tests {
         sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_eventloop) = SubClient::new(sub_opts, 10);
         sub_client
-            .subscribe("acowork/agents/com.test.agent/#", QoS::AtLeastOnce)
+            .subscribe("acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/#", QoS::AtLeastOnce)
             .await
             .unwrap();
 
@@ -2394,19 +2438,19 @@ mod tests {
 
         assert!(
             received_topics
-                .contains(&"acowork/agents/com.test.agent/status".to_string()),
+                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/status".to_string()),
             "should receive status: {:?}",
             received_topics
         );
         assert!(
             received_topics
-                .contains(&"acowork/agents/com.test.agent/meta".to_string()),
+                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/meta".to_string()),
             "should receive meta: {:?}",
             received_topics
         );
         assert!(
             received_topics
-                .contains(&"acowork/agents/com.test.agent/config".to_string()),
+                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/config".to_string()),
             "should receive config: {:?}",
             received_topics
         );
@@ -2438,6 +2482,8 @@ mod tests {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.bootstrap",
+                // ADR-073: instance-scoped identity (see first test).
+                instance_id: "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d",
                 agent_name: "Bootstrap Test",
                 agent_version: "1.0.0",
                 avatar: None,
@@ -2487,7 +2533,7 @@ mod tests {
         sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_loop) = SubClient::new(sub_opts, 10);
         sub_client
-            .subscribe("acowork/agents/com.test.bootstrap/#", QoS::AtLeastOnce)
+            .subscribe("acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/#", QoS::AtLeastOnce)
             .await
             .unwrap();
 
@@ -2506,15 +2552,15 @@ mod tests {
         }
 
         assert!(
-            received.contains(&"acowork/agents/com.test.bootstrap/status".to_string()),
+            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/status".to_string()),
             "should receive status after multiple bootstraps"
         );
         assert!(
-            received.contains(&"acowork/agents/com.test.bootstrap/meta".to_string()),
+            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/meta".to_string()),
             "should receive meta after multiple bootstraps"
         );
         assert!(
-            received.contains(&"acowork/agents/com.test.bootstrap/config".to_string()),
+            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/config".to_string()),
             "should receive config after multiple bootstraps"
         );
 

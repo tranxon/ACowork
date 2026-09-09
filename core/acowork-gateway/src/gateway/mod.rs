@@ -168,6 +168,20 @@ impl Gateway {
     }
 
     /// Install an agent from a source directory.
+    ///
+    /// ADR-073 §5.6: lands the package in the node-side TWO-LEVEL layout
+    /// `{packages_dir}/{agent_id}/{instance_id}/` so the local node's
+    /// `restore_installed_agents` discovers it on the next boot. The
+    /// instance id is gateway-generated (UUID v4) exactly as a
+    /// `POST /api/agents/install` would.
+    ///
+    /// Idempotent by design (review P1-3): when `{packages_dir}/{agent_id}`
+    /// already exists on disk (a previous boot auto-installed it and the
+    /// node will re-discover every instance on its next startup), the copy
+    /// is skipped. This function NEVER deletes directories — not its own
+    /// prior copies, and certainly not other instances of the same
+    /// package. No legacy data migration is performed (pre-launch
+    /// project; stale on-disk state is cleaned manually).
     async fn install_agent_from_dir(
         &mut self,
         src_dir: &std::path::Path,
@@ -183,19 +197,39 @@ impl Gateway {
             .map_err(|e| GatewayError::Config(format!("Failed to parse manifest: {}", e)))?;
 
         let agent_id = manifest.agent_id.clone();
-
-        // Copy agent files to packages directory. The local node
-        // re-discovers the copied package from its packages dir on startup
-        // and publishes the retained installed info — the Gateway does NOT
-        // add it to installed_agents directly (ADR-055 §6.5 / L2-9).
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let agent_pkg_dir = packages_dir.join(&agent_id);
+        let agent_pkg_root = packages_dir.join(&agent_id);
 
-        let _ = std::fs::remove_dir_all(&agent_pkg_dir);
-        std::fs::create_dir_all(&agent_pkg_dir)
+        // Skip when this package was already auto-installed by a previous
+        // boot — the local node re-discovers existing instances from its
+        // packages dir and republishes the retained installed inventory
+        // (ADR-055 §6.5); a second copy would accumulate duplicate
+        // instance directories across restarts.
+        if agent_pkg_root.exists() {
+            tracing::info!(
+                agent_id,
+                path = %agent_pkg_root.display(),
+                "Bundled agent already present on disk — skipping auto-install copy"
+            );
+            return Ok(agent_id);
+        }
+
+        // ADR-073: generate the instance identity at install time. It
+        // decides the landing directory and the Runtime's
+        // `--agent-instance-id`; the node never invents it.
+        let instance_id = uuid::Uuid::new_v4().to_string();
+
+        // Copy agent files to the node-side two-level package layout.
+        // The local node re-discovers the copied package from its
+        // packages dir on startup and publishes the retained installed
+        // info — the Gateway does NOT add it to installed_agents
+        // directly (ADR-055 §6.5 / L2-9).
+        let instance_pkg_dir = agent_pkg_root.join(&instance_id);
+
+        std::fs::create_dir_all(&instance_pkg_dir)
             .map_err(|e| GatewayError::Config(format!("Failed to create package dir: {}", e)))?;
 
-        Self::copy_dir_recursive(src_dir, &agent_pkg_dir)
+        Self::copy_dir_recursive(src_dir, &instance_pkg_dir)
             .map_err(|e| GatewayError::Config(format!("Failed to copy agent files: {}", e)))?;
 
         Ok(agent_id)
@@ -1312,14 +1346,27 @@ impl Gateway {
                     if !sa_state.read().await.is_installed(SYSTEM_AGENT_ID) {
                         tracing::warn!("System Agent not installed — skipping auto-start");
                     } else {
+                        // ADR-073: resolve the instance identity for the
+                        // control topic + running table key.
+                        let (sa_instance_id, sa_agent_id) = {
+                            let gw = sa_state.read().await;
+                            let inst = gw.resolve_installed_key(SYSTEM_AGENT_ID);
+                            match inst {
+                                Some(id) => {
+                                    let aid = gw.installed(&id).map(|i| i.agent_id.clone()).unwrap_or_else(|| SYSTEM_AGENT_ID.to_string());
+                                    (id, aid)
+                                }
+                                None => (SYSTEM_AGENT_ID.to_string(), SYSTEM_AGENT_ID.to_string()),
+                            }
+                        };
                         match nc
-                            .start_agent(&acowork_core::node::local_node_id(), SYSTEM_AGENT_ID, false)
+                            .start_agent(&acowork_core::node::local_node_id(), &sa_instance_id, &sa_agent_id, false)
                             .await
                         {
                             Ok(event) => {
                                 if let Err(e) =
                                     crate::mqtt::node_control::NodeControlClient::check_reply(
-                                        SYSTEM_AGENT_ID,
+                                        &sa_agent_id,
                                         &event,
                                     )
                                 {
@@ -1327,8 +1374,7 @@ impl Gateway {
                                 } else {
                                     let mut gw = sa_state.write().await;
                                     let workspace = gw
-                                        .installed_agents
-                                        .get(SYSTEM_AGENT_ID)
+                                        .installed(&sa_instance_id)
                                         .map(|i| {
                                             std::path::PathBuf::from(&i.install_path)
                                                 .join("workspace")
@@ -1337,7 +1383,8 @@ impl Gateway {
                                         })
                                         .unwrap_or_default();
                                     gw.add_running(crate::gateway::state::RunningAgentInfo {
-                                        agent_id: SYSTEM_AGENT_ID.to_string(),
+                                        instance_id: sa_instance_id.clone(),
+                                        agent_id: sa_agent_id,
                                         pid: 0,
                                         started_at: chrono::Utc::now(),
                                         workspace,

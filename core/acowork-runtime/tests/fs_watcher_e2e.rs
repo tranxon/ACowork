@@ -36,6 +36,11 @@ fn fresh_broker_port() -> u16 {
 }
 
 const AGENT_ID: &str = "com.test.agent";
+// ADR-073: instance identity for the Runtime's MQTT client id AND the
+// fs-changed topic key (the sink reads it from the bound client at
+// publish time). The envelope payload keeps carrying the package
+// `AGENT_ID` label for Desktop display.
+const INSTANCE_ID: &str = "8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d";
 
 /// Drain deadline: poll cycle (500ms) + aggregation window (500ms)
 /// plus transport margin.
@@ -54,7 +59,7 @@ async fn spawn_fs_subscriber(
 
     client
         .subscribe(
-            format!("acowork/agents/{}/workspaces/+/fs-changed", AGENT_ID),
+            format!("acowork/agents/{}/workspaces/+/fs-changed", INSTANCE_ID),
             rumqttc::QoS::AtLeastOnce,
         )
         .await
@@ -128,6 +133,8 @@ fn fs_watcher_full_chain_e2e() {
             host: "127.0.0.1",
             port,
             agent_id: AGENT_ID,
+            // ADR-073: broker client id = instance id (never the package id).
+            instance_id: INSTANCE_ID,
             agent_name: "Test Agent",
             agent_version: "1.0.0",
             avatar: None,

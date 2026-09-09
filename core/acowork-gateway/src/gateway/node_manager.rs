@@ -601,7 +601,10 @@ pub async fn drain_node_via_mqtt(
     }
 
     for agent_id in &agents {
-        match control.stop_agent(node_id, agent_id, "drain").await {
+        // ADR-073: the `installed` topic variable is the INSTANCE
+        // identity — pass it as such (agent_id falls back to the same
+        // string for legacy node inventory entries).
+        match control.stop_agent(node_id, agent_id, agent_id, "drain").await {
             Ok(event) => {
                 if event.status == "ok" {
                     println!("stopped {agent_id}");
@@ -750,12 +753,17 @@ pub async fn install_agent_via_mqtt(
     );
 
     let control = cli_control_client(dispatch.mqtt_host, dispatch.mqtt_port).await?;
+    // ADR-073 决策 5: the Gateway (here: the CLI control plane)
+    // generates the instance identity at install time; the node uses it
+    // verbatim for the on-disk directory and the Runtime flag.
+    let instance_id = uuid::Uuid::new_v4().to_string();
     // ADR-059 §6: the CLI dispatch has no operation store; a fresh
     // operation id still gives the NodeEvent reply a correlation id.
     let operation_id = acowork_core::operation::OperationId::new();
     control
         .install_agent_by_url(
             dispatch.node_id,
+            &instance_id,
             &agent_id,
             &url,
             dispatch.dev_mode,
@@ -764,7 +772,7 @@ pub async fn install_agent_via_mqtt(
         .await
         .map_err(|e| crate::error::GatewayError::Lifecycle(e.to_string()))?;
 
-    println!("Install dispatched to node '{}': {agent_id}", dispatch.node_id);
+    println!("Install dispatched to node '{}': {agent_id} (instance {instance_id})", dispatch.node_id);
     Ok(())
 }
 
@@ -804,8 +812,12 @@ pub async fn upgrade_agent_via_mqtt(
     );
 
     let control = cli_control_client(dispatch.mqtt_host, dispatch.mqtt_port).await?;
+    // ADR-073: the CLI passes the same identifier as instance and
+    // package identity — the node resolves the instance table by
+    // instance_id first, falling back to the package id for legacy
+    // installs.
     control
-        .upgrade_agent_by_url(dispatch.node_id, agent_id, &url, dispatch.dev_mode)
+        .upgrade_agent_by_url(dispatch.node_id, agent_id, agent_id, &url, dispatch.dev_mode)
         .await
         .map_err(|e| crate::error::GatewayError::Lifecycle(e.to_string()))?;
 
@@ -822,7 +834,7 @@ pub async fn uninstall_agent_via_mqtt(
     agent_id: &str,
 ) -> crate::error::Result<()> {
     let control = cli_control_client(mqtt_host, mqtt_port).await?;
-    match control.uninstall_agent(node_id, agent_id).await {
+    match control.uninstall_agent(node_id, agent_id, agent_id).await {
         Ok(event) if event.status == "ok" => {
             println!("Uninstalled '{agent_id}' on node '{node_id}'");
             Ok(())
@@ -841,7 +853,7 @@ pub async fn start_agent_via_mqtt(
     agent_id: &str,
 ) -> crate::error::Result<()> {
     let control = cli_control_client(mqtt_host, mqtt_port).await?;
-    match control.start_agent(node_id, agent_id, false).await {
+    match control.start_agent(node_id, agent_id, agent_id, false).await {
         Ok(event) if event.status == "ok" => {
             println!("Started '{agent_id}' on node '{node_id}'");
             Ok(())
@@ -860,7 +872,7 @@ pub async fn stop_agent_via_mqtt(
     agent_id: &str,
 ) -> crate::error::Result<()> {
     let control = cli_control_client(mqtt_host, mqtt_port).await?;
-    match control.stop_agent(node_id, agent_id, "cli").await {
+    match control.stop_agent(node_id, agent_id, agent_id, "cli").await {
         Ok(event) if event.status == "ok" => {
             println!("Stopped '{agent_id}' on node '{node_id}'");
             Ok(())

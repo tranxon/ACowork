@@ -375,16 +375,24 @@ pub async fn import_skill(
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
+    // ADR-073: resolve the route variable to the instance identity.
+    let (instance_id, resolved_agent_id) =
+        crate::http::agents::resolve_agent_identity(&state, &agent_id).await;
     let zip_path = temp_file.to_string_lossy().to_string();
     let event = node_control
-        .skills_import(&acowork_core::node::local_node_id(), &agent_id, &zip_path)
+        .skills_import(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            &zip_path,
+        )
         .await
         .map_err(|e| {
             let _ = std::fs::remove_file(&temp_file);
             ApiError::internal(&format!("Skill import failed: {}", e))
         })?;
     let _ = std::fs::remove_file(&temp_file);
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Skill import failed: {}", e)))?;
 
     // The node reply carries "skill '{name}' imported".

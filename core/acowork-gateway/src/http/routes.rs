@@ -387,6 +387,13 @@ pub struct OperationAck {
     pub resource_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_error: Option<StructuredErrorBody>,
+    /// ADR-073: the instance identity created by this operation
+    /// (install / clone only). Lets the Desktop render the new
+    /// instance immediately instead of polling the retained
+    /// inventory. `None` for operations that do not create an
+    /// instance (start/stop/upgrade/…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 impl OperationAck {
@@ -398,6 +405,7 @@ impl OperationAck {
             state: record.state,
             resource_version: record.resource_version,
             terminal_error: record.terminal_error.clone(),
+            instance_id: None,
         }
     }
 }

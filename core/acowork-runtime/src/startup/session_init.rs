@@ -1002,6 +1002,7 @@ pub(crate) async fn phase_b_init_session(
             crate::agent::idle_watcher::IdleWatcherConfig {
                 effective_timeout_secs: effective,
                 agent_id: ctx.loaded.manifest.agent_id.clone(),
+                instance_id: mqtt_client.instance_id().to_string(),
                 mqtt_client: mqtt_client.clone(),
                 session_activity,
             },

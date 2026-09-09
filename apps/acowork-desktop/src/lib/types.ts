@@ -87,7 +87,18 @@ export interface NodeInfo {
 
 /** Agent list entry — matches Gateway API */
 export interface AgentInfo {
+  /**
+   * ADR-073: instance identity (UUID v4, immutable). Every agent list
+   * entry is an INSTANCE — the Gateway always populates this field and
+   * every registry key / MQTT topic on the frontend is instance-scoped.
+   */
+  instance_id: string;
   agent_id: string;
+  /**
+   * ADR-073: current location (node hosting this instance; mutable on
+   * migration). Display-only metadata — never a registry key.
+   */
+  node_id?: string;
   name: string;
   display_name?: string;
   role?: string;
@@ -136,7 +147,14 @@ export interface AgentInfo {
 
 /** Agent detail response */
 export interface AgentDetail {
+  /**
+   * ADR-073: instance identity (UUID v4, immutable). Always present —
+   * the Gateway serialises it on every agent payload.
+   */
+  instance_id: string;
   agent_id: string;
+  /** ADR-073: current location (mutable on migration). */
+  node_id?: string;
   name: string;
   display_name?: string;
   role?: string;
@@ -1178,6 +1196,18 @@ export function getProcessingPhase(s: SessionStatus | undefined | null): Process
  */
 export function isProcessing(s: SessionStatus | undefined | null): boolean {
   return getProcessingPhase(s) !== "idle";
+}
+
+/**
+ * ADR-073: canonical agent addressing key — the INSTANCE identity.
+ * The Gateway always populates `instance_id` (no legacy fallback to
+ * the package `agent_id`, which is display/package identity only).
+ * Every registry key on the frontend (agentStore map, selectedAgentId,
+ * chat/workspace stores) MUST go through this helper so addressing
+ * stays instance-scoped.
+ */
+export function instanceIdOf(meta: Pick<AgentInfo, "instance_id">): string {
+  return meta.instance_id;
 }
 
 /**

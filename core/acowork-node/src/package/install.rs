@@ -26,11 +26,16 @@ use crate::state::{InstalledAgent, NodeState};
 /// This is the sole installation entry point. When `dev_mode` is true,
 /// unsigned packages are allowed (for local development). In production
 /// mode, packages must have a valid signature.
+///
+/// ADR-073 §5.6: the package lands at
+/// `{install_dir}/{agent_id}/{instance_id}/`; `instance_id` is supplied
+/// by the Gateway at install time (never self-invented by the node).
 pub fn install_package(
     package_path: &Path,
     install_dir: &Path,
     state: &mut NodeState,
     dev_mode: bool,
+    instance_id: &str,
 ) -> Result<InstalledAgent> {
     // 1. Read and open ZIP
     let data = std::fs::read(package_path).map_err(|e| {
@@ -90,16 +95,16 @@ pub fn install_package(
     // 3. Extract and parse manifest.toml
     let manifest = extract_manifest(&mut archive)?;
 
-    // 4. Check if already installed
-    if state.is_installed(&manifest.agent_id) {
+    // 4. Check if already installed (keyed by instance_id, ADR-073)
+    if state.is_installed(instance_id) {
         return Err(NodeError::Package(format!(
-            "Agent '{}' is already installed. Use upgrade instead.",
-            manifest.agent_id
+            "Agent instance '{}' is already installed. Use upgrade instead.",
+            instance_id
         )));
     }
 
-    // 5. Create install directory
-    let agent_install_dir = install_dir.join(&manifest.agent_id);
+    // 5. Create install directory: {install_dir}/{agent_id}/{instance_id}/
+    let agent_install_dir = install_dir.join(&manifest.agent_id).join(instance_id);
     std::fs::create_dir_all(&agent_install_dir)
         .map_err(|e| NodeError::Package(format!("Failed to create install dir: {}", e)))?;
 
@@ -140,6 +145,7 @@ pub fn install_package(
 
     // 7. Create InstalledAgent
     let info = InstalledAgent {
+        instance_id: instance_id.to_string(),
         agent_id: manifest.agent_id.clone(),
         version: manifest.version.clone(),
         name: manifest.name.clone(),
@@ -147,7 +153,7 @@ pub fn install_package(
         manifest,
     };
 
-    tracing::info!("Installed agent: {} v{}", info.agent_id, info.version);
+    tracing::info!("Installed agent instance: {} ({}) v{}", info.instance_id, info.agent_id, info.version);
     state.add_installed(info.clone());
 
     Ok(info)
@@ -216,12 +222,13 @@ mod tests {
         let install_dir = temp_dir.join("installed");
         let mut state = NodeState::new(16);
 
-        let result = install_package(&zip_path, &install_dir, &mut state, true);
+        let result = install_package(&zip_path, &install_dir, &mut state, true, "inst-1");
         assert!(result.is_ok());
         let info = result.unwrap();
+        assert_eq!(info.instance_id, "inst-1");
         assert_eq!(info.agent_id, "com.test.weather");
         assert_eq!(info.version, "1.0.0");
-        assert!(state.is_installed("com.test.weather"));
+        assert!(state.is_installed("inst-1"));
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -250,10 +257,10 @@ mod tests {
         let mut state = NodeState::new(16);
 
         // First install should succeed
-        install_package(&zip_path, &install_dir, &mut state, true).unwrap();
+        install_package(&zip_path, &install_dir, &mut state, true, "inst-dup").unwrap();
 
         // Second install should fail
-        let result = install_package(&zip_path, &install_dir, &mut state, true);
+        let result = install_package(&zip_path, &install_dir, &mut state, true, "inst-dup");
         assert!(result.is_err());
 
         // Cleanup
@@ -280,7 +287,7 @@ mod tests {
         let install_dir = temp_dir.join("installed");
         let mut state = NodeState::new(16);
 
-        let result = install_package(&zip_path, &install_dir, &mut state, true);
+        let result = install_package(&zip_path, &install_dir, &mut state, true, "inst-nomanifest");
         assert!(result.is_err());
 
         // Cleanup

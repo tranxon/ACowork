@@ -393,8 +393,12 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             let Some(client) = mqtt_client_for_republish else {
                 return;
             };
-            let Some(agent_id) = extract_agent_id_from_status_topic(&topic_owned) else {
-                tracing::warn!(topic = %topic_owned, "status topic matched but agent_id extraction failed");
+            // ADR-073: the topic variable under `acowork/agents/` is the
+            // INSTANCE identity. The plain-text status carries no package
+            // id, so `agent_id` stays empty here — consumers key on
+            // `instance_id`.
+            let Some(instance_id) = extract_agent_id_from_status_topic(&topic_owned) else {
+                tracing::warn!(topic = %topic_owned, "status topic matched but instance_id extraction failed");
                 return;
             };
             let payload_str = String::from_utf8_lossy(&payload_owned);
@@ -418,9 +422,11 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             let envelope = DataEnvelope {
                 version: 1,
                 payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
-                    agent_id,
+                    agent_id: String::new(),
                     online,
                     sleeping,
+                    instance_id,
+                    node_id: String::new(),
                 })),
             };
             // Same topic — the broker will replace the retained
@@ -503,8 +509,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             // instead of paying a control/start round-trip.
             if !gw.running_agents.contains_key(&agent_id_for_log) {
                 let workspace = gw
-                    .installed_agents
-                    .get(&agent_id_for_log)
+                    .installed(&agent_id_for_log)
                     .map(|i| {
                         std::path::PathBuf::from(&i.install_path)
                             .join("workspace")
@@ -512,8 +517,13 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                             .to_string()
                     })
                     .unwrap_or_default();
+                let resolved_agent_id = gw
+                    .installed(&agent_id_for_log)
+                    .map(|i| i.agent_id.clone())
+                    .unwrap_or_else(|| agent_id_for_log.clone());
                 gw.add_running(crate::gateway::state::RunningAgentInfo {
-                    agent_id: agent_id_for_log.clone(),
+                    instance_id: agent_id_for_log.clone(),
+                    agent_id: resolved_agent_id,
                     pid: 0,
                     started_at: chrono::Utc::now(),
                     workspace,
@@ -1258,8 +1268,7 @@ async fn track_running_agent_for_status(
         return;
     }
     let workspace = gw
-        .installed_agents
-        .get(agent_id)
+        .installed(agent_id)
         .map(|i| {
             std::path::PathBuf::from(&i.install_path)
                 .join("workspace")
@@ -1267,8 +1276,13 @@ async fn track_running_agent_for_status(
                 .to_string()
         })
         .unwrap_or_default();
+    let resolved_agent_id = gw
+        .installed(agent_id)
+        .map(|i| i.agent_id.clone())
+        .unwrap_or_else(|| agent_id.to_string());
     gw.add_running(crate::gateway::state::RunningAgentInfo {
-        agent_id: agent_id.to_string(),
+        instance_id: agent_id.to_string(),
+        agent_id: resolved_agent_id,
         // Node-hosted Runtimes are tracked with `pid = 0`; liveness
         // is guaranteed by the MQTT broker's LWT registry, not by a
         // local process probe.
@@ -1341,8 +1355,7 @@ pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &Shar
     for agent_id in &installed_ids {
         if online_set.contains(agent_id) && !gw.running_agents.contains_key(agent_id) {
             let workspace = gw
-                .installed_agents
-                .get(agent_id)
+                .installed(agent_id)
                 .map(|i| {
                     std::path::PathBuf::from(&i.install_path)
                         .join("workspace")
@@ -1350,8 +1363,13 @@ pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &Shar
                         .to_string()
                 })
                 .unwrap_or_default();
+            let resolved_agent_id = gw
+                .installed(agent_id)
+                .map(|i| i.agent_id.clone())
+                .unwrap_or_else(|| agent_id.clone());
             gw.add_running(crate::gateway::state::RunningAgentInfo {
-                agent_id: agent_id.clone(),
+                instance_id: agent_id.clone(),
+                agent_id: resolved_agent_id,
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace,
@@ -2268,6 +2286,7 @@ mod tests {
             gw.installed_agents.insert(
                 "com.acowork.architect".to_string(),
                 crate::gateway::state::AgentInfo {
+                    instance_id: "com.acowork.architect".to_string(),
                     agent_id: "com.acowork.architect".to_string(),
                     version: "1.0.0".to_string(),
                     name: "Architect".to_string(),
@@ -2391,6 +2410,7 @@ mod tests {
             gw.installed_agents.insert(
                 "com.acowork.architect".to_string(),
                 crate::gateway::state::AgentInfo {
+                    instance_id: "com.acowork.architect".to_string(),
                     agent_id: "com.acowork.architect".to_string(),
                     version: "1.0.0".to_string(),
                     name: "Architect".to_string(),
@@ -2469,6 +2489,7 @@ mod tests {
         {
             let mut gw = state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
+                instance_id: "com.acowork.stale".to_string(),
                 agent_id: "com.acowork.stale".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now() - chrono::Duration::seconds(60),
@@ -2510,6 +2531,7 @@ mod tests {
         {
             let mut gw = state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
+                instance_id: "com.acowork.booting".to_string(),
                 agent_id: "com.acowork.booting".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),

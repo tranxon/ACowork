@@ -275,7 +275,8 @@
     "errorFailedToStartDebugAgent": "偵錯啟動 Agent 失敗：{{error}}",
     "errorFailedToRestartInDebug": "重新啟動偵錯失敗：{{error}}",
     "errorFailedToStopAgent": "停止 Agent 失敗：{{error}}",
-    "errorFailedToUninstallAgent": "解除安裝 Agent 失敗：{{error}}"
+    "errorFailedToUninstallAgent": "解除安裝 Agent 失敗：{{error}}",
+    "node": "節點"
   },
   "cloneDialog": {
     "skeleton": "骨架",

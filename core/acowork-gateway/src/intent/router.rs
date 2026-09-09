@@ -377,6 +377,7 @@ mod tests {
             "#;
             let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
             guard.add_installed(crate::gateway::state::AgentInfo {
+                instance_id: "com.example.target".to_string(),
                 agent_id: "com.example.target".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Target".to_string(),
@@ -427,6 +428,7 @@ mod tests {
             "#;
             let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
             guard.add_installed(crate::gateway::state::AgentInfo {
+                instance_id: "com.example.target".to_string(),
                 agent_id: "com.example.target".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Target".to_string(),

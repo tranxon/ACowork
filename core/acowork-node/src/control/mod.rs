@@ -36,6 +36,7 @@ use acowork_core::node::{
     node_info_topic, node_lsps_topic, node_ready_topic, node_sidecar_status_topic,
     node_status_topic, NODE_PROTOCOL_VERSION,
 };
+use acowork_core::AgentInstanceId;
 
 use crate::config::{system_hostname, NodeConfig};
 use crate::error::NodeError;
@@ -122,6 +123,25 @@ fn refresh_live_advertise_host<S: std::ops::Deref<Target = NodeState>>(
     host
 }
 
+/// Extract the instance id from an agent-scoped control command
+/// (ADR-073). Returns `None` for the node-scoped `Ping`.
+fn agent_lifecycle_instance_id(command: Option<&node_control_command::Command>) -> Option<&str> {
+    use node_control_command::Command;
+    Some(match command? {
+        Command::Start(c) => &c.instance_id,
+        Command::Stop(c) => &c.instance_id,
+        Command::Install(c) => &c.instance_id,
+        Command::Uninstall(c) => &c.instance_id,
+        Command::SkillsImport(c) => &c.instance_id,
+        Command::AvatarUpdate(c) => &c.instance_id,
+        Command::Clone(c) => &c.instance_id,
+        Command::Upgrade(c) => &c.instance_id,
+        Command::PublishPrepare(c) => &c.instance_id,
+        Command::PublishBuild(c) => &c.instance_id,
+        Command::Ping(_) => return None,
+    })
+}
+
 /// Decode an incoming envelope and dispatch a command to its handler.
 ///
 /// Idempotent semantics per ADR-055 §6.2:
@@ -158,6 +178,23 @@ async fn handle_command(
         result_json: Some(result_json),
     };
 
+    // ADR-073 / security: every agent-scoped command must carry a
+    // well-formed UUID instance id BEFORE it reaches any filesystem,
+    // process, or topic side effect — a spoofed/truncated id would
+    // otherwise key install dirs and MQTT topics arbitrarily. `Ping`
+    // is node-scoped and has no instance id.
+    if let Some(instance_id) = agent_lifecycle_instance_id(command.command.as_ref())
+        && AgentInstanceId::from_string(instance_id.to_string()).is_err()
+    {
+        return reply(
+            "error",
+            format!(
+                "invalid instance_id '{instance_id}' for '{}' (expected a valid UUID, ADR-073)",
+                command.request_id
+            ),
+        );
+    }
+
     match command.command.as_ref() {
         Some(Command::Ping(_)) => reply("ok", "pong".to_string()),
         Some(Command::Start(cmd)) => {
@@ -174,16 +211,22 @@ async fn handle_command(
                 Some(config.proxy_advertise_endpoint_for(&live)),
                 node_token.map(str::to_string),
             );
-            match mgr.start_agent(&cmd.agent_id, state, cmd.dev_mode, true).await {
+            match mgr
+                .start_agent(&cmd.instance_id, &cmd.agent_id, state, cmd.dev_mode, true)
+                .await
+            {
                 Ok(()) => {
                     state.read().await.save_snapshot(&config.home);
-                    reply("ok", format!("started '{}'", cmd.agent_id))
+                    reply("ok", format!("started '{}'", cmd.instance_id))
                 }
                 Err(NodeError::AgentAlreadyRunning(id)) => {
                     // Idempotent: start on a running agent succeeds.
                     reply("ok", format!("'{}' already running", id))
                 }
-                Err(e) => reply("error", format!("start '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => reply(
+                    "error",
+                    format!("start '{}' failed: {}", cmd.instance_id, e),
+                ),
             }
         }
         Some(Command::Stop(cmd)) => {
@@ -199,16 +242,22 @@ async fn handle_command(
                 Some(config.proxy_advertise_endpoint_for(&live)),
                 node_token.map(str::to_string),
             );
-            match mgr.stop_agent(&cmd.agent_id, state).await {
+            match mgr
+                .stop_agent(&cmd.instance_id, &cmd.agent_id, state)
+                .await
+            {
                 Ok(()) => {
                     state.read().await.save_snapshot(&config.home);
-                    reply("ok", format!("stopped '{}'", cmd.agent_id))
+                    reply("ok", format!("stopped '{}'", cmd.instance_id))
                 }
                 Err(NodeError::AgentNotRunning(id)) => {
                     // Idempotent: stop on an exited agent succeeds.
                     reply("ok", format!("'{}' already stopped", id))
                 }
-                Err(e) => reply("error", format!("stop '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => reply(
+                    "error",
+                    format!("stop '{}' failed: {}", cmd.instance_id, e),
+                ),
             }
         }
         Some(Command::Uninstall(cmd)) => {
@@ -220,29 +269,39 @@ async fn handle_command(
             // reaper regression).
             let result = {
                 let mut node = state.write().await;
-                crate::package::uninstall::uninstall_package(&cmd.agent_id, &install_dir, &mut node)
+                crate::package::uninstall::uninstall_package(
+                    &cmd.instance_id,
+                    &cmd.agent_id,
+                    &install_dir,
+                    &mut node,
+                )
             };
             match result {
                 Ok(()) => {
                     // Clear the retained inventory entry (ADR-055 §6.5) so
                     // the Gateway drops the agent from installed_agents.
-                    let installed_topic =
-                        node_agent_installed_topic(&command.node_id, &cmd.agent_id);
+                    // ADR-073: instance id is mandatory and UUID-validated
+                    // at the command gate — no agent_id fallback.
+                    let key = cmd.instance_id.clone();
+                    let installed_topic = node_agent_installed_topic(&command.node_id, &key);
                     let _ = dispatcher::clear_installed_info(installed_topic).await;
-                    reply("ok", format!("uninstalled '{}'", cmd.agent_id))
+                    reply("ok", format!("uninstalled '{}'", key))
                 }
                 Err(e) => reply("error", format!("uninstall '{}' failed: {}", cmd.agent_id, e)),
             }
         }
         Some(Command::SkillsImport(cmd)) => {
+            // ADR-073: instance id is mandatory and UUID-validated at the
+            // command gate — the agent id is display/package identity only.
+            let key = cmd.instance_id.clone();
             let skills_dir = {
                 let node = state.read().await;
-                match node.installed_agents.get(&cmd.agent_id) {
+                match node.installed_agents.get(&key) {
                     Some(info) => crate::package::skills::agent_skills_dir(&info.install_path),
                     None => {
                         return reply(
                             "error",
-                            format!("skills_import '{}': agent not installed", cmd.agent_id),
+                            format!("skills_import '{}': agent not installed", key),
                         );
                     }
                 }
@@ -253,7 +312,7 @@ async fn handle_command(
             ) {
                 Ok(name) => reply("ok", format!("skill '{}' imported", name)),
                 Err(e) => {
-                    reply("error", format!("skills_import '{}' failed: {}", cmd.agent_id, e))
+                    reply("error", format!("skills_import '{}' failed: {}", key, e))
                 }
             }
         }
@@ -302,11 +361,14 @@ async fn handle_command(
                 let mut node = state.write().await;
                 // Signature strictness follows the Gateway's dev_mode
                 // (ADR-055 §6.20): `true` allows unsigned packages.
+                // ADR-073: install lands under `{agent_id}/{instance_id}/`
+                // using the Gateway-issued instance_id verbatim.
                 let result = crate::package::install::install_package(
                     &source_path,
                     &install_dir,
                     &mut node,
                     cmd.dev_mode,
+                    &cmd.instance_id,
                 );
                 if let Some(tmp) = spooled {
                     let _ = std::fs::remove_file(&tmp);
@@ -320,12 +382,12 @@ async fn handle_command(
                     // Gateway aggregates this into installed_agents.
                     if let Some(entry) = crate::package::build_installed_info(&info) {
                         let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.agent_id);
+                            node_agent_installed_topic(&command.node_id, &info.instance_id);
                         let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
                     }
-                    reply("ok", format!("installed '{}' v{}", info.agent_id, info.version))
+                    reply("ok", format!("installed '{}' v{}", info.instance_id, info.version))
                 }
-                Err(e) => reply("error", format!("install '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => reply("error", format!("install '{}' failed: {}", cmd.instance_id, e)),
             }
         }
         Some(Command::AvatarUpdate(cmd)) => reply(
@@ -347,6 +409,7 @@ async fn handle_command(
             let result = {
                 let mut node = state.write().await;
                 crate::package::clone::clone_agent(
+                    &cmd.instance_id,
                     &cmd.agent_id,
                     &cmd.new_agent_id,
                     mode,
@@ -361,13 +424,16 @@ async fn handle_command(
                     // cron via the install-completed is_new hook).
                     if let Some(entry) = crate::package::build_installed_info(&info) {
                         let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.agent_id);
+                            node_agent_installed_topic(&command.node_id, &info.instance_id);
                         let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
                     }
                     let json = serde_json::json!({ "install_path": info.install_path }).to_string();
                     reply_json(
                         "ok",
-                        format!("cloned '{}' -> '{}'", cmd.agent_id, cmd.new_agent_id),
+                        format!(
+                            "cloned '{}' -> '{}' (instance {})",
+                            cmd.agent_id, cmd.new_agent_id, info.instance_id
+                        ),
                         json,
                     )
                 }
@@ -417,6 +483,7 @@ async fn handle_command(
             let (result, upgraded_info) = {
                 let mut node = state.write().await;
                 let result = crate::package::upgrade::upgrade_package(
+                    &cmd.instance_id,
                     &cmd.agent_id,
                     &source_path,
                     &install_dir,
@@ -426,7 +493,10 @@ async fn handle_command(
                 if let Some(tmp) = spooled {
                     let _ = std::fs::remove_file(&tmp);
                 }
-                let upgraded_info = node.installed_agents.get(&cmd.agent_id).cloned();
+                // ADR-073: instance id is mandatory and UUID-validated at
+                // the command gate — no agent_id fallback for the key.
+                let key = cmd.instance_id.clone();
+                let upgraded_info = node.installed_agents.get(&key).cloned();
                 (result, upgraded_info)
             };
 
@@ -438,7 +508,7 @@ async fn handle_command(
                         && let Some(entry) = crate::package::build_installed_info(&info)
                     {
                         let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.agent_id);
+                            node_agent_installed_topic(&command.node_id, &info.instance_id);
                         let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
                     }
                     reply("ok", format!("upgraded '{}'", cmd.agent_id))
@@ -448,15 +518,27 @@ async fn handle_command(
         }
         Some(Command::PublishPrepare(cmd)) => {
             let mut node = state.write().await;
-            match crate::package::publish::prepare_publish(&cmd.agent_id, cmd.clean, &mut node) {
+            match crate::package::publish::prepare_publish(
+                &cmd.instance_id,
+                &cmd.agent_id,
+                cmd.clean,
+                &mut node,
+            ) {
                 Ok(result) => {
                     let json = serde_json::to_string(&result).unwrap_or_else(|e| {
                         format!(r#"{{"error":"{}"}}"#, e)
                     });
-                    reply_json("ok", format!("publish prepare '{}' complete", cmd.agent_id), json)
+                    reply_json(
+                        "ok",
+                        format!("publish prepare '{}' complete", cmd.instance_id),
+                        json,
+                    )
                 }
                 Err(e) => {
-                    reply("error", format!("publish prepare '{}' failed: {}", cmd.agent_id, e))
+                    reply(
+                        "error",
+                        format!("publish prepare '{}' failed: {}", cmd.instance_id, e),
+                    )
                 }
             }
         }
@@ -473,6 +555,7 @@ async fn handle_command(
             };
             let node = state.read().await;
             match crate::package::publish::build_package(
+                &cmd.instance_id,
                 &cmd.agent_id,
                 &output_dir,
                 cmd.sign,
@@ -483,7 +566,9 @@ async fn handle_command(
                     let json = serde_json::to_string(&result).unwrap_or_default();
                     reply_json("ok", format!("built '{}'", result.output_path), json)
                 }
-                Err(e) => reply("error", format!("publish build '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => {
+                    reply("error", format!("publish build '{}' failed: {}", cmd.instance_id, e))
+                }
             }
         }
         None => reply("error", "empty command payload".to_string()),
@@ -653,19 +738,24 @@ async fn handle_enroll_result(
     true
 }
 
-/// Extract (node_id, Some(agent_id)) from an agent-level control topic
-/// or (node_id, None) from a node-level control topic. Returns `None`
-/// for topics outside the control family.
+/// Extract (node_id, Some(instance_id)) from an agent-level control
+/// topic or (node_id, None) from a node-level control topic. Returns
+/// `None` for topics outside the control family.
+///
+/// ADR-073: the topic variable under `agents/` is the INSTANCE identity
+/// (`nodes/{node}/agents/{instance_id}/control/{cmd}`); legacy topics
+/// carrying a package id still parse — the string is forwarded verbatim
+/// to the command handler which resolves it against the install table.
 fn parse_control_topic(topic: &str, own_node_id: &str) -> Option<(String, Option<String>)> {
     let agent_prefix = format!("acowork/nodes/{own_node_id}/agents/");
     let node_prefix = format!("acowork/nodes/{own_node_id}/control/");
     if let Some(rest) = topic.strip_prefix(&agent_prefix) {
-        // rest = {agent_id}/control/{cmd}
+        // rest = {instance_id}/control/{cmd}
         let mut parts = rest.splitn(3, '/');
-        let agent_id = parts.next().unwrap_or("");
+        let instance_id = parts.next().unwrap_or("");
         let control = parts.next().unwrap_or("");
-        if !agent_id.is_empty() && control == "control" {
-            return Some((own_node_id.to_string(), Some(agent_id.to_string())));
+        if !instance_id.is_empty() && control == "control" {
+            return Some((own_node_id.to_string(), Some(instance_id.to_string())));
         }
         return None;
     }
@@ -822,7 +912,7 @@ impl NodeControlPlane {
                     let Some(info) = crate::package::build_installed_info(&entry) else {
                         continue;
                     };
-                    let installed_topic = node_agent_installed_topic(&node_id, &info.agent_id);
+                    let installed_topic = node_agent_installed_topic(&node_id, &entry.instance_id);
                     let envelope = DataEnvelope {
                         version: 1,
                         payload: Some(data_envelope::Payload::InstalledAgentInfo(info)),
@@ -1655,14 +1745,14 @@ async fn migrate_retained(
     // 2. Republish the installed inventory under the NEW node_id.
     for entry in installed {
         if let Some(installed_info) = crate::package::build_installed_info(entry) {
-            let agent_id = installed_info.agent_id.clone();
+            let instance_id = installed_info.instance_id.clone();
             let envelope = DataEnvelope {
                 version: 1,
                 payload: Some(data_envelope::Payload::InstalledAgentInfo(installed_info)),
             };
             let _ = client
                 .publish(
-                    node_agent_installed_topic(new_id, &agent_id),
+                    node_agent_installed_topic(new_id, &instance_id),
                     QoS::AtLeastOnce,
                     true,
                     prost::Message::encode_to_vec(&envelope),
@@ -1692,7 +1782,7 @@ async fn clear_retained(
     for entry in installed {
         let _ = client
             .publish(
-                node_agent_installed_topic(node_id, &entry.agent_id),
+                node_agent_installed_topic(node_id, &entry.instance_id),
                 QoS::AtLeastOnce,
                 true,
                 Vec::new(),
@@ -1954,6 +2044,22 @@ mod tests {
         }
     }
 
+    /// ADR-073: any valid UUID works for lifecycle tests.
+    const TEST_INSTANCE_ID: &str = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+
+    fn start_command(instance_id: &str) -> NodeControlCommand {
+        use acowork_core::mqtt_proto::NodeStart;
+        NodeControlCommand {
+            node_id: "local".to_string(),
+            request_id: "req-start".to_string(),
+            command: Some(node_control_command::Command::Start(NodeStart {
+                agent_id: "com.test.agent".to_string(),
+                dev_mode: false,
+                instance_id: instance_id.to_string(),
+            })),
+        }
+    }
+
     fn test_state() -> SharedNodeState {
         Arc::new(RwLock::new(crate::state::NodeState::new(16)))
     }
@@ -2025,6 +2131,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_gate_rejects_malformed_instance_id() {
+        let state = test_state();
+        let config = test_config();
+        let reply = handle_command(&state, &config, &start_command("not-a-uuid"), None).await;
+        // ADR-073: rejected at the gate — before any ProcessManager or
+        // filesystem side effect — so the reply carries the validation
+        // error, not a spawn attempt.
+        assert_eq!(reply.status, "error");
+        assert!(
+            reply.message.contains("invalid instance_id"),
+            "unexpected reply: {}",
+            reply.message
+        );
+        assert!(reply.message.contains("not-a-uuid"));
+    }
+
+    #[tokio::test]
+    async fn control_gate_rejects_empty_instance_id() {
+        let state = test_state();
+        let config = test_config();
+        let reply = handle_command(&state, &config, &start_command(""), None).await;
+        assert_eq!(reply.status, "error");
+        assert!(reply.message.contains("invalid instance_id"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_instance_id_extraction_maps_all_agent_commands() {
+        use acowork_core::mqtt_proto::NodeStop;
+        assert_eq!(
+            agent_lifecycle_instance_id(Some(&node_control_command::Command::Start(
+                acowork_core::mqtt_proto::NodeStart {
+                    agent_id: "com.test.agent".to_string(),
+                    dev_mode: false,
+                    instance_id: TEST_INSTANCE_ID.to_string(),
+                },
+            ))),
+            Some(TEST_INSTANCE_ID)
+        );
+        assert_eq!(
+            agent_lifecycle_instance_id(Some(&node_control_command::Command::Stop(NodeStop {
+                agent_id: "com.test.agent".to_string(),
+                reason: String::new(),
+                instance_id: TEST_INSTANCE_ID.to_string(),
+            }))),
+            Some(TEST_INSTANCE_ID)
+        );
+        // Node-scoped ping has no instance id → None.
+        assert_eq!(
+            agent_lifecycle_instance_id(Some(&node_control_command::Command::Ping(
+                Default::default()
+            ))),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn start_not_installed_answers_error() {
         let state = test_state();
         let config = test_config();
@@ -2035,6 +2197,9 @@ mod tests {
                 acowork_core::mqtt_proto::NodeStart {
                     agent_id: "com.example".to_string(),
                     dev_mode: false,
+                    // ADR-073: valid instance id so the test exercises the
+                    // real not-installed path, not the validation gate.
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2057,6 +2222,9 @@ mod tests {
                     package_url: String::new(),
                     local_path: String::new(),
                     dev_mode: false,
+                    // ADR-073: valid instance id — the test targets the
+                    // missing-source validation, not the UUID gate.
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2090,6 +2258,7 @@ mod tests {
                     agent_id: "com.example".to_string(),
                     new_agent_id: "com.example.clone".to_string(),
                     mode: "skeleton".to_string(),
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2110,6 +2279,7 @@ mod tests {
                     package_url: String::new(),
                     local_path: String::new(),
                     dev_mode: false,
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2129,6 +2299,7 @@ mod tests {
                 acowork_core::mqtt_proto::NodePublishPrepare {
                     agent_id: "com.example".to_string(),
                     clean: false,
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2149,6 +2320,7 @@ mod tests {
                     output_dir: String::new(),
                     sign: false,
                     key_dir: String::new(),
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };

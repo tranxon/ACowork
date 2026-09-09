@@ -3114,9 +3114,10 @@ After installation, ask the user to re-enable the MCP server.",
         // acowork/agents/<id>/debug/events/<event_type>.
         if let Some(mqtt_client) = mqtt_client {
             let event_rx = event_bus.subscribe();
-            let agent_id = self.core.config.agent_id.clone();
+            // ADR-073: debug event topics are per-instance.
+            let instance_id = self.core.config.instance_id().to_string();
             let publisher = crate::mqtt::DebugEventMqttPublisher::new(
-                agent_id,
+                instance_id,
                 mqtt_client,
                 event_rx,
             );

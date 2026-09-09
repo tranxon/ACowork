@@ -349,6 +349,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 host: config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
                 port: mqtt_port,
                 agent_id: &loaded.manifest.agent_id,
+                // ADR-073: instance identity (required — injected by the
+                // Node at spawn time via --agent-instance-id).
+                instance_id: config.instance_id(),
                 agent_name: &loaded.manifest.name,
                 agent_version: &loaded.manifest.version,
                 avatar: None,
@@ -384,19 +387,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     //
                     // ADR-055 §6.4: when the Node injects
                     // `--http-advertise-endpoint` (the Node reverse-proxy
-                    // base URL), publish `{base}/agents/{id}` so the
-                    // Gateway routes through the Node. The Runtime only
+                    // base URL), publish `{base}/agents/{instance_id}` so
+                    // the Gateway routes through the Node. The Runtime only
                     // concatenates — node-internal topology stays private
-                    // to the Node.
+                    // to the Node. ADR-073: the proxy path variable is the
+                    // instance identity.
+                    let instance_id = config.instance_id().to_string();
                     let endpoint = match &config.http_advertise_endpoint {
                         Some(base) => format!(
                             "{}/agents/{}",
                             base.trim_end_matches('/'),
-                            loaded.manifest.agent_id
+                            instance_id
                         ),
                         None => format!("http://127.0.0.1:{}", port),
                     };
-                    let topic = format!("acowork/agents/{}/http_endpoint", loaded.manifest.agent_id);
+                    let topic = format!("acowork/agents/{}/http_endpoint", instance_id);
                     match client.publish_raw(
                         &topic,
                         endpoint.as_bytes(),
@@ -405,11 +410,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     ).await {
                         Ok(()) => tracing::info!(
                             agent_id=%loaded.manifest.agent_id,
+                            instance_id=%instance_id,
                             %endpoint,
                             "Published retained http_endpoint for Gateway reverse-proxy discovery"
                         ),
                         Err(e) => tracing::error!(
                             agent_id=%loaded.manifest.agent_id,
+                            instance_id=%instance_id,
                             %endpoint,
                             error=%e,
                             "Failed to publish retained http_endpoint — Gateway will return 503 until the Runtime restarts and re-publishes"
@@ -437,16 +444,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 {
                     let endpoint_client = client.clone();
                     let endpoint_agent_id = loaded.manifest.agent_id.clone();
+                    let endpoint_instance_id = config.instance_id().to_string();
                     tokio::spawn(async move {
                         while let Some(base) = node_proxy_update_rx.recv().await {
                             let endpoint = format!(
                                 "{}/agents/{}",
                                 base.trim_end_matches('/'),
-                                endpoint_agent_id
+                                endpoint_instance_id
                             );
                             let topic = format!(
                                 "acowork/agents/{}/http_endpoint",
-                                endpoint_agent_id
+                                endpoint_instance_id
                             );
                             match endpoint_client
                                 .publish_raw(
@@ -459,11 +467,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                             {
                                 Ok(()) => tracing::info!(
                                     agent_id = %endpoint_agent_id,
+                                    instance_id = %endpoint_instance_id,
                                     %endpoint,
                                     "Re-published retained http_endpoint after node proxy change (§6.3.3)"
                                 ),
                                 Err(e) => tracing::warn!(
                                     agent_id = %endpoint_agent_id,
+                                    instance_id = %endpoint_instance_id,
                                     %endpoint,
                                     error = %e,
                                     "Failed to re-publish retained http_endpoint after node proxy change"

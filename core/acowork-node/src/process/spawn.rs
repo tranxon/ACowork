@@ -84,6 +84,7 @@ async fn reap_agent(state: &SharedNodeState, agent_id: &str) -> Option<AgentSlot
 /// the broker's `agent:{id}` CONNECT rule (§6.8).
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_agent_process(
+    instance_id: &str,
     agent_id: &str,
     install_path: &str,
     workspace: &Path,
@@ -125,6 +126,11 @@ pub async fn spawn_agent_process(
     let mut cmd = tokio::process::Command::new(&runtime_bin);
     cmd.arg("--agent-id")
         .arg(agent_id)
+        // ADR-073: pass the instance identity so the Runtime builds its
+        // MQTT topics under `acowork/agents/{instance_id}/...` and
+        // reports status on the instance-scoped path.
+        .arg("--agent-instance-id")
+        .arg(instance_id)
         .arg("--package-path")
         .arg(install_path)
         .arg("--manifest-path")
@@ -424,6 +430,7 @@ mod tests {
         let http_port = acowork_core::node::NODE_HTTP_PORT_BASE;
         let debug_port = http_port + 1;
         state.write().await.add_agent(AgentSlot {
+            instance_id: "inst-com.test.reap".to_string(),
             agent_id: "com.test.reap".to_string(),
             pid: 424242,
             started_at: chrono::Utc::now(),
@@ -435,14 +442,14 @@ mod tests {
 
         // Regression guard for 261a8f77: re-acquiring a read lock
         // under the write guard would hang reap_agent forever.
-        let removed = timeout(Duration::from_secs(5), reap_agent(&state, "com.test.reap"))
+        let removed = timeout(Duration::from_secs(5), reap_agent(&state, "inst-com.test.reap"))
             .await
             .expect("reap_agent must not deadlock")
             .expect("agent slot must be removed");
 
         assert_eq!(removed.http_port, http_port);
         assert_eq!(removed.debug_port, Some(debug_port));
-        assert!(!state.read().await.is_running("com.test.reap"));
+        assert!(!state.read().await.is_running("inst-com.test.reap"));
     }
 
     #[test]
@@ -484,6 +491,7 @@ mod tests {
     async fn test_spawn_nonexistent_binary() {
         // Spawning a non-existent agent should fail (binary won't be found).
         let result = spawn_agent_process(
+            "inst-com.test.nonexistent",
             "com.test.nonexistent",
             "/nonexistent/path",
             Path::new("/tmp/nonexistent-workspace"),

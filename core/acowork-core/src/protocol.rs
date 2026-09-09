@@ -1005,8 +1005,18 @@ pub enum GatewayRequest {
     /// Agent registration — first message sent after gRPC connection
     /// Runtime sends this to identify itself to the Gateway
     AgentHello {
-        /// The agent's reverse-domain identifier
+        /// The agent's reverse-domain identifier (package identity)
         agent_id: String,
+        /// ADR-073: instance identity (UUID v4). The Runtime receives it
+        /// from the Node control plane at spawn time (`--agent-instance-id`)
+        /// and reports it here; the Gateway uses it to bind the running
+        /// registry entry.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        instance_id: String,
+        /// ADR-073: current location (node hosting this Runtime). `"local"`
+        /// for standalone / Gateway-spawned runtimes.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        node_id: String,
         /// The agent's version
         version: String,
         /// Connection role — "main" for the primary gRPC connection,

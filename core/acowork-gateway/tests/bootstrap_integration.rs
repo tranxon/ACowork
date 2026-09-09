@@ -848,6 +848,9 @@ async fn concurrent_installs_unique_ids_and_aggregate_inventory() {
             name: agent_id.to_string(),
             install_path: format!("/agents/{agent_id}"),
             manifest_toml: manifest.clone(),
+            // ADR-073: legacy inventory payload — no instance identity;
+            // the Gateway falls back to the package id as the key.
+            instance_id: String::new(),
         };
         node.publish(
             node_agent_installed_topic(NODE_ID, agent_id),
