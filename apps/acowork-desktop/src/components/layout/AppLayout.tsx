@@ -233,8 +233,8 @@ export function AppLayout() {
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.sleeping ?? false) : false;
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.running;
-  const agentDisplayName = selectedAgent
-    ? (agents[selectedAgent.agent_id]?.profile?.displayName ??
+  const agentDisplayName = selectedAgent && selectedAgentId
+    ? (agents[selectedAgentId]?.profile?.displayName ??
       selectedAgent.display_name ??
       selectedAgent.name)
     : null;

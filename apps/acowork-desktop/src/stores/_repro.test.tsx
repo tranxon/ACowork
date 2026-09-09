@@ -176,7 +176,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
       handleMessageEvent(
         {
           type: "session_created",
-          agent_id: AGENT,
+          instance_id: AGENT,
           session_id: "sess-new",
         },
         useChatStore.setState,
@@ -259,7 +259,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
     // 1. session_created → activateNewlyCreatedSession → activeSessionId=NEW
     await act(async () => {
       handleMessageEvent(
-        { type: "session_created", agent_id: AGENT, session_id: "sess-new" },
+        { type: "session_created", instance_id: AGENT, session_id: "sess-new" },
         useChatStore.setState,
         useChatStore.getState,
         AGENT,
@@ -348,7 +348,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
     // Step 1: activate NEW via session_created
     await act(async () => {
       handleMessageEvent(
-        { type: "session_created", agent_id: AGENT, session_id: "sess-new" },
+        { type: "session_created", instance_id: AGENT, session_id: "sess-new" },
         useChatStore.setState,
         useChatStore.getState,
         AGENT,
@@ -437,7 +437,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
     // Step 1: user clicks "+" → session_created → NEW auto-activated
     await act(async () => {
       handleMessageEvent(
-        { type: "session_created", agent_id: AGENT, session_id: "sess-new" },
+        { type: "session_created", instance_id: AGENT, session_id: "sess-new" },
         useChatStore.setState,
         useChatStore.getState,
         AGENT,
@@ -553,7 +553,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
     // Step 2: session_created → NEW auto-activated (production event chain).
     await act(async () => {
       handleMessageEvent(
-        { type: "session_created", agent_id: AGENT, session_id: "sess-new" },
+        { type: "session_created", instance_id: AGENT, session_id: "sess-new" },
         useChatStore.setState,
         useChatStore.getState,
         AGENT,
@@ -638,7 +638,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
       handleMessageEvent(
         {
           type: "session_state",
-          agent_id: AGENT,
+          instance_id: AGENT,
           session_id: SESSION,
           status: { status: "llm_awaiting_first_chunk" },
           message_count: 0,
@@ -708,7 +708,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
       handleMessageEvent(
         {
           type: "session_state",
-          agent_id: AGENT,
+          instance_id: AGENT,
           session_id: SESSION,
           status: { status: "idle" },
           message_count: 1,

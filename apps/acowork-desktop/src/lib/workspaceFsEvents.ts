@@ -47,7 +47,8 @@ export interface FsChange {
 
 /** Payload of the `acowork:workspace-fs-changed` Tauri event. */
 export interface WorkspaceFsChangeEvent {
-    agent_id: string;
+    /** ADR-073: instance identity (UUID) — the store addressing key. */
+    instance_id: string;
     workspace_id: string;
     changes: FsChange[];
     window_end_ms: number;
@@ -219,8 +220,8 @@ async function doInit(): Promise<void> {
     // pointless full sync (the initial tree fetch happens on mount).
     _agentEventUnlisten = await listen<Record<string, unknown>>("agent-event", (event) => {
         const data = event.payload;
-        if (data.type !== "agent_status" || typeof data.agent_id !== "string") return;
-        const agentId = data.agent_id as string;
+        if (data.type !== "agent_status" || typeof data.instance_id !== "string") return;
+        const agentId = data.instance_id as string;
         const next: AgentStatusSnapshot = {
             online: data.online === true,
             sleeping: data.sleeping === true,
@@ -291,7 +292,7 @@ function refreshTreesForChanges(ev: WorkspaceFsChangeEvent): void {
 
     let scheduled = 0;
     for (const parent of parents) {
-        const key = treeKey(ev.agent_id, ev.workspace_id, parent);
+        const key = treeKey(ev.instance_id, ev.workspace_id, parent);
         // Skip parents we have never loaded — nothing visible to update.
         if (!isReadyNode(treeStore.getNode(key))) continue;
         // Force a fresh fetch — the fs-watcher just told us the
@@ -308,13 +309,13 @@ function refreshTreesForChanges(ev: WorkspaceFsChangeEvent): void {
         // windows) would otherwise abort+refetch the same parent N
         // times; coalescing keeps it to one authoritative pull per
         // window.
-        refreshParentDebounced(ev.agent_id, ev.workspace_id, parent);
+        refreshParentDebounced(ev.instance_id, ev.workspace_id, parent);
         scheduled++;
     }
     if (scheduled > 0) {
         log.debug(
             "[WorkspaceFsEvents] scheduled incremental tree refresh",
-            { agent: ev.agent_id, workspace: ev.workspace_id, dirs: scheduled },
+            { agent: ev.instance_id, workspace: ev.workspace_id, dirs: scheduled },
         );
     }
 }
@@ -328,7 +329,7 @@ async function handleEditorConflicts(ev: WorkspaceFsChangeEvent): Promise<void> 
         const file = editor.openFiles.find(
             (f) =>
                 f.kind === "file" &&
-                f.agentId === ev.agent_id &&
+                f.agentId === ev.instance_id &&
                 f.workspaceId === ev.workspace_id &&
                 f.relPath === change.path,
         );
@@ -376,7 +377,7 @@ async function handleEditorConflicts(ev: WorkspaceFsChangeEvent): Promise<void> 
         // ── Dirty file: re-check before prompting. PollWatcher maps
         // Modify(Metadata) (chmod / touch) to "modified" the same as a
         // content write — pure metadata changes must NOT prompt.
-        const meta = await statDiskFile(ev.agent_id, ev.workspace_id, change.path);
+        const meta = await statDiskFile(ev.instance_id, ev.workspace_id, change.path);
         if (!meta) continue; // stat failed (file gone?) — next event decides
         if (meta.modified === file.diskModified && meta.size === file.diskSize) {
             // Pure metadata change — silently adopt the new baseline.

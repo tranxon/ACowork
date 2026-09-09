@@ -65,10 +65,15 @@ import { useAgentStore } from "./agentStore";
 import type { AgentInfo } from "./agentStore";
 
 const AGENT_ID = "com.acowork.architect";
+// ADR-073: the store map is keyed by INSTANCE identity (UUID); the
+// package `agent_id` is display/package identity only.
+const INSTANCE_ID = "b7f0c6c2-4f10-4f5e-9a1e-3d8e9f2a1c33";
+const REMOVED_INSTANCE_ID = "9f1e2d3c-8a7b-4c5d-9e0f-1a2b3c4d5e6f";
 
 function makeMeta(overrides: Partial<AgentInfo>): AgentInfo {
     return {
         agent_id: AGENT_ID,
+        instance_id: INSTANCE_ID,
         name: "Architect",
         version: "1.0.0",
         avatar: null,
@@ -111,7 +116,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
         // (some previous MQTT/agent_status event).
         useAgentStore.setState({
             agents: {
-                [AGENT_ID]: {
+                [INSTANCE_ID]: {
                     meta: makeMeta({ running: true }),
                     profile: {} as never,
                     sessions: [],
@@ -128,7 +133,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
                     sleeping: false,
                 },
             },
-            selectedAgentId: AGENT_ID,
+            selectedAgentId: INSTANCE_ID,
         });
         mockListAgents.mockResolvedValue([
             makeMeta({ running: true, connected: false }),
@@ -136,7 +141,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
 
         await useAgentStore.getState().fetchAgents();
 
-        const storage = useAgentStore.getState().agents[AGENT_ID];
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.online).toBe(true);
         expect(storage.sleeping).toBe(false);
     });
@@ -147,7 +152,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
         // it connected, so the desktop must NOT render it as offline.
         useAgentStore.setState({
             agents: {
-                [AGENT_ID]: {
+                [INSTANCE_ID]: {
                     meta: makeMeta({ running: false }),
                     profile: {} as never,
                     sessions: [],
@@ -164,7 +169,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
                     sleeping: false,
                 },
             },
-            selectedAgentId: AGENT_ID,
+            selectedAgentId: INSTANCE_ID,
         });
         mockListAgents.mockResolvedValue([
             makeMeta({ running: false, connected: true }),
@@ -172,7 +177,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
 
         await useAgentStore.getState().fetchAgents();
 
-        const storage = useAgentStore.getState().agents[AGENT_ID];
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.online).toBe(true);
         expect(storage.sleeping).toBe(false);
         expect(storage.meta.running).toBe(false);
@@ -186,7 +191,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
         // showing the input after the Runtime actually died.
         useAgentStore.setState({
             agents: {
-                [AGENT_ID]: {
+                [INSTANCE_ID]: {
                     meta: makeMeta({ running: true }),
                     profile: {} as never,
                     sessions: [],
@@ -203,7 +208,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
                     sleeping: false,
                 },
             },
-            selectedAgentId: AGENT_ID,
+            selectedAgentId: INSTANCE_ID,
         });
         mockListAgents.mockResolvedValue([
             makeMeta({ running: false, connected: false }),
@@ -211,7 +216,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
 
         await useAgentStore.getState().fetchAgents();
 
-        const storage = useAgentStore.getState().agents[AGENT_ID];
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.online).toBe(false);
         expect(storage.sleeping).toBe(false);
     });
@@ -225,7 +230,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
         // MQTT-online or HTTP-alive signal arrives.
         useAgentStore.setState({
             agents: {
-                [AGENT_ID]: {
+                [INSTANCE_ID]: {
                     meta: makeMeta({ running: false }),
                     profile: {} as never,
                     sessions: [],
@@ -242,7 +247,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
                     sleeping: false,
                 },
             },
-            selectedAgentId: AGENT_ID,
+            selectedAgentId: INSTANCE_ID,
         });
         mockListAgents.mockResolvedValue([
             makeMeta({ running: true, connected: true }),
@@ -250,7 +255,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
 
         await useAgentStore.getState().fetchAgents();
 
-        const storage = useAgentStore.getState().agents[AGENT_ID];
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
         // fetchAgents keeps `existing.online` when alive — so the offline
         // state stays preserved (not flipped back to online without an
         // explicit MQTT/HTTP revival).
@@ -264,7 +269,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
         // reports both signals gone, BOTH must reset.
         useAgentStore.setState({
             agents: {
-                [AGENT_ID]: {
+                [INSTANCE_ID]: {
                     meta: makeMeta({ running: false }),
                     profile: {} as never,
                     sessions: [],
@@ -281,7 +286,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
                     sleeping: true,
                 },
             },
-            selectedAgentId: AGENT_ID,
+            selectedAgentId: INSTANCE_ID,
         });
         mockListAgents.mockResolvedValue([
             makeMeta({ running: false, connected: false }),
@@ -289,7 +294,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
 
         await useAgentStore.getState().fetchAgents();
 
-        const storage = useAgentStore.getState().agents[AGENT_ID];
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.online).toBe(false);
         expect(storage.sleeping).toBe(false);
     });
@@ -304,7 +309,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
 
         await useAgentStore.getState().fetchAgents();
 
-        const storage = useAgentStore.getState().agents[AGENT_ID];
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage).toBeDefined();
         expect(storage.online).toBe(true);
         expect(storage.sleeping).toBe(false);
@@ -314,7 +319,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
     it("removes agents that are no longer in the Gateway's list", async () => {
         useAgentStore.setState({
             agents: {
-                [AGENT_ID]: {
+                [INSTANCE_ID]: {
                     meta: makeMeta({ running: true }),
                     profile: {} as never,
                     sessions: [],
@@ -350,7 +355,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
                     sleeping: false,
                 },
             },
-            selectedAgentId: AGENT_ID,
+            selectedAgentId: INSTANCE_ID,
         });
         // Gateway only reports the architect agent now.
         mockListAgents.mockResolvedValue([
@@ -360,7 +365,7 @@ describe("fetchAgents — distributed liveness (`running || connected`)", () => 
         await useAgentStore.getState().fetchAgents();
 
         const agents = useAgentStore.getState().agents;
-        expect(agents[AGENT_ID]).toBeDefined();
-        expect(agents["com.acowork.removed"]).toBeUndefined();
+        expect(agents[INSTANCE_ID]).toBeDefined();
+        expect(agents[REMOVED_INSTANCE_ID]).toBeUndefined();
     });
 });

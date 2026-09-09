@@ -37,6 +37,8 @@ export interface HealthResponse {
 /** Agent list entry — matches Gateway HTTP API GET /api/agents */
 export interface AgentListResponse {
   agent_id: string;
+  /** ADR-073: instance identity (UUID) — canonical addressing key. */
+  instance_id: string;
   name: string;
   display_name: string | null;
   role: string | null;
@@ -1009,7 +1011,7 @@ export interface SkillExecutionHistoryResponse {
 export interface ToolApprovalNeededEvent {
   type: "tool_approval_needed";
   request_id: string;
-  agent_id: string;
+  /** ADR-073: identity lives in the event envelope's `instance_id` (store key), never here. */
   tool_name: string;
   risk_level: "Low" | "Medium" | "High";
   /** Session ID that originated this approval (used for multi-session routing) */
@@ -2012,7 +2014,8 @@ export interface CloudEmbeddingProviderResponse {
 
 /** Migration progress for a single agent — matches GET /api/embedding-models/migration-progress */
 export interface AgentMigrationProgress {
-  agent_id: string;
+  /** ADR-073: instance identity (UUID). */
+  instance_id: string;
   request_id: string;
   target_model_id: string;
   target_dimension: number;
@@ -2034,7 +2037,8 @@ export interface MigrationProgressResponse {
 
 /** Agent entry returned in migration-required response */
 export interface MigrationAgentEntry {
-  agent_id: string;
+  /** ADR-073: instance identity (UUID) — canonical addressing key. */
+  instance_id: string;
   name: string;
   is_running: boolean;
   has_active_sessions: boolean;

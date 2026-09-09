@@ -232,7 +232,7 @@ describe("ADR-047: openSession includes loadSession call", () => {
 
     // Simulate the openSession internal calls
     await mockInvoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "open_session",
       payloadJson: { session_id: sessionId },
     });

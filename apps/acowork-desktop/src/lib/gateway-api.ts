@@ -341,16 +341,16 @@ export async function testEmbeddingModel(
   return resp.json();
 }
 
-/** Start embedding dimension migration for agents */
+/** Start embedding dimension migration for agents (ADR-073: instance-scoped) */
 export async function startMigration(
   modelId: string,
-  agentIds: string[],
+  instanceIds: string[],
   gatewayUrl = getGatewayUrl(),
 ): Promise<EmbeddingModelActionResponse> {
   const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}/start-migration`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent_ids: agentIds }),
+    body: JSON.stringify({ instance_ids: instanceIds }),
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error((data as EmbeddingModelActionResponse).message ?? `Migration start failed: ${resp.status}`);

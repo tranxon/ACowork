@@ -170,7 +170,7 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
       const progress: Record<string, AgentMigrationProgress> = {};
       let anyInProgress = false;
       for (const agent of resp.agents) {
-        progress[agent.agent_id] = agent;
+        progress[agent.instance_id] = agent;
         if (!agent.done && !agent.error) anyInProgress = true;
       }
       set({ migrationProgress: progress });

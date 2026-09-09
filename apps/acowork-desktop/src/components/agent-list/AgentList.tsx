@@ -405,7 +405,11 @@ export function AgentList({ width }: AgentListProps) {
       onClick: () => {
         if (!contextAgent) return;
         setCloneSource({
-          agentId: contextAgent.agent_id,
+          // ADR-073: clone source is instance-scoped — the Gateway route
+          // resolves through the installed table, so use the row's instance
+          // key (aid) and never the package `agent_id` (ambiguous in
+          // multi-instance deployments).
+          agentId: aid,
           agentName: contextAgent.display_name ?? contextAgent.name,
         });
       },
@@ -417,7 +421,9 @@ export function AgentList({ width }: AgentListProps) {
       onClick: () => {
         if (!contextAgent) return;
         setPublishTarget({
-          agentId: contextAgent.agent_id,
+          // ADR-073: publish prepare/execute and avatar upload are
+          // instance-scoped routes — use the row's instance key (aid).
+          agentId: aid,
           agentName: contextAgent.display_name ?? contextAgent.name,
         });
       },
@@ -790,7 +796,13 @@ export function AgentList({ width }: AgentListProps) {
           setCloneSource(null);
           addToast({ type: "success", message: t("agentList.agentCloned", { agentId: result.agent_id }) });
           void fetchAgents().then(() => {
-            selectAgent(result.agent_id);
+            // ADR-073: select by INSTANCE identity — the clone response
+            // carries the new package id, so match the freshly installed
+            // row through the manifest agent_id and select its instance key.
+            const entry = Object.entries(useAgentStore.getState().agents).find(
+              ([, s]) => s.meta.agent_id === result.agent_id,
+            );
+            if (entry) selectAgent(entry[0]);
           });
         }}
         onClose={() => setCloneSource(null)}

@@ -1593,12 +1593,14 @@ export function ChatPanel() {
 
   // Tool approval: send decision via MQTT, then clear inline state
   const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
-    const agentId = String(approval.agent_id ?? selectedAgentId ?? "");
+    // ADR-073: the approval event carries no `agent_id` — identity is the
+    // instance key from the connection context (`selectedAgentId`).
+    const instanceId = String(selectedAgentId ?? "");
     const requestId = String(approval.request_id ?? "");
     const sessionId = approval.session_id;
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId,
         command: "approval_decision",
         payloadJson: {
           session_id: sessionId ?? "",
@@ -1622,11 +1624,11 @@ export function ChatPanel() {
   // Ask question answer: send answer via MQTT, then clear the answered question from the queue
   const handleQuestionAnswer = async (requestId: string, answer: string) => {
     if (!selectedAgentId) return;
-    const agentId = String(selectedAgentId);
+    const instanceId = String(selectedAgentId);
     const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId,
         command: "question_answer",
         payloadJson: {
           session_id: sessionId ?? "",
@@ -1638,7 +1640,7 @@ export function ChatPanel() {
       log.error("[ChatPanel] Failed to send question answer:", err);
     }
     // Clear the answered question from the queue by requestId
-    useChatStore.getState().resolveQuestion(agentId, requestId);
+    useChatStore.getState().resolveQuestion(selectedAgentId, requestId);
   };
 
   // Auto-send queued messages when agent finishes execution
@@ -1686,7 +1688,10 @@ export function ChatPanel() {
           <Tooltip content={t("chatPanel.startAgent")} variant="plain">
             <button
               onClick={async () => {
-                await startAgentAndSyncUI(selectedAgent.agent_id);
+                // ADR-073: start is instance-scoped — use the instance key,
+                // not the package `agent_id` (ambiguous in multi-instance).
+                if (!selectedAgentId) return;
+                await startAgentAndSyncUI(selectedAgentId);
               }}
               className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
             >

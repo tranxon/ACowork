@@ -826,7 +826,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       if (lastActiveWs) body.workspace_id = lastActiveWs;
 
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "create_session",
         payloadJson: body,
       });
@@ -884,7 +884,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // session). Still tell the backend to release its task.
         try {
           await invoke("mqtt_publish_control", {
-            agentId,
+            instanceId: agentId,
             command: "close_session",
             payloadJson: { session_id: sessionId },
           });
@@ -912,7 +912,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   deleteSession: async (agentId: string, sessionId: string) => {
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "delete_session",
         payloadJson: { session_id: sessionId },
       });
@@ -978,7 +978,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "update_session_title",
         payloadJson: { session_id: sessionId, title },
       });

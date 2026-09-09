@@ -346,13 +346,13 @@ impl DesktopMqttClient {
     /// - `control/stop` — stop current generation
     pub async fn publish_control(
         &self,
-        agent_id: &str,
+        instance_id: &str,
         command: &str,
         payload: &[u8],
     ) -> Result<(), String> {
         let topic = format!(
             "acowork/agents/{}/sessions/control/{}",
-            agent_id, command
+            instance_id, command
         );
         self.inner
             .publish_raw(&topic, payload.to_vec(), QoS::AtLeastOnce, false)
@@ -367,7 +367,7 @@ impl DesktopMqttClient {
     /// Protobuf `DataEnvelope` encoding for wire compatibility.
     pub async fn publish_control_protobuf(
         &self,
-        agent_id: &str,
+        instance_id: &str,
         control_command: ControlCommand,
     ) -> Result<(), String> {
         let envelope = DataEnvelope {
@@ -406,7 +406,7 @@ impl DesktopMqttClient {
             _ => "chat_message",
         };
 
-        self.publish_control(agent_id, command, &payload).await
+        self.publish_control(instance_id, command, &payload).await
     }
 
     /// Force a soft-restart of the MQTT event loop (deterministic

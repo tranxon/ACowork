@@ -372,7 +372,7 @@ function GatewayTab() {
           ) : (
             <ListBox variant="plain">
               {agents.map((agent) => (
-                <RuntimeRow key={agent.agent_id} agent={agent} />
+                <RuntimeRow key={agent.instance_id} agent={agent} />
               ))}
             </ListBox>
           )}
@@ -389,7 +389,9 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${getGatewayUrl()}/api/agents/${agent.agent_id}/model`)
+    // ADR-073: `/api/agents/{id}` addresses the INSTANCE — using the
+    // package `agent_id` would misroute in multi-instance deployments.
+    fetch(`${getGatewayUrl()}/api/agents/${agent.instance_id}/model`)
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!cancelled && data) {
@@ -398,7 +400,7 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
       })
       .catch(() => { });
     return () => { cancelled = true; };
-  }, [agent.agent_id]);
+  }, [agent.instance_id]);
 
   return (
     <ListRow

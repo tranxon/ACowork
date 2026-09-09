@@ -100,7 +100,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         // MQTT signal is authoritative when it says alive; we don't burn
         // an HTTP round-trip per status tick.
         handleMessageEvent(
-            { type: "agent_status", agent_id: AGENT, online: true },
+            { type: "agent_status", instance_id: AGENT, online: true },
             useChatStore.setState,
             useChatStore.getState,
             AGENT,
@@ -124,7 +124,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         mockVerifyAgentHealth.mockResolvedValue(true);
 
         handleMessageEvent(
-            { type: "agent_status", agent_id: AGENT, online: false },
+            { type: "agent_status", instance_id: AGENT, online: false },
             useChatStore.setState,
             useChatStore.getState,
             AGENT,
@@ -160,7 +160,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         mockVerifyAgentHealth.mockResolvedValue(false);
 
         handleMessageEvent(
-            { type: "agent_status", agent_id: AGENT, online: false },
+            { type: "agent_status", instance_id: AGENT, online: false },
             useChatStore.setState,
             useChatStore.getState,
             AGENT,
@@ -185,7 +185,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
 
         expect(() => {
             handleMessageEvent(
-                { type: "agent_status", agent_id: AGENT, online: false },
+                { type: "agent_status", instance_id: AGENT, online: false },
                 useChatStore.setState,
                 useChatStore.getState,
                 AGENT,
@@ -211,7 +211,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         handleMessageEvent(
             {
                 type: "agent_status",
-                agent_id: AGENT,
+                instance_id: AGENT,
                 online: false,
                 sleeping: true,
             },
@@ -246,7 +246,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         // Older protobuf branches may not include `sleeping` at all.
         // The handler must not crash on `undefined`.
         handleMessageEvent(
-            { type: "agent_status", agent_id: AGENT, online: false },
+            { type: "agent_status", instance_id: AGENT, online: false },
             useChatStore.setState,
             useChatStore.getState,
             AGENT,
@@ -255,7 +255,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledWith(AGENT, false, false);
     });
 
-    it("ignores malformed events without an agent_id", () => {
+    it("ignores malformed events without an instance_id", () => {
         handleMessageEvent(
             { type: "agent_status", online: false },
             useChatStore.setState,
@@ -263,14 +263,14 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
             AGENT,
         );
 
-        // No agent_id → no update, no probe.
+        // No instance_id → no update, no probe.
         expect(mockUpdateAgentOnlineStatus).not.toHaveBeenCalled();
         expect(mockVerifyAgentHealth).not.toHaveBeenCalled();
     });
 
     it("ignores events without a defined online flag", () => {
         handleMessageEvent(
-            { type: "agent_status", agent_id: AGENT },
+            { type: "agent_status", instance_id: AGENT },
             useChatStore.setState,
             useChatStore.getState,
             AGENT,

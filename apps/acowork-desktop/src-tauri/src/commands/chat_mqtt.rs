@@ -110,7 +110,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             if let Some(parsed) = parse_plaintext_agent_status(&msg.topic, &msg.payload) {
                 let event = serde_json::json!({
                     "type": "agent_status",
-                    "agent_id": parsed.agent_id,
+                    "instance_id": parsed.instance_id,
                     "online": parsed.online,
                     "sleeping": parsed.sleeping,
                 });
@@ -160,13 +160,21 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             Err(_) => return, // Not protobuf — ignore
         };
 
+        // ADR-073: the topic path variable under `acowork/agents/` is the
+        // INSTANCE identity — the canonical addressing key. Session-scoped
+        // envelopes carry only the package `agent_id` in their payload, so
+        // the addressing key must be derived from the topic, never from
+        // `sm.agent_id` / `created.agent_id` / ... (package identity is a
+        // category attribute with display value only).
+        let topic_instance_id = extract_instance_id_from_topic(&msg.topic).unwrap_or_default();
+
         let Some(payload) = &envelope.payload else { return };
 
         match payload {
             // ── Session message events (streaming) ──
             data_envelope::Payload::SessionMessage(sm) => {
                 if let Some(event) = &sm.event
-                    && let Some(flat) = session_message_to_flat(sm.agent_id.as_str(), sm.session_id.as_str(), event)
+                    && let Some(flat) = session_message_to_flat(&topic_instance_id, sm.session_id.as_str(), event)
                 {
                     let _ = app_handle.emit("agent-event", flat);
                 }
@@ -176,13 +184,13 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             data_envelope::Payload::SessionCreated(created) => {
                 let event = serde_json::json!({
                     "type": "session_created",
-                    "agent_id": created.agent_id,
+                    "instance_id": topic_instance_id,
                     "session_id": created.session_id,
                     "title": created.title,
                     "created_at": created.created_at,
                 });
                 tracing::info!(
-                    agent_id = %created.agent_id,
+                    instance_id = %topic_instance_id,
                     session_id = %created.session_id,
                     title = %created.title,
                     "DESKTOP: emitting session_created agent-event"
@@ -192,12 +200,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             data_envelope::Payload::SessionDeleted(deleted) => {
                 let event = serde_json::json!({
                     "type": "session_deleted",
-                    "agent_id": deleted.agent_id,
+                    "instance_id": topic_instance_id,
                     "session_id": deleted.session_id,
                     "deleted_at": deleted.deleted_at,
                 });
                 tracing::info!(
-                    agent_id = %deleted.agent_id,
+                    instance_id = %topic_instance_id,
                     session_id = %deleted.session_id,
                     "DESKTOP: emitting session_deleted agent-event"
                 );
@@ -216,17 +224,15 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             //
             // SessionOpened / SessionNotOpened proto messages do not
             // carry `agent_id` (it's encoded in the topic path
-            // `acowork/agents/{id}/sessions/{sid}/opened` /
+            // `acowork/agents/{instance_id}/sessions/{sid}/opened` /
             // `…/not_opened`); we parse it out of the topic so the
-            // flat-JSON payload stays self-describing for the Desktop,
-            // matching the shape of `session_created` / `session_meta`
-            // siblings that DO include `agent_id` inline.
+            // flat-JSON payload stays self-describing for the Desktop.
             data_envelope::Payload::SessionOpened(opened) => {
-                let agent_id = extract_agent_id_from_topic(&msg.topic)
+                let instance_id = extract_instance_id_from_topic(&msg.topic)
                     .unwrap_or_default();
                 let event = serde_json::json!({
                     "type": "session_opened",
-                    "agent_id": agent_id,
+                    "instance_id": instance_id,
                     "session_id": opened.session_id,
                     "status": opened.status,
                     "model": opened.model,
@@ -236,11 +242,11 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("agent-event", event);
             }
             data_envelope::Payload::SessionNotOpened(not_opened) => {
-                let agent_id = extract_agent_id_from_topic(&msg.topic)
+                let instance_id = extract_instance_id_from_topic(&msg.topic)
                     .unwrap_or_default();
                 let event = serde_json::json!({
                     "type": "session_not_opened",
-                    "agent_id": agent_id,
+                    "instance_id": instance_id,
                     "session_id": not_opened.session_id,
                     "attempted_command": not_opened.attempted_command,
                     "reason": not_opened.reason,
@@ -258,7 +264,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 );
                 let event = serde_json::json!({
                     "type": "session_config",
-                    "agent_id": config.agent_id,
+                    "instance_id": topic_instance_id,
                     "session_id": config.session_id,
                     "title": config.title,
                     "provider_id": config.provider_id,
@@ -272,7 +278,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "llm_availability": config.llm_availability as i32,
                 });
                 tracing::info!(
-                    agent_id = %config.agent_id,
+                    instance_id = %topic_instance_id,
                     session_id = %config.session_id,
                     model_id = %config.model_id,
                     provider_id = %config.provider_id,
@@ -286,7 +292,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             data_envelope::Payload::SessionState(state) => {
                 let event = serde_json::json!({
                     "type": "session_state",
-                    "agent_id": state.agent_id,
+                    "instance_id": topic_instance_id,
                     "session_id": state.session_id,
                     "message_count": state.message_count,
                     "input_tokens": state.input_tokens,
@@ -311,7 +317,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     }
                 }
                 tracing::info!(
-                    agent_id = %state.agent_id,
+                    instance_id = %topic_instance_id,
                     session_id = %state.session_id,
                     message_count = state.message_count,
                     "DESKTOP: emitting session_state agent-event"
@@ -327,7 +333,14 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 // one code path.
                 let event = serde_json::json!({
                     "type": "agent_status",
-                    "agent_id": status.agent_id,
+                    // ADR-073: the envelope carries `instance_id` on the
+                    // wire (field 4); fall back to the topic path for
+                    // legacy envelopes that predate the field.
+                    "instance_id": if status.instance_id.is_empty() {
+                        topic_instance_id.clone()
+                    } else {
+                        status.instance_id.clone()
+                    },
                     "online": status.online,
                     "sleeping": status.sleeping,
                 });
@@ -336,7 +349,11 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             data_envelope::Payload::AgentMeta(meta) => {
                 let event = serde_json::json!({
                     "type": "agent_meta",
-                    "agent_id": meta.agent_id,
+                    "instance_id": if meta.instance_id.is_empty() {
+                        topic_instance_id.clone()
+                    } else {
+                        meta.instance_id.clone()
+                    },
                     "name": meta.name,
                     "version": meta.version,
                     "avatar": meta.avatar,
@@ -347,7 +364,11 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             data_envelope::Payload::AgentConfig(config) => {
                 let event = serde_json::json!({
                     "type": "agent_config",
-                    "agent_id": config.agent_id,
+                    "instance_id": if config.instance_id.is_empty() {
+                        topic_instance_id.clone()
+                    } else {
+                        config.instance_id.clone()
+                    },
                     "config_json": config.config_json,
                 });
                 let _ = app_handle.emit("agent-event", event);
@@ -368,7 +389,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             data_envelope::Payload::MemoryNodeUpdate(update) => {
                 let event = serde_json::json!({
                     "type": "memory_node_update",
-                    "agent_id": update.agent_id,
+                    "instance_id": topic_instance_id,
                     "node_id": update.node_id,
                     "node_json": update.node_json,
                 });
@@ -389,10 +410,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             // debug types. Payload `type` mirrors the MQTT topic suffix so
             // the frontend dispatch table stays 1:1 with the wire topics.
             data_envelope::Payload::DebugStepEvent(ev) => {
-                let agent_id = extract_agent_id_from_topic(&msg.topic).unwrap_or_default();
+                let instance_id = extract_instance_id_from_topic(&msg.topic).unwrap_or_default();
                 let event = serde_json::json!({
                     "type": "onStep",
-                    "agent_id": agent_id,
+                    "instance_id": instance_id,
                     "session_id": ev.session_id,
                     "iteration": ev.iteration,
                     "phase": ev.phase,
@@ -403,7 +424,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("debug-event", event);
             }
             data_envelope::Payload::DebugContextBuiltEvent(ev) => {
-                let agent_id = extract_agent_id_from_topic(&msg.topic).unwrap_or_default();
+                let instance_id = extract_instance_id_from_topic(&msg.topic).unwrap_or_default();
                 // sections: proto map<string, SectionMeta> -> flat JSON
                 // object keyed by section name (system_prompt, ...). The
                 // frontend ContextSnapshotMeta consumes it as a plain
@@ -424,7 +445,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     .collect();
                 let event = serde_json::json!({
                     "type": "onContextBuilt",
-                    "agent_id": agent_id,
+                    "instance_id": instance_id,
                     "session_id": ev.session_id,
                     "iteration": ev.iteration,
                     "total_token_estimate": ev.total_token_estimate,
@@ -442,7 +463,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("debug-event", event);
             }
             data_envelope::Payload::DebugStateChangeEvent(ev) => {
-                let agent_id = extract_agent_id_from_topic(&msg.topic).unwrap_or_default();
+                let instance_id = extract_instance_id_from_topic(&msg.topic).unwrap_or_default();
                 // `new_state` carries either a DebugState ("Running" /
                 // "Paused" / "Stepping" / "Stopped") or a DebugPhase name
                 // ("LlmCall", ...) - the Runtime maps both legacy event
@@ -450,7 +471,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 // value (see debugStore `_handleDebugEvent`).
                 let event = serde_json::json!({
                     "type": "onStateChange",
-                    "agent_id": agent_id,
+                    "instance_id": instance_id,
                     "session_id": ev.session_id,
                     "new_state": ev.new_state,
                     "iteration": ev.iteration,
@@ -480,7 +501,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     })
                     .collect();
                 let event = serde_json::json!({
-                    "agent_id": ev.agent_id,
+                    // ADR-073: the topic path carries the instance identity;
+                    // the payload `agent_id` is package metadata (display only)
+                    // and must not be used for store addressing.
+                    "instance_id": topic_instance_id,
                     "workspace_id": ev.workspace_id,
                     "changes": changes,
                     "window_end_ms": ev.window_end_ms,
@@ -640,7 +664,7 @@ pub async fn get_mqtt_status(
 /// - "compress_action": { "session_id", "compress_type" }
 #[tauri::command]
 pub async fn mqtt_publish_control(
-    agent_id: String,
+    instance_id: String,
     command: String,
     payload_json: serde_json::Value,
     state: tauri::State<'_, AppState>,
@@ -653,24 +677,28 @@ pub async fn mqtt_publish_control(
     let client = client.lock().await;
 
     tracing::info!(
-        agent_id = %agent_id,
+        instance_id = %instance_id,
         command = %command,
         "mqtt_publish_control: publishing control command"
     );
 
     // Build ControlCommand protobuf from the JSON payload.
-    let control = build_control_command(&agent_id, &command, &payload_json)?;
+    let control = build_control_command(&instance_id, &command, &payload_json)?;
 
-    client.publish_control_protobuf(&agent_id, control).await
+    client.publish_control_protobuf(&instance_id, control).await
 }
 
 /// Build a `ControlCommand` protobuf from a JSON payload and command type.
 ///
 /// Maps frontend JSON → protobuf per ADR-034 §3.2 / `docs/zh/protocols/mqtt.md` §9.1.
-/// ADR-034 Phase 5: all sub-command `agent_id` fields removed (now only in ControlCommand top level);
-/// 8 new commands added; "message" renamed to "chat_message" with params_json.
+/// ADR-034 Phase 5: all sub-command `agent_id` fields removed (now only in
+/// ControlCommand top level); 8 new commands added; "message" renamed to
+/// "chat_message" with params_json.
+///
+/// ADR-073: the identity param is the INSTANCE id (matches the control
+/// topic); the proto's `instance_id` field mirrors it on the wire.
 fn build_control_command(
-    agent_id: &str,
+    instance_id: &str,
     command: &str,
     json: &serde_json::Value,
 ) -> Result<ControlCommand, String> {
@@ -847,7 +875,7 @@ fn build_control_command(
                 .unwrap_or("")
                 .to_string();
             tracing::info!(
-                agent_id = %agent_id,
+                instance_id = %instance_id,
                 session_id = %session_id,
                 model_id = %model_id,
                 provider_id = %provider_id,
@@ -908,7 +936,7 @@ fn build_control_command(
     };
 
     Ok(ControlCommand {
-        agent_id: agent_id.to_string(),
+        instance_id: instance_id.to_string(),
         command: Some(cmd),
     })
 }
@@ -987,13 +1015,18 @@ mod adr058_tests {
 
 /// Convert a `session_message::Event` protobuf oneof to flat JSON
 /// matching the old WebSocket event format that `handleMessageEvent` expects.
+///
+/// ADR-073: `instance_id` is the canonical addressing key (derived by the
+/// caller from the MQTT topic path). The envelope's package `agent_id` is
+/// deliberately NOT used here — it is a category attribute with display
+/// value only and would key the frontend stores wrongly.
 fn session_message_to_flat(
-    agent_id: &str,
+    instance_id: &str,
     session_id: &str,
     event: &session_message::Event,
 ) -> Option<serde_json::Value> {
     let base = serde_json::json!({
-        "agent_id": agent_id,
+        "instance_id": instance_id,
         "session_id": session_id,
     });
 
@@ -1266,25 +1299,27 @@ fn base64_encode(data: &[u8]) -> String {
     result
 }
 
-/// Extract the `agent_id` segment from a session-scoped MQTT topic.
+/// Extract the INSTANCE identity segment from a session-scoped MQTT topic.
 ///
-/// All session topics share the prefix `acowork/agents/{id}/sessions/{sid}/...`.
+/// ADR-073: the path variable under `acowork/agents/` is the instance id
+/// (UUID v4) — the canonical addressing key. All session topics share the
+/// prefix `acowork/agents/{instance_id}/sessions/{sid}/...`.
 /// Returns `None` for topics that don't match this shape (which should
 /// only happen on malformed/misconfigured topics).
-fn extract_agent_id_from_topic(topic: &str) -> Option<String> {
+fn extract_instance_id_from_topic(topic: &str) -> Option<String> {
     let parts: Vec<&str> = topic.split('/').collect();
     // acowork / agents / {id} / sessions / ...  (>=3rd segment, 0-indexed)
     if parts.len() >= 3 && parts[0] == "acowork" && parts[1] == "agents" {
-        let agent_id = parts[2];
-        if !agent_id.is_empty() {
-            return Some(agent_id.to_string());
+        let instance_id = parts[2];
+        if !instance_id.is_empty() {
+            return Some(instance_id.to_string());
         }
     }
     None
 }
 
 /// Parse the plain-text agent status payload published by the Runtime
-/// on `acowork/agents/{id}/status` (retained message).
+/// on `acowork/agents/{instance_id}/status` (retained message).
 ///
 /// Returns:
 /// - `Some(...)` when the topic matches the status shape and the
@@ -1301,7 +1336,7 @@ fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAge
     if !topic.starts_with("acowork/agents/") || !topic.ends_with("/status") {
         return None;
     }
-    let agent_id = extract_agent_id_from_topic(topic)?;
+    let instance_id = extract_instance_id_from_topic(topic)?;
     // Distinguish "binary payload from the Gateway's DataEnvelope
     // re-publish" (silent fall-through) from "UTF-8 payload with an
     // unknown status string" (warn — likely a protocol drift). Using
@@ -1312,9 +1347,9 @@ fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAge
         return None;
     };
     match payload_str.trim() {
-        "online" => Some(ParsedAgentStatus { agent_id, online: true, sleeping: false }),
-        "sleeping" => Some(ParsedAgentStatus { agent_id, online: true, sleeping: true }),
-        "offline" => Some(ParsedAgentStatus { agent_id, online: false, sleeping: false }),
+        "online" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: false }),
+        "sleeping" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: true }),
+        "offline" => Some(ParsedAgentStatus { instance_id, online: false, sleeping: false }),
         unknown => {
             tracing::warn!(
                 topic = %topic,
@@ -1328,7 +1363,7 @@ fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAge
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedAgentStatus {
-    agent_id: String,
+    instance_id: String,
     online: bool,
     sleeping: bool,
 }
@@ -1338,26 +1373,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_agent_id_from_opened_topic() {
+    fn extract_instance_id_from_opened_topic() {
         assert_eq!(
-            extract_agent_id_from_topic("acowork/agents/com.acowork.pm/sessions/sess-1/opened"),
+            extract_instance_id_from_topic("acowork/agents/com.acowork.pm/sessions/sess-1/opened"),
             Some("com.acowork.pm".to_string())
         );
     }
 
     #[test]
-    fn extract_agent_id_from_not_opened_topic() {
+    fn extract_instance_id_from_not_opened_topic() {
         assert_eq!(
-            extract_agent_id_from_topic("acowork/agents/agent_x/sessions/sess-9/not_opened"),
+            extract_instance_id_from_topic("acowork/agents/agent_x/sessions/sess-9/not_opened"),
             Some("agent_x".to_string())
         );
     }
 
     #[test]
-    fn extract_agent_id_missing_returns_none() {
-        assert_eq!(extract_agent_id_from_topic(""), None);
-        assert_eq!(extract_agent_id_from_topic("not/the/expected/topic"), None);
-        assert_eq!(extract_agent_id_from_topic("acowork/agents//sessions/x/opened"), None);
+    fn extract_instance_id_missing_returns_none() {
+        assert_eq!(extract_instance_id_from_topic(""), None);
+        assert_eq!(extract_instance_id_from_topic("not/the/expected/topic"), None);
+        assert_eq!(extract_instance_id_from_topic("acowork/agents//sessions/x/opened"), None);
     }
 
     /// Regression test: plain-text "sleeping" payload must surface as
@@ -1373,7 +1408,7 @@ mod tests {
             b"sleeping",
         )
         .expect("known status payload must parse");
-        assert_eq!(p.agent_id, "com.acowork.senior-engineer");
+        assert_eq!(p.instance_id, "com.acowork.senior-engineer");
         assert!(p.online);
         assert!(p.sleeping);
     }
@@ -1385,7 +1420,7 @@ mod tests {
             b"online",
         )
         .unwrap();
-        assert_eq!(p.agent_id, "com.example.weather");
+        assert_eq!(p.instance_id, "com.example.weather");
         assert!(p.online);
         assert!(!p.sleeping);
     }
@@ -1397,7 +1432,7 @@ mod tests {
             b"offline",
         )
         .unwrap();
-        assert_eq!(p.agent_id, "com.example.weather");
+        assert_eq!(p.instance_id, "com.example.weather");
         assert!(!p.online);
         assert!(!p.sleeping);
     }

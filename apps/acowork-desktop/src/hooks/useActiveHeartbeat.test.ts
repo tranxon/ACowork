@@ -55,14 +55,14 @@ afterEach(() => {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-function getHeartbeatCalls(): Array<{ agentId: string; command: string; payloadJson: unknown }> {
+function getHeartbeatCalls(): Array<{ instanceId: string; command: string; payloadJson: unknown }> {
   // Walk the raw mock.calls directly so we never lose positional
   // alignment between the filtered command name and its argument
   // object (an earlier version of this helper re-indexed after a
   // .filter and produced silently wrong tuples).
   return invokeMock.mock.calls
     .filter((c) => c[0] === "mqtt_publish_control")
-    .map((c) => c[1] as { agentId: string; command: string; payloadJson: unknown });
+    .map((c) => c[1] as { instanceId: string; command: string; payloadJson: unknown });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ describe("useActiveHeartbeat", () => {
 
     // One immediate pulse; the interval has not fired yet.
     expect(getHeartbeatCalls()).toEqual([
-      { agentId: "com.acowork.test", command: "active_heartbeat", payloadJson: {} },
+      { instanceId: "com.acowork.test", command: "active_heartbeat", payloadJson: {} },
     ]);
   });
 
@@ -138,7 +138,7 @@ describe("useActiveHeartbeat", () => {
 
     // Initial pulse for agent-a.
     expect(getHeartbeatCalls()).toEqual([
-      { agentId: "agent-a", command: "active_heartbeat", payloadJson: {} },
+      { instanceId: "agent-a", command: "active_heartbeat", payloadJson: {} },
     ]);
 
     // Switch to agent-b — React re-runs the effect; old interval
@@ -149,7 +149,7 @@ describe("useActiveHeartbeat", () => {
     const calls = getHeartbeatCalls();
     expect(calls.length).toBe(2);
     expect(calls[1]).toEqual({
-      agentId: "agent-b",
+      instanceId: "agent-b",
       command: "active_heartbeat",
       payloadJson: {},
     });
@@ -169,7 +169,7 @@ describe("useActiveHeartbeat", () => {
     // mount must be for agent-b. The agent-a interval must not
     // still be running.
     const callsAfterSwitch = finalCalls.slice(1);
-    expect(callsAfterSwitch.every((c) => c.agentId === "agent-b")).toBe(true);
+    expect(callsAfterSwitch.every((c) => c.instanceId === "agent-b")).toBe(true);
   });
 
   it("transitions to no-op when agentId changes to null", () => {
@@ -215,7 +215,7 @@ describe("useActiveHeartbeatForSelection", () => {
     renderHook(() => useActiveHeartbeatForSelection());
 
     expect(getHeartbeatCalls()).toEqual([
-      { agentId: "com.acowork.system", command: "active_heartbeat", payloadJson: {} },
+      { instanceId: "com.acowork.system", command: "active_heartbeat", payloadJson: {} },
     ]);
   });
 
