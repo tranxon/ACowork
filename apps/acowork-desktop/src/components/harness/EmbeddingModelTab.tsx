@@ -231,7 +231,7 @@ export function EmbeddingModelTab() {
                 if ("agents" in result && result.status === "migration_required") {
                     // Dimension changed — show migration agent list
                     setMigrationResponse(result);
-                    setMigrationAgentIds(new Set(result.agents.filter(a => a.is_running).map(a => a.agent_id)));
+                    setMigrationAgentIds(new Set(result.agents.filter(a => a.is_running).map(a => a.instance_id)));
                     setSelectingId(null);
                     await loadModels();
                     return;
@@ -269,8 +269,8 @@ export function EmbeddingModelTab() {
         setMigrationStarting(true);
         setError(null);
         try {
-            const agentIds = Array.from(migrationAgentIds);
-            await startMigration(modelId, agentIds);
+            const instanceIds = Array.from(migrationAgentIds);
+            await startMigration(modelId, instanceIds);
             setMigrationStarted(true);
             // Start polling migration progress
             if (migrationPollingRef.current) clearInterval(migrationPollingRef.current);
@@ -841,9 +841,9 @@ function MigrationPanel({
     onCancel: () => void;
 }) {
     const allDone = migrationResponse.agents
-        .filter((a) => migrationAgentIds.has(a.agent_id))
+        .filter((a) => migrationAgentIds.has(a.instance_id))
         .every((a) => {
-            const p = migrationProgress[a.agent_id];
+            const p = migrationProgress[a.instance_id];
             return p?.done;
         });
 
@@ -862,8 +862,8 @@ function MigrationPanel({
             {/* Agent list */}
             <div className="mb-3 space-y-1.5">
                 {migrationResponse.agents.map((agent) => {
-                    const isSelected = migrationAgentIds.has(agent.agent_id);
-                    const prog = migrationProgress[agent.agent_id];
+                    const isSelected = migrationAgentIds.has(agent.instance_id);
+                    const prog = migrationProgress[agent.instance_id];
                     const pct = prog?.progress?.total_scanned
                         ? Math.round((prog.progress.rebuilt / prog.progress.total_scanned) * 100)
                         : 0;
@@ -872,7 +872,7 @@ function MigrationPanel({
 
                     return (
                         <div
-                            key={agent.agent_id}
+                            key={agent.instance_id}
                             className="flex items-center gap-2 rounded border border-amber-200 bg-modal-surface px-3 py-2 text-xs dark:border-amber-700"
                         >
                             {/* Checkbox (only before migration starts) */}
@@ -881,14 +881,22 @@ function MigrationPanel({
                                     type="checkbox"
                                     checked={isSelected}
                                     disabled={!agent.is_running}
-                                    onChange={() => onToggleAgent(agent.agent_id)}
+                                    onChange={() => onToggleAgent(agent.instance_id)}
                                     className="h-3.5 w-3.5"
                                 />
                             )}
 
                             {/* Agent name */}
                             <span className="min-w-[100px] truncate font-medium">
-                                {agent.name !== agent.agent_id ? agent.name : agent.agent_id}
+                                {/* ADR-073: backend currently fills `name` with the
+                                 * package `agent_id` (reverse-domain) — fine for display.
+                                 * Fallback is a SHORT instance id (first 8 hex chars,
+                                 * mirroring acowork_core::AgentInstanceId::short()) so
+                                 * we never leak a full 36-char UUID into the UI when
+                                 * `name` is unexpectedly empty. */}
+                                {agent.name
+                                    || agent.instance_id.slice(0, 8)
+                                    || agent.instance_id}
                             </span>
 
                             {/* Status badge */}

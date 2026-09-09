@@ -5,6 +5,7 @@
 //! - Requires intent:send:<target> permission
 //! - Phase 1 uses synchronous Intent routing; Phase 2+ supports async Intent
 
+use acowork_core::agent_instance_id::AgentInstanceId;
 use acowork_core::mqtt_proto::{self, DataEnvelope, data_envelope::Payload};
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
@@ -40,7 +41,7 @@ impl IntentSendTool {
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Target Agent ID (reverse-domain, e.g. 'com.example.calendar')"
+                        "description": "Target agent INSTANCE identity (UUID v4, generated at install time by the Gateway). Look it up via the agent list — the package `agent_id` (e.g. 'com.example.calendar') does NOT address a runtime on the wire (ADR-073)."
                     },
                     "action": {
                         "type": "string",
@@ -106,13 +107,21 @@ impl Tool for IntentSendTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // Validate target format (reverse-domain)
-        if !target.contains('.') {
+        // ADR-073: target is the INSTANCE identity (UUID v4), not the
+        // package `agent_id`. The MQTT control topic
+        // `acowork/agents/{target}/sessions/control/intent` is bound
+        // to whichever Runtime subscribed with that instance UUID —
+        // a package id would silently misroute (no instance is
+        // subscribed to it). Reject early so the LLM sees the
+        // contract explicitly and falls back to the agent list.
+        if AgentInstanceId::from_string(target.clone()).is_err() {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
-                    "Invalid target '{}'. Must be a reverse-domain Agent ID (e.g. 'com.example.calendar')",
+                    "Invalid target '{}'. Must be the target agent's INSTANCE UUID (ADR-073) — \
+                     find it in the agent list; the package `agent_id` is display-only and \
+                     cannot address a runtime on the wire.",
                     target
                 )),
                 token_usage: None,
@@ -133,7 +142,7 @@ impl Tool for IntentSendTool {
                         .unwrap_or_else(|_| "{}".to_string()),
                 };
                 let control_cmd = mqtt_proto::ControlCommand {
-                    agent_id: target.clone(),
+                    instance_id: target.clone(),
                     command: Some(mqtt_proto::control_command::Command::Intent(intent)),
                 };
                 let envelope = DataEnvelope {
@@ -219,7 +228,7 @@ mod tests {
         let tool = test_tool();
         let result = tool
             .execute(
-                serde_json::json!({ "target": "com.example.calendar" }),
+                serde_json::json!({ "target": "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c" }),
                 None,
             )
             .await
@@ -236,15 +245,32 @@ mod tests {
     #[tokio::test]
     async fn test_intent_send_invalid_target() {
         let tool = test_tool();
+        // ADR-073: a non-UUID (including legacy package ids) must be
+        // rejected with an explicit contract error — silently routing
+        // through would mis-target any Runtime whose instance happens
+        // to equal the bad input.
         let result = tool
             .execute(
-                serde_json::json!({ "target": "calendar", "action": "schedule" }),
+                serde_json::json!({
+                    "target": "com.example.calendar",
+                    "action": "schedule"
+                }),
                 None,
             )
             .await
             .unwrap();
         assert!(!result.ok);
-        assert!(result.error.unwrap().contains("reverse-domain"));
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("INSTANCE UUID"),
+            "error should reference ADR-073 instance-UUID contract, got: {}",
+            err
+        );
+        assert!(
+            !err.contains("reverse-domain"),
+            "legacy reverse-domain wording must be retired, got: {}",
+            err
+        );
     }
 
     /// Without MQTT, a valid intent call returns an error explaining the
@@ -256,7 +282,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({
-                    "target": "com.example.calendar",
+                    "target": "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
                     "action": "schedule",
                     "params": { "time": "10:00", "title": "Team sync" }
                 }),
