@@ -210,6 +210,9 @@ pub(crate) struct HttpState {
     /// `load_optional_prompt`.
     pub(crate) package_dir: PathBuf,
     pub(crate) agent_id: String,
+    /// ADR-073: instance identity (UUID v4). Accepts instance-scoped
+    /// `/agents/{id}/*` paths from the Gateway reverse proxy.
+    pub(crate) instance_id: String,
     /// Late-bind slot for the `AgentCore` Arc. Created empty in Phase A
     /// and cloned into the HTTP server alongside the other late-bind
     /// resources; populated by Phase B (`session_init.rs` line ~715) once
@@ -363,6 +366,18 @@ pub struct RuntimeHttpServer {
     _handle: tokio::task::JoinHandle<()>,
 }
 
+impl HttpState {
+    /// ADR-073: a `/agents/{id}/*` path matches only when `id` equals the
+    /// canonical **instance identity** (`instance_id`, UUID v4). The
+    /// package `agent_id` is display metadata and is deliberately NOT
+    /// accepted in the path — a package-addressed request is a caller bug
+    /// (misconfigured Gateway / old client) and must fail loudly, not
+    /// silently hit an arbitrary instance of the package.
+    pub(crate) fn instance_matches(&self, id: &str) -> bool {
+        id == self.instance_id
+    }
+}
+
 impl RuntimeHttpServer {
     /// Start the HTTP server on `127.0.0.1:0` (random port).
     ///
@@ -384,6 +399,12 @@ impl RuntimeHttpServer {
         work_dir: PathBuf,
         package_dir: PathBuf,
         agent_id: String,
+        // ADR-073: the instance identity (UUID). Production passes the real
+        // UUID so instance-scoped reverse-proxy paths resolve; tests pass
+        // a test-local literal (uuid in the MQTT-config test, a shared package
+        // string elsewhere); the route guard matches this field only — the
+        // package `agent_id` is never accepted in `/agents/{id}/*` paths.
+        instance_id: String,
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
         dispatch_tx: SharedDispatchSender,
@@ -411,6 +432,7 @@ impl RuntimeHttpServer {
             work_dir,
             package_dir,
             agent_id,
+            instance_id,
             session_snapshots,
             latest_session,
             dispatch_tx,
@@ -439,7 +461,7 @@ impl RuntimeHttpServer {
     ///
     /// The Node allocates a concrete port (from `NODE_HTTP_PORT_BASE`) and
     /// passes it via `--http-port` so its reverse proxy has a stable
-    /// `{agent_id} → port` mapping. `bind_port = 0` keeps the historical
+    /// `{instance_id} → port` mapping. `bind_port = 0` keeps the historical
     /// random-port behaviour (`127.0.0.1:0`).
     #[allow(clippy::too_many_arguments)]
     pub async fn start_with_bind_port(
@@ -447,6 +469,12 @@ impl RuntimeHttpServer {
         work_dir: PathBuf,
         package_dir: PathBuf,
         agent_id: String,
+        // ADR-073: the instance identity (UUID). Production passes the real
+        // UUID so instance-scoped reverse-proxy paths resolve; tests pass
+        // a test-local literal (uuid in the MQTT-config test, a shared package
+        // string elsewhere); the route guard matches this field only — the
+        // package `agent_id` is never accepted in `/agents/{id}/*` paths.
+        instance_id: String,
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
         dispatch_tx: SharedDispatchSender,
@@ -494,6 +522,7 @@ impl RuntimeHttpServer {
             work_dir,
             package_dir,
             agent_id,
+            instance_id,
             shell_risk_rules: Arc::new(std::sync::RwLock::new(shell_risk_rules)),
             session_snapshots,
             latest_session,
@@ -2077,7 +2106,7 @@ async fn read_file(
 /// manifest_path, work_dir}` envelope construction live in
 /// [`AgentConfigService::get_config`]. This handler is a thin
 /// protocol converter that:
-///   1. validates path `id` against `state.agent_id` (ADR-034
+///   1. validates path `id` against this runtime's `instance_id` (ADR-034
 ///      cross-process routing guard — return an empty envelope
 ///      rather than 404 so a misconfigured Gateway doesn't blank
 ///      the whole panel),
@@ -2089,7 +2118,7 @@ async fn get_agent_config(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let matches = id == state.agent_id;
+    let matches = state.instance_matches(&id);
     if !matches {
         // Tolerate a misconfigured Gateway rather than 404 — see ADR-034
         // and the comment block above.
@@ -2156,16 +2185,16 @@ async fn put_agent_config(
     Path(id): Path<String>,
     Json(req): Json<UpdateAgentConfigRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    // ADR-034: path `id` must match this Runtime's agent_id. A mismatch
+    // ADR-034: path `id` must match this Runtime's instance identity. A mismatch
     // is a caller bug — 404 makes the misrouting loud instead of
     // silently writing to the wrong agent's directory.
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2528,7 +2557,7 @@ async fn get_agent_tools(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let matches = id == state.agent_id;
+    let matches = state.instance_matches(&id);
     if !matches {
         // Tolerate a misconfigured Gateway rather than 404 - see ADR-034.
         return Ok(Json(serde_json::json!({
@@ -2583,13 +2612,13 @@ async fn get_agent_mcp_servers(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2632,13 +2661,13 @@ async fn put_agent_mcp_servers(
     Path(id): Path<String>,
     Json(req): Json<UpdateMcpServersRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2676,7 +2705,7 @@ async fn put_agent_mcp_servers(
             // expansion (no tools data).
             if let Some(notifier) = &state.mcp_notifier {
                 tracing::info!(
-                    agent_id = %id,
+                    instance_id = %id,
                     "PUT /mcp-servers persisted — signaling MCP config change for reconnect"
                 );
                 notifier.notify();
@@ -2716,13 +2745,13 @@ async fn get_agent_mcp_tools(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2756,13 +2785,13 @@ async fn put_agent_mcp_tools(
     Path(id): Path<String>,
     Json(req): Json<crate::usecases::PutMcpToolsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2788,7 +2817,7 @@ async fn put_agent_mcp_tools(
             // `PUT /mcp-servers` handler fires).
             if let Some(notifier) = &state.mcp_notifier {
                 tracing::info!(
-                    agent_id = %id,
+                    instance_id = %id,
                     "PUT /mcp-tools persisted — signaling MCP config change for reconnect"
                 );
                 notifier.notify();
@@ -2824,13 +2853,13 @@ async fn get_agent_search_config(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2875,13 +2904,13 @@ async fn get_agent_providers(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2918,13 +2947,13 @@ async fn put_agent_search_config(
     Path(id): Path<String>,
     Json(req): Json<UpdateAgentSearchConfigRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -2990,13 +3019,13 @@ async fn get_agent_builtin_tools(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -3029,13 +3058,13 @@ async fn put_agent_builtin_tools(
     Path(id): Path<String>,
     Json(req): Json<UpdateAgentBuiltinToolsRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
-                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
-                    id, state.agent_id
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
                 ),
             })),
         ));
@@ -3141,7 +3170,7 @@ async fn get_agent_status(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let matches = id == state.agent_id;
+    let matches = state.instance_matches(&id);
 
     // Pull the active session + model/embedding dim from the shared
     // state so the panel can show "what is the agent doing right now?".
@@ -3181,15 +3210,15 @@ async fn get_shell_risk_rules(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "agent_id mismatch"})),
+            Json(serde_json::json!({"error": "instance_id mismatch: path id is not this runtime's instance id"})),
         ));
     }
     let config_dir = state.work_dir.join("config");
     let path = config_dir.join("shell_risk_rules.toml");
-    tracing::info!(agent_id = %id, path = %path.display(), "GET /agents/{id}/shell-risk-rules");
+    tracing::info!(instance_id = %id, path = %path.display(), "GET /agents/{id}/shell-risk-rules");
 
     // Build revision identifier embedded in the generated template. It is
     // informational only — lets the user see at a glance which binary
@@ -3272,14 +3301,14 @@ async fn put_shell_risk_rules(
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "agent_id mismatch"})),
+            Json(serde_json::json!({"error": "instance_id mismatch: path id is not this runtime's instance id"})),
         ));
     }
     tracing::info!(
-        agent_id = %id,
+        instance_id = %id,
         content_bytes = req.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0),
         "PUT /agents/{id}/shell-risk-rules"
     );
@@ -3649,6 +3678,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -3758,6 +3788,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -3929,6 +3960,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -3996,6 +4028,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -4132,6 +4165,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -4282,6 +4316,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -4495,6 +4530,10 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            // ADR-073: the server mirrors the MQTT runtime's real instance
+            // identity (same UUID) — the config topic subscriber above and
+            // the HTTP path below must both use it.
+            "5f4e3d2c-1b0a-4a98-8765-4321fedcba09".to_string(),
             snapshots,
             latest,
             dispatch_tx,
@@ -4525,10 +4564,41 @@ mod tests {
         .await
         .expect("server start");
 
-        // 5. PUT /agents/{id}/config — must trigger publish via the
+        // 5. Strict instance identity (ADR-073): the package `agent_id`
+        //    is rejected on instance-scoped routes — a caller that still
+        //    addresses this runtime by package name gets an explicit
+        //    mismatch instead of silently hitting the wrong instance.
+        let pkg_url = format!(
+            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            server.port
+        );
+        let client = reqwest::Client::new();
+        let get_pkg = client.get(&pkg_url).send().await.unwrap();
+        assert_eq!(get_pkg.status(), 200, "package-addressed GET must still return the tolerant envelope");
+        let pkg_body: serde_json::Value = get_pkg.json().await.unwrap();
+        assert_eq!(
+            pkg_body["matches"], false,
+            "package agent_id must NOT match the instance identity"
+        );
+        let put_pkg = client
+            .put(&pkg_url)
+            .json(&serde_json::json!({"temperature": 0.1}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            put_pkg.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "package-addressed PUT must 404 loudly"
+        );
+
+        // 6. PUT /agents/{instance_id}/config — must trigger publish via the
         //    refactored MqttAgentConfigPublisher path.
-        let url = format!("http://127.0.0.1:{}/agents/com.test.agent/config", server.port);
-        let response = reqwest::Client::new()
+        let url = format!(
+            "http://127.0.0.1:{}/agents/5f4e3d2c-1b0a-4a98-8765-4321fedcba09/config",
+            server.port
+        );
+        let response = client
             .put(&url)
             .json(&serde_json::json!({"temperature": 0.42}))
             .send()
@@ -4536,7 +4606,7 @@ mod tests {
             .unwrap();
         assert!(response.status().is_success(), "PUT /config should succeed");
 
-        // 6. Subscriber must receive the retained snapshot with the
+        // 7. Subscriber must receive the retained snapshot with the
         //    just-pushed temperature. This is the contract the Desktop
         //    Tools panel listens to via `case "agent_config"`.
         use prost::Message as _;
@@ -4670,6 +4740,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -4875,6 +4946,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -5050,6 +5122,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -5153,6 +5226,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5247,6 +5321,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5420,6 +5495,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -5915,6 +5991,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6043,6 +6120,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6202,6 +6280,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6268,6 +6347,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6325,6 +6405,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6408,6 +6489,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6470,6 +6552,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6563,6 +6646,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6644,6 +6728,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6723,6 +6808,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -6898,6 +6984,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7019,6 +7106,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7107,6 +7195,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7210,6 +7299,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7330,6 +7420,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.debug_enable".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,
@@ -7449,6 +7540,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.no_sm".to_string(),
+            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
             snapshots,
             latest,
             dispatch_tx,

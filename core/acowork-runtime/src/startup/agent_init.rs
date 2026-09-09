@@ -247,6 +247,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             // `<package_dir>/prompts/`.
             loaded.package_dir.clone(),
             loaded.manifest.agent_id.clone(),
+            // ADR-073: the instance identity (UUID) — the Runtime's HTTP
+            // `/agents/{id}/*` routes accept only this id in the path, so
+            // the Gateway's instance-scoped reverse-proxy reaches the right
+            // process (see `HttpState::instance_matches`).
+            config.instance_id().to_string(),
             session_snapshots.clone(),
             latest_session.clone(),
             http_dispatch_shared,

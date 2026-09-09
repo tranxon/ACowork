@@ -24,7 +24,7 @@
 //!
 //! ## Path `id` semantics
 //!
-//! Each handler validates `Path(id) == state.agent_id` (same cross-process
+//! Each handler validates `Path(id) == state.instance_id` (same cross-process
 //! guard as `/agents/{id}/config`, see ADR-034). A mismatch returns 404
 //! rather than silently writing to the wrong runtime — see `put_prompt`.
 //!
@@ -285,7 +285,7 @@ async fn list_prompts(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Response {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return (
             StatusCode::NOT_FOUND,
             Json(ListPromptsResponse {
@@ -323,13 +323,13 @@ async fn get_prompt(
     State(state): State<HttpState>,
     Path((id, name)): Path<(String, String)>,
 ) -> Response {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return err_response(
             StatusCode::NOT_FOUND,
-            "agent_id_mismatch",
+            "instance_id_mismatch",
             format!(
-                "path agent_id '{}' does not match this runtime '{}'",
-                id, state.agent_id
+                "path '{}' is not this runtime's instance id '{}'",
+                id, state.instance_id
             ),
         );
     }
@@ -381,13 +381,13 @@ async fn put_prompt(
     Path((id, name)): Path<(String, String)>,
     Json(req): Json<PutPromptRequest>,
 ) -> Response {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return err_response(
             StatusCode::NOT_FOUND,
-            "agent_id_mismatch",
+            "instance_id_mismatch",
             format!(
-                "path agent_id '{}' does not match this runtime '{}'",
-                id, state.agent_id
+                "path '{}' is not this runtime's instance id '{}'",
+                id, state.instance_id
             ),
         );
     }
@@ -499,7 +499,7 @@ fn err_response(status: StatusCode, code: &str, message: String) -> Response {
 ///
 /// Status codes:
 /// - `200 OK` — reload succeeded (7 prompts reloaded).
-/// - `404 Not Found` — `{id}` does not match `state.agent_id` (same guard
+/// - `404 Not Found` — `{id}` does not match `state.instance_id` (same guard
 ///   as every other handler in this module — see ADR-034 "tolerate
 ///   misconfigured Gateway" pattern).
 /// - `503 Service Unavailable` — `AgentCore` slot is still empty (Phase B
@@ -513,13 +513,13 @@ async fn post_reload_prompts(
     State(state): State<HttpState>,
     Path(id): Path<String>,
 ) -> Response {
-    if id != state.agent_id {
+    if !state.instance_matches(&id) {
         return err_response(
             StatusCode::NOT_FOUND,
-            "agent_id_mismatch",
+            "instance_id_mismatch",
             format!(
-                "path agent_id `{id}` does not match this runtime's agent_id `{}`",
-                state.agent_id
+                "path `{id}` is not this runtime's instance id `{}`",
+                state.instance_id
             ),
         );
     }
