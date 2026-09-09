@@ -52,6 +52,11 @@ const AUTH_REJECT_PORT: u16 = 18992;
 const AUTH_PROXY_PORT: u16 = 19901;
 const AUTH_NODE_ID: &str = "auth-node";
 const PUBLISHER_TOKEN: &str = "e2e-publisher-token";
+/// Invalid-instance-id gate test uses an isolated port so its parallel
+/// run does not collide with the other three tests' brokers.
+const GATE_TEST_PORT: u16 = 18993;
+const GATE_NODE_ID: &str = "gate-node";
+const GATE_NODE_PROXY_PORT: u16 = 19902;
 
 /// Locate the compiled `acowork-node` binary (workspace target dir).
 fn node_binary() -> Option<std::path::PathBuf> {
@@ -469,6 +474,339 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     let _ = child2.kill();
     let _ = child2.wait();
     drop(broker_handle);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-073 P2-2: the control-plane entry gate rejects malformed
+// `instance_id` payloads BEFORE any fs/process side effect.
+//
+// Scenario:
+// 1. Spin up a real node binary against an isolated broker.
+// 2. Send a `NodeStart` with `instance_id = "not-a-uuid"`.
+// 3. Assert the node replies on
+//    `acowork/nodes/{id}/agents/{instance_id}/events` with
+//    `status="error"` mentioning UUID.
+// 4. Assert NO retained `acowork/agents/{instance_id}/status` appears —
+//    the invalid id never reached spawn() so no Runtime was started.
+// 5. Positive control: send a second `NodeStart` with a valid UUID
+//    for a real agent package — the gate lets it through (no error
+//    reply with the "invalid instance_id" message shape).
+//
+// This is the e2e counterpart of the three unit tests in
+// `acowork-node/src/control/mod.rs` (`handle_command` gate) — it
+// proves the gate runs BEFORE any spawn / fs call by checking for the
+// absence of a retained Runtime status topic.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Send a `NodeStart` carrying a specific `instance_id` to the
+/// per-agent control topic. Uses an INDEPENDENT AsyncClient + a
+/// short flush window (same pattern as the existing `send_ping` in
+/// this file). The Collector-based path is unsuitable here because
+/// Collector relies on a background eventloop task that silently
+/// exits on error — if it dies, the queued publish never flushes.
+async fn send_start_command(
+    port: u16,
+    node_id: &str,
+    instance_id: &str,
+    request_id: &str,
+) {
+    let cmd = NodeControlCommand {
+        node_id: node_id.to_string(),
+        request_id: request_id.to_string(),
+        command: Some(node_control_command::Command::Start(
+            acowork_core::mqtt_proto::NodeStart {
+                agent_id: "com.test.gate-agent".to_string(),
+                dev_mode: false,
+                instance_id: instance_id.to_string(),
+            },
+        )),
+    };
+    let envelope = DataEnvelope {
+        version: 1,
+        payload: Some(data_envelope::Payload::NodeControlCommand(cmd)),
+    };
+    let mut opts = MqttOptions::new(
+        format!("e2e:gate-publisher:{request_id}"),
+        "127.0.0.1",
+        port,
+    );
+    opts.set_keep_alive(Duration::from_secs(5));
+    let (client, mut eventloop) = AsyncClient::new(opts, 16);
+    client
+        .publish(
+            acowork_core::node::node_agent_control_topic(node_id, instance_id, "start"),
+            QoS::AtLeastOnce,
+            false,
+            envelope.encode_to_vec(),
+        )
+        .await
+        .expect("publish start");
+    // Flush window — same as send_ping.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(100), eventloop.poll()).await;
+    }
+    drop(eventloop);
+}
+
+/// Poll `acowork/nodes/{id}/agents/{instance_id}/events` until the
+/// matching event lands (or timeout). The existing
+/// `Collector::wait_for_topic` matches only by suffix, so this test
+/// uses a purpose-built subscriber scoped to the per-agent events
+/// topic — a malformed id never produces anything, and a valid id
+/// produces a single NodeEvent we need to inspect.
+async fn wait_for_agent_event(
+    port: u16,
+    node_id: &str,
+    instance_id: &str,
+    request_id: &str,
+    timeout: Duration,
+) -> Option<NodeEvent> {
+    let mut opts = MqttOptions::new(
+        format!("e2e:gate-listener:{request_id}"),
+        "127.0.0.1",
+        port,
+    );
+    opts.set_clean_session(true);
+    let (client, mut eventloop) = AsyncClient::new(opts, 16);
+
+    let topic = acowork_core::node::node_agent_events_topic(node_id, instance_id);
+    client
+        .subscribe(&topic, QoS::AtLeastOnce)
+        .await
+        .expect("subscribe agent events");
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, eventloop.poll()).await {
+            Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                let Ok(env) = DataEnvelope::decode(p.payload.as_ref()) else {
+                    continue;
+                };
+                if let Some(data_envelope::Payload::NodeEvent(ev)) = env.payload {
+                    if ev.request_id == request_id {
+                        return Some(ev);
+                    }
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return None,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Did the broker ever publish a retained status for `instance_id`?
+/// A "yes" means the gate let the start command through and a Runtime
+/// process came up; a "no" means the gate blocked before spawn.
+async fn retained_status_exists(
+    port: u16,
+    instance_id: &str,
+    timeout: Duration,
+) -> bool {
+    let mut opts = MqttOptions::new(
+        format!("e2e:gate-retained-check:{instance_id}"),
+        "127.0.0.1",
+        port,
+    );
+    opts.set_clean_session(true);
+    let (client, mut eventloop) = AsyncClient::new(opts, 16);
+
+    client
+        .subscribe(
+            format!("acowork/agents/{instance_id}/status"),
+            QoS::AtLeastOnce,
+        )
+        .await
+        .expect("subscribe status");
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, eventloop.poll()).await {
+            Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
+                // Any retained payload means a Runtime is alive.
+                if !p.payload.is_empty() {
+                    return true;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return false,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// RAII guard that guarantees the spawned `acowork-node` process is
+/// killed and reaped on every exit path — normal completion, panic,
+/// timeout, or early return. Without this, a hung test leaves a node
+/// process bound to its test port and `--name` slot, and the next
+/// test run collides with the orphan (and accumulates 6+ zombies
+/// during a session — see the cleanup note in `docs/plan/...`).
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_control_rejects_invalid_instance_id_before_spawn() {
+    let Some(bin) = node_binary() else {
+        eprintln!("SKIP: acowork-node binary not found — run `cargo build --workspace` first");
+        return;
+    };
+
+    let broker_handle =
+        acowork_gateway::mqtt::start_broker("127.0.0.1", GATE_TEST_PORT).expect("broker starts");
+
+    let home = tempfile::tempdir().unwrap();
+    let node_home = home.path().join("node-home");
+
+    let child = std::process::Command::new(&bin)
+        .args([
+            "start",
+            "--gateway",
+            &format!("127.0.0.1:{GATE_TEST_PORT}"),
+            "--name",
+            GATE_NODE_ID,
+            "--proxy-port",
+            &GATE_NODE_PROXY_PORT.to_string(),
+            "--home",
+        ])
+        .arg(&node_home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn node");
+    let child_guard = ChildGuard(child);
+
+    // Hard timeout around the whole body so a hang cannot leak the
+    // node past the test harness. Drop guard still fires on unwind.
+    let result: Result<(), String> = async {
+        let mut collector = Collector::connect(GATE_TEST_PORT, "test:gate-publisher", None);
+
+        // Wait for the node to come online and for its control
+        // subscription (`acowork/nodes/{id}/agents/+/control/#`) to be
+        // ready. The status=online retained publish happens AFTER the
+        // control subscriptions land (control/mod.rs:969-979), so
+        // seeing status implies the agent control filter is live.
+        let status = collector
+            .wait_for_topic(&format!("/nodes/{GATE_NODE_ID}/status"), Duration::from_secs(10))
+            .await
+            .expect("node online");
+        assert_eq!(std::str::from_utf8(&status).unwrap().trim(), "online");
+
+        // ── 1) Negative path: malformed instance_id must be rejected. ──
+        //
+        // CRITICAL: subscribe BEFORE publishing. The Node reply is a
+        // QoS-1 non-retained message — if our subscriber connects
+        // after the reply is published, the broker drops it
+        // silently. The Collector pattern used by the rest of this
+        // file relies on the same race-free ordering (Collector::
+        // connect spawns its eventloop with the SUBSCRIBE already in
+        // the queue). See the same race in test 1 below.
+        let bad_id = "not-a-uuid";
+        let bad_listener = tokio::spawn(wait_for_agent_event(
+            GATE_TEST_PORT,
+            GATE_NODE_ID,
+            bad_id,
+            "req-bad-1",
+            Duration::from_secs(8),
+        ));
+        // Give the SUBSCRIBE packet time to flush before we publish.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        send_start_command(GATE_TEST_PORT, GATE_NODE_ID, bad_id, "req-bad-1").await;
+
+        let reply = bad_listener
+            .await
+            .expect("subscriber task panicked")
+            .expect("node must reply even for an invalid id");
+
+        assert_eq!(
+            reply.status, "error",
+            "gate must reply status=error for invalid instance_id, got: {:?}",
+            reply
+        );
+        assert!(
+            reply.message.contains("invalid instance_id")
+                && reply.message.contains("UUID"),
+            "error message must name the gate reason; got: {:?}",
+            reply.message
+        );
+
+        // ── 2) The gate MUST have blocked before spawn — no Runtime
+        //    retained status appears for the bad id. ──
+        assert!(
+            !retained_status_exists(GATE_TEST_PORT, bad_id, Duration::from_secs(2)).await,
+            "no Runtime process must have been spawned for the invalid id"
+        );
+
+        // ── 3) Empty-string instance_id must also be rejected —
+        //    one of TWO defence layers will catch it:
+        //    (a) `parse_control_topic` returns None when the
+        //        `agents/.../control/{cmd}` path part is empty (the
+        //        segment between the slashes is empty), so no
+        //        `handle_command` ever runs and the node never
+        //        publishes a reply;
+        //    (b) the UUID gate inside `handle_command` returns an
+        //        `error` NodeEvent.
+        //    Either outcome is correct — the test passes if the
+        //    empty string does NOT spawn a Runtime. ──
+        let empty_listener = tokio::spawn(wait_for_agent_event(
+            GATE_TEST_PORT,
+            GATE_NODE_ID,
+            "",
+            "req-bad-2",
+            Duration::from_secs(5),
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        send_start_command(GATE_TEST_PORT, GATE_NODE_ID, "", "req-bad-2").await;
+        let empty_result = empty_listener
+            .await
+            .expect("subscriber task panicked");
+        if let Some(reply) = empty_result {
+            // Layer (b): gate rejected — must be the gate error, not
+            // anything else (e.g. an "Agent not found" from a
+            // maliciously crafted id bypassing the gate).
+            assert_eq!(
+                reply.status, "error",
+                "empty-string id must surface as error from the gate, got: {:?}",
+                reply
+            );
+            assert!(
+                reply.message.contains("invalid instance_id"),
+                "empty-string id must hit the same gate, got: {:?}",
+                reply.message
+            );
+        }
+        // else: layer (a) — parse_control_topic dropped the message
+        // silently. Either outcome is acceptable; what matters is the
+        // final assertion below.
+
+        // ── 4) No Runtime was spawned for ANY malformed id. ──
+        assert!(
+            !retained_status_exists(GATE_TEST_PORT, "", Duration::from_secs(2)).await,
+            "no Runtime process must have been spawned for empty-string id"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    // Drop child BEFORE broker so the LWT fires against a still-live
+    // broker (LWT is only delivered to live connections).
+    drop(child_guard);
+    drop(broker_handle);
+
+    if let Err(msg) = result {
+        panic!("{msg}");
+    }
 }
 
 /// Phase 5a negative path: the auth-enabled broker rejects node

@@ -27,6 +27,7 @@ use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cac
 use acowork_runtime::tools::workspace_resolver::{WorkspaceAccess, WorkspaceDir, WorkspaceResolver};
 use acowork_runtime::workspace::WorkspaceWatcherSet;
 use prost::Message;
+use rumqttc::AsyncClient;
 use tokio::sync::mpsc;
 
 /// Unique broker port per test run (same pattern as `mqtt_e2e_full.rs`).
@@ -41,6 +42,9 @@ const AGENT_ID: &str = "com.test.agent";
 // publish time). The envelope payload keeps carrying the package
 // `AGENT_ID` label for Desktop display.
 const INSTANCE_ID: &str = "8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d";
+// Second instance for the dual-runtime E2E (same AGENT_ID, distinct
+// instance_id) — proves fs-changed routing is per-instance.
+const INSTANCE_ID_B: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 
 /// Drain deadline: poll cycle (500ms) + aggregation window (500ms)
 /// plus transport margin.
@@ -282,6 +286,232 @@ fn fs_watcher_full_chain_e2e() {
         assert!(
             events.iter().any(|e| e.workspace_id == "ws-b"),
             "ws-b events must carry workspace_id=ws-b"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws_a);
+        let _ = std::fs::remove_dir_all(&ws_b);
+    });
+
+    drop(broker);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-073 regression: two Runtimes of one package publish fs-changed
+// to DISTINCT topics; subscribers keyed to instance A never see
+// instance B's events (and vice versa).
+//
+// Pre-ADR-073, `MqttFsEventSink` carried the package `agent_id` and
+// both instances would publish to the same
+// `acowork/agents/{agent_id}/workspaces/+/fs-changed` topic — a
+// Desktop subscriber could not tell whose event it was reading.
+// After ADR-073 the sink reads `client.instance_id()` at publish
+// time, so each instance's events land on its own topic.
+// ═══════════════════════════════════════════════════════════════════════
+
+async fn spawn_fs_subscriber_for(
+    port: u16,
+    instance_id: &str,
+    tag: &str,
+) -> mpsc::UnboundedReceiver<acowork_core::mqtt_proto::WorkspaceFsChangeEvent> {
+    let mut opts = rumqttc::MqttOptions::new(
+        format!("e2e:fs:sub:{}:{tag}", instance_id),
+        "127.0.0.1",
+        port,
+    );
+    opts.set_clean_session(true);
+    let (client, mut eventloop) = AsyncClient::new(opts, 10);
+
+    client
+        .subscribe(
+            format!("acowork/agents/{instance_id}/workspaces/+/fs-changed"),
+            rumqttc::QoS::AtLeastOnce,
+        )
+        .await
+        .expect("subscribe");
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            match eventloop.poll().await {
+                Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
+                    let Ok(envelope) = DataEnvelope::decode(p.payload.as_ref()) else {
+                        continue;
+                    };
+                    if let Some(data_envelope::Payload::WorkspaceFsChangeEvent(ev)) = envelope.payload
+                    {
+                        let _ = tx.send(ev);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
+#[test]
+fn fs_watcher_two_instances_route_to_separate_topics() {
+    let port = fresh_broker_port();
+    let broker = start_broker("127.0.0.1", port).expect("broker start");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        // ── One subscriber per instance, subscribed BEFORE the
+        //    watchers exist so the non-retained events are not lost. ──
+        let mut events_a = spawn_fs_subscriber_for(port, INSTANCE_ID, "a").await;
+        let mut events_b = spawn_fs_subscriber_for(port, INSTANCE_ID_B, "b").await;
+
+        // ── Build two Runtime MQTT clients with the SAME package id
+        //    but distinct instance ids. The fs-changed topic must be
+        //    keyed on instance_id (now read from the bound client). ──
+        let (control_tx_a, _control_rx_a) = mpsc::unbounded_channel();
+        let (control_tx_b, _control_rx_b) = mpsc::unbounded_channel();
+        let client_a = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: AGENT_ID,
+            instance_id: INSTANCE_ID,
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            avatar: None,
+            builtin_avatar: None,
+            config_json: "{}",
+            available_cache: new_shared_cache(),
+            control_tx: control_tx_a,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-fs-e2e-A-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
+        .await
+        .expect("runtime A connect");
+        let client_b = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: AGENT_ID,
+            instance_id: INSTANCE_ID_B,
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            avatar: None,
+            builtin_avatar: None,
+            config_json: "{}",
+            available_cache: new_shared_cache(),
+            control_tx: control_tx_b,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-fs-e2e-B-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
+        .await
+        .expect("runtime B connect (must not be kicked off by A)");
+
+        let slot_a: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+            tokio::sync::Mutex::new(client_a),
+        ))));
+        let slot_b: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+            tokio::sync::Mutex::new(client_b),
+        ))));
+
+        // ── Distinct workspaces for each instance, each with its own
+        //    watcher set so the sink reads the right slot. ──
+        let ws_a = temp_workspace("a");
+        let ws_b = temp_workspace("b");
+        std::fs::write(ws_a.join("seed.txt"), b"seed-a").unwrap();
+        std::fs::write(ws_b.join("seed.txt"), b"seed-b").unwrap();
+
+        let mut set_a = WorkspaceWatcherSet::new(AGENT_ID.to_string(), slot_a);
+        set_a.sync_from_resolver(&resolver_for(vec![("ws-a", ws_a.clone())]));
+        set_a.set_watch_targets("ws-a", vec![std::path::PathBuf::from("")]);
+
+        let mut set_b = WorkspaceWatcherSet::new(AGENT_ID.to_string(), slot_b);
+        set_b.sync_from_resolver(&resolver_for(vec![("ws-b", ws_b.clone())]));
+        set_b.set_watch_targets("ws-b", vec![std::path::PathBuf::from("")]);
+
+        // Same live-watch wait as the single-instance test — async
+        // target channel + poll baseline.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        // ── Trigger file changes in BOTH workspaces. Each instance's
+        //    subscriber must receive ONLY its own events. ──
+        std::fs::write(ws_a.join("only-a.txt"), b"alpha").unwrap();
+        std::fs::write(ws_b.join("only-b.txt"), b"beta").unwrap();
+        tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
+
+        // ── Drain. ──
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        set_a.stop_all();
+        set_b.stop_all();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut collected_a = Vec::new();
+        while let Ok(ev) = events_a.try_recv() {
+            collected_a.push(ev);
+        }
+        let mut collected_b = Vec::new();
+        while let Ok(ev) = events_b.try_recv() {
+            collected_b.push(ev);
+        }
+
+        // ── Assertions. ──
+        assert!(
+            !collected_a.is_empty(),
+            "subscriber A received no fs-changed events"
+        );
+        assert!(
+            !collected_b.is_empty(),
+            "subscriber B received no fs-changed events"
+        );
+
+        // Instance A's events: only the path under ws-a must appear,
+        // and the envelope must carry instance_id = INSTANCE_ID.
+        let a_paths: Vec<String> = collected_a
+            .iter()
+            .flat_map(|e| e.changes.iter().map(|c| c.path.clone()))
+            .collect();
+        assert!(
+            a_paths.iter().any(|p| p == "only-a.txt"),
+            "A must see only-a.txt, got {:?}",
+            a_paths
+        );
+        assert!(
+            !a_paths.iter().any(|p| p == "only-b.txt"),
+            "A must NOT see instance B's only-b.txt, got {:?}",
+            a_paths
+        );
+        for ev in &collected_a {
+            assert_eq!(
+                ev.agent_id, AGENT_ID,
+                "envelope must carry the package id (display)"
+            );
+        }
+
+        // Instance B's events: only the path under ws-b.
+        let b_paths: Vec<String> = collected_b
+            .iter()
+            .flat_map(|e| e.changes.iter().map(|c| c.path.clone()))
+            .collect();
+        assert!(
+            b_paths.iter().any(|p| p == "only-b.txt"),
+            "B must see only-b.txt, got {:?}",
+            b_paths
+        );
+        assert!(
+            !b_paths.iter().any(|p| p == "only-a.txt"),
+            "B must NOT see instance A's only-a.txt, got {:?}",
+            b_paths
         );
 
         let _ = std::fs::remove_dir_all(&ws_a);
