@@ -21,15 +21,21 @@ import { with503Retry } from "../lib/httpRetry";
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
   /**
-   * Sub-classification filter (only meaningful when `type` is `Knowledge`
-   * or `Autobiographical`).
+   * Sub-classification filter (only meaningful when `type` is `Knowledge`,
+   * `Autobiographical`, or `Episodic`).
    *
    * Knowledge:    `Fact` | `Preference` | `Relation` | `Procedure`
    * Autobiographical: `Identity` | `Capability` | `Limitation`
    *                | `Preference` | `History` | `Relationship`
+   * Episodic:    `Fact` | `Preference` | `Relation` | `Procedure`
+   *              — read from the `knowledge_subtype` distillation routing
+   *              tag (ADR-068 §3.4.2). Same enum as Knowledge because an
+   *              episode tagged with `knowledge_subtype=X` is the
+   *              distiller's input for promoting a `X` node into the
+   *              semantic layer.
    *
-   * `""` = no filter. Ignored by the backend when `type` is `Episodic` or
-   * `Procedural` (those labels have no sub-classification).
+   * `""` = no filter. Ignored by the backend when `type` is `Procedural`
+   * (that label has no sub-classification).
    */
   subType: string;
   keyword: string;

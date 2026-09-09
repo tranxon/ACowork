@@ -68,15 +68,25 @@ export function MemoryPanel() {
     if (selectedNodeId !== null) setSearchOpen(true);
   }, [selectedNodeId]);
 
-  // Sub-filter dropdown is only meaningful for Knowledge and
-  // Autobiographical nodes — those are the labels that carry a sub_type.
+  // Sub-filter dropdown is meaningful for Knowledge / Autobiographical /
+  // Episodic nodes — those are the labels that carry a sub_type.
+  //   - Knowledge / Autobiographical: sub_type is the schema property
+  //     (`sub_type` / `category` respectively).
+  //   - Episodic: sub_type is the `knowledge_subtype` distillation routing
+  //     tag (ADR-068 §3.4.2) — same 4-value enum as Knowledge, surfaced
+  //     here so users can drill into "episodes tagged as Preference" etc.
+  // Procedural carries no secondary classification and stays hidden.
   // Computing the option list here (rather than in `subTypeOptions`) keeps
   // the i18n t() binding reactive when the user switches locales.
+  const supportsSubFilter = (type: typeof filters.type): boolean =>
+    type === "Knowledge" ||
+    type === "Autobiographical" ||
+    type === "Episodic";
   const subTypeChoices = useMemo(
     () => subTypeOptions(t, filters.type),
     [t, filters.type],
   );
-  const subFilterVisible = filters.type === "Knowledge" || filters.type === "Autobiographical";
+  const subFilterVisible = supportsSubFilter(filters.type);
 
   // Live migration progress for the currently selected agent, used to drive
   // the "重建中…" button label and a tiny progress fraction in the banner.
@@ -401,13 +411,13 @@ export function MemoryPanel() {
                     // When the user moves off a label that supports sub_type, the
                     // previous sub-filter becomes meaningless. Clearing it here
                     // keeps the URL state honest and avoids sending a stale
-                    // `sub_type=` param on subsequent fetches.
+                    // `sub_type=` param on subsequent fetches. Episodic joins
+                    // Knowledge / Autobiographical in carrying a sub_type
+                    // (`knowledge_subtype`, ADR-068 §3.4.2) so its filter is
+                    // preserved across type switches.
                     setFilters({
                       type: nextType,
-                      subType:
-                        nextType === "Knowledge" || nextType === "Autobiographical"
-                          ? filters.subType
-                          : "",
+                      subType: supportsSubFilter(nextType) ? filters.subType : "",
                     });
                   }}
                   options={[
