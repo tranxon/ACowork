@@ -228,7 +228,7 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
             .await
             .expect("gateway publisher");
         let cmd = ControlCommand {
-            agent_id: AGENT_ID.to_string(),
+            instance_id: AGENT_ID.to_string(),
             command: Some(Command::ChatMessage(ChatMessage {
                 session_id: "sess-A".into(),
                 message_id: "msg-A".into(),

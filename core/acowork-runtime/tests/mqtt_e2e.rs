@@ -46,7 +46,7 @@ fn test_build_broker_config_custom_port() {
 #[test]
 fn test_control_command_encode_decode() {
     let cmd = ControlCommand {
-        agent_id: "com.test.agent".into(),
+        instance_id: "com.test.agent".into(),
         command: Some(Command::ChatMessage(ChatMessage {
             session_id: "sess-001".into(),
             message_id: "msg-001".into(),
@@ -71,7 +71,7 @@ fn test_control_command_encode_decode() {
 
     match decoded.payload {
         Some(Payload::ControlCommand(cmd)) => {
-            assert_eq!(cmd.agent_id, "com.test.agent");
+            assert_eq!(cmd.instance_id, "com.test.agent");
             match cmd.command {
                 Some(Command::ChatMessage(msg)) => {
                     assert_eq!(msg.content, "Hello MQTT");
@@ -87,7 +87,7 @@ fn test_control_command_encode_decode() {
 #[test]
 fn test_control_command_stop() {
     let cmd = ControlCommand {
-        agent_id: "a".into(),
+        instance_id: "a".into(),
         command: Some(Command::Stop(mqtt_proto::Stop {
             session_id: "s".into(),
             reason: "user_requested".into(),
@@ -106,7 +106,7 @@ fn test_control_command_stop() {
 #[test]
 fn test_parse_control_message() {
     let cmd = ControlCommand {
-        agent_id: "a".into(),
+        instance_id: "a".into(),
         command: Some(Command::ChatMessage(ChatMessage {
             session_id: "sid-1".into(),
             message_id: "mid-1".into(),
@@ -135,7 +135,7 @@ fn test_parse_control_message() {
 #[test]
 fn test_parse_control_stop() {
     let cmd = ControlCommand {
-        agent_id: "a".into(),
+        instance_id: "a".into(),
         command: Some(Command::Stop(mqtt_proto::Stop {
             session_id: "s".into(),
             reason: String::new(),
@@ -153,7 +153,7 @@ fn test_parse_control_stop() {
 #[test]
 fn test_parse_control_cancel_tool() {
     let cmd = ControlCommand {
-        agent_id: "a".into(),
+        instance_id: "a".into(),
         command: Some(Command::CancelTool(mqtt_proto::CancelTool {
             session_id: "s".into(),
             tool_call_id: "call_abc123".into(),
@@ -180,7 +180,7 @@ fn test_parse_control_create_session() {
     // ADR-034 Phase 1A: CreateSession has no fields (agent_id moved
     // to ControlCommand top-level, no per-subcommand fields).
     let cmd = ControlCommand {
-        agent_id: "a".into(),
+        instance_id: "a".into(),
         command: Some(Command::CreateSession(mqtt_proto::CreateSession {})),
     };
     let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
@@ -262,7 +262,7 @@ fn phase9_chat_message_rich_fields_via_params_json() {
     let params_json = serde_json::to_string(&rich_params).unwrap();
 
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::ChatMessage(ChatMessage {
             session_id: "sess-rich".into(),
             message_id: "msg-rich".into(),
@@ -308,7 +308,7 @@ fn phase9_chat_message_rich_fields_via_params_json() {
 #[test]
 fn phase9_stop_with_reason_roundtrip() {
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::Stop(mqtt_proto::Stop {
             session_id: "sess-stop".into(),
             reason: "iteration_limit".into(),
@@ -339,7 +339,7 @@ fn phase9_stop_with_reason_roundtrip() {
 fn phase9_model_switch_provider_id_normalization() {
     // Same-provider path: provider_id empty -> None
     let cmd_same = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::ModelSwitch(mqtt_proto::ModelSwitch {
             session_id: "s".into(),
             model_id: "gpt-4o-mini".into(),
@@ -358,7 +358,7 @@ fn phase9_model_switch_provider_id_normalization() {
 
     // Cross-provider path: provider_id "minimax" -> Some("minimax")
     let cmd_x = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::ModelSwitch(mqtt_proto::ModelSwitch {
             session_id: "s".into(),
             model_id: "MiniMax-Text-01".into(),
@@ -387,7 +387,7 @@ fn phase9_compress_action_summary_vs_tool_results() {
     ];
     for (compress_type_i32, label) in cases {
         let cmd = ControlCommand {
-            agent_id: "com.acowork.test".into(),
+            instance_id: "com.acowork.test".into(),
             command: Some(Command::CompressAction(mqtt_proto::CompressAction {
                 session_id: "s".into(),
                 compress_type: compress_type_i32,
@@ -422,7 +422,7 @@ fn phase9_compress_action_summary_vs_tool_results() {
 #[test]
 fn phase9_workspace_switch_unknown_id_dispatches() {
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::WorkspaceSwitch(mqtt_proto::WorkspaceSwitch {
             session_id: "s".into(),
             workspace_id: "ghost-workspace-xyz".into(), // deliberately not installed
@@ -457,7 +457,7 @@ fn test_control_command_open_session_encode_decode() {
     // OpenSession carries only session_id (wire compat with legacy
     // activate_session envelope shape; new semantic per ADR-038).
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::OpenSession(mqtt_proto::OpenSession {
             session_id: "sess-closed-001".into(),
         })),
@@ -477,7 +477,7 @@ fn test_control_command_open_session_encode_decode() {
 #[test]
 fn test_parse_control_open_session() {
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::OpenSession(mqtt_proto::OpenSession {
             session_id: "sess-002".into(),
         })),
@@ -710,7 +710,7 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
 #[test]
 fn test_control_command_active_heartbeat_encode_decode() {
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
     };
     let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
@@ -732,7 +732,7 @@ fn test_control_command_active_heartbeat_encode_decode() {
 #[test]
 fn test_parse_control_active_heartbeat() {
     let cmd = ControlCommand {
-        agent_id: "com.acowork.test".into(),
+        instance_id: "com.acowork.test".into(),
         command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
     };
     let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };

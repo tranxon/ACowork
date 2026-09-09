@@ -158,6 +158,8 @@ async fn spawn_memory_e2e_server(tag: &str) -> MemoryE2e {
         temp_dir.clone(),
         temp_dir.clone(), // package_dir (ADR-063): tests reuse work_dir as package dir
         "com.test.agent".to_string(),
+        String::new(), // ADR-073: root-level /memory/* routes carry no agent-path guard, so the
+        // instance identity is unused here
         snapshots,
         latest,
         dispatch_tx,

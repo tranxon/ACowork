@@ -67,6 +67,7 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
         temp_dir.clone(),
         temp_dir.clone(), // package_dir (ADR-063): same dir; tests create prompts/ inside
         AGENT_ID.to_string(),
+        AGENT_ID.to_string(), // ADR-073: instance id literal shared with the package string in these smoke tests
         snapshots,
         latest,
         dispatch_tx,
@@ -465,7 +466,7 @@ async fn test_put_path_traversal_returns_404() {
 // ── cross-cutting ──────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_agent_id_mismatch_returns_404() {
+async fn test_instance_id_mismatch_returns_404() {
     // Cross-process guard (ADR-034): if the path's agent_id differs
     // from the runtime's, the request targets the wrong agent and must
     // be rejected — not silently written elsewhere.

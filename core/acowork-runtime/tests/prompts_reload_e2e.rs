@@ -2,7 +2,7 @@
 //!
 //! Companion to [`prompts_api_e2e`]. That file covers the GET/PUT
 //! prompts handlers; this one covers the L2 reload handler at the
-//! HTTP layer (status codes, agent_id mismatch guard, route
+//! HTTP layer (status codes, instance-identity mismatch guard, route
 //! registration, and 503 when the late-bind slot is empty).
 //!
 //! ## Scope
@@ -15,7 +15,7 @@
 //!    old test that asserted 503 "Debug service not ready" — the slot
 //!    the handler reads is now `agent_core`, not `debug_service`,
 //!    and the dependency on DevMode being enabled is gone.
-//! 2. **404** when `Path(id)` does not match `state.agent_id`. Same
+//! 2. **404** when `Path(id)` does not match `state.instance_id`. Same
 //!    cross-process guard as every other handler in
 //!    `http/prompts.rs` (see ADR-034 "tolerate misconfigured Gateway"
 //!    pattern).
@@ -46,7 +46,11 @@ use std::sync::Arc;
 use reqwest::StatusCode;
 
 const AGENT_ID: &str = "com.test.prompts-reload-e2e";
-const RELOAD_PATH: &str = "/agents/com.test.prompts-reload-e2e/prompts/reload";
+// ADR-073: the Runtime HTTP path variable is the INSTANCE identity; this
+// e2e addresses the server by UUID so a package-addressed request (e.g. a
+// regression to the legacy `agent_id` fallback) fails loudly.
+const INSTANCE_ID: &str = "6f2e9c1d-4b3a-4c2d-9e8f-0a1b2c3d4e5f";
+const RELOAD_PATH: &str = "/agents/6f2e9c1d-4b3a-4c2d-9e8f-0a1b2c3d4e5f/prompts/reload";
 const OLD_RELOAD_PATH: &str = "/api/agents/com.test.prompts-reload-e2e/debug/prompts/reload";
 
 // ── Test harness ───────────────────────────────────────────────────────
@@ -105,6 +109,7 @@ async fn spawn_server(
         temp_dir.clone(),
         temp_dir.clone(), // package_dir (ADR-063): same dir; tests create prompts/ inside
         AGENT_ID.to_string(),
+        INSTANCE_ID.to_string(),
         snapshots,
         latest,
         dispatch_tx,
@@ -176,13 +181,13 @@ async fn test_reload_prompts_returns_503_when_agent_core_slot_empty() {
     );
 }
 
-/// 404 contract: `Path(id) != state.agent_id` → handler returns
-/// 404 with `agent_id_mismatch`. Same guard as every other prompts
+/// 404 contract: `Path(id) != state.instance_id` → handler returns
+/// 404 with `instance_id_mismatch`. Same guard as every other prompts
 /// handler (see ADR-034). Pins the cross-process protection so a
 /// misconfigured Gateway reverse-proxy can't accidentally push
 /// overrides into the wrong runtime.
 #[tokio::test]
-async fn test_reload_prompts_returns_404_when_agent_id_mismatches() {
+async fn test_reload_prompts_returns_404_when_instance_id_mismatches() {
     let (port, _temp) = spawn_server(
         "reload-404",
         Arc::new(std::sync::RwLock::new(None)),
@@ -199,10 +204,10 @@ async fn test_reload_prompts_returns_404_when_agent_id_mismatches() {
     assert_eq!(
         resp.status(),
         StatusCode::NOT_FOUND,
-        "mismatched agent_id must return 404 (ADR-034 tolerate misconfigured Gateway)"
+        "mismatched instance id must return 404 (ADR-034 tolerate misconfigured Gateway)"
     );
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "agent_id_mismatch");
+    assert_eq!(body["error"], "instance_id_mismatch");
 }
 
 /// Regression guard: the OLD path

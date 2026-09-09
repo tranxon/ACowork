@@ -45,6 +45,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         temp_dir.clone(),
         temp_dir.clone(), // package_dir (ADR-063): tests reuse work_dir as package dir
         "com.test.agent".to_string(),
+        "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package string in these smoke tests
         snapshots,
         latest,
         dispatch_tx,
