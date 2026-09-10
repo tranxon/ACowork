@@ -685,7 +685,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
           {listOpen && (
             <SessionListDropdown
               agentId={agentId}
-              activeSessionId={activeSessionId}
+              activeSessionId={activeSessionId ?? undefined}
               onClose={() => setListOpen(false)}
             />
           )}

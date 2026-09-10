@@ -22,130 +22,117 @@ use crate::gateway::state::SYSTEM_AGENT_ID;
 /// The Node-side `restore_installed_agents` will pick such directories up
 /// on the next restart and publish the retained installed inventory
 /// (ADR-055 §6.5 / ADR-073 §5.6 two-level layout).
-fn has_two_level_instance(agent_root: &std::path::Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(agent_root) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
+/// Recursively add every file under `src` to `zip`, storing paths
+/// relative to `src` (so `manifest.toml` lands at the archive root — the
+/// layout the Node's installer and `extract_manifest_from_package` expect).
+fn zip_dir_to_agent_package(
+    src: &std::path::Path,
+    zip: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+    prefix: &str,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("read_dir {}: {}", src.display(), e))?;
+    for entry in entries.flatten() {
         let path = entry.path();
-        let name_os = entry.file_name();
-        let Some(name) = name_os.to_str() else {
-            return false;
-        };
-        path.is_dir()
-            && uuid::Uuid::parse_str(name).is_ok()
-            && path.join("manifest.toml").exists()
-    })
-}
-
-/// Recursively copy a directory (free function — accessible from
-/// spawned tasks and from `install_bundled_agent_to_disk`).
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            std::fs::create_dir_all(&dst_path)?;
-            copy_dir_recursive(&entry.path(), &dst_path)?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let archive_name = if prefix.is_empty() {
+            name.clone()
         } else {
-            if let Some(parent) = dst_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(entry.path(), dst_path)?;
+            format!("{}/{}", prefix, name)
+        };
+        if path.is_dir() {
+            zip_dir_to_agent_package(&path, zip, &archive_name)?;
+        } else {
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+            zip.start_file(archive_name, zip::write::SimpleFileOptions::default())
+                .map_err(|e| format!("zip entry: {}", e))?;
+            use std::io::Write;
+            zip.write_all(&bytes)
+                .map_err(|e| format!("zip write: {}", e))?;
         }
     }
     Ok(())
 }
 
-/// Copy a bundled agent directory into `{packages_dir}/{agent_id}/{uuid}/`
-/// (ADR-073 §5.6 two-level layout). Free function — callable from
-/// spawned tasks that don't hold `&mut self`.
+/// Stage a bundled agent directory as a `.agent` ZIP in the Gateway's own
+/// package registry and dispatch a declarative "ensure present" install to
+/// the node that will host it.
 ///
-/// Returns `(agent_id, instance_id)` so the caller can decide
-/// whether to (a) wait for the Node to re-discover on its next
-/// startup (boot-time path), or (b) directly insert into the
-/// Gateway install table (mid-session retry path where the Node
-/// is already running and won't re-scan).
-pub(crate) async fn install_bundled_agent_to_disk(
+/// ADR-009 §V-O: the node owns `{packages_dir}` (by default a directory
+/// under the *Node Agent's* home, see `GatewayConfig::packages_dir`) and is
+/// the only process allowed to create files there. The Gateway therefore
+/// never copies a bundled agent to disk itself — it publishes the package to
+/// its registry (`package_registry_dir()`, which it does own) and hands the
+/// node a download URL, exactly like the HTTP install/ensure endpoints do.
+///
+/// Completion is observed through the node's retained installed inventory,
+/// never here.
+async fn dispatch_bundled_agent_install(
+    config: &GatewayConfig,
+    node_control: &crate::mqtt::node_control::NodeControlClient,
     src_dir: &std::path::Path,
-    packages_dir: &std::path::Path,
-) -> Result<(String, String), String> {
-    use acowork_core::AgentManifest;
+) -> Result<(), String> {
+    use crate::mqtt::node_control::{NodeInstallDispatch, NodePackageSource};
 
     let manifest_path = src_dir.join("manifest.toml");
-    let content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("Failed to read manifest: {}", e))?;
-    let manifest: AgentManifest = toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse manifest: {}", e))?;
-
+    let manifest_toml = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read manifest {}: {}", manifest_path.display(), e))?;
+    let manifest = acowork_core::AgentManifest::from_toml(&manifest_toml)
+        .map_err(|e| format!("parse manifest: {}", e))?;
     let agent_id = manifest.agent_id.clone();
-    let agent_root = packages_dir.join(&agent_id);
 
-    // Detect a properly-installed two-level layout. If found, no-op:
-    // the local node re-discovers every instance on its next startup
-    // and republishes the retained installed inventory (ADR-055 §6.5).
-    if has_two_level_instance(&agent_root) {
-        tracing::info!(
-            agent_id,
-            path = %agent_root.display(),
-            "Bundled agent already installed (two-level layout) — no-op"
-        );
-        // Surface the existing instance identity so callers can
-        // resolve it without re-scanning the directory themselves.
-        let instance_id = std::fs::read_dir(&agent_root)
-            .ok()
-            .and_then(|it| {
-                it.flatten().find_map(|entry| {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if uuid::Uuid::parse_str(&name).is_ok() {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .ok_or_else(|| {
-                format!(
-                    "two-level layout present but no UUID instance under {}",
-                    agent_root.display()
-                )
-            })?;
-        return Ok((agent_id, instance_id));
-    }
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip_dir_to_agent_package(src_dir, &mut zip, "")?;
+    let bytes = zip
+        .finish()
+        .map_err(|e| format!("finish package: {}", e))?
+        .into_inner();
 
-    // Stale on-disk state. The directory exists but lacks a valid
-    // `{uuid}/manifest.toml` subdir — i.e. it's either empty or in
-    // the pre-ADR-073 flat layout. Remove it so the install can
-    // land a proper two-level entry. This is destructive of any
-    // user data in the old package directory; the pre-launch
-    // project policy is to migrate data manually before this runs.
-    if agent_root.exists() {
-        tracing::warn!(
-            agent_id,
-            path = %agent_root.display(),
-            "Removing stale package directory before fresh install"
-        );
-        if let Err(e) = std::fs::remove_dir_all(&agent_root) {
-            return Err(format!(
-                "remove_dir_all({}) failed: {}",
-                agent_root.display(),
-                e
-            ));
-        }
-    }
+    let registry_dir = config.package_registry_dir();
+    std::fs::create_dir_all(&registry_dir)
+        .map_err(|e| format!("create registry dir: {}", e))?;
+    let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+    std::fs::write(&registry_path, &bytes).map_err(|e| format!("write registry entry: {}", e))?;
 
-    // ADR-073: generate the instance identity at install time. It
-    // decides the landing directory and the Runtime's
-    // `--agent-instance-id`; the node never invents it.
+    let node_id = acowork_core::node::local_node_id();
+    // A wildcard bind must be dialed via loopback; the local node shares
+    // our host, so `advertise_host` (for remote nodes) is the wrong answer
+    // here — see `http::agents::publish_to_registry`.
+    let url_host = if config.http.host == "0.0.0.0" || config.http.host == "::" {
+        "127.0.0.1"
+    } else {
+        config.http.host.as_str()
+    };
+    let package_url = format!(
+        "http://{}:{}/api/packages/{}/download",
+        url_host, config.http.port, agent_id
+    );
+
+    // ADR-073 决策 5: the Gateway mints the instance identity; the node
+    // installs into `{packages_dir}/{agent_id}/{instance_id}/`.
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let instance_dir = agent_root.join(&instance_id);
-    std::fs::create_dir_all(&instance_dir)
-        .map_err(|e| format!("Failed to create package dir: {}", e))?;
-    copy_dir_recursive(src_dir, &instance_dir)
-        .map_err(|e| format!("Failed to copy agent files: {}", e))?;
-    Ok((agent_id, instance_id))
+    node_control
+        .install_agent_by_url(NodeInstallDispatch {
+            node_id: &node_id,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::Url(&package_url),
+            dev_mode: config.dev_mode,
+            system: manifest.system,
+            // Boot-time bundled install: "make sure this package is
+            // present", never "add one more copy".
+            ensure: true,
+            operation_id: "",
+        })
+        .await
+        .map_err(|e| format!("install dispatch failed: {}", e))?;
+
+    // The registry entry stays: the node downloads the URL asynchronously,
+    // and the same path is reused by later `ensure` calls.
+    Ok(())
 }
+
 
 /// Gateway — the top-level orchestrator
 ///
@@ -215,64 +202,6 @@ impl Gateway {
         Ok(gateway)
     }
 
-    /// Auto-install bundled agents (System Agent, etc.) if not already installed.
-    ///
-    /// This is called during Gateway startup. It looks for bundled agents in:
-    /// 1. The project source directory (../../examples/)
-    /// 2. The ACOWORK_BUNDLED_AGENTS_DIR environment variable
-    ///
-    /// Bundled agents are identified by `system = true` in their manifest.toml.
-    async fn auto_install_bundled_agents(&mut self) {
-        // Skip in production mode (bundled agents only for dev)
-        if !self.config.dev_mode {
-            tracing::debug!("Skipping bundled agents installation (dev_mode=false)");
-            return;
-        }
-
-        // Check if System Agent is already installed
-        if self.state.read().await.is_installed(SYSTEM_AGENT_ID) {
-            tracing::debug!("System Agent already installed, skipping bundled install");
-            return;
-        }
-
-        // Find bundled agents directory
-        let bundled_dir = Self::find_bundled_agents_dir();
-        let Some(bundled_dir) = bundled_dir else {
-            tracing::debug!("No bundled agents directory found, skipping auto-install");
-            return;
-        };
-
-        // Find system agent in bundled directory
-        let system_agent_src = bundled_dir.join("system-agent");
-        if !system_agent_src.exists() {
-            tracing::debug!("Bundled system-agent not found at {:?}", system_agent_src);
-            return;
-        }
-
-        // Verify it has manifest.toml
-        if !system_agent_src.join("manifest.toml").exists() {
-            tracing::warn!("Bundled system-agent missing manifest.toml");
-            return;
-        }
-
-        // Install the system agent
-        tracing::info!(
-            "Auto-installing bundled System Agent from {:?}",
-            system_agent_src
-        );
-        match self.install_agent_from_dir(&system_agent_src).await {
-            Ok(agent_id) => {
-                // The local node re-discovers the copied package from its
-                // packages dir on startup and publishes the retained
-                // installed info; no in-memory refresh is needed here.
-                tracing::info!("Successfully auto-installed bundled agent: {}", agent_id);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to auto-install bundled System Agent: {}", e);
-            }
-        }
-    }
-
     /// Find the bundled agents directory.
     /// Returns Some(path) if found, None otherwise.
     fn find_bundled_agents_dir() -> Option<std::path::PathBuf> {
@@ -297,49 +226,6 @@ impl Gateway {
         None
     }
 
-    /// Install an agent from a source directory.
-    ///
-    /// ADR-073 §5.6: lands the package in the node-side TWO-LEVEL layout
-    /// `{packages_dir}/{agent_id}/{instance_id}/` so the local node's
-    /// `restore_installed_agents` discovers it on the next boot. The
-    /// instance id is gateway-generated (UUID v4) exactly as a
-    /// `POST /api/agents/install` would.
-    ///
-    /// Idempotent by design: when `{packages_dir}/{agent_id}` already
-    /// contains a valid two-level instance directory
-    /// (`{uuid}/manifest.toml`), the call is a no-op — the local node
-    /// re-discovers every instance on its next startup and republishes
-    /// the retained installed inventory (ADR-055 §6.5).
-    ///
-    /// When the on-disk directory exists but is in the pre-ADR-073 flat
-    /// layout (`{agent_id}/manifest.toml` directly — i.e. no UUID-named
-    /// instance subdir), the directory is removed and the install is
-    /// performed fresh. This is destructive of any user data in the old
-    /// package directory; pre-launch project policy is to migrate data
-    /// manually before this code path runs.
-    async fn install_agent_from_dir(
-        &mut self,
-        src_dir: &std::path::Path,
-    ) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        install_bundled_agent_to_disk(src_dir, packages_dir)
-            .await
-            .map(|(agent_id, _instance_id)| agent_id)
-            .map_err(GatewayError::Config)
-    }
-
-    /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.
-    ///
-    /// When Gateway restarts, previously spawned runtime processes lose their
-    /// MQTT connection (or fail to reconnect) and become useless orphans. This
-    /// method finds them by scanning for `acowork-runtime` processes whose
-    /// `--mqtt-port <N>` argument matches this Gateway's MQTT port.
-    ///
-    /// If MQTT is disabled on this Gateway, runtime processes are never given
-    /// `--mqtt-port` and orphans cannot be distinguished by port — we keep them.
-    ///
-    /// Since Gateway is single-instance per host (enforced by HTTP port probing),
-    /// scoping by MQTT port is a safety measure against false positives.
     fn cleanup_orphaned_runtimes(&self) -> usize {
         // ADR-033: gRPC endpoint no longer passed to Runtime. Use MQTT port
         // as the unique cmdline marker tying a runtime to this Gateway.
@@ -426,8 +312,11 @@ impl Gateway {
             tracing::info!(count = orphan_count, "Cleaned up orphan runtime processes");
         }
 
-        // Auto-install bundled agents (System Agent, etc.) if not installed
-        self.auto_install_bundled_agents().await;
+        // ADR-009 §V-O: bundled agents are no longer copied to disk here.
+        // The Gateway cannot create files in the node's packages dir, and at
+        // this point the local node is not even up yet — the bundled install
+        // is dispatched from the System-Agent bootstrap task below, once the
+        // node's control plane is ready.
 
         // `self.state` is already a SharedState. Clone the handle so the
         // rest of `run()` can move it into long-lived tasks (reapers,
@@ -1410,7 +1299,7 @@ impl Gateway {
         {
             let sa_slot = node_control_slot.clone();
             let sa_state = shared_state.clone();
-            let sa_packages_dir = std::path::PathBuf::from(&self.config.packages_dir);
+            let sa_config = self.config.clone();
             tokio::spawn(async move {
                 // Take the node-control handle WITHOUT holding the slot
                 // lock across the wait loop below. A `MutexGuard` born in
@@ -1436,97 +1325,81 @@ impl Gateway {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
 
-                // If no instance appeared, attempt a fresh bundled
+                // If no instance appeared, dispatch a fresh bundled
                 // install. This is the safety net for a stale on-disk
                 // package directory (pre-ADR-073 flat layout): the Node
                 // would otherwise keep re-publishing a non-UUID instance
                 // id and every `start` would be rejected at the UUID
                 // gate.
                 //
-                // When the Node is already running it won't re-scan its
-                // packages dir until its next restart, so we directly
-                // insert the freshly-installed entry into the install
-                // table from the Gateway side. The Node will overwrite
-                // our entry with its own retained publish if/when it
-                // eventually re-emits — the data converges because both
-                // sides read the same manifest.toml on disk.
+                // ADR-009 §V-O: the Gateway does not copy the package to
+                // the node's packages dir. It stages the bundled directory
+                // as a `.agent` ZIP in its own registry and sends the node
+                // one `ensure` install command; the node's retained
+                // installed inventory (published on install completion)
+                // is what seeds the install table here.
                 if sa_state
                     .read()
                     .await
                     .find_instance_by_agent_id(SYSTEM_AGENT_ID)
                     .is_none()
                 {
-                    if let Some(bundled_dir) = Self::find_bundled_agents_dir() {
+                    if !sa_config.dev_mode {
+                        // ADR-009 §V-O keeps the on-disk bundled
+                        // install for local development only (the
+                        // pre-ADR-009 gate in
+                        // `auto_install_bundled_agents`); production
+                        // installs arrive through the registry.
+                        tracing::debug!(
+                            "Skipping bundled System Agent install (dev_mode=false)"
+                        );
+                    } else if let Some(bundled_dir) = Self::find_bundled_agents_dir() {
                         let system_agent_src = bundled_dir.join("system-agent");
-                        if system_agent_src.exists()
-                            && system_agent_src.join("manifest.toml").exists()
-                        {
+                        if system_agent_src.join("manifest.toml").exists() {
                             tracing::info!(
-                                "System Agent not found in install table — \
-                                 auto-installing from bundled sources"
+                                "System Agent not found in install table — dispatching bundled install to the node"
                             );
-                            match install_bundled_agent_to_disk(
+                            match dispatch_bundled_agent_install(
+                                &sa_config,
+                                &nc,
                                 &system_agent_src,
-                                &sa_packages_dir,
                             )
                             .await
                             {
-                                Ok((agent_id, instance_id)) => {
-                                    let install_path = sa_packages_dir
-                                        .join(&agent_id)
-                                        .join(&instance_id);
-                                    let manifest_toml = std::fs::read_to_string(
-                                        install_path.join("manifest.toml"),
-                                    )
-                                    .unwrap_or_default();
-                                    let manifest = acowork_core::AgentManifest::from_toml(
-                                        &manifest_toml,
-                                    )
-                                    .ok();
-                                    if let Some(manifest) = manifest {
-                                        let mut gw = sa_state.write().await;
-                                        gw.add_installed(
-                                            crate::gateway::state::AgentInfo {
-                                                instance_id: instance_id.clone(),
-                                                agent_id: agent_id.clone(),
-                                                version: manifest.version.clone(),
-                                                name: manifest.name.clone(),
-                                                install_path: install_path
-                                                    .to_string_lossy()
-                                                    .to_string(),
-                                                manifest,
-                                                node_id: acowork_core::node::local_node_id(),
-                                            },
-                                        );
-                                        tracing::info!(
-                                            "Auto-installed System Agent and seeded install table: \
-                                             instance_id={} agent_id={}",
-                                            instance_id,
-                                            agent_id
-                                        );
-                                    } else {
-                                        tracing::warn!(
-                                            "Auto-installed System Agent to disk but failed to \
-                                             parse manifest for in-table seeding"
-                                        );
+                                Ok(()) => {
+                                    // Wait for the node to finish the
+                                    // download/install and re-publish its
+                                    // inventory.
+                                    let install_deadline =
+                                        tokio::time::Instant::now()
+                                            + std::time::Duration::from_secs(30);
+                                    while sa_state
+                                        .read()
+                                        .await
+                                        .find_instance_by_agent_id(SYSTEM_AGENT_ID)
+                                        .is_none()
+                                        && tokio::time::Instant::now() < install_deadline
+                                    {
+                                        tokio::time::sleep(
+                                            std::time::Duration::from_millis(200),
+                                        )
+                                        .await;
                                     }
                                 }
                                 Err(e) => tracing::warn!(
                                     error = %e,
-                                    "Auto-install of System Agent failed"
+                                    "Bundled System Agent install dispatch failed"
                                 ),
                             }
                         } else {
                             tracing::warn!(
-                                "System Agent not installed and bundled source \
-                                 is unavailable — skipping auto-start"
+                                "System Agent not installed and bundled source is unavailable — skipping auto-start"
                             );
                             return;
                         }
                     } else {
                         tracing::warn!(
-                            "System Agent not installed and bundled agents \
-                             directory is unavailable — skipping auto-start"
+                            "System Agent not installed and bundled agents directory is unavailable — skipping auto-start"
                         );
                         return;
                     }
@@ -1744,18 +1617,14 @@ impl Gateway {
         ))
     }
 
-    /// Ensure all required directories exist
+    /// Ensure the Gateway's own directories exist.
+    ///
+    /// `packages_dir` is deliberately absent: it points at the **node's**
+    /// package directory (ADR-055) and is created by the node itself
+    /// (`acowork_node::config::NodeConfig::ensure_dirs`) — see ADR-009
+    /// §V-O.
     fn ensure_dirs(&self) -> Result<(), GatewayError> {
-        for dir in &[
-            &self.config.vault_dir,
-            &self.config.packages_dir,
-            &self.config.data_dir,
-        ] {
-            std::fs::create_dir_all(dir).map_err(|e| {
-                GatewayError::Config(format!("Failed to create directory '{}': {}", dir, e))
-            })?;
-        }
-        Ok(())
+        self.config.ensure_dirs()
     }
 }
 

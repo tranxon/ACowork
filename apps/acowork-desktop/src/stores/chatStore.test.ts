@@ -20,6 +20,7 @@ import {
   type AdapterSessionState,
 } from "../components/chat/chatAdapterStore";
 import type { ChatMessage, ConversationEntry } from "../lib/types";
+import { useAgentStore } from "./agentStore";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -1176,5 +1177,57 @@ describe("ADR-067: session_state preserves context_usage sections", () => {
 
     const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
     expect(ss.contextUsage?.sections).toEqual([{ key: "messages", size_bytes: 500 }]);
+  });
+});
+
+describe("ADR-009 §V-Q: agent_meta must not clobber the server-resolved avatar", () => {
+  it("keeps the effective avatar / display_name when the Runtime meta carries none", () => {
+    const id = "11111111-2222-4333-8444-555555555555";
+    // The Runtime never populates `AgentMeta.avatar` (agent_init passes
+    // None), so the wire value is always "". Patching it into the store
+    // dropped the sidebar icon to the random builtin fallback. The
+    // Gateway's `list_agents` is the display authority.
+    useAgentStore.setState({
+      agents: {
+        [id]: {
+          meta: {
+            instance_id: id,
+            agent_id: "com.test.agent",
+            name: "Package Name",
+            display_name: "My Rename",
+            avatar: "assets/avatar-01.jpg",
+            builtin_avatar: "icon-05",
+            version: "1.0.0",
+            running: true,
+            connected: true,
+            ready: true,
+            dev_mode: false,
+          },
+        },
+      },
+    } as never);
+
+    handleMessageEvent(
+      {
+        type: "agent_meta",
+        instance_id: id,
+        name: "Package Name",
+        version: "2.0.0",
+        avatar: "",
+        builtin_avatar: "",
+      },
+      () => {},
+      (() => ({})) as never,
+      id,
+    );
+
+    const meta = useAgentStore.getState().agents[id]!.meta;
+    expect(meta.avatar).toBe("assets/avatar-01.jpg");
+    expect(meta.builtin_avatar).toBe("icon-05");
+    expect(meta.display_name).toBe("My Rename");
+    // Fields the meta payload *does* carry still flow through.
+    expect(meta.version).toBe("2.0.0");
+
+    useAgentStore.setState({ agents: {} } as never);
   });
 });

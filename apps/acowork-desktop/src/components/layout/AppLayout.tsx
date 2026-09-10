@@ -233,10 +233,10 @@ export function AppLayout() {
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.sleeping ?? false) : false;
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.running;
-  const agentDisplayName = selectedAgent && selectedAgentId
-    ? (agents[selectedAgentId]?.profile?.displayName ??
-      selectedAgent.display_name ??
-      selectedAgent.name)
+  // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
+  // mirrored into the Gateway's list view) — no local override.
+  const agentDisplayName = selectedAgent
+    ? (selectedAgent.display_name ?? selectedAgent.name)
     : null;
   // Context usage for the bottom status bar.
   // (Session count was removed — see PR-3 follow-up: users found it noisy

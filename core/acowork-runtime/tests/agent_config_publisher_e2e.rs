@@ -83,8 +83,6 @@ async fn connect_runtime(port: u16, agent_id: &str) -> (RuntimeMqttClient, Strin
         instance_id: &instance_id,
         agent_name: "Test Agent",
         agent_version: "1.0.0",
-        avatar: None,
-        builtin_avatar: None,
         config_json: "{}",
         available_cache: cache,
         control_tx,

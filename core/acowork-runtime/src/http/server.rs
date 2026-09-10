@@ -45,6 +45,9 @@
 //! GET    /agents/{id}/config                     // NEW: panel 1
 //! GET    /agents/{id}/tools                      // NEW: panel 3
 //! GET    /agents/{id}/status                     // NEW: panel 5
+//! GET    /agents/{id}/skills                     // ADR-009 §V-A
+//! GET    /agents/{id}/skills/{name}              // ADR-009 §V-A
+//! GET    /agents/{id}/skills/{name}/history      // ADR-009 §V-A
 //!
 //! Removed in Phase 3 (ADR-034 §7.6.4):
 //!   ~~GET  /sessions/{sid}/state~~        → absorbed by /sessions/{sid}
@@ -760,6 +763,14 @@ impl RuntimeHttpServer {
             // primary router; a `.merge()` after `.with_state()` is a
             // type error.
             .merge(crate::http::prompts::prompts_routes())
+            // ADR-009 §V-A: the Runtime owns `{package_dir}/skills/`. The
+            // Gateway reverse-proxies `/api/agents/{id}/skills*` here so a
+            // single SKILL.md parser survives (no Gateway-side second copy).
+            .merge(crate::http::skills::skills_routes())
+            // ADR-009 §V-B: avatar reads resolve against the agent package
+            // ({package_dir}/assets + manifest.avatar), which lives next to
+            // the Runtime — not on the Gateway.
+            .merge(crate::http::avatar::avatar_routes())
             .with_state(state);
         // Diagnostic: confirms the migration route was wired into the Router
         // during this build. Runs once at server boot. If this log never
@@ -4481,8 +4492,6 @@ mod tests {
             instance_id: "5f4e3d2c-1b0a-4a98-8765-4321fedcba09",
             agent_name: "Test Agent",
             agent_version: "1.0.0",
-            avatar: None,
-            builtin_avatar: None,
             config_json: "{}",
             available_cache: cache,
             control_tx,

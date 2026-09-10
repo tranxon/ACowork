@@ -411,7 +411,10 @@ message AgentMeta {
   string agent_id = 1;
   string name = 2;
   string version = 3;
-  string avatar = 4;       // empty = none
+  // Fields 4/5 (avatar, builtin_avatar) are unused since ADR-009
+  // §V-Q: the avatar is resolved server-side (the Gateway
+  // `list_agents` merge). Kept for wire compatibility — always empty.
+  string avatar = 4;
   string builtin_avatar = 5;
   /// ADR-073: instance identity (UUID v4, immutable).
   string instance_id = 6;
@@ -1269,6 +1272,13 @@ message InstalledAgentInfo {
   /// install time; the Node receives it in the install command and
   /// MUST use it verbatim, never self-generate).
   string instance_id = 6;
+  /// ADR-009 §5 / ADR-073: raw content of the instance's
+  /// `{instance_id}.overrides.json` (user-preference overrides —
+  /// avatar, builtin avatar, display name). Opaque to the Node: it
+  /// reads the sibling file verbatim and never parses it, exactly like
+  /// `manifest_toml`. The Gateway parses it for display; the Runtime
+  /// owns writes. Empty = no overrides (or a pre-upgrade entry).
+  string overrides_json = 7;
 }
 
 /// Gateway → Node command.
@@ -1293,7 +1303,9 @@ message NodeControlCommand {
     NodeInstall       install        = 13;  // Phase 3 (remote package distribution)
     NodeUninstall     uninstall      = 14;  // Phase 2b
     NodeSkillsImport  skills_import  = 15;  // Phase 2b
-    NodeAvatarUpdate  avatar_update  = 16;  // Phase 2b
+    // 16 was `avatar_update` — retired in ADR-009 Phase 5: avatar / display-name
+    // preferences are agent data and travel HTTP (Runtime `/avatar-config`),
+    // never MQTT. Field 16 is retired and MUST NOT be reused.
     NodeClone         clone          = 17;  // Phase 3b (node-local clone)
     NodeUpgrade       upgrade        = 18;  // Phase 3b (package upgrade)
     NodePublishPrepare publish_prepare = 19; // Phase 3b (publish prepare)
@@ -1378,16 +1390,6 @@ message NodeSkillsImport {
   string agent_id = 1;
   /// Node-local path of the uploaded skill archive (Phase 2b).
   string zip_path = 2;
-  /// ADR-073: instance identity.
-  string instance_id = 3;
-}
-
-/// Update avatar assets inside an installed agent package.
-message NodeAvatarUpdate {
-  /// Package identity (from manifest).
-  string agent_id = 1;
-  /// Serialized avatar update request (mirrors the HTTP handler shape).
-  string avatar_json = 2;
   /// ADR-073: instance identity.
   string instance_id = 3;
 }

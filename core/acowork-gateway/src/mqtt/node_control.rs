@@ -482,7 +482,6 @@ fn command_name(command: &NodeControlCommand) -> String {
         Some(node_control_command::Command::Install(_)) => "install",
         Some(node_control_command::Command::Uninstall(_)) => "uninstall",
         Some(node_control_command::Command::SkillsImport(_)) => "skills_import",
-        Some(node_control_command::Command::AvatarUpdate(_)) => "avatar_update",
         Some(node_control_command::Command::Clone(_)) => "clone",
         Some(node_control_command::Command::Upgrade(_)) => "upgrade",
         Some(node_control_command::Command::PublishPrepare(_)) => "publish_prepare",

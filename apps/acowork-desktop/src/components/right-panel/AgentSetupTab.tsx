@@ -139,6 +139,8 @@ export function AgentSetupTab() {
   const [avatarAssets, setAvatarAssets] = useState<AvatarAssetEntry[]>([]);
   const [avatarConfig, setAvatarConfig] = useState<AvatarConfigResponse | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
+  /** In-flight rename draft; `null` = show the server value. */
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
 
   // ── Avatar picker popup positioning ─────────────────────────────
   // The picker popup used to be `absolute` inside the avatar button's
@@ -507,6 +509,26 @@ export function AgentSetupTab() {
 
   // ── Avatar selection handlers ──────────────────────────────────────
 
+  // ── Display-name handler (ADR-009 §V-Q) ────────────────────────────
+  //
+  // Committed on blur / Enter: the Runtime persists it into the instance's
+  // `.overrides.json` and the node republishes its inventory, which is what
+  // refreshes the sidebar. `nameDraft === null` means "show the server
+  // value".
+  const commitAgentName = async () => {
+    if (!selectedAgentId || !selectedAgent || nameDraft === null) return;
+    const next = nameDraft.trim();
+    setNameDraft(null);
+    const current = selectedAgent.display_name ?? "";
+    if (next === current) return;
+    try {
+      await updateAvatarConfig(selectedAgentId, { display_name: next });
+      await fetchAgents();
+    } catch (err) {
+      log.warn("[AgentSetup] Rename agent failed:", err);
+    }
+  };
+
   const handleSelectCustom = async (relativePath: string) => {
     if (!selectedAgentId) return;
     setAvatarBusy(true);
@@ -602,7 +624,10 @@ export function AgentSetupTab() {
     );
   }
 
-  const agentName = profile.displayName ?? selectedAgent.name ?? selectedAgentId;
+  // ADR-009 §V-Q: the display name lives on the server (Runtime
+  // `.overrides.json`, mirrored into the Gateway's list view), so it is
+  // read from the agent meta — never from a local profile override.
+  const agentName = selectedAgent.display_name ?? selectedAgent.name ?? selectedAgentId;
 
   // Derived once so the slider thumb and the numeric badge can never
   // disagree (bug: previously the slider used `?? 0.9` while the badge
@@ -784,10 +809,12 @@ export function AgentSetupTab() {
             </label>
             <StyledInput
               type="text"
-              value={profile.displayName ?? selectedAgent.name ?? ""}
-              onChange={(e) =>
-                setProfile(selectedAgentId, { displayName: e.target.value || undefined })
-              }
+              value={nameDraft ?? selectedAgent.display_name ?? selectedAgent.name ?? ""}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={() => void commitAgentName()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitAgentName();
+              }}
               placeholder={selectedAgent.name ?? "Agent name"}
               className="rounded-md bg-panel-block"
             />

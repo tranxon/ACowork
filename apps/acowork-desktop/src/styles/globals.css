@@ -39,7 +39,7 @@
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
-  --color-chat-input-border: hsl(240 5.9% 90.6% / 0.7);
+  --color-chat-input-border: hsl(240 5.9% 90.6% / 0.5);
   /* = zinc-200, #e4e4e7 — chat input box outline (matches the
      right-panel section divider hairlines like `border-zinc-200` on
      RightPanel's tab header / section dividers, so the input reads

@@ -356,8 +356,6 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     },
                     "name": meta.name,
                     "version": meta.version,
-                    "avatar": meta.avatar,
-                    "builtin_avatar": meta.builtin_avatar,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }

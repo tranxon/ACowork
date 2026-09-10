@@ -58,6 +58,8 @@ ref-repo/
 # Rust test build artifacts
 target-test/
 core/target-test/
+target_test/
+core/target_test/
 # Rust verification build dir (used by build verification scripts)
 target-build-test/
 

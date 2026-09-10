@@ -155,10 +155,10 @@ export function mergeMessageWindow(
 
 function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
   const store = useAgentStore.getState();
-  const agentProfile = store.getProfile(agentId);
   const agent = store.agents[agentId]?.meta;
   return {
-    senderDisplayName: agentProfile?.displayName ?? agent?.display_name ?? agent?.name,
+    // ADR-009 §V-Q: name is server-side — no localStorage overlay.
+    senderDisplayName: agent?.display_name ?? agent?.name,
     senderRole: agent?.role,
   };
 }
@@ -3166,11 +3166,13 @@ export function handleMessageEvent(
     case "agent_meta": {
       const aid = data.instance_id as string | undefined;
       if (aid) {
+        // ADR-009 §V-Q: avatar / display name are resolved server-side
+        // (Gateway `list_agents` merges the Runtime's per-instance
+        // overrides). The Runtime meta payload carries no avatar, so
+        // patching it here would clobber the effective value.
         useAgentStore.getState().patchAgentMeta(aid, {
           name: data.name as string | undefined,
           version: data.version as string | undefined,
-          avatar: data.avatar as string | undefined,
-          builtin_avatar: data.builtin_avatar as string | undefined,
         });
       }
       break;

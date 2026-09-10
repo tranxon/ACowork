@@ -468,6 +468,11 @@ pub(crate) async fn phase_b_init_session(
         c.memory_session = Some(ctx.memory_session.clone());
         c.embedding_provider = ctx.emb_provider.clone();
         c.rag_provider = ctx.rag_provider.take();
+        // Per-turn skill command injection: carry the Phase A SkillRegistry
+        // (skills/*/SKILL.md) on AgentCore so `dispatch_inbound` can resolve
+        // a chat `command` (skill name) into instructions — the runtime is
+        // the authoritative source, the frontend only sends names.
+        c.skill_registry = ctx.skill_registry.clone();
         // ADR-071 D4/D6: seed the AgentCore runtime distiller layer from
         // `agent_config.json` BEFORE the consolidation pipeline starts
         // (init_memory_provider → start_consolidation_pipeline reads
@@ -586,28 +591,12 @@ pub(crate) async fn phase_b_init_session(
         // Fields intentionally NOT auto-resolved:
         //   system_prompt_override — None = "use compiled manifest prompt"
         //   max_output_tokens      — None = "use each model's native limit"
-        //   avatar / builtin_avatar — resolved via resolve_effective_avatar();
-        //     seeded from manifest on first start (package author's default),
-        //     then left alone (user may explicitly clear to fallback).
+        //   avatar / display name  — NOT part of this file at all; they are
+        //     user preferences in `AgentOverrides` (ADR-009 §5), resolved by
+        //     `http::avatar` as overrides > manifest.
         {
             let mut updated = agent_cfg.clone();
             let mut dirty = false;
-
-            // ── First-start avatar seeding ──────────────────────────
-            let is_first_start = !work_dir_path
-                .join("config")
-                .join("agent_config.json")
-                .exists();
-            if is_first_start {
-                if updated.avatar.is_none() {
-                    updated.avatar = ctx.loaded.manifest.avatar.clone();
-                    dirty = true;
-                }
-                if updated.builtin_avatar.is_none() {
-                    updated.builtin_avatar = ctx.loaded.manifest.builtin_avatar.clone();
-                    dirty = true;
-                }
-            }
 
             // ── context_window: manifest.llm.context_window → 200K ──
             // Note: manifest may set Some(0) meaning "no limit" (use

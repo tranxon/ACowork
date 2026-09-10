@@ -359,8 +359,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 instance_id: config.instance_id(),
                 agent_name: &loaded.manifest.name,
                 agent_version: &loaded.manifest.version,
-                avatar: None,
-                builtin_avatar: None,
                 config_json: &config_json,
                 available_cache: cache.clone(),
                 control_tx,
@@ -623,16 +621,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         load_or_trace("distiller-judge.md", "distiller Step 4 judge prompt");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
+    // Kept alive on the boot context (not discarded) so Phase B injects it
+    // into AgentCore — the runtime resolves per-turn chat `command` (skill
+    // name) against it, and skills are the agent's own package content, not
+    // something the frontend should supply.
     let skills_dir = loaded.package_dir.join("skills");
-    let _skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
-        .unwrap_or_else(|e| {
+    let skill_registry = Arc::new(
+        crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir).unwrap_or_else(|e| {
             tracing::warn!(
                 skills_dir = %skills_dir.display(),
                 error = %e,
                 "Failed to load skills registry, proceeding without skills"
             );
             crate::skills::parser::SkillRegistry::new()
-        });
+        }),
+    );
 
     // ── Step 3: Initialize LLM Provider ─────────────────────────────
     let mut gateway_current_provider_id: Option<String> = None;
@@ -1233,6 +1236,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_tool_specs,
         system_prompt,
         compaction_prompt,
+        // Per-turn skill command injection: registry loaded in Step 3.5
+        // above, injected into AgentCore in Phase B (session_init.rs).
+        skill_registry,
         // ADR-063: 4 additional package-level overrides (Phase A loaded
         // each from `prompts/<file>.md`; see load_or_trace above). Wired
         // through `AgentBootContext` so Phase B's session_init.rs can

@@ -847,10 +847,16 @@ impl GatewayConfig {
         std::path::PathBuf::from(&self.data_dir).join("package-registry")
     }
 
-    /// Ensure required directories exist
+    /// Ensure the directories the Gateway owns exist.
+    ///
+    /// `packages_dir` is **not** created here: it is the node's package
+    /// directory (ADR-055), owned by `acowork-node`, and the Gateway never
+    /// writes into it (ADR-009 §V-O). The package *registry*
+    /// (`package_registry_dir()`) is the Gateway's own store and is created
+    /// below.
     pub fn ensure_dirs(&self) -> Result<(), GatewayError> {
         let registry = self.package_registry_dir();
-        for dir in [&self.vault_dir, &self.packages_dir, &self.data_dir] {
+        for dir in [&self.vault_dir, &self.data_dir] {
             std::fs::create_dir_all(dir).map_err(GatewayError::Io)?;
         }
         std::fs::create_dir_all(&registry).map_err(GatewayError::Io)?;

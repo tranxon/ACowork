@@ -1357,7 +1357,20 @@ impl SessionManager {
     /// or the channel is closed (SessionTask has died).
     ///
     /// **Full vs Closed distinction**: when the channel is merely full,
-    /// the session handle is NOT removed — the session is healthy but
+    /// Per-turn skill command injection: resolve a chat `command` (skill
+    /// name) into the skill's instruction block via the agent's
+    /// `SkillRegistry` (loaded Phase A, injected Phase B). The registry is
+    /// the authoritative source — the frontend only ever sends names.
+    /// Returns `None` for unknown/empty commands so the caller can fall
+    /// back to no skill injection.
+    pub(crate) fn resolve_skill_instructions(&self, command: &str) -> Option<String> {
+        self.core.skill_registry.instructions_for(command)
+    }
+
+    /// ADR-034 Phase 7: Send a message to a session by ID.
+    ///
+    /// NOTE: when the session's channel is full (backpressure), the
+    /// session handle is NOT removed — the session is healthy but
     /// experiencing backpressure. When the channel is closed (e.g. the
     /// SessionTask panicked), the stale handle IS auto-removed so
     /// subsequent calls get a clean "Session not found" instead of

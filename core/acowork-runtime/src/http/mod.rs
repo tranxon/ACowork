@@ -7,10 +7,12 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §7.5.
 
+pub mod avatar;
 pub mod debug;
 pub mod memory_query;
 pub mod prompts;
 pub mod server;
+pub mod skills;
 
 pub use server::{
     RuntimeHttpServer, RuntimeHttpServerError, SharedAgentCore, SharedDegradation,

@@ -14,6 +14,7 @@ pub mod mqtt_proto {
 
 pub mod addr;
 pub mod agent_instance_id;
+pub mod agent_overrides;
 pub mod budget;
 pub mod crlf;
 pub mod defaults;
@@ -43,6 +44,7 @@ pub mod tools;
 
 // Re-exports for convenience
 pub use agent_instance_id::{AgentInstanceId, InstanceIdError};
+pub use agent_overrides::{AgentOverrides, overrides_path};
 pub use manifest::{
     AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ManifestConsolidationQuality,
     ManifestDedupQuality, ManifestEdgeWeightQuality, ManifestGraphExpandQuality,

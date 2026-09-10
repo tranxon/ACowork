@@ -2064,8 +2064,11 @@ export interface AvatarConfigResponse {
   avatar: string | null;
   /** Effective builtin avatar icon ID (e.g. "icon-05"). Null when none. */
   builtin_avatar: string | null;
-  /** Source of the effective value: "runtime" | "config" | "manifest" | "fallback" */
-  source: "runtime" | "config" | "manifest" | "fallback";
+  /** Effective display name: server-side override > `manifest.display_name`.
+   *  Null when neither is set (callers fall back to `manifest.name`). */
+  display_name: string | null;
+  /** Source of the effective value: "overrides" | "manifest" | "fallback" */
+  source: "overrides" | "manifest" | "fallback";
 }
 
 /** PUT request body for PUT /api/agents/:id/avatar-config */
@@ -2074,6 +2077,9 @@ export interface UpdateAvatarConfigRequest {
   avatar?: string;
   /** Set to an icon ID to select, "" to clear, omit to leave unchanged */
   builtin_avatar?: string;
+  /** Rename the agent (stored server-side, ADR-009 §V-Q). "" clears it
+   *  back to `manifest.display_name`; omit to leave unchanged. */
+  display_name?: string;
 }
 
 /** A single avatar asset file in the install directory */

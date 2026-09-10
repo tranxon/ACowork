@@ -126,8 +126,6 @@ fn runtime_connect_cfg<'a>(
         instance_id,
         agent_name: "Shared Agent",
         agent_version: "1.0.0",
-        avatar: None,
-        builtin_avatar: None,
         config_json: "{}",
         available_cache: new_shared_cache(),
         control_tx,
@@ -182,6 +180,11 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
         //    bits more than once in this short window). ──
         let mut by_topic: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
+        // Channel drain over a fixed window. `Err(_)` here is the
+        // per-iteration timeout, not a recv error — converting it into
+        // the loop's break condition is what `while let` cannot express
+        // without a flag, so we suppress the lint locally.
+        #[allow(clippy::while_let_loop)]
         loop {
             match tokio::time::timeout(Duration::from_millis(500), status_rx.recv()).await {
                 Ok(Some((topic, payload))) => {

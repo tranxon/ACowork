@@ -103,9 +103,6 @@ pub enum SkillParseError {
     #[error("Missing required field '{0}' in SKILL.md frontmatter")]
     MissingField(String),
 
-    #[error("Empty triggers list in SKILL.md")]
-    EmptyTriggers,
-
     #[error("Empty instructions body in SKILL.md")]
     EmptyInstructions,
 
@@ -159,7 +156,12 @@ pub fn parse_skill_md(content: &str) -> Result<SkillDefinition, SkillParseError>
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter_str)
         .map_err(|e| SkillParseError::YamlParse(e.to_string()))?;
 
-    // Validate required fields
+    // Validate required fields.
+    // `triggers` is intentionally NOT required: a skill with no triggers is
+    // still valid — it just won't be auto-matched by `find_by_trigger`, and
+    // can only be invoked manually via the chat-box selector (which the
+    // runtime resolves by `name`). We log a warning so authors know the
+    // skill won't surface via natural-language trigger matching.
     if frontmatter.name.is_empty() {
         return Err(SkillParseError::MissingField("name".to_string()));
     }
@@ -167,7 +169,11 @@ pub fn parse_skill_md(content: &str) -> Result<SkillDefinition, SkillParseError>
         return Err(SkillParseError::MissingField("description".to_string()));
     }
     if frontmatter.triggers.is_empty() {
-        return Err(SkillParseError::EmptyTriggers);
+        tracing::warn!(
+            skill = %frontmatter.name,
+            "SKILL.md has no triggers — skill will load but won't be auto-matched; \
+             it can only be invoked manually via the chat-box selector"
+        );
     }
     if instructions.is_empty() {
         return Err(SkillParseError::EmptyInstructions);
@@ -333,6 +339,17 @@ impl SkillRegistry {
         output
     }
 
+    /// Build the system-prompt block for a single skill by name — the
+    /// per-turn command-injection path. The frontend sends only the skill
+    /// NAME in the chat `command` field; the runtime owns the instructions
+    /// (this registry is the authoritative source). Returns `None` when
+    /// `name` is not registered (unknown command — the skill is ignored).
+    /// Block shape matches the per-skill block of [`Self::build_skill_instructions`].
+    pub fn instructions_for(&self, name: &str) -> Option<String> {
+        let skill = self.get(name)?;
+        Some(format!("### {}\n\n{}", skill.name, skill.instructions))
+    }
+
     /// Build a compact skill summary for system prompt injection
     ///
     /// Generates a formatted string containing only skill names and descriptions,
@@ -479,16 +496,22 @@ Body
     }
 
     #[test]
-    fn test_parse_skill_md_missing_triggers() {
+    fn test_parse_skill_md_empty_triggers_loads_with_warning() {
+        // A skill with no triggers is still valid: it loads into the
+        // registry (so manual command injection works) but won't be
+        // auto-matched by `find_by_trigger`. This is the common shape for
+        // "manual-only" skills like /ponytail-review.
         let content = r#"---
-name: test
-description: Test skill
+name: ponytail-review
+description: Code review focused on over-engineering
 ---
 
 Body
 "#;
-        let result = parse_skill_md(content);
-        assert!(matches!(result, Err(SkillParseError::EmptyTriggers)));
+        let skill = parse_skill_md(content).expect("empty triggers should not reject the skill");
+        assert_eq!(skill.name, "ponytail-review");
+        assert!(skill.triggers.is_empty());
+        assert!(skill.instructions.contains("Body"));
     }
 
     #[test]
@@ -634,6 +657,22 @@ Auto skill instructions.
         assert!(instructions.contains("## Skills"));
         assert!(instructions.contains("### weekly-report"));
         assert!(instructions.contains("执行步骤"));
+    }
+
+    #[test]
+    fn test_skill_registry_instructions_for_single_skill() {
+        let mut registry = SkillRegistry::new();
+        registry.register(parse_skill_md(sample_skill_md()).unwrap());
+
+        // Known skill → formatted instruction block (name + body).
+        let instructions = registry.instructions_for("weekly-report").unwrap();
+        assert!(instructions.contains("### weekly-report"));
+        assert!(instructions.contains("执行步骤"));
+
+        // Unknown skill / empty name → None (caller falls back to no
+        // skill injection instead of trusting a client-supplied name).
+        assert!(registry.instructions_for("no-such-skill").is_none());
+        assert!(registry.instructions_for("").is_none());
     }
 
     #[test]

@@ -168,16 +168,13 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<usize>,
 
-    /// Custom avatar path (relative to install dir, e.g. "assets/avatar-02.jpg").
-    /// When set, takes priority over `builtin_avatar`. Managed via gRPC
-    /// (RuntimeConfigUpdate) from the Gateway — the Runtime persists it
-    /// to agent_config.json.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
-
-    /// Builtin avatar icon ID (e.g. "icon-05"). Mutually exclusive with `avatar`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_avatar: Option<String>,
+    // NOTE: the avatar did NOT live here. ADR-009 §5 moved the user's
+    // avatar / display-name pick into `AgentOverrides`
+    // (`{instance_id}.overrides.json`, sibling of the package dir) — see
+    // `acowork_core::agent_overrides` and `http::avatar`. Putting it back
+    // in `agent_config.json` would (a) make it the Gateway's business
+    // again and (b) lose it on every upgrade, since `work_dir` sits
+    // inside the instance dir.
 
     /// Approval timeout in seconds for loop approval. None = use system default (300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,31 +259,6 @@ pub struct AgentConfig {
     /// PurgeLog (30-day recovery window). `None` = default (90).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_forgetting_archive_days: Option<u64>,
-}
-
-/// Resolve the effective avatar from agent config and manifest fallback.
-///
-/// Priority:
-/// 1. config.avatar          — user's runtime choice (custom image)
-/// 2. config.builtin_avatar  — user's runtime choice (builtin icon)
-/// 3. manifest.avatar         — install-time default (custom image)
-/// 4. manifest.builtin_avatar — install-time default (builtin icon)
-/// 5. fallback (both None)   — caller renders deterministic random icon
-///
-/// Returns `(avatar, builtin_avatar, source)` where source is
-/// `"config"`, `"manifest"`, or `"fallback"`.
-pub fn resolve_effective_avatar(
-    config: &AgentConfig,
-    manifest_avatar: &Option<String>,
-    manifest_builtin_avatar: &Option<String>,
-) -> (Option<String>, Option<String>, &'static str) {
-    if config.avatar.is_some() || config.builtin_avatar.is_some() {
-        return (config.avatar.clone(), config.builtin_avatar.clone(), "config");
-    }
-    if manifest_avatar.is_some() || manifest_builtin_avatar.is_some() {
-        return (manifest_avatar.clone(), manifest_builtin_avatar.clone(), "manifest");
-    }
-    (None, None, "fallback")
 }
 
 /// Filename for per-agent config in the workspace config directory.

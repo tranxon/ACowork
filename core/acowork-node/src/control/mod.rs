@@ -134,7 +134,6 @@ fn agent_lifecycle_instance_id(command: Option<&node_control_command::Command>) 
         Command::Install(c) => &c.instance_id,
         Command::Uninstall(c) => &c.instance_id,
         Command::SkillsImport(c) => &c.instance_id,
-        Command::AvatarUpdate(c) => &c.instance_id,
         Command::Clone(c) => &c.instance_id,
         Command::Upgrade(c) => &c.instance_id,
         Command::PublishPrepare(c) => &c.instance_id,
@@ -149,7 +148,6 @@ fn agent_lifecycle_instance_id(command: Option<&node_control_command::Command>) 
 /// - `ping` → always succeeds (stateless);
 /// - `start`/`stop` → already-running / already-exited return success;
 /// - `install`/`uninstall`/`skills_import` → local package operations;
-/// - `avatar_update` → Phase 2c/3, answers `not_implemented`.
 async fn handle_command(
     state: &SharedNodeState,
     config: &NodeConfig,
@@ -427,10 +425,6 @@ async fn handle_command(
                 ),
             }
         }
-        Some(Command::AvatarUpdate(cmd)) => reply(
-            "not_implemented",
-            format!("avatar_update '{}' not implemented until ADR-055 Phase 2c", cmd.agent_id),
-        ),
         Some(Command::Clone(cmd)) => {
             // Node-local clone (ADR-055 §6.6 L2-5): source and new agent
             // live on the same node, so the package directory is copied
@@ -1203,9 +1197,10 @@ impl NodeControlPlane {
         // relay's parent-health watchdog has a live target from birth.
         let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
-            // ADR-055 §6.4 + L7-1: the node HTTP server hosts both the
-            // `/agents/{id}/*` reverse proxy and the `/fs/browse` remote
-            // filesystem browser on the same `:19900` listener.
+            // ADR-055 §6.4 + L7-1: the node HTTP server hosts the
+            // `/agents/{id}/*` reverse proxy, the `/fs/browse` remote
+            // filesystem browser and (ADR-009 §5) the read-only agent
+            // asset service on the same `:19900` listener.
             // ADR-055 Phase 5a §6.8: the node HTTP router carries the
             // live identity so the proxy can validate inbound
             // `X-ACowork-Node-Token` against the issued node_token.
@@ -1214,7 +1209,8 @@ impl NodeControlPlane {
                 identity: http_identity,
             };
             let app = crate::proxy::router(node_http_state.clone())
-                .merge(crate::fs_browse::router(node_http_state));
+                .merge(crate::fs_browse::router(node_http_state.clone()))
+                .merge(crate::package_http::router(node_http_state));
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {
                 Ok(l) => l,
                 Err(e) => {

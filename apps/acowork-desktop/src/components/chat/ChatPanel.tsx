@@ -703,7 +703,8 @@ export function ChatPanel() {
    */
   const vmlRef = useRef<VirtualMessageListHandle | null>(null);
 
-  const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
+  // ADR-009 §V-Q: server-side name only (no localStorage override).
+  const agentDisplayName = selectedAgent?.display_name ?? selectedAgent?.name;
 
   // Read saved scroll snapshot for data-driven restoration.
   // The snapshot carries { atBottom, firstVisibleBlockId } and is consumed
@@ -2243,7 +2244,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-xl border border-chat-input-border bg-right-panel">
+        <div className="mx-3 mb-3 rounded-xl border border-chat-input-border bg-right-panel shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">

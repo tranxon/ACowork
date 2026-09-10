@@ -17,7 +17,9 @@ pub mod upgrade;
 
 use std::path::Path;
 
-use crate::state::{InstalledAgent, NodeState};
+use acowork_core::mqtt_proto::InstalledAgentInfo;
+
+use crate::state::{InstalledAgent, NodeHttpState, NodeState};
 
 /// Build the retained `InstalledAgentInfo` payload for a locally-installed
 /// agent (ADR-055 §6.5). Returns `None` if the manifest fails to serialize
@@ -31,7 +33,86 @@ pub fn build_installed_info(installed: &InstalledAgent) -> Option<acowork_core::
         name: installed.name.clone(),
         install_path: installed.install_path.clone(),
         manifest_toml,
+        overrides_json: read_overrides_json(installed),
     })
+}
+
+/// Read the instance's `{instance_id}.overrides.json` **verbatim**.
+///
+/// ADR-009 §5: the file is written by the Runtime and is opaque to the
+/// Node — we copy the bytes into the retained inventory so a stopped
+/// agent still reports the user's avatar / display name (the Runtime
+/// has no process to ask). An unreadable file degrades to "no
+/// overrides" so a permissions problem can never block an install from
+/// being reported.
+fn read_overrides_json(installed: &InstalledAgent) -> String {
+    let Some(path) = acowork_core::overrides_path(
+        Path::new(&installed.install_path),
+        &installed.instance_id,
+    ) else {
+        return String::new();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Cannot read instance overrides — publishing empty overrides"
+            );
+            String::new()
+        }
+    }
+}
+
+/// [`build_installed_info`] with the manifest re-read from disk.
+///
+/// The install table holds the **install-time** manifest snapshot; a
+/// publish-flow rewrite (`PUT /manifest/avatar`) changes the file only.
+/// The retained inventory describes the package, so it must be built
+/// from the file — the same rule `package_http::get_avatar` follows
+/// when serving.
+pub fn build_installed_info_fresh(installed: &InstalledAgent) -> Option<InstalledAgentInfo> {
+    let mut fresh = installed.clone();
+    let manifest_path = Path::new(&installed.install_path).join("manifest.toml");
+    if let Ok(raw) = std::fs::read_to_string(&manifest_path)
+        && let Ok(manifest) = acowork_core::AgentManifest::from_toml(&raw)
+    {
+        fresh.manifest = manifest;
+    }
+    build_installed_info(&fresh)
+}
+
+/// Re-publish this instance's retained inventory entry (ADR-055 §6.5).
+///
+/// That entry carries `manifest_toml` + `overrides_json` — the durable
+/// copy the Gateway rebuilds its agent list from, and the only copy for
+/// a **stopped** agent. Every write that changes either must refresh
+/// it, otherwise the Gateway (and a Gateway restart) keeps reading the
+/// pre-write value until this node reconnects.
+///
+/// Called from the two write paths this node can see: its own
+/// `PUT /manifest/avatar` and the `PUT /avatar-config` it reverse
+/// proxies to the Runtime.
+pub async fn republish_installed_info(state: &NodeHttpState, instance_id: &str) {
+    let entry = {
+        let node = state.node.read().await;
+        node.installed_agents.get(instance_id).cloned()
+    };
+    let Some(entry) = entry else {
+        tracing::debug!(instance_id, "Not installed here — nothing to republish");
+        return;
+    };
+    let Some(info) = build_installed_info_fresh(&entry) else {
+        tracing::warn!(instance_id, "Cannot rebuild installed info — skipping republish");
+        return;
+    };
+    let node_id = state.identity.read().await.node_id.clone();
+    let topic = acowork_core::node::node_agent_installed_topic(&node_id, instance_id);
+    if let Err(e) = crate::control::dispatcher::publish_installed_info(topic, info).await {
+        tracing::warn!(instance_id, error = %e, "Failed to republish installed info");
+    }
 }
 
 /// Scan the packages directory and rebuild the local install table
@@ -111,5 +192,47 @@ pub fn restore_installed_agents(state: &mut NodeState, packages_dir: &Path) {
             );
             state.add_installed(info);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The install table holds the install-time manifest snapshot; a
+    /// publish-flow rewrite changes the file only. The retained
+    /// inventory must follow the file, otherwise the Gateway keeps
+    /// showing the pre-rewrite avatar until this node reconnects.
+    #[test]
+    fn build_installed_info_fresh_follows_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-pkg-fresh-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let on_disk = "agent_id = \"com.acowork.test\"\nname = \"Test\"\nversion = \"1.0.0\"\ndescription = \"fixture\"\nauthor = \"acowork-test\"\nruntime_version = \"0.1.0\"\navatar = \"assets/on-disk.png\"\n";
+        std::fs::write(dir.join("manifest.toml"), on_disk).unwrap();
+
+        let stale = acowork_core::AgentManifest::from_toml(
+            "agent_id = \"com.acowork.test\"\nname = \"Test\"\nversion = \"1.0.0\"\ndescription = \"fixture\"\nauthor = \"acowork-test\"\nruntime_version = \"0.1.0\"\navatar = \"assets/stale.png\"\n",
+        )
+        .unwrap();
+        let entry = InstalledAgent {
+            instance_id: "3f2a0c1e-0000-4000-8000-000000000001".to_string(),
+            agent_id: "com.acowork.test".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Test".to_string(),
+            install_path: dir.to_string_lossy().to_string(),
+            manifest: stale,
+        };
+
+        let info = build_installed_info_fresh(&entry).expect("info");
+        assert!(info.manifest_toml.contains("assets/on-disk.png"));
+        assert!(!info.manifest_toml.contains("assets/stale.png"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

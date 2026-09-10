@@ -840,21 +840,6 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                             return;
                         };
 
-                        // ADR-017: apply the Gateway-owned avatar cache to
-                        // the freshly-aggregated agent so list_agents shows
-                        // the correct avatar for stopped agents.
-                        if let Some(data_dir) = gw.config.as_ref().map(|c| c.data_dir.clone()) {
-                            let cache = crate::http::agent_config::load_avatar_cache(
-                                std::path::Path::new(&data_dir),
-                            );
-                            if let Some(entry) = cache.get(&aid)
-                                && let Some(agent) = gw.installed_agents.get_mut(&aid)
-                            {
-                                agent.manifest.avatar = entry.avatar.clone();
-                                agent.manifest.builtin_avatar = entry.builtin_avatar.clone();
-                            }
-                        }
-
                         // ADR-055 §3.2 / S3.3: register the manifest-declared
                         // cron triggers on first install. The node no longer
                         // owns cron; the Gateway registers them once the

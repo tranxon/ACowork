@@ -175,10 +175,14 @@ pub enum InboundMessage {
     /// ADR-034 Phase 7: User chat message from MQTT SendMessage.
     /// Carries content and message_id for SessionMessage::ChatMessage.
     /// Also carries raw params_json so the handler can extract
-    /// attached_items / command / content_parts.
+    /// attached_items / skill_instructions / content_parts, and the
+    /// `command` (skill name for per-turn skill injection — resolved
+    /// against the agent's SkillRegistry by the handler; the runtime is
+    /// the authoritative source of skill instructions, never the client).
     ChatMessage {
         content: String,
         message_id: String,
+        command: String,
         params_json: String,
     },
     /// ADR-034 Phase 7: Per-session model switch.

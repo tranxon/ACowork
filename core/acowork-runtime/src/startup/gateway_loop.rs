@@ -233,13 +233,14 @@ fn control_action_to_inbound(
             session_id,
             message_id,
             content,
-            command: _,
+            command,
             params_json,
         } => Some((
             session_id,
             InboundMessage::ChatMessage {
                 content,
                 message_id,
+                command,
                 params_json,
             },
         )),
@@ -1087,11 +1088,12 @@ async fn dispatch_inbound(
         InboundMessage::ChatMessage {
             content,
             message_id,
+            command,
             params_json,
         } => {
-            // Parse params_json to extract skill_instructions and
-            // attached_items (ADR-046 replaces the prior document_ids +
-            // content_parts + attached_context fields).
+            // Parse params_json to extract attached_items (ADR-046 replaces
+            // the prior document_ids + content_parts + attached_context
+            // fields).
             //
             // ADR-046: `attached_items` is a strongly-typed discriminated
             // union array. Each item carries a `"type"` tag matching the
@@ -1105,11 +1107,6 @@ async fn dispatch_inbound(
             if !params_json.is_empty()
                 && let Ok(params) = serde_json::from_str::<serde_json::Value>(&params_json)
             {
-                    if let Some(si) = params.get("skill_instructions").and_then(|v| v.as_str())
-                        && !si.is_empty()
-                    {
-                        skill_instructions = Some(si.to_string());
-                    }
                     if let Some(items) = params.get("attached_items").and_then(|v| v.as_array()) {
                         let parsed: Vec<acowork_core::protocol::AttachedItem> = items
                             .iter()
@@ -1128,6 +1125,33 @@ async fn dispatch_inbound(
                             content_parts = Some(parsed);
                         }
                     }
+            }
+
+            // Per-turn skill injection: the frontend sends only the skill
+            // NAME in `command`; the runtime owns the instructions (the
+            // agent's SkillRegistry, loaded Phase A / injected Phase B).
+            // Resolve here so skill content is never trusted to the client.
+            if !command.is_empty() {
+                let resolved = session_manager
+                    .lock()
+                    .await
+                    .resolve_skill_instructions(&command);
+                match resolved {
+                    Some(instructions) => {
+                        tracing::info!(
+                            session_id = %session_id,
+                            skill = %command,
+                            skill_len = instructions.len(),
+                            "ChatMessage: resolved skill command → instructions"
+                        );
+                        skill_instructions = Some(instructions);
+                    }
+                    None => tracing::warn!(
+                        session_id = %session_id,
+                        command = %command,
+                        "ChatMessage: command did not match any loaded skill, ignoring"
+                    ),
+                }
             }
 
             session_manager

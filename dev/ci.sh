@@ -53,6 +53,59 @@ run_mqtt_redline() {
     echo "MQTT ErrorKind red line: OK"
 }
 
+# ADR-009 §5.4 red line: Gateway = communication + resource management +
+# reverse proxy. It MUST NOT turn an installed agent's `install_path` into a
+# filesystem root. Since ADR-055 that path is a *node-local* path, so such
+# access silently works on a single-machine setup and breaks (5xx) the moment
+# Gateway and Node are on different machines — that is the V-A/V-B bug class:
+# a second parser in the Gateway reading a directory that is not there.
+#
+# Ceiling, not allowlist. These are the surviving legitimate call sites
+# (ADR-009 §2.2 install-time package management, the Gateway-owned avatar
+# cache and its publish flow, reporting `{install_path}/workspace` back to the
+# Runtime). Counts may only go DOWN: the moment one goes up, or a hit appears
+# in a file that is not listed here, the boundary has been re-crossed.
+# Lower a number in the same commit that removes a call site.
+ADR009_FS_CEILING="
+gateway/mod.rs:2
+http/agents.rs:4
+mqtt/dispatch.rs:3
+"
+run_gateway_fs_redline() {
+    echo "Checking ADR-009 Gateway filesystem-isolation red line..."
+    local root="$SCRIPT_DIR/../core/acowork-gateway/src"
+    local hits
+    hits=$(grep -rnE 'install_path' --include='*.rs' "$root" \
+        | grep -E 'Path::new|PathBuf::from|\.join\(|fs::read|fs::write|canonicalize|\.exists\(' \
+        | grep -vE 'install_path: ' \
+        | grep -vE ':[0-9]+:[[:space:]]*//' \
+        || true)
+
+    local failed=0 rel count ceiling files f
+    files=$(printf '%s\n' "$hits" | grep -oE "^$root/[^:]+" | sort -u || true)
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        rel="${f#"$root"/}"
+        count=$(printf '%s\n' "$hits" | grep -cF "$f:" || true)
+        ceiling=$(printf '%s\n' "$ADR009_FS_CEILING" | grep -E "^$rel:" | cut -d: -f2 || true)
+        if [ -z "$ceiling" ]; then
+            echo "ERROR: ${rel}: ${count} install_path filesystem access(es) — not on the ADR-009 §5.4 allowlist."
+            failed=1
+        elif [ "$count" -gt "$ceiling" ]; then
+            echo "ERROR: ${rel}: ${count} install_path filesystem access(es), ceiling is ${ceiling}."
+            failed=1
+        fi
+    done <<< "$files"
+
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "Agent-private data must be proxied through the Runtime, not read by the Gateway:"
+        echo "  core/acowork-gateway/src/http/proxy.rs  ->  core/acowork-runtime/src/http/"
+        exit 1
+    fi
+    echo "Gateway filesystem red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -102,6 +155,7 @@ run_smoke() {
 
 case "$MODE" in
     check)
+        run_gateway_fs_redline
         run_check
         ;;
     clippy)
@@ -119,6 +173,7 @@ case "$MODE" in
     all)
         run_node_redline
         run_mqtt_redline
+        run_gateway_fs_redline
         run_check
         run_clippy
         run_test

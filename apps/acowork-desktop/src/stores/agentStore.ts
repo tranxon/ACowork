@@ -19,7 +19,6 @@ export const SYSTEM_AGENT_ID = "com.acowork.system";
 // ══════════════════════════════════════════════════════════════════════════
 
 export interface AgentProfileSettings {
-  displayName?: string;
   /** @deprecated ADR-017 — avatar is now server-side (agent_config.json).
    *  Kept for backward compat with existing localStorage profiles. */
   avatarIconId?: string | null;
@@ -50,7 +49,6 @@ export interface AgentProfileSettings {
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
-  displayName: undefined,
   avatarIconId: null,
   modelId: undefined,
   providerId: undefined,
@@ -92,7 +90,6 @@ function saveAllProfiles(profiles: Record<string, AgentProfileSettings>) {
 
 function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSettings {
   return {
-    displayName: s.displayName,
     avatarIconId: validateIconId(s.avatarIconId),
     modelId: s.modelId,
     providerId: s.providerId,

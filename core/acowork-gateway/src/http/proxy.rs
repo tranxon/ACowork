@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
@@ -26,7 +26,8 @@ use axum::{
 use axum::body::Bytes;
 use tokio::sync::RwLock;
 
-use crate::http::routes::AppState;
+use crate::http::agents::resolve_avatar_from_manifest;
+use crate::http::routes::{ApiError, AppState};
 
 /// Maximum body size the Gateway will accept for any reverse-proxy
 /// route. The actual layer is installed at the merged-router root
@@ -198,6 +199,51 @@ pub fn proxy_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/shell-risk-rules",
             get(proxy_get_shell_risk_rules).put(proxy_put_shell_risk_rules),
+        )
+        // ADR-009 §V-A: skill inspection. The Runtime owns `{package_dir}/skills/`
+        // and the only SKILL.md parser; the Gateway forwards verbatim instead of
+        // re-parsing (the old Gateway copy drifted from the Runtime's and broke
+        // cross-machine, where `install_path` is node-local).
+        //
+        // `POST .../skills/import` deliberately stays on the Gateway: it
+        // delegates extraction to the local Node control plane and never reads
+        // Runtime-private files, so there is nothing to proxy.
+        .route("/api/agents/{id}/skills", get(proxy_list_skills))
+        .route("/api/agents/{id}/skills/{name}", get(proxy_skill_detail))
+        .route(
+            "/api/agents/{id}/skills/{name}/history",
+            get(proxy_skill_history),
+        )
+        // ADR-009 §5 / §V-R: the agent's package content — avatar reads,
+        // the publish wizard's manifest/avatar rewrite, image upload
+        // (multipart) and file delete — is served by the **node**, which
+        // owns the package and is up whether or not the agent runs. The
+        // Gateway only forwards, so no agent-private bytes cross this
+        // process (see `proxy_to_node`).
+        .route("/api/agents/{id}/avatar", get(proxy_get_avatar))
+        .route(
+            "/api/agents/{id}/avatar-file",
+            get(proxy_get_avatar_file).delete(proxy_delete_avatar_file),
+        )
+        .route(
+            "/api/agents/{id}/manifest/avatar-assets",
+            get(proxy_get_avatar_assets),
+        )
+        .route(
+            "/api/agents/{id}/manifest/avatar",
+            post(proxy_put_manifest_avatar),
+        )
+        .route(
+            "/api/agents/{id}/manifest/file",
+            post(proxy_upload_agent_file),
+        )
+        // ADR-009 §5: avatar/display-name preferences — the Runtime owns
+        // the instance's `.overrides.json`. The PUT additionally mirrors
+        // the result into the Gateway's list view (see
+        // `forward_avatar_config_put`).
+        .route(
+            "/api/agents/{id}/avatar-config",
+            get(proxy_get_avatar_config).put(proxy_put_avatar_config),
         )
         // Route 1: Get single session
         .route(
@@ -609,6 +655,461 @@ async fn proxy_put_shell_risk_rules(
     let path = format!("/agents/{}/shell-risk-rules", id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+}
+
+// ── ADR-009 §5: agent asset reads (served by the Node) ───────────────
+//
+// These three reads used to be forwarded to the Runtime. That broke the
+// moment the agent stopped: no Runtime process → no registered
+// `http_endpoint` → 503 → the Desktop silently fell back to a random
+// builtin icon (review §7.1, V-P). Package bytes belong to the Node,
+// which is the package manager and is up regardless of agent state, so
+// one path serves both states.
+
+/// Resolve the HTTP base URL of a node from the NodeRegistry's retained
+/// `NodeInfo` snapshot (ADR-055 §6.3).
+///
+/// Node-level, not agent-level: a stopped agent has no registered
+/// `http_endpoint`, but the Node process is still reachable.
+pub(crate) async fn node_http_endpoint(
+    state: &AppState,
+    node_id: &str,
+) -> Result<String, ApiError> {
+    let registry = state
+        .node_registry
+        .as_ref()
+        .ok_or_else(|| ApiError::service_unavailable("Node registry not initialized"))?;
+
+    let reg = registry.read().await;
+    let node = reg
+        .get(node_id)
+        .ok_or_else(|| ApiError::not_found(&format!("Node '{}' not found", node_id)))?;
+    if !node.online {
+        return Err(ApiError::service_unavailable(&format!(
+            "Node '{}' is offline",
+            node_id
+        )));
+    }
+    node.info
+        .as_ref()
+        .map(|i| i.http_endpoint.clone())
+        .filter(|ep| !ep.is_empty())
+        .ok_or_else(|| {
+            ApiError::service_unavailable(&format!("Node '{}' has no HTTP endpoint", node_id))
+        })
+}
+
+/// Reverse-proxy `{method} /agents/{id}{sub_path}` to the **node** hosting
+/// the instance, passing the response through verbatim (status, headers,
+/// bytes) so an image read keeps its `Content-Type` / `Cache-Control` and
+/// an upload keeps the node's own error shape.
+///
+/// The node token is attached when the node is enrolled (ADR-055 Phase 5a
+/// §6.8) — the package routes sit behind the same boundary as the Runtime
+/// reverse proxy.
+async fn proxy_to_node(
+    state: &AppState,
+    id: &str,
+    sub_path: &str,
+    query: &str,
+    method: reqwest::Method,
+    body: Option<Vec<u8>>,
+    headers: &HeaderMap,
+) -> Response {
+    let node_id = {
+        let gw = state.gateway_state.read().await;
+        gw.installed(id).map(|a| a.node_id.clone())
+    };
+    let Some(node_id) = node_id else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Agent not found", "id": id })),
+        )
+            .into_response();
+    };
+
+    let base = match node_http_endpoint(state, &node_id).await {
+        Ok(base) => base,
+        Err(e) => {
+            // http.md §4.13: honour the Desktop's `with503Retry` backoff.
+            let mut response = e.into_response();
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("2"));
+            return response;
+        }
+    };
+
+    let path = format!("/agents/{id}{sub_path}");
+    let target_url = if query.is_empty() {
+        format!("{base}{path}")
+    } else {
+        format!("{base}{path}?{query}")
+    };
+
+    let client = runtime_http_client();
+    let mut request = client.request(method, &target_url);
+    for (name, value) in headers {
+        if !is_hop_by_hop_header(name) {
+            request = request.header(name, value);
+        }
+    }
+    if let Some(node_token) = resolve_node_token(state, id).await {
+        request = request.header("X-ACowork-Node-Token", node_token);
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+
+    match request.send().await {
+        Ok(response) => {
+            let status = StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let resp_headers = response.headers().clone();
+            let body = response.bytes().await.unwrap_or_default();
+            let mut builder = Response::builder().status(status);
+            *builder.headers_mut().unwrap() = resp_headers;
+            builder.body(axum::body::Body::from(body)).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build proxy response").into_response()
+            })
+        }
+        Err(e) => {
+            tracing::warn!(agent_id = id, url = %target_url, error = %e, "Failed to proxy to node");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "Failed to connect to node HTTP server",
+                    "id": id,
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ── ADR-009 §V-A: skill inspection ───────────────────────────────────
+//
+// All three reads are transparent forwards to the Runtime's
+// `http/skills.rs`. `{name}` is percent-encoded as a single path segment
+// so a skill name containing `/` or a space cannot re-shape the upstream
+// request line.
+
+/// Reverse-proxy `GET /api/agents/{id}/skills` to Runtime's `GET /agents/{id}/skills`.
+async fn proxy_list_skills(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/skills", id);
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/skills/{name}` to the Runtime.
+async fn proxy_skill_detail(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/skills/{}", id, encode_path_segment(&name));
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/skills/{name}/history` to the Runtime.
+async fn proxy_skill_history(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!(
+        "/agents/{}/skills/{}/history",
+        id,
+        encode_path_segment(&name)
+    );
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+// ── ADR-009 §V-B / §5: agent package content ─────────────────────────
+//
+// Reads (any agent state) and publish-domain writes (wizard runs on a
+// stopped agent too) all go to the node, which owns the package bytes.
+// Query strings (`?v=<version>` cache-buster on `/avatar`, `?path=<rel>`
+// on `/avatar-file`) are forwarded verbatim.
+
+/// Reverse-proxy `GET /api/agents/{id}/avatar` to the node.
+async fn proxy_get_avatar(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_node(
+        &state,
+        &id,
+        "/avatar",
+        &query,
+        reqwest::Method::GET,
+        None,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/avatar-file?path=` to the node.
+async fn proxy_get_avatar_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_node(
+        &state,
+        &id,
+        "/avatar-file",
+        &query,
+        reqwest::Method::GET,
+        None,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/manifest/avatar-assets` to the node.
+async fn proxy_get_avatar_assets(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_node(
+        &state,
+        &id,
+        "/manifest/avatar-assets",
+        "",
+        reqwest::Method::GET,
+        None,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/manifest/avatar` to the node
+/// (which rewrites `manifest.toml` on its own disk).
+async fn proxy_put_manifest_avatar(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    proxy_to_node(
+        &state,
+        &id,
+        "/manifest/avatar",
+        "",
+        reqwest::Method::POST,
+        Some(body.to_vec()),
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/manifest/file?path=` (multipart)
+/// to the node.
+///
+/// The multipart body — boundary included, via the forwarded
+/// `content-type` — goes through untouched: it is bytes, so it stays on
+/// HTTP (ADR-009 §V-R) rather than being re-encoded for the control plane.
+async fn proxy_upload_agent_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_node(
+        &state,
+        &id,
+        "/manifest/file",
+        &query,
+        reqwest::Method::POST,
+        Some(body.to_vec()),
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/avatar-file?path=` to the node,
+/// then ask the Runtime to drop a preference that referenced the file.
+///
+/// Two owners, two calls: the *file* is package content (node), the
+/// *reference to it* is a user preference (Runtime, ADR-009 §5). The
+/// Gateway must not decide the reference itself — it only mirrors what the
+/// Runtime persisted (see `forward_avatar_config_put`).
+async fn proxy_delete_avatar_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    let deleted_path = params.get("path").cloned();
+
+    // Snapshot the effective avatar BEFORE deleting: after the call the
+    // mirror may already have been refreshed by another request.
+    let effective_avatar = {
+        let gw = state.gateway_state.read().await;
+        gw.installed(&id).and_then(|info| {
+            let overrides = gw.overrides_of(info.instance_id.as_str());
+            let (avatar, _, _) = match overrides {
+                Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => (
+                    ov.avatar.clone(),
+                    ov.builtin_avatar.clone(),
+                    "overrides",
+                ),
+                _ => resolve_avatar_from_manifest(&info.manifest),
+            };
+            avatar
+        })
+    };
+
+    let response = proxy_to_node(
+        &state,
+        &id,
+        "/avatar-file",
+        &query,
+        reqwest::Method::DELETE,
+        None,
+        &headers,
+    )
+    .await;
+    if !response.status().is_success() {
+        return response;
+    }
+
+    if deleted_path.is_some() && deleted_path.as_deref() == effective_avatar.as_deref() {
+        tracing::info!(
+            agent_id = %id,
+            "Avatar file deleted — clearing the reference through the Runtime"
+        );
+        let clear = crate::http::proxy::forward_avatar_config_put(
+            &state,
+            &id,
+            br#"{"avatar":""}"#.to_vec(),
+        )
+        .await;
+        // Best-effort: the file is already gone, so a stopped agent /
+        // unpicked default must not turn a successful delete into a 5xx.
+        // The stale reference then resolves to a missing file, which the
+        // Desktop renders as the deterministic fallback icon.
+        if !clear.status().is_success() {
+            tracing::warn!(
+                agent_id = %id,
+                status = %clear.status(),
+                "Avatar file deleted, but the Runtime kept the stale reference"
+            );
+        }
+    }
+
+    response
+}
+
+// ── ADR-009 §5: user-preference overrides (avatar + display name) ─────
+//
+// The Runtime owns the instance's `.overrides.json`; the Gateway only
+// forwards and mirrors. See `forward_avatar_config_put` for why the PUT
+// is not a plain `proxy_to_runtime_with_method`.
+
+/// Reverse-proxy `GET /api/agents/{id}/avatar-config` to the Runtime.
+async fn proxy_get_avatar_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/avatar-config", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/avatar-config` to the Runtime and
+/// mirror the persisted overrides into the Gateway's agent list.
+async fn proxy_put_avatar_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    forward_avatar_config_put(&state, &id, body.to_vec()).await
+}
+
+/// The subset of the Runtime's avatar-config response the Gateway mirrors.
+/// Everything else in that response is passed through untouched — the
+/// Gateway deliberately does not own the full DTO.
+#[derive(serde::Deserialize)]
+struct AvatarConfigMirror {
+    #[serde(default)]
+    overrides: Option<acowork_core::AgentOverrides>,
+}
+
+/// PUT the user's avatar/display-name preference to the Runtime (the
+/// owner of the instance's `.overrides.json`, ADR-009 §5) and update the
+/// Gateway's list view from what the Runtime actually persisted.
+///
+/// This is the live half of the two-source design: a **stopped** agent's
+/// values come from the Node's retained inventory, a **running** one's
+/// from here. The Gateway intentionally does not decide what the new
+/// value is — it stores the Runtime's answer verbatim, so the two sources
+/// can never disagree.
+pub(crate) async fn forward_avatar_config_put(
+    state: &AppState,
+    id: &str,
+    body: Vec<u8>,
+) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let path = format!("/agents/{id}/avatar-config");
+    let response = proxy_to_runtime_with_method(
+        state,
+        id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        Some(body),
+        &headers,
+    )
+    .await;
+
+    if !response.status().is_success() {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 256 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(agent_id = id, error = %e, "avatar-config: cannot read Runtime response");
+            return (parts.status, Json(serde_json::json!({ "error": "unreadable upstream response" })))
+                .into_response();
+        }
+    };
+    match serde_json::from_slice::<AvatarConfigMirror>(&bytes) {
+        Ok(mirror) => {
+            let mut gw = state.gateway_state.write().await;
+            gw.set_overrides(id, mirror.overrides.unwrap_or_default());
+        }
+        Err(e) => tracing::warn!(
+            agent_id = id,
+            error = %e,
+            "avatar-config: Runtime response not mirrorable — list view stays stale until the next inventory publish"
+        ),
+    }
+    Response::from_parts(parts, axum::body::Body::from(bytes))
 }
 
 // ── ADR-063: package-level LLM prompt overrides ──────────────────────
@@ -1548,6 +2049,14 @@ fn urlencoding(s: &str) -> String {
             _ => format!("%{:02X}", c as u8),
         })
         .collect()
+}
+
+/// Percent-encode a single URL **path segment** (RFC 3986 §3.3) so it cannot
+/// re-shape the upstream request line. Uses the `urlencoding` crate (not the
+/// local [`urlencoding`] helper above, which is query-string flavoured and
+/// would emit a literal `+` for a space).
+fn encode_path_segment(s: &str) -> String {
+    urlencoding::encode(s).into_owned()
 }
 
 /// Check if a header is hop-by-hop (RFC 7230 §6.1) or should otherwise
