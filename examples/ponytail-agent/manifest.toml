@@ -1,0 +1,111 @@
+# Senior Software Engineer Agent
+# A multi-skilled senior engineer for code review, architecture, debugging, refactoring, testing, and documentation.
+
+agent_id = "com.acowork.ponytail"
+version = "1.0.0"
+name = "Ponytail"
+display_name = "Ponytail"
+role = "Senior Software Engineer"
+description = "The best code is the code you never wrote."
+author = "DietrichGebert"
+runtime_version = "0.1.0"
+system = false
+dev = false
+avatar = "assets/avatar.png"
+
+identity_deps = ["language", "timezone"]
+
+[[permissions]]
+type = "FilesystemRead"
+
+[[permissions]]
+type = "FilesystemWrite"
+
+[[permissions]]
+type = "Network"
+
+[[permissions]]
+type = "Shell"
+
+[[permissions]]
+type = "MemoryRead"
+
+[[permissions]]
+type = "MemoryWrite"
+
+# Built-in tool opt-in declarations (ADR-029)
+# Each [[tools]] entry seeds `agent_tools.json` with `enabled = true` on first start.
+# Tools NOT listed here are registered in code but kept disabled (opt-in model).
+#
+# Conditionally-registered tools (no-ops when runtime lacks the required capability):
+#   - `web_search`: requires a configured search provider (brave/tavily/serper/...)
+#   - `codebase`  : requires an LSP Relay endpoint
+#   - shell tools : names are platform-detected. We declare all three (`bash`,
+#                   `powershell`, `shell`) so a senior engineer always has shell
+#                   access on every platform — `init_tools_config_from_manifest`
+#                   silently drops names that the runtime hasn't registered.
+
+# --- Memory ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Filesystem ---
+[[tools]]
+name = "file_edit"
+
+# --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
+[[tools]]
+name = "bash"        # Windows (Git Bash installed)
+
+[[tools]]
+name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+
+[[tools]]
+name = "shell"       # Linux / macOS
+
+# --- Inter-agent messaging ---
+[[tools]]
+name = "intent_send"
+
+# --- Workflow primitives ---
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
+
+[llm]
+temperature = 0.1
+max_tokens = 32768
+context_window = 200000
+
+[llm.routing]
+strategy = "quality_priority"
+fallback_order = ["openai", "claude"]
+
+[llm.budget]
+max_output_tokens = 8192
+exceeded_action = "warn"
+
+[memory]
+enabled = true
+retention_days = 180
+
+[resources]
+max_memory_mb = 512
+idle_timeout_secs = 3600
+
+[sandbox]
+enabled = false
+
+[capabilities.code_review]
+description = "Perform a thorough code review with actionable feedback"
+
+[capabilities.architecture_design]
+description = "Design system architecture with module breakdown and interface definitions"
+
+[capabilities.debug_assist]
+description = "Debug and troubleshoot issues with systematic root-cause analysis"
