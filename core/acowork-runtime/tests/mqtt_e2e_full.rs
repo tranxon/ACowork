@@ -165,7 +165,7 @@ fn integration_control_message_flow() {
 
         // Publish control message from Gateway
         let cmd = ControlCommand {
-            instance_id: "com.test.agent".into(),
+            instance_id: TEST_INSTANCE_ID.into(),
             command: Some(Command::ChatMessage(ChatMessage {
                 session_id: "sess-e2e".into(),
                 message_id: "msg-e2e".into(),
@@ -194,7 +194,7 @@ fn integration_control_message_flow() {
 
         match env.payload {
             Some(Payload::ControlCommand(ctrl)) => {
-                assert_eq!(ctrl.instance_id, "com.test.agent");
+                assert_eq!(ctrl.instance_id, TEST_INSTANCE_ID);
                 match ctrl.command {
                     Some(Command::ChatMessage(msg)) => {
                         assert_eq!(msg.content, "Hello from E2E test");
@@ -256,7 +256,7 @@ fn integration_control_stop_flow() {
         ).await.unwrap();
 
         let cmd = ControlCommand {
-            instance_id: "com.test.agent".into(),
+            instance_id: TEST_INSTANCE_ID.into(),
             command: Some(Command::Stop(mqtt_proto::Stop {
                 session_id: "sess-stop".into(),
                 reason: String::new(),
@@ -293,7 +293,7 @@ fn integration_control_stop_flow() {
                         .publish_control_command(
                             TEST_INSTANCE_ID,
                             ControlCommand {
-                                instance_id: "com.test.agent".into(),
+                                instance_id: TEST_INSTANCE_ID.into(),
                                 command: Some(Command::Stop(mqtt_proto::Stop {
                                     session_id: "sess-stop".into(),
                                     reason: String::new(),
@@ -360,7 +360,7 @@ fn integration_multiple_messages() {
         let messages = ["msg-1", "msg-2", "msg-3"];
         for (i, content) in messages.iter().enumerate() {
             let cmd = ControlCommand {
-                instance_id: "com.test.agent".into(),
+                instance_id: TEST_INSTANCE_ID.into(),
                 command: Some(Command::ChatMessage(ChatMessage {
                     session_id: "sess-seq".into(),
                     message_id: format!("mid-{}", i),

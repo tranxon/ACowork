@@ -6,6 +6,9 @@
 
 use std::sync::Arc;
 
+/// Test-only instance identity (ADR-073: must be a UUIDv4).
+const INSTANCE_ID: &str = "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d";
+
 #[tokio::test]
 async fn test_shell_risk_rules_get_put_roundtrip() {
     let temp_dir = std::env::temp_dir().join("acowork-test-shell-risk-e2e");
@@ -45,7 +48,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         temp_dir.clone(),
         temp_dir.clone(), // package_dir (ADR-063): tests reuse work_dir as package dir
         "com.test.agent".to_string(),
-        "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package string in these smoke tests
+        INSTANCE_ID.to_string(),
         snapshots,
         latest,
         dispatch_tx,
@@ -80,7 +83,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     // "local copy" hint). has_user_override is therefore `true` even on
     // first GET; the content is the generated template, not a user edit.
     let resp = client
-        .get(format!("{}/agents/com.test.agent/shell-risk-rules", base))
+        .get(format!("{}/agents/{}/shell-risk-rules", base, INSTANCE_ID))
         .send()
         .await
         .expect("GET should not error");
@@ -103,7 +106,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     // Step 2: PUT a valid override
     let new_rules = "[[rules]]\ncommand = \"echo\"\nrisk = \"Low\"\nreason = \"safe test override\"\n";
     let resp = client
-        .put(format!("{}/agents/com.test.agent/shell-risk-rules", base))
+        .put(format!("{}/agents/{}/shell-risk-rules", base, INSTANCE_ID))
         .json(&serde_json::json!({ "content": new_rules }))
         .send()
         .await
@@ -112,7 +115,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
 
     // Step 3: GET again — should now reflect the override on disk
     let resp = client
-        .get(format!("{}/agents/com.test.agent/shell-risk-rules", base))
+        .get(format!("{}/agents/{}/shell-risk-rules", base, INSTANCE_ID))
         .send()
         .await
         .expect("GET should not error");
@@ -124,7 +127,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
 
     // Step 4: PUT invalid TOML — should be rejected with 400
     let resp = client
-        .put(format!("{}/agents/com.test.agent/shell-risk-rules", base))
+        .put(format!("{}/agents/{}/shell-risk-rules", base, INSTANCE_ID))
         .json(&serde_json::json!({ "content": "this is = not toml = at all" }))
         .send()
         .await

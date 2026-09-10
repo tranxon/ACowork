@@ -21,6 +21,9 @@ use std::sync::Arc;
 
 const AGENT_ID: &str = "com.test.prompts-e2e";
 
+/// Test-only instance identity (ADR-073: must be a UUIDv4).
+const INSTANCE_ID: &str = "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d";
+
 async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
     let temp_dir = std::env::temp_dir().join(format!(
         "acowork-test-prompts-e2e-{}-{}",
@@ -67,7 +70,7 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
         temp_dir.clone(),
         temp_dir.clone(), // package_dir (ADR-063): same dir; tests create prompts/ inside
         AGENT_ID.to_string(),
-        AGENT_ID.to_string(), // ADR-073: instance id literal shared with the package string in these smoke tests
+        INSTANCE_ID.to_string(),
         snapshots,
         latest,
         dispatch_tx,
@@ -101,7 +104,7 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
 async fn test_list_prompts_returns_all_8_with_overridden_false() {
     let (port, temp_dir) = spawn_server("list-all-8").await;
 
-    let resp = reqwest::get(format!("http://127.0.0.1:{}/agents/{}/prompts", port, AGENT_ID))
+    let resp = reqwest::get(format!("http://127.0.0.1:{}/agents/{}/prompts", port, INSTANCE_ID))
         .await
         .expect("GET should not error");
     assert_eq!(resp.status(), 200);
@@ -181,7 +184,7 @@ async fn test_get_prompt_unknown_name_returns_404_with_canonical_list() {
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
         port,
-        AGENT_ID,
+        INSTANCE_ID,
         "not-a-real-prompt",
     ))
     .await
@@ -221,7 +224,7 @@ async fn test_get_prompt_path_traversal_returns_404() {
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
         port,
-        AGENT_ID,
+        INSTANCE_ID,
         "..%2F..%2Fetc%2Fpasswd",
     ))
     .await
@@ -234,7 +237,7 @@ async fn test_get_prompt_path_traversal_returns_404() {
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
         port,
-        AGENT_ID,
+        INSTANCE_ID,
         "..%5C..%5Cetc%5Cpasswd",
     ))
     .await
@@ -252,7 +255,7 @@ async fn test_get_prompt_case_variant_returns_404() {
     for variant in ["Summary", "SUMMARY", "sUmMaRy"] {
         let resp = reqwest::get(format!(
             "http://127.0.0.1:{}/agents/{}/prompts/{}",
-            port, AGENT_ID, variant,
+            port, INSTANCE_ID, variant,
         ))
         .await
         .expect("GET should not error");
@@ -275,7 +278,7 @@ async fn test_get_prompt_existing_override_returns_content() {
 
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
-        port, AGENT_ID, "compact-template",
+        port, INSTANCE_ID, "compact-template",
     ))
     .await
     .expect("GET should not error");
@@ -305,7 +308,7 @@ async fn test_put_then_get_roundtrip() {
     let resp = client
         .put(format!(
             "http://127.0.0.1:{}/agents/{}/prompts/{}",
-            port, AGENT_ID, "compact-template",
+            port, INSTANCE_ID, "compact-template",
         ))
         .json(&serde_json::json!({ "content": payload }))
         .send()
@@ -329,7 +332,7 @@ async fn test_put_then_get_roundtrip() {
     // GET roundtrip must return the just-written content.
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
-        port, AGENT_ID, "compact-template",
+        port, INSTANCE_ID, "compact-template",
     ))
     .await
     .expect("GET should not error");
@@ -355,7 +358,7 @@ async fn test_put_creates_prompts_dir_when_missing() {
     let resp = client
         .put(format!(
             "http://127.0.0.1:{}/agents/{}/prompts/{}",
-            port, AGENT_ID, "summary",
+            port, INSTANCE_ID, "summary",
         ))
         .json(&serde_json::json!({ "content": "fresh install override\n" }))
         .send()
@@ -373,7 +376,7 @@ async fn test_put_unknown_prompt_returns_404() {
     let resp = client
         .put(format!(
             "http://127.0.0.1:{}/agents/{}/prompts/{}",
-            port, AGENT_ID, "not-a-prompt",
+            port, INSTANCE_ID, "not-a-prompt",
         ))
         .json(&serde_json::json!({ "content": "x" }))
         .send()
@@ -396,7 +399,7 @@ async fn test_put_empty_content_returns_400() {
         let resp = client
             .put(format!(
                 "http://127.0.0.1:{}/agents/{}/prompts/{}",
-                port, AGENT_ID, "summary",
+                port, INSTANCE_ID, "summary",
             ))
             .json(&serde_json::json!({ "content": empty }))
             .send()
@@ -434,7 +437,7 @@ async fn test_put_path_traversal_returns_404() {
         let resp = client
             .put(format!(
                 "http://127.0.0.1:{}/agents/{}/prompts/{}",
-                port, AGENT_ID, malicious,
+                port, INSTANCE_ID, malicious,
             ))
             .json(&serde_json::json!({ "content": "pwned" }))
             .send()
@@ -518,7 +521,7 @@ async fn test_put_does_not_mutate_other_prompts_overridden_state() {
     let resp = client
         .put(format!(
             "http://127.0.0.1:{}/agents/{}/prompts/{}",
-            port, AGENT_ID, "title",
+            port, INSTANCE_ID, "title",
         ))
         .json(&serde_json::json!({ "content": "title-override\n" }))
         .send()
@@ -528,7 +531,7 @@ async fn test_put_does_not_mutate_other_prompts_overridden_state() {
 
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts",
-        port, AGENT_ID,
+        port, INSTANCE_ID,
     ))
     .await
     .unwrap();
