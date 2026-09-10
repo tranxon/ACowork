@@ -158,7 +158,7 @@ mod tests {
     fn bs(phase: BootstrapPhase) -> BootstrapState {
         BootstrapState {
             protocol_version: 1,
-            instance_id: "test".to_string(),
+            instance_id: "8c9d0e1f-2a3b-4024-8354-046e7f8a9b0c".to_string(),
             version: 1,
             phase: phase as i32,
             phase_detail: String::new(),

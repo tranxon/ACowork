@@ -9,6 +9,7 @@
 
 pub mod clone;
 pub mod install;
+pub mod install_gate;
 pub mod publish;
 pub mod skills;
 pub mod uninstall;
@@ -41,10 +42,11 @@ pub fn build_installed_info(installed: &InstalledAgent) -> Option<acowork_core::
 /// re-install.
 ///
 /// ADR-073 §5.6: installs land in the two-level layout
-/// `{packages_dir}/{agent_id}/{instance_id}/`; legacy single-level
-/// installs (`{packages_dir}/{agent_id}/manifest.toml`) are still
-/// discovered for backward compatibility, with `instance_id` falling
-/// back to the `agent_id`.
+/// `{packages_dir}/{agent_id}/{instance_id}/manifest.toml`. The
+/// `instance_id` is the directory name and is always a UUIDv4; no
+/// fallback path is supported. A pre-ADR-073 flat layout
+/// (`{agent_id}/manifest.toml`) is intentionally NOT auto-migrated —
+/// re-install the package to land it in the new layout.
 pub fn restore_installed_agents(state: &mut NodeState, packages_dir: &Path) {
     if !packages_dir.exists() {
         return;
@@ -59,73 +61,55 @@ pub fn restore_installed_agents(state: &mut NodeState, packages_dir: &Path) {
             continue;
         }
 
-        // Two-level layout: {agent_id}/{instance_id}/manifest.toml
-        if let Ok(instance_entries) = std::fs::read_dir(&agent_dir) {
-            let mut found_any = false;
-            for instance_entry in instance_entries.flatten() {
-                let instance_dir = instance_entry.path();
-                if !instance_dir.is_dir() {
-                    continue;
-                }
-                let manifest_path = instance_dir.join("manifest.toml");
-                if !manifest_path.exists() {
-                    continue;
-                }
-                let Ok(content) = std::fs::read_to_string(&manifest_path) else {
-                    continue;
-                };
-                let Ok(manifest) = acowork_core::AgentManifest::from_toml(&content) else {
-                    continue;
-                };
-                let info = InstalledAgent {
-                    instance_id: instance_dir
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    agent_id: manifest.agent_id.clone(),
-                    version: manifest.version.clone(),
-                    name: manifest.name.clone(),
-                    install_path: instance_dir.to_string_lossy().to_string(),
-                    manifest,
-                };
-                tracing::info!(
-                    "Restored installed agent instance on node: {} ({}) v{}",
-                    info.instance_id,
-                    info.agent_id,
-                    info.version
-                );
-                state.add_installed(info);
-                found_any = true;
-            }
-            if found_any {
+        let Ok(instance_entries) = std::fs::read_dir(&agent_dir) else {
+            continue;
+        };
+
+        for instance_entry in instance_entries.flatten() {
+            let instance_dir = instance_entry.path();
+            if !instance_dir.is_dir() {
                 continue;
             }
+            let manifest_path = instance_dir.join("manifest.toml");
+            if !manifest_path.exists() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = acowork_core::AgentManifest::from_toml(&content) else {
+                continue;
+            };
+            // ADR-073: the directory name MUST be a valid UUIDv4. An
+            // instance directory named anything else (e.g. "manifest"
+            // or an old package id) is not a valid instance and is
+            // skipped — re-install through the official install path.
+            let raw_instance_id = instance_dir
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if acowork_core::AgentInstanceId::from_string(raw_instance_id.clone()).is_err() {
+                tracing::warn!(
+                    path = %instance_dir.display(),
+                    "Skipping instance directory with non-UUID name; reinstall required"
+                );
+                continue;
+            }
+            let info = InstalledAgent {
+                instance_id: raw_instance_id,
+                agent_id: manifest.agent_id.clone(),
+                version: manifest.version.clone(),
+                name: manifest.name.clone(),
+                install_path: instance_dir.to_string_lossy().to_string(),
+                manifest,
+            };
+            tracing::info!(
+                "Restored installed agent instance on node: {} ({}) v{}",
+                info.instance_id,
+                info.agent_id,
+                info.version
+            );
+            state.add_installed(info);
         }
-
-        // Legacy single-level layout: {agent_id}/manifest.toml
-        let manifest_path = agent_dir.join("manifest.toml");
-        if !manifest_path.exists() {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        let Ok(manifest) = acowork_core::AgentManifest::from_toml(&content) else {
-            continue;
-        };
-        let info = InstalledAgent {
-            instance_id: manifest.agent_id.clone(),
-            agent_id: manifest.agent_id.clone(),
-            version: manifest.version.clone(),
-            name: manifest.name.clone(),
-            install_path: agent_dir.to_string_lossy().to_string(),
-            manifest,
-        };
-        tracing::info!(
-            "Restored installed agent on node: {} v{}",
-            info.agent_id,
-            info.version
-        );
-        state.add_installed(info);
     }
 }

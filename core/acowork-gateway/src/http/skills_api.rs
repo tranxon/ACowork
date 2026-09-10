@@ -377,7 +377,7 @@ pub async fn import_skill(
     })?;
     // ADR-073: resolve the route variable to the instance identity.
     let (instance_id, resolved_agent_id) =
-        crate::http::agents::resolve_agent_identity(&state, &agent_id).await;
+        crate::http::agents::resolve_agent_identity(&state, &agent_id).await?;
     let zip_path = temp_file.to_string_lossy().to_string();
     let event = node_control
         .skills_import(

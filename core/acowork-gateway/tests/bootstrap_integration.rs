@@ -841,19 +841,24 @@ async fn concurrent_installs_unique_ids_and_aggregate_inventory() {
 
     let manifest = manifest_toml_from_package(system_agent_package_path().as_path());
     let node = node_publisher(port, "node:verify-node-inv").await;
-    for agent_id in ["com.acowork.a", "com.acowork.b", "com.acowork.c"] {
+    for (agent_id, instance_id) in [
+        ("com.acowork.a", "1a1a1a1a-0000-4000-8000-000000000001"),
+        ("com.acowork.b", "1a1a1a1a-0000-4000-8000-000000000002"),
+        ("com.acowork.c", "1a1a1a1a-0000-4000-8000-000000000003"),
+    ] {
         let info = acowork_core::mqtt_proto::InstalledAgentInfo {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: agent_id.to_string(),
-            install_path: format!("/agents/{agent_id}"),
+            install_path: format!("/agents/{instance_id}"),
             manifest_toml: manifest.clone(),
-            // ADR-073: legacy inventory payload — no instance identity;
-            // the Gateway falls back to the package id as the key.
-            instance_id: String::new(),
+            // ADR-073: the install table is keyed by INSTANCE identity;
+            // each retained inventory entry carries the UUID the Node used
+            // when it landed the package.
+            instance_id: instance_id.to_string(),
         };
         node.publish(
-            node_agent_installed_topic(NODE_ID, agent_id),
+            node_agent_installed_topic(NODE_ID, instance_id),
             QoS::AtLeastOnce,
             true,
             DataEnvelope {
@@ -1154,7 +1159,7 @@ async fn reconnect_observes_new_instance_and_old_operation_is_uncertain() {
     // A stale retained redelivery from generation A must be rejected.
     let stale = acowork_core::mqtt_proto::BootstrapState {
         protocol_version: 1,
-        instance_id: "instance-A".to_string(),
+        instance_id: "0e1f2a3b-4c5d-4026-8576-268a9b0c1d2e".to_string(),
         version: 9,
         phase: 2,
         phase_detail: "stale".to_string(),

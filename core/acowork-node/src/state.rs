@@ -126,6 +126,12 @@ pub struct NodeState {
     /// and heartbeat paths publish NodeInfo with this host so the
     /// Gateway always sees the current address after a network change.
     pub live_advertise_host: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Serial install gate (ADR-073 install atomicity): the node's one
+    /// install slot plus its queue. `None` until the control plane has
+    /// connected — the gate's worker publishes retained inventory, so it
+    /// cannot exist before there is an MQTT client. An install command
+    /// arriving in that window is refused loudly, never silently queued.
+    pub install_gate: Option<std::sync::Arc<crate::package::install_gate::InstallGate>>,
     snapshot: NodeRuntimeSnapshot,
 }
 
@@ -138,8 +144,22 @@ impl NodeState {
             lsp_relay_process: None,
             port_allocator: std::sync::Arc::new(PortAllocator::new()),
             live_advertise_host: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            install_gate: None,
             snapshot: NodeRuntimeSnapshot::default(),
         }
+    }
+
+    /// Install the gate once the control plane can service it.
+    pub fn set_install_gate(
+        &mut self,
+        gate: std::sync::Arc<crate::package::install_gate::InstallGate>,
+    ) {
+        self.install_gate = Some(gate);
+    }
+
+    /// The node's install gate, if the control plane has started it.
+    pub fn install_gate(&self) -> Option<std::sync::Arc<crate::package::install_gate::InstallGate>> {
+        self.install_gate.clone()
     }
 
     /// Whether an agent instance is installed on this node.

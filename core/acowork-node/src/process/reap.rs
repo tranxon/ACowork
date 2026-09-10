@@ -29,8 +29,9 @@ pub struct RuntimeCandidate {
     pub pid: u32,
     /// Agent id (`--agent-id`).
     pub agent_id: String,
-    /// Instance identity (`--agent-instance-id`, ADR-073). Empty for
-    /// Runtimes spawned before the ADR-073 flag existed.
+    /// Instance identity (`--agent-instance-id`, ADR-073). Must be a
+    /// valid UUIDv4; any candidate with a missing or non-UUID instance
+    /// id is rejected by [`parse_runtime_args`].
     pub instance_id: String,
     /// Loopback HTTP port the Runtime listens on (`--http-port`). This
     /// is required for the reverse proxy's `{id} → port` mapping.
@@ -105,9 +106,9 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
 /// for the operator / a `start` command to sort out; we do not
 /// SIGKILL unadopted processes on a best-effort scan).
 ///
-/// ADR-073: the install table is keyed by instance identity; a
-/// candidate matches when its `instance_id` (falling back to the
-/// package id for legacy spawns) is present.
+/// ADR-073: the install table is keyed by the instance identity; a
+/// candidate matches when its `instance_id` is present in the table.
+/// A package id never matches.
 ///
 /// Returns `(adopt, skip)` — the skip set is for diagnostics only.
 pub fn classify_candidates(
@@ -116,14 +117,7 @@ pub fn classify_candidates(
 ) -> (Vec<RuntimeCandidate>, Vec<RuntimeCandidate>) {
     candidates
         .into_iter()
-        .partition(|c| {
-            let key = if c.instance_id.is_empty() {
-                c.agent_id.as_str()
-            } else {
-                c.instance_id.as_str()
-            };
-            installed.contains_key(key)
-        })
+        .partition(|c| installed.contains_key(&c.instance_id))
 }
 
 /// Scan the local process list for `acowork-runtime` processes and

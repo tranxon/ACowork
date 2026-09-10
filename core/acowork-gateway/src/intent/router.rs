@@ -377,7 +377,7 @@ mod tests {
             "#;
             let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
             guard.add_installed(crate::gateway::state::AgentInfo {
-                instance_id: "com.example.target".to_string(),
+                instance_id: "2c3d4e5f-6a7b-4c8c-8d9d-ae0f1a2b3c4d".to_string(),
                 agent_id: "com.example.target".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Target".to_string(),
@@ -390,7 +390,8 @@ mod tests {
         let result = router
             .route_sync(
                 "com.example.source",
-                "com.example.target",
+                // ADR-073: the router resolves the target by INSTANCE identity.
+                "2c3d4e5f-6a7b-4c8c-8d9d-ae0f1a2b3c4d",
                 "query",
                 &json!({}),
                 &state,
@@ -428,7 +429,7 @@ mod tests {
             "#;
             let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
             guard.add_installed(crate::gateway::state::AgentInfo {
-                instance_id: "com.example.target".to_string(),
+                instance_id: "2c3d4e5f-6a7b-4c8c-8d9d-ae0f1a2b3c4d".to_string(),
                 agent_id: "com.example.target".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Target".to_string(),
@@ -441,7 +442,8 @@ mod tests {
         let result = router
             .route_async(
                 "com.example.source",
-                "com.example.target",
+                // ADR-073: the router resolves the target by INSTANCE identity.
+                "2c3d4e5f-6a7b-4c8c-8d9d-ae0f1a2b3c4d",
                 "query",
                 &json!({}),
                 &state,

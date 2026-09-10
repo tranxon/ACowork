@@ -25,9 +25,11 @@ use crate::http::agent_config::{
 };
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::lifecycle::process::is_process_alive;
+use crate::gateway::state::GatewayState;
+use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
 use crate::gateway::state::SYSTEM_AGENT_ID;
 use acowork_core::error_codes::StructuredErrorBody;
-use acowork_core::operation::OperationRecord;
+use acowork_core::operation::{OperationId, OperationRecord};
 use acowork_core::AgentManifest;
 
 /// Build the agent management router
@@ -48,6 +50,11 @@ pub fn agent_routes() -> Router<AppState> {
             post(upload_agent_file),
         )
         .route("/api/agents/install", post(install_agent))
+        // ADR-073: declarative "make sure this package is installed".
+        // Idempotent by construction (unlike `/install`, which always
+        // lands one more instance) — repeated callers converge on one
+        // instance, and the caller never has to orchestrate that.
+        .route("/api/agents/ensure", post(ensure_agent))
         // ADR-055 §3.2: package distribution source — remote Nodes pull
         // the uploaded `.agent` file from the Gateway's registry here.
         .route(
@@ -289,9 +296,9 @@ pub async fn list_agents(
         .installed_agents
         .values()
         .map(|info| {
-            // ADR-073: registries are keyed by INSTANCE identity. Resolve
-            // via the instance key (with legacy package-id fallback) so a
-            // package with multiple instances never cross-reads state.
+            // ADR-073: registries are keyed by INSTANCE identity. Cross-instance
+            // reads are impossible by construction (each instance has
+            // its own row in installed_agents and running_agents).
             let running_info = gw.running(&info.instance_id);
             // Verify the process is actually alive (not just in running_agents).
             // pid=0 marks an ADR-055 node-hosted Runtime auto-tracked from its
@@ -426,8 +433,7 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
 
 /// `GET /api/agents/:id` — get agent detail
 ///
-/// ADR-073: `:id` is the INSTANCE identity (with legacy package-id
-/// fallback via the resolve helpers).
+/// ADR-073: `:id` is the INSTANCE identity (UUIDv4).
 pub async fn get_agent_detail(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -725,26 +731,22 @@ fn is_plausible_builtin_avatar_id(value: &str) -> bool {
 /// Resolve an HTTP route variable (`{id}`) to the canonical instance
 /// identity + package identity pair.
 ///
-/// ADR-073: the route variable is semantically an INSTANCE identity, but
-/// legacy clients (and the System Agent bootstrap) may still address an
-/// agent by its package id. The install table resolves either: an exact
-/// instance-key hit wins; otherwise the first installed instance of that
-/// package is used.
+/// ADR-073: the route variable is the INSTANCE identity (UUIDv4). A
+/// package id never matches — callers must use the resolved instance id
+/// from the list endpoint, not the package id.
 pub(crate) async fn resolve_agent_identity(
     state: &AppState,
     id: &str,
-) -> (String, String) {
+) -> Result<(String, String), ApiError> {
     let gw = state.gateway_state.read().await;
-    match gw.resolve_installed_key(id) {
-        Some(inst) => {
-            let aid = gw
-                .installed(&inst)
-                .map(|i| i.agent_id.clone())
-                .unwrap_or_else(|| id.to_string());
-            (inst, aid)
-        }
-        None => (id.to_string(), id.to_string()),
-    }
+    let inst = gw
+        .resolve_installed_key(id)
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", id)))?;
+    let aid = gw
+        .installed(&inst)
+        .map(|i| i.agent_id.clone())
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", id)))?;
+    Ok((inst, aid))
 }
 
 fn resolve_avatar_from_manifest(    manifest: &AgentManifest,
@@ -1490,10 +1492,19 @@ pub async fn get_agent_lsp_endpoint(
 ///
 /// The Gateway's own `dev_mode` flag is forwarded to the node to select
 /// signature strictness (ADR-055 §6.20).
-pub async fn install_agent(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
+/// Fields shared by `POST /api/agents/install` and
+/// `POST /api/agents/ensure`.
+struct AgentUploadForm {
+    package_bytes: Vec<u8>,
+    node_id: String,
+    /// ADR-059 §7.3 precondition — only meaningful for the explicit
+    /// install path; a declarative ensure has no version precondition to
+    /// violate (it does not depend on the caller's view).
+    expected_version: Option<u64>,
+}
+
+/// Read the install/ensure multipart body.
+async fn read_agent_upload(mut multipart: Multipart) -> Result<AgentUploadForm, ApiError> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
     // ADR-059 §7.3: optional optimistic-concurrency precondition — the
@@ -1535,7 +1546,215 @@ pub async fn install_agent(
     if package_bytes.is_empty() {
         return Err(ApiError::bad_request("Package file is empty"));
     }
-    let node_id = node_id.unwrap_or_else(acowork_core::node::local_node_id);
+
+    Ok(AgentUploadForm {
+        package_bytes,
+        node_id: node_id.unwrap_or_else(acowork_core::node::local_node_id),
+        expected_version,
+    })
+}
+
+/// The node control-plane client, or a loud failure when MQTT is off.
+fn node_control_client(state: &AppState) -> Result<NodeControlClient, ApiError> {
+    state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))
+}
+
+/// ADR-059 §2.3: the install/ensure command is a (fire-and-forget) MQTT
+/// publish — if the target Node's control plane has not announced
+/// `NodeReady`, the command would be silently dropped. Reject with 409
+/// `dependency_not_ready` (structured error, Phase 3.2) so the caller
+/// retries once `GET /api/bootstrap` reaches READY. This covers BOTH
+/// "never enrolled" and "enrolled but not ready": the node publishes its
+/// enroll request before NodeReady (bootstrap order, ADR-059 §7.2), so
+/// `node.{id}` cannot be ready while the node is unknown to the
+/// registry.
+async fn ensure_node_ready(state: &AppState, node_id: &str) -> Result<(), ApiError> {
+    let Some(registry) = state.bootstrap_registry.as_ref() else {
+        // No bootstrap registry (MQTT disabled) — the dispatch path fails
+        // later with a clearer error.
+        return Ok(());
+    };
+    if registry.is_ready(&crate::bootstrap::SubsystemId(format!("node.{}", node_id))) {
+        return Ok(());
+    }
+    let (phase, phase_detail) = state
+        .gateway_state
+        .read()
+        .await
+        .bootstrap
+        .orchestrator
+        .as_ref()
+        .map(|o| {
+            let s = o.snapshot();
+            // SCREAMING_SNAKE_CASE serde name — the same string the HTTP
+            // projection uses (`BOOTING`, `READY`, …).
+            let phase = serde_json::to_string(&s.phase)
+                .map(|p| p.trim_matches('"').to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            (phase, s.phase_detail)
+        })
+        .unwrap_or_else(|| ("unknown".to_string(), "orchestrator unavailable".to_string()));
+    Err(ApiError::conflict_structured(
+        StructuredErrorBody::dependency_not_ready(Some(phase), Some(phase_detail), 500),
+    ))
+}
+
+/// Where a declarative ensure request resolves to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EnsureResolution {
+    /// An instance of this package is already on the target node — by
+    /// ADR-073 instance identity.
+    Present(String),
+    /// Nothing known locally; the request must be dispatched to the node
+    /// (which re-checks the same precondition before touching the disk).
+    Dispatch,
+}
+
+/// Resolve a declarative ensure against the Gateway's view of the target
+/// node's inventory.
+///
+/// The Gateway's view lags the node (it is fed by retained inventory
+/// messages), so this is a fast path and never the authority: a miss here
+/// only means "ask the node".
+pub(crate) fn resolve_ensure(
+    gw: &GatewayState,
+    agent_id: &str,
+    node_id: &str,
+) -> EnsureResolution {
+    let mut matches = gw
+        .installed_agents
+        .values()
+        .filter(|info| info.agent_id == agent_id && info.node_id == node_id)
+        .map(|info| info.instance_id.clone())
+        .collect::<Vec<_>>();
+    // Stable pick when one package has several instances on one node: any
+    // of them satisfies an existence claim, but the answer must not
+    // change between calls.
+    matches.sort();
+    match matches.into_iter().next() {
+        Some(instance_id) => EnsureResolution::Present(instance_id),
+        None => EnsureResolution::Dispatch,
+    }
+}
+
+/// Response for `POST /api/agents/ensure` (ADR-073 declarative install).
+#[derive(Debug, Serialize)]
+pub struct EnsureAck {
+    /// Package whose presence was ensured.
+    pub agent_id: String,
+    /// Instance this request resolves to. On the already-present path it
+    /// is the instance the node holds; on the dispatch path it is the
+    /// candidate the Gateway minted — the node may still satisfy the
+    /// request from an instance the Gateway has not seen yet.
+    pub instance_id: String,
+    /// `true` when the package was already present: no install was
+    /// dispatched and this request creates nothing.
+    pub already_present: bool,
+    /// ADR-059 §6 tracking id — present only when an install was
+    /// dispatched. The node's terminal event completes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+}
+
+/// `POST /api/agents/ensure` — declarative "make sure this package is
+/// installed on this node".
+///
+/// The difference from `/install` is *intent*, and it is the whole point
+/// of this endpoint: `/install` always lands one more instance (ADR-073
+/// multi-instance is legal, and stays legal), while `/ensure` answers
+/// "is it there?" and creates at most one instance no matter how many
+/// callers ask. It is idempotent by construction, so a caller may retry
+/// freely — serialization and the existence check live on the node
+/// (`InstallKind::Ensure` + the install gate), never in the caller.
+///
+/// Returns `200 OK` with `already_present = true` when the package is
+/// already on the target node (nothing published), or `202 Accepted` with
+/// an operation id when an install was dispatched.
+pub async fn ensure_agent(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<EnsureAck>), ApiError> {
+    let form = read_agent_upload(multipart).await?;
+    let node_id = form.node_id;
+
+    // The package must be opened to learn its `agent_id`; the staged temp
+    // file is deleted when this scope ends, whichever way it ends.
+    let staged = StagedPackage::stage(&form.package_bytes)?;
+    let agent_id = staged.manifest.agent_id.clone();
+
+    // Fast path: the package is already on the node, so there is nothing
+    // to dispatch — and no reason to require the node to be ready.
+    let present = {
+        let gw = state.gateway_state.read().await;
+        resolve_ensure(&gw, &agent_id, &node_id)
+    };
+    if let EnsureResolution::Present(instance_id) = present {
+        return Ok((
+            StatusCode::OK,
+            Json(EnsureAck {
+                agent_id,
+                instance_id,
+                already_present: true,
+                operation_id: None,
+            }),
+        ));
+    }
+
+    let node_control = node_control_client(&state)?;
+    ensure_node_ready(&state, &node_id).await?;
+    check_node_compatible(&state, &node_id).await?;
+
+    // Persist the source and build the download URL the node will use.
+    let package_url = publish_to_registry(&state, &staged, &node_id).await?;
+
+    // ADR-073 决策 5: the Gateway mints the candidate instance identity.
+    // The node may still answer "already satisfied" (an instance the
+    // Gateway has not seen yet) — that is what `ensure` means.
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let record = OperationRecord::new(0);
+    let operation_id = record.operation_id.clone();
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+
+    node_control
+        .install_agent_by_url(NodeInstallDispatch {
+            node_id: &node_id,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::Url(&package_url),
+            dev_mode: gateway_dev_mode(&state).await,
+            system: staged.manifest.system,
+            // The intent: at most one instance, no matter how many
+            // callers ask (the node re-checks after dequeue).
+            ensure: true,
+            operation_id: operation_id.as_str(),
+        })
+        .await
+        .map_err(|e| ApiError::internal(&format!("Ensure dispatch failed: {}", e)))?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnsureAck {
+            agent_id,
+            instance_id,
+            already_present: false,
+            operation_id: Some(operation_id),
+        }),
+    ))
+}
+
+pub async fn install_agent(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
+    let form = read_agent_upload(multipart).await?;
+    let package_bytes = form.package_bytes;
+    let node_id = form.node_id;
+    let expected_version = form.expected_version;
 
     // Persist the source into the package registry and build the download
     // URL the node will use (advertise_host = the address other machines
@@ -1566,33 +1785,7 @@ pub async fn install_agent(
     // node publishes its enroll request before NodeReady (bootstrap
     // order, ADR-059 §7.2), so `node.{id}` cannot be ready while the
     // node is unknown to the registry.
-    if let Some(registry) = state.bootstrap_registry.as_ref()
-        && !registry.is_ready(&crate::bootstrap::SubsystemId(format!("node.{}", node_id)))
-    {
-        let (phase, phase_detail) = state
-            .gateway_state
-            .read()
-            .await
-            .bootstrap.orchestrator
-            .as_ref()
-            .map(|o| {
-                let s = o.snapshot();
-                // SCREAMING_SNAKE_CASE serde name — the same string the
-                // HTTP projection uses (`BOOTING`, `READY`, …).
-                let phase = serde_json::to_string(&s.phase)
-                    .map(|p| p.trim_matches('"').to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                (phase, s.phase_detail)
-            })
-            .unwrap_or_else(|| ("unknown".to_string(), "orchestrator unavailable".to_string()));
-        return Err(ApiError::conflict_structured(
-            StructuredErrorBody::dependency_not_ready(
-                Some(phase),
-                Some(phase_detail),
-                500,
-            ),
-        ));
-    }
+    ensure_node_ready(&state, &node_id).await?;
     // ADR-059 §6: open an Accepted operation BEFORE dispatch — the node's
     // NodeEvent reply (same `request_id`) transitions it to
     // Completed/Failed. The ack carries the operation_id so the client
@@ -1608,18 +1801,68 @@ pub async fn install_agent(
     }
 
     node_control
-        .install_agent_by_url(
-            &node_id,
-            &instance_id,
-            &agent_id,
-            &package_url,
-            gateway_dev_mode(&state).await,
-            operation_id.as_str(),
-        )
+        .install_agent_by_url(NodeInstallDispatch {
+            node_id: &node_id,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::Url(&package_url),
+            dev_mode: gateway_dev_mode(&state).await,
+            // `manifest.system` decides the node's install lane.
+            system: manifest.system,
+            // `POST /api/agents/install` is an explicit install of one
+            // more copy (ADR-073 multi-instance) — a declarative
+            // "ensure present" is a different intent and a different
+            // endpoint.
+            ensure: false,
+            operation_id: operation_id.as_str(),
+        })
         .await
         .map_err(|e| ApiError::internal(&format!("Install dispatch failed: {}", e)))?;
 
     Ok((StatusCode::ACCEPTED, Json(ack)))
+}
+
+/// An uploaded `.agent` spooled to a temp file, with its parsed
+/// manifest.
+///
+/// The upload is only ever a staging area — the durable copy is the
+/// registry entry — so the temp file is deleted on drop, including on
+/// the paths that return early (ensure's already-present fast path).
+struct StagedPackage {
+    path: std::path::PathBuf,
+    manifest: AgentManifest,
+}
+
+impl StagedPackage {
+    fn stage(package_bytes: &[u8]) -> Result<Self, ApiError> {
+        let path = std::env::temp_dir().join(format!(
+            "acowork-install-{}-{}.agent",
+            std::process::id(),
+            timestamp_nanos(),
+        ));
+        if let Err(e) = std::fs::write(&path, package_bytes) {
+            return Err(ApiError::internal(&format!(
+                "Failed to write upload to temp file: {}",
+                e
+            )));
+        }
+        // A `.agent` is a ZIP; the manifest must be read out of it before
+        // the registry copy gets a stable name (the URL is derived from
+        // `agent_id`, which only the manifest knows).
+        match extract_manifest_from_package(&path) {
+            Ok(manifest) => Ok(Self { path, manifest }),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                Err(ApiError::bad_request(&format!("{}", e)))
+            }
+        }
+    }
+}
+
+impl Drop for StagedPackage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Spool package bytes to a temp file, extract the manifest, and persist
@@ -1632,73 +1875,59 @@ async fn register_package_in_registry(
     package_bytes: &[u8],
     node_id: &str,
 ) -> Result<(AgentManifest, String), ApiError> {
-    let temp_file = std::env::temp_dir().join(format!(
-        "acowork-install-{}-{}.agent",
-        std::process::id(),
-        timestamp_nanos(),
-    ));
-    if let Err(e) = std::fs::write(&temp_file, package_bytes) {
+    let staged = StagedPackage::stage(package_bytes)?;
+    let url = publish_to_registry(state, &staged, node_id).await?;
+    Ok((staged.manifest.clone(), url))
+}
+
+/// Copy a staged package into the Gateway's registry and build the
+/// download URL the target node will fetch it from.
+///
+/// The URL host must be reachable *from the node*: the local node is
+/// loopback-bound, so it dials the HTTP bind host — auto-detecting a LAN
+/// advertise host (ADR-055 D3) would make the download fail with
+/// connection refused whenever the listener is 127.0.0.1-only. Remote
+/// nodes get the advertise host, which is what they can route to.
+async fn publish_to_registry(
+    state: &AppState,
+    staged: &StagedPackage,
+    node_id: &str,
+) -> Result<String, ApiError> {
+    let agent_id = &staged.manifest.agent_id;
+    let gw = state.gateway_state.read().await;
+    let config = gw
+        .config
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?;
+    let registry_dir = config.package_registry_dir();
+    if let Err(e) = std::fs::create_dir_all(&registry_dir) {
         return Err(ApiError::internal(&format!(
-            "Failed to write upload to temp file: {}",
+            "Failed to create registry dir: {}",
             e
         )));
     }
-
-    let manifest = match extract_manifest_from_package(&temp_file) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp_file);
-            return Err(ApiError::bad_request(&format!("{}", e)));
-        }
-    };
-    let agent_id = manifest.agent_id.clone();
-
-    let (registry_path, package_url) = {
-        let gw = state.gateway_state.read().await;
-        let config = gw
-            .config
-            .as_ref()
-            .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?;
-        let registry_dir = config.package_registry_dir();
-        if let Err(e) = std::fs::create_dir_all(&registry_dir) {
-            return Err(ApiError::internal(&format!(
-                "Failed to create registry dir: {}",
-                e
-            )));
-        }
-        let registry_path = registry_dir.join(format!("{}.agent", agent_id));
-        // The download URL must be reachable from the target node. The
-        // local node is loopback-bound, so it must dial the HTTP bind
-        // host — auto-detecting a LAN advertise host (ADR-055 D3) would
-        // make the download fail with connection refused whenever the
-        // listener is 127.0.0.1-only. Remote nodes get the advertise
-        // host, which is what they can actually route to.
-        let url_host = if node_id == acowork_core::node::local_node_id() {
-            // A wildcard bind must still be dialed via loopback.
-            if config.http.host == "0.0.0.0" || config.http.host == "::" {
-                "127.0.0.1"
-            } else {
-                config.http.host.as_str()
-            }
+    let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+    let url_host = if node_id == acowork_core::node::local_node_id() {
+        // A wildcard bind must still be dialed via loopback.
+        if config.http.host == "0.0.0.0" || config.http.host == "::" {
+            "127.0.0.1"
         } else {
-            gw.advertise_host.as_str()
-        };
-        let url = format!(
-            "http://{}:{}/api/packages/{}/download",
-            url_host, config.http.port, agent_id
-        );
-        (registry_path, url)
+            config.http.host.as_str()
+        }
+    } else {
+        gw.advertise_host.as_str()
     };
-    if let Err(e) = std::fs::copy(&temp_file, &registry_path) {
-        let _ = std::fs::remove_file(&temp_file);
+    let url = format!(
+        "http://{}:{}/api/packages/{}/download",
+        url_host, config.http.port, agent_id
+    );
+    if let Err(e) = std::fs::copy(&staged.path, &registry_path) {
         return Err(ApiError::internal(&format!(
             "Failed to store package in registry: {}",
             e
         )));
     }
-    let _ = std::fs::remove_file(&temp_file);
-
-    Ok((manifest, package_url))
+    Ok(url)
 }
 
 /// Extract the `manifest.toml` from a `.agent` package ZIP (path-based).
@@ -1741,20 +1970,17 @@ pub(crate) fn extract_manifest_from_package(
 /// Track a node-hosted running agent in `GatewayState` after a
 /// successful node start (ADR-055 §6.2). `pid` is 0 — the Gateway
 /// observes liveness via MQTT status/ready topics, not the PID.
-/// `agent_id` may be either an instance id (UUID) or a package id
-/// (ADR-073); it is resolved to the instance identity first.
+/// `agent_id` is the resolved instance identity (ADR-073); callers
+/// obtain it from `resolve_agent_identity` before invoking this helper.
 async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
     // Resolve everything from an immutable snapshot first; the write
     // lock is only taken for the final upsert (avoids E0502).
-    let (instance_id, resolved_agent_id, workspace) = {
+    let (resolved_agent_id, workspace) = {
         let gw = state.gateway_state.read().await;
-        let instance_id = gw
-            .resolve_installed_key(agent_id)
-            .unwrap_or_else(|| agent_id.to_string());
-        let info = gw.installed(&instance_id);
+        let info = gw.installed(agent_id);
         let resolved_agent_id = info
             .map(|i| i.agent_id.clone())
-            .unwrap_or_else(|| agent_id.to_string());
+            .unwrap_or_default();
         let workspace = info
             .map(|i| {
                 std::path::PathBuf::from(&i.install_path)
@@ -1763,12 +1989,12 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
                     .to_string()
             })
             .unwrap_or_default();
-        (instance_id, resolved_agent_id, workspace)
+        (resolved_agent_id, workspace)
     };
 
     let mut gw = state.gateway_state.write().await;
     gw.add_running(crate::gateway::state::RunningAgentInfo {
-        instance_id,
+        instance_id: agent_id.to_string(),
         agent_id: resolved_agent_id,
         pid: 0,
         started_at: chrono::Utc::now(),
@@ -1841,21 +2067,11 @@ pub async fn clone_agent(
 
     // Route to the node hosting the source agent (ADR-055 §6.6 L2-5 —
     // clone is a node-local operation on the source's node).
-    // ADR-073: the route variable may be an instance identity or a
-    // legacy package id — resolve to the canonical instance key.
-    let (instance_id, resolved_agent_id) = {
-        let gw = state.gateway_state.read().await;
-        match gw.resolve_installed_key(&agent_id) {
-            Some(inst) => {
-                let aid = gw
-                    .installed(&inst)
-                    .map(|i| i.agent_id.clone())
-                    .unwrap_or_else(|| agent_id.clone());
-                (inst, aid)
-            }
-            None => (agent_id.clone(), agent_id.clone()),
-        }
-    };
+    // ADR-073: the route variable is the INSTANCE identity (UUIDv4);
+    // resolve to the canonical instance key. A non-UUID input returns
+    // 404 from `resolve_agent_identity`.
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let node_id = {
         let gw = state.gateway_state.read().await;
         gw.installed(&instance_id)
@@ -1952,21 +2168,9 @@ pub async fn upgrade_agent(
     }
 
     // Upgrade targets an existing agent — default to the node hosting it.
-    // ADR-073: resolve the route variable (instance or legacy package id)
-    // to the canonical instance key.
-    let (instance_id, resolved_agent_id) = {
-        let gw = state.gateway_state.read().await;
-        match gw.resolve_installed_key(&agent_id) {
-            Some(inst) => {
-                let aid = gw
-                    .installed(&inst)
-                    .map(|i| i.agent_id.clone())
-                    .unwrap_or_else(|| agent_id.clone());
-                (inst, aid)
-            }
-            None => (agent_id.clone(), agent_id.clone()),
-        }
-    };
+    // ADR-073: the route variable is the INSTANCE identity (UUIDv4).
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let node_id = match node_id {
         Some(n) => n,
         None => {
@@ -2043,7 +2247,7 @@ pub async fn uninstall_agent(
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
     let (instance_id, resolved_agent_id) =
-        resolve_agent_identity(&state, &agent_id).await;
+        resolve_agent_identity(&state, &agent_id).await?;
     let event = node_control
         .uninstall_agent(
             &acowork_core::node::local_node_id(),
@@ -2236,7 +2440,7 @@ pub async fn start_agent(
     check_node_compatible(&state, &acowork_core::node::local_node_id()).await?;
     // ADR-073: route the command to the instance identity.
     let (instance_id, resolved_agent_id) =
-        resolve_agent_identity(&state, &agent_id).await;
+        resolve_agent_identity(&state, &agent_id).await?;
     let event = node_control
         .start_agent(
             &acowork_core::node::local_node_id(),
@@ -2442,7 +2646,7 @@ pub async fn stop_agent(
         )
     })?;
     let (instance_id, resolved_agent_id) =
-        resolve_agent_identity(&state, &agent_id).await;
+        resolve_agent_identity(&state, &agent_id).await?;
     let event = node_control
         .stop_agent(
             &acowork_core::node::local_node_id(),
@@ -2542,7 +2746,7 @@ pub async fn restart_agent_in_debug(
 
     // Stop current process
     let (instance_id, resolved_agent_id) =
-        resolve_agent_identity(&state, &agent_id).await;
+        resolve_agent_identity(&state, &agent_id).await?;
     let stop_event = node_control
         .stop_agent(
             &acowork_core::node::local_node_id(),
@@ -2857,6 +3061,12 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    /// Test-only instance identity for "com.acowork.architect" / "com.acowork.senior-engineer".
+    const INSTANCE_ARCHITECT: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    const INSTANCE_SENIOR_ENG: &str = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e";
+    const INSTANCE_FOO_BAZ: &str = "4d5e6f7a-8b9c-4d0e-9f1a-3b4c5d6e7f8a";
+    const INSTANCE_WEATHER: &str = "5e6f7a8b-9c0d-4e1f-a02b-4c5d6e7f8a9b";
+
     fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {        acowork_core::AgentManifest {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
@@ -2892,20 +3102,31 @@ mod tests {
         AppState::new(gw, Arc::new(HttpAuth::new(false)))
     }
 
-    /// Build an AppState with `agent_id` installed and the MQTT agent
-    /// registry seeded with the given status payload. `node_control` is
-    /// left `None` so a handler that fails to short-circuit errors with
-    /// "Node control plane unavailable" — proving the fast-path was hit.
-    async fn state_with_registry_status(agent_id: &str, status: &[u8]) -> AppState {
+    /// Build an AppState with package `agent_id` installed as instance
+    /// `instance_id`, and the MQTT agent registry seeded with the given
+    /// status payload for that instance.
+    ///
+    /// ADR-073: the install table and the MQTT status registry are both
+    /// keyed by INSTANCE identity, so the two inputs are passed
+    /// separately — using one string for both is exactly the conflation
+    /// the ADR removes. Handlers are therefore called with `instance_id`
+    /// in the route path. `node_control` is left `None` so a handler that
+    /// fails to short-circuit errors with "Node control plane
+    /// unavailable" — proving the fast-path was hit.
+    async fn state_with_registry_status(
+        agent_id: &str,
+        instance_id: &str,
+        status: &[u8],
+    ) -> AppState {
         let gw = Arc::new(RwLock::new(GatewayState::new(
             "/tmp/acowork-start-test-vault",
         )));
         {
             let mut g = gw.write().await;
             g.installed_agents.insert(
-                agent_id.to_string(),
+                instance_id.to_string(),
                 AgentInfo {
-                    instance_id: agent_id.to_string(),
+                    instance_id: instance_id.to_string(),
                     agent_id: agent_id.to_string(),
                     version: "1.0.0".to_string(),
                     name: "Test Agent".to_string(),
@@ -2916,9 +3137,10 @@ mod tests {
             );
         }
         let reg = crate::mqtt::agent_registry::new_shared_registry();
-        reg.write()
-            .await
-            .update_from_mqtt(&format!("acowork/agents/{}/status", agent_id), status);
+        reg.write().await.update_from_mqtt(
+            &format!("acowork/agents/{}/status", instance_id),
+            status,
+        );
 
         let mut state = AppState::new(gw, Arc::new(HttpAuth::new(false)));
         state.agent_registry = Some(reg);
@@ -2933,11 +3155,12 @@ mod tests {
         // COMMAND_TIMEOUT (30s) while the Node recovers.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
+            INSTANCE_SENIOR_ENG,
             b"online",
         ).await;
         let result = start_agent(
             State(state),
-            Path("com.acowork.senior-engineer".to_string()),
+            Path(INSTANCE_SENIOR_ENG.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -2961,11 +3184,12 @@ mod tests {
         // rather than returning the idempotent 200.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
+            INSTANCE_SENIOR_ENG,
             b"sleeping",
         ).await;
         let result = start_agent(
             State(state),
-            Path("com.acowork.senior-engineer".to_string()),
+            Path(INSTANCE_SENIOR_ENG.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -2990,11 +3214,12 @@ mod tests {
         // node-control path must run.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
+            INSTANCE_SENIOR_ENG,
             b"offline",
         ).await;
         let result = start_agent(
             State(state),
-            Path("com.acowork.senior-engineer".to_string()),
+            Path(INSTANCE_SENIOR_ENG.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -3022,11 +3247,12 @@ mod tests {
         // even though the MQTT LWT registry says it is online. Liveness
         // for pid=0 is guaranteed by the registry instead.
         let state =
-            state_with_registry_status("com.acowork.senior-engineer", b"online").await;
+            state_with_registry_status("com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, b"online")
+                .await;
         {
             let mut gw = state.gateway_state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
-                instance_id: "com.acowork.senior-engineer".to_string(),
+                instance_id: INSTANCE_SENIOR_ENG.to_string(),
                 agent_id: "com.acowork.senior-engineer".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),
@@ -3078,8 +3304,8 @@ mod tests {
             let mut gw = state.gateway_state.write().await;
             // Two instances of the same package, on two different nodes.
             for (inst, node) in [
-                ("inst-a1", "node-a"),
-                ("inst-a2", "node-b"),
+                ("6a7a8a9a-0b1b-4c2c-8d3d-9e4e5f6a7b8c", "node-a"),
+                ("7b8b9c0d-1c2c-4d3d-8e4e-af5f6a7b8c9d", "node-b"),
             ] {
                 gw.add_installed(crate::gateway::state::AgentInfo {
                     instance_id: inst.to_string(),
@@ -3093,7 +3319,7 @@ mod tests {
             }
             // A different package for the node filter cross-check.
             gw.add_installed(crate::gateway::state::AgentInfo {
-                instance_id: "inst-b1".to_string(),
+                instance_id: INSTANCE_FOO_BAZ.to_string(),
                 agent_id: "com.foo.baz".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Foo Baz".to_string(),
@@ -3123,7 +3349,7 @@ mod tests {
         sorted_instances.sort();
         assert_eq!(
             sorted_instances,
-            vec!["inst-a1".to_string(), "inst-a2".to_string()],
+            vec!["6a7a8a9a-0b1b-4c2c-8d3d-9e4e5f6a7b8c".to_string(), "7b8b9c0d-1c2c-4d3d-8e4e-af5f6a7b8c9d".to_string()],
             "both instances of the same package must survive the list"
         );
 
@@ -3162,7 +3388,7 @@ mod tests {
     fn test_agent_list_response_serialization() {
 
         let resp = AgentListResponse {
-            instance_id: "inst-com.example.weather".to_string(),
+            instance_id: INSTANCE_WEATHER.to_string(),
             agent_id: "com.example.weather".to_string(),
             node_id: "local".to_string(),
             name: "Weather Agent".to_string(),
@@ -3186,8 +3412,9 @@ mod tests {
         assert!(json.contains("Weather Agent"));
         assert!(json.contains("icon-05"));
         // ADR-073: three-layer identity surfaces on every list entry.
+        // The instance identity is a UUIDv4, never the package id.
         assert!(
-            json.contains("\"instance_id\":\"inst-com.example.weather\""),
+            json.contains(&format!("\"instance_id\":\"{}\"", INSTANCE_WEATHER)),
             "instance_id must serialise; got: {}",
             json
         );
@@ -3521,6 +3748,7 @@ mod tests {
         // retained snapshot), but `running_agents` is empty.
         let state = state_with_registry_status(
             "com.acowork.architect",
+            INSTANCE_ARCHITECT,
             b"online",
         )
         .await;
@@ -3528,14 +3756,14 @@ mod tests {
         {
             let reg = state.agent_registry.as_ref().expect("registry seeded");
             assert!(
-                reg.read().await.is_online("com.acowork.architect"),
+                reg.read().await.is_online(INSTANCE_ARCHITECT),
                 "preflight: registry says online"
             );
         }
         {
             let gw = state.gateway_state.read().await;
             assert!(
-                !gw.is_running("com.acowork.architect"),
+                !gw.is_running(INSTANCE_ARCHITECT),
                 "preflight: no running_agents entry — DESYNC"
             );
         }
@@ -3558,7 +3786,7 @@ mod tests {
         // silent short-circuit of the original bug.
         let result = start_agent(
             State(state),
-            Path("com.acowork.architect".to_string()),
+            Path(INSTANCE_ARCHITECT.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -3589,11 +3817,13 @@ mod tests {
     #[tokio::test]
     async fn start_agent_fast_path_returns_idempotent_200_when_views_agree() {
         // Pre-condition: registry online AND entry present.
-        let state = state_with_registry_status("com.acowork.architect", b"online").await;
+        let state =
+            state_with_registry_status("com.acowork.architect", INSTANCE_ARCHITECT, b"online")
+                .await;
         {
             let mut gw = state.gateway_state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
-                instance_id: "com.acowork.architect".to_string(),
+                instance_id: INSTANCE_ARCHITECT.to_string(),
                 agent_id: "com.acowork.architect".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),
@@ -3611,7 +3841,7 @@ mod tests {
         }
         let result = start_agent(
             State(state),
-            Path("com.acowork.architect".to_string()),
+            Path(INSTANCE_ARCHITECT.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -3622,6 +3852,75 @@ mod tests {
                 resp.message
             ),
             Err(e) => panic!("expected idempotent 200, got error: {}", e.error),
+        }
+    }
+
+    // ── Declarative ensure (ADR-073) ────────────────────────────────
+
+    /// Seed one installed instance into the Gateway's view.
+    fn insert_instance(gw: &mut GatewayState, agent_id: &str, instance_id: &str, node_id: &str) {
+        gw.installed_agents.insert(
+            instance_id.to_string(),
+            AgentInfo {
+                instance_id: instance_id.to_string(),
+                agent_id: agent_id.to_string(),
+                version: "1.0.0".to_string(),
+                name: agent_id.to_string(),
+                install_path: format!("/tmp/pkg/{instance_id}"),
+                manifest: test_manifest(agent_id),
+                node_id: node_id.to_string(),
+            },
+        );
+    }
+
+    /// The ensure fast path asks an existence question about one package
+    /// on ONE node — the answer is an instance identity (ADR-073).
+    #[tokio::test]
+    async fn resolve_ensure_matches_package_and_node() {
+        let mut gw = GatewayState::new("/tmp/acowork-resolve-ensure-vault");
+        insert_instance(&mut gw, "com.test.weather", INSTANCE_WEATHER, "local");
+        insert_instance(&mut gw, "com.test.weather", INSTANCE_FOO_BAZ, "node-b");
+
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.weather", "local"),
+            EnsureResolution::Present(INSTANCE_WEATHER.to_string())
+        );
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.weather", "node-b"),
+            EnsureResolution::Present(INSTANCE_FOO_BAZ.to_string())
+        );
+        // A different node holds nothing for this package — the request
+        // must be dispatched there rather than satisfied from elsewhere.
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.weather", "node-c"),
+            EnsureResolution::Dispatch
+        );
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.absent", "local"),
+            EnsureResolution::Dispatch
+        );
+    }
+
+    /// ADR-073: several instances of one package on one node are legal —
+    /// any of them satisfies the existence claim, and the answer must not
+    /// change between calls (hash-map order is not stable).
+    #[tokio::test]
+    async fn resolve_ensure_is_stable_when_a_package_has_several_instances() {
+        let mut gw = GatewayState::new("/tmp/acowork-resolve-ensure-multi-vault");
+        insert_instance(&mut gw, "com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, "local");
+        insert_instance(&mut gw, "com.acowork.senior-engineer", INSTANCE_ARCHITECT, "local");
+
+        let first = resolve_ensure(&gw, "com.acowork.senior-engineer", "local");
+        let expected = EnsureResolution::Present(
+            [INSTANCE_ARCHITECT, INSTANCE_SENIOR_ENG]
+                .iter()
+                .min()
+                .expect("two candidates")
+                .to_string(),
+        );
+        assert_eq!(first, expected);
+        for _ in 0..8 {
+            assert_eq!(resolve_ensure(&gw, "com.acowork.senior-engineer", "local"), expected);
         }
     }
 }

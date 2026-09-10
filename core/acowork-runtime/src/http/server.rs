@@ -3568,6 +3568,12 @@ async fn post_rag_query(
 mod tests {
     use super::*;
 
+    /// Stable instance identity used by all in-process HTTP tests.
+    /// Pre-ADR-073 these tests used the package id `com.test.agent`
+    /// as both agent_id and URL path; ADR-073 requires the URL path
+    /// to address the runtime's actual UUID instance id.
+    const TEST_INSTANCE_ID: &str = "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d";
+
     /// Build a session-metadata service backed by on-disk session files.
     fn new_test_session_metadata(
         work_dir: &std::path::Path,
@@ -3678,7 +3684,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -3788,7 +3794,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -3960,7 +3966,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -4028,7 +4034,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -4165,7 +4171,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -4194,7 +4200,7 @@ mod tests {
         // load-bearing: it exercises the "untouched field is preserved"
         // path of the read-modify-write cycle.
         let url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/config",
             server.port
         );
         let client = reqwest::Client::new();
@@ -4267,7 +4273,7 @@ mod tests {
         // GET /agents/{id}/config must surface the new state too —
         // this is the path the SetupTab refresh listener reads.
         let get_url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/config",
             server.port
         );
         let get_resp: serde_json::Value =
@@ -4316,7 +4322,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -4342,7 +4348,7 @@ mod tests {
         .expect("server should start");
 
         let url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/config",
             server.port
         );
         let client = reqwest::Client::new();
@@ -4569,7 +4575,7 @@ mod tests {
         //    addresses this runtime by package name gets an explicit
         //    mismatch instead of silently hitting the wrong instance.
         let pkg_url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/config",
             server.port
         );
         let client = reqwest::Client::new();
@@ -4740,7 +4746,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -4769,7 +4775,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         // 1) PUT mcp-servers — user ticks `context7` only.
-        let url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let url = format!("{}/agents/{TEST_INSTANCE_ID}/mcp-servers", base);
         let resp = client
             .put(&url)
             .json(&serde_json::json!({"servers": ["context7"]}))
@@ -4797,7 +4803,7 @@ mod tests {
         // 3) GET merged /tools — `mcp_servers` now reflects the user's
         //    selection rather than `[]` (the pre-fix bug surfaced here
         //    because the server was lying about an empty config).
-        let tools_url = format!("{}/agents/com.test.agent/tools", base);
+        let tools_url = format!("{}/agents/{TEST_INSTANCE_ID}/tools", base);
         let resp = reqwest::get(&tools_url).await.unwrap();
         let tools: serde_json::Value = resp.json().await.unwrap();
         let mcp_servers: Vec<String> = tools["mcp_servers"]
@@ -4820,7 +4826,7 @@ mod tests {
         assert_eq!(defs[1]["active"], false);
 
         // 4) PUT search-config — user activates `tavily` with priority 1.
-        let search_url = format!("{}/agents/com.test.agent/search-config", base);
+        let search_url = format!("{}/agents/{TEST_INSTANCE_ID}/search-config", base);
         let resp = client
             .put(&search_url)
             .json(&serde_json::json!({
@@ -4850,7 +4856,7 @@ mod tests {
         // 6) PUT mcp-servers with an unknown name → 400 (not 200 with
         //    silent drop, which was the pre-fix symptom at the
         //    security/UX layer).
-        let bad_url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let bad_url = format!("{}/agents/{TEST_INSTANCE_ID}/mcp-servers", base);
         let resp = client
             .put(&bad_url)
             .json(&serde_json::json!({"servers": ["context7", "ghost-mcp"]}))
@@ -4946,7 +4952,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -4973,8 +4979,8 @@ mod tests {
 
         let base = format!("http://127.0.0.1:{}", server.port);
         let client = reqwest::Client::new();
-        let mcp_url = format!("{}/agents/com.test.agent/mcp-servers", base);
-        let search_url = format!("{}/agents/com.test.agent/search-config", base);
+        let mcp_url = format!("{}/agents/{TEST_INSTANCE_ID}/mcp-servers", base);
+        let search_url = format!("{}/agents/{TEST_INSTANCE_ID}/search-config", base);
 
         // 1) Bare `{}` to mcp-servers must succeed (was 400 pre-fix).
         let resp = client
@@ -5122,7 +5128,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -5154,7 +5160,7 @@ mod tests {
         // the context7 checkbox in the Tools tab. In the current broken
         // state, this returns 400 with "unknown MCP server names
         // (not in catalog+local)" — which is what the user sees.
-        let url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let url = format!("{}/agents/{TEST_INSTANCE_ID}/mcp-servers", base);
         let resp = client
             .put(&url)
             .json(&serde_json::json!({"servers": ["context7"]}))
@@ -5226,7 +5232,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5321,7 +5327,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5495,7 +5501,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -5991,7 +5997,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6120,7 +6126,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6280,7 +6286,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6347,7 +6353,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6405,7 +6411,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6489,7 +6495,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6518,7 +6524,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         // With RAG configured: should return configured=true.
-        let url = format!("{}/agents/com.test.agent/rag/status", base);
+        let url = format!("{}/agents/{TEST_INSTANCE_ID}/rag/status", base);
         let resp = client.get(&url).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
@@ -6552,7 +6558,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6578,7 +6584,7 @@ mod tests {
         .expect("server should start");
 
         let url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/rag/status",
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/rag/status",
             server.port
         );
         let resp = reqwest::get(&url).await.unwrap();
@@ -6646,7 +6652,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6675,7 +6681,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         // Valid query.
-        let url = format!("{}/agents/com.test.agent/rag/query", base);
+        let url = format!("{}/agents/{TEST_INSTANCE_ID}/rag/query", base);
         let resp = client
             .post(&url)
             .json(&serde_json::json!({"query": "product pricing"}))
@@ -6728,7 +6734,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6754,7 +6760,7 @@ mod tests {
         .expect("server should start");
 
         let url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/rag/query",
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/rag/query",
             server.port
         );
         let resp = reqwest::Client::new()
@@ -6808,7 +6814,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -6984,7 +6990,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7106,7 +7112,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7195,7 +7201,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7299,7 +7305,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.agent".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7420,7 +7426,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.debug_enable".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,
@@ -7540,7 +7546,7 @@ mod tests {
             temp_dir.clone(),
             temp_dir.clone(),
             "com.test.no_sm".to_string(),
-            "com.test.agent".to_string(), // ADR-073: instance id literal shared with the package name in these smoke tests
+            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
             snapshots,
             latest,
             dispatch_tx,

@@ -367,80 +367,46 @@ impl GatewayState {
         self.bootstrap.orchestrator = Some(orchestrator);
     }
 
-    /// Check if an agent is installed.
-    ///
-    /// `id` may be an instance identity (ADR-073 table key) or, for
-    /// legacy callers, a package id — the first installed instance of
-    /// that package matches.
+    /// Check if an agent is installed. `id` is the instance identity
+    /// (ADR-073 table key); a package id never matches.
     pub fn is_installed(&self, id: &str) -> bool {
         self.installed_agents.contains_key(id)
-            || self
-                .installed_agents
-                .values()
-                .any(|info| info.agent_id == id)
     }
 
-    /// Resolve a caller-supplied id (instance identity or legacy
-    /// package id) to the install-table key. ADR-073: the canonical key
-    /// is the instance_id.
+    /// Return the install-table key for `id`. `id` must already be the
+    /// instance identity (ADR-073 table key); returns `None` for any
+    /// non-instance input.
     pub fn resolve_installed_key(&self, id: &str) -> Option<String> {
-        if self.installed_agents.contains_key(id) {
-            return Some(id.to_string());
-        }
         self.installed_agents
-            .values()
-            .find(|info| info.agent_id == id)
-            .map(|info| info.instance_id.clone())
+            .contains_key(id)
+            .then(|| id.to_string())
     }
 
-    /// Look up an installed agent. `id` may be an instance identity or
-    /// a legacy package id.
+    /// Look up an installed agent. `id` is the instance identity
+    /// (ADR-073 table key); a package id never matches.
     pub fn installed(&self, id: &str) -> Option<&AgentInfo> {
-        self.installed_agents
-            .get(id)
-            .or_else(|| {
-                self.installed_agents
-                    .values()
-                    .find(|info| info.agent_id == id)
-            })
+        self.installed_agents.get(id)
     }
 
-    /// Check if an agent is running.
-    ///
-    /// `id` may be an instance identity (ADR-073 table key) or, for
-    /// legacy callers, a package id — the first running instance of
-    /// that package matches.
+    /// Check if an agent is running. `id` is the instance identity
+    /// (ADR-073 table key); a package id never matches.
     pub fn is_running(&self, id: &str) -> bool {
         self.running_agents.contains_key(id)
-            || self
-                .running_agents
-                .values()
-                .any(|info| info.agent_id == id)
     }
 
-    /// Resolve a caller-supplied id (instance identity or legacy
-    /// package id) to the running-agents table key. ADR-073: the
-    /// canonical key is the instance_id.
+    /// Return the running-agents table key for `id`. `id` must already
+    /// be the instance identity (ADR-073 table key); returns `None`
+    /// for any non-instance input.
     pub fn resolve_running_key(&self, id: &str) -> Option<String> {
-        if self.running_agents.contains_key(id) {
-            return Some(id.to_string());
-        }
         self.running_agents
-            .values()
-            .find(|info| info.agent_id == id)
-            .map(|info| info.instance_id.clone())
+            .contains_key(id)
+            .then(|| id.to_string())
     }
 
-    /// Look up a running agent. `id` may be an instance identity or a
-    /// legacy package id.
+    /// Look up a running agent. `id` is the instance identity
+    /// (ADR-073 table key); a package id never matches.
     pub fn running(&self, id: &str) -> Option<&RunningAgentInfo> {
-        self.running_agents
-            .get(id)
-            .or_else(|| {
-                self.running_agents
-                    .values()
-                    .find(|info| info.agent_id == id)
-            })
+        self.running_agents.get(id)
     }
 
     /// Check if an agent is connected (gRPC AgentHello completed)
@@ -476,11 +442,23 @@ impl GatewayState {
         self.installed_agents.insert(info.instance_id.clone(), info);
     }
 
-    /// Remove an installed agent. `id` may be an instance identity or a
-    /// legacy package id.
+    /// Look up the (first) instance identity for a package id. Used by
+    /// the System Agent auto-start path — at boot the Gateway knows the
+    /// package id (`com.acowork.system`) but not the instance id, since
+    /// the latter is gateway-generated at install time. Returns the
+    /// instance id of the first installed instance of `agent_id`, or
+    /// `None` if no instance is installed.
+    pub fn find_instance_by_agent_id(&self, agent_id: &str) -> Option<String> {
+        self.installed_agents
+            .values()
+            .find(|info| info.agent_id == agent_id)
+            .map(|info| info.instance_id.clone())
+    }
+
+    /// Remove an installed agent. `id` is the instance identity
+    /// (ADR-073 table key); a package id never matches.
     pub fn remove_installed(&mut self, id: &str) -> Option<AgentInfo> {
-        let key = self.resolve_installed_key(id)?;
-        let removed = self.installed_agents.remove(&key);
+        let removed = self.installed_agents.remove(id);
         if let Some(info) = &removed {
             // S4.2.3: Unregister capabilities on uninstall (instance-scoped).
             self.capability_registry.unregister_instance(&info.instance_id);
@@ -500,6 +478,9 @@ impl GatewayState {
     ///
     /// Returns `None` (and logs) when the embedded `manifest.toml` is
     /// invalid — the entry is skipped rather than poisoning the table.
+    /// Returns `None` when the entry lacks a valid UUIDv4 `instance_id`
+    /// (the node is the authority for instance identity; a missing or
+    /// non-UUID instance id is a malformed retained payload).
     pub fn upsert_installed_from_node(
         &mut self,
         node_id: &str,
@@ -522,13 +503,22 @@ impl GatewayState {
         } else {
             entry.agent_id.clone()
         };
-        // ADR-073: the instance identity decides the table key. Legacy
-        // entries without an instance_id fall back to the package id.
-        let instance_id = if entry.instance_id.is_empty() {
-            agent_id.clone()
-        } else {
-            entry.instance_id.clone()
-        };
+        // ADR-073: the instance identity is a UUIDv4 minted at install
+        // time. An empty / non-UUID `instance_id` means the node hasn't
+        // migrated to the two-level layout yet (legacy flat install);
+        // skip the entry and surface a warning instead of poisoning the
+        // install table with a package-id "instance" that fails the
+        // Node-side UUID gate downstream.
+        if acowork_core::AgentInstanceId::from_string(entry.instance_id.clone()).is_err() {
+            tracing::warn!(
+                node_id,
+                agent_id = %agent_id,
+                instance_id = %entry.instance_id,
+                "Installed-agent info carries non-UUID instance_id — ignoring (reinstall required)"
+            );
+            return None;
+        }
+        let instance_id = entry.instance_id.clone();
         let info = AgentInfo {
             instance_id: instance_id.clone(),
             agent_id: agent_id.clone(),
@@ -547,11 +537,10 @@ impl GatewayState {
         self.running_agents.insert(info.instance_id.clone(), info);
     }
 
-    /// Remove a running agent. `id` may be an instance identity or a
-    /// legacy package id.
+    /// Remove a running agent. `id` is the instance identity
+    /// (ADR-073 table key); a package id never matches.
     pub fn remove_running(&mut self, id: &str) -> Option<RunningAgentInfo> {
-        let key = self.resolve_running_key(id)?;
-        self.running_agents.remove(&key)
+        self.running_agents.remove(id)
     }
 
     /// Get budget tracker (read-only)
@@ -661,7 +650,7 @@ mod tests {
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
         state.add_installed(AgentInfo {
-            instance_id: "inst-weather".to_string(),
+            instance_id: "1f0c9a5e-7d2b-4c6a-8e31-0b6c5d4e3f21".to_string(),
             agent_id: "com.example.weather".to_string(),
             version: "1.0.0".to_string(),
             name: "Weather Agent".to_string(),
@@ -669,8 +658,12 @@ mod tests {
             manifest,
             node_id: "local".to_string(),
         });
-        assert!(state.is_installed("com.example.weather"));
-        assert!(state.is_installed("inst-weather"));
+        // ADR-073: the install table is keyed by INSTANCE identity. The
+        // package id is metadata on the row, never a lookup key — a
+        // package may have several instances, so resolving it to "an"
+        // entry would be ambiguous.
+        assert!(state.is_installed("1f0c9a5e-7d2b-4c6a-8e31-0b6c5d4e3f21"));
+        assert!(!state.is_installed("com.example.weather"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -679,7 +672,7 @@ mod tests {
         let dir = temp_vault_dir("running");
         let mut state = GatewayState::new(&dir);
         state.add_running(RunningAgentInfo {
-            instance_id: "inst-weather".to_string(),
+            instance_id: "1f0c9a5e-7d2b-4c6a-8e31-0b6c5d4e3f21".to_string(),
             agent_id: "com.example.weather".to_string(),
             pid: 1234,
             started_at: chrono::Utc::now(),
@@ -694,11 +687,12 @@ mod tests {
             current_embed_dim: None,
             migration: None,
         });
-        assert!(state.is_running("com.example.weather"));
-        assert!(state.is_running("inst-weather"));
-
-        state.remove_running("com.example.weather");
+        // ADR-073: keyed by instance identity, exactly like the install table.
+        assert!(state.is_running("1f0c9a5e-7d2b-4c6a-8e31-0b6c5d4e3f21"));
         assert!(!state.is_running("com.example.weather"));
+
+        state.remove_running("1f0c9a5e-7d2b-4c6a-8e31-0b6c5d4e3f21");
+        assert!(!state.is_running("1f0c9a5e-7d2b-4c6a-8e31-0b6c5d4e3f21"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

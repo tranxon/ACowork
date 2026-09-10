@@ -47,7 +47,7 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
-use crate::mqtt::node_control::NodeControlClient;
+use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
 use crate::mqtt::node_registry::SharedNodeRegistry;
 
 /// Node id of the Gateway's own-machine node — the machine hostname
@@ -761,14 +761,17 @@ pub async fn install_agent_via_mqtt(
     // operation id still gives the NodeEvent reply a correlation id.
     let operation_id = acowork_core::operation::OperationId::new();
     control
-        .install_agent_by_url(
-            dispatch.node_id,
-            &instance_id,
-            &agent_id,
-            &url,
-            dispatch.dev_mode,
-            operation_id.as_str(),
-        )
+        .install_agent_by_url(NodeInstallDispatch {
+            node_id: dispatch.node_id,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::Url(&url),
+            dev_mode: dispatch.dev_mode,
+            system: manifest.system,
+            // CLI `install` is an explicit install of one more copy.
+            ensure: false,
+            operation_id: operation_id.as_str(),
+        })
         .await
         .map_err(|e| crate::error::GatewayError::Lifecycle(e.to_string()))?;
 

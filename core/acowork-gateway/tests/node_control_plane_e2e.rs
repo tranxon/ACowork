@@ -62,6 +62,9 @@ const GATE_NODE_PROXY_PORT: u16 = 19902;
 fn node_binary() -> Option<std::path::PathBuf> {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidates = [
+        // isolated test target dir (CARGO_TARGET_DIR=target_test)
+        manifest.join("../../target_test/debug/acowork-node.exe"),
+        manifest.join("../../target_test/debug/acowork-node"),
         // workspace target-dir layout (core/acowork-gateway → ../../target)
         manifest.join("../../target/debug/acowork-node"),
         manifest.join("../../target/debug/acowork-node.exe"),
@@ -584,10 +587,10 @@ async fn wait_for_agent_event(
                 let Ok(env) = DataEnvelope::decode(p.payload.as_ref()) else {
                     continue;
                 };
-                if let Some(data_envelope::Payload::NodeEvent(ev)) = env.payload {
-                    if ev.request_id == request_id {
-                        return Some(ev);
-                    }
+                if let Some(data_envelope::Payload::NodeEvent(ev)) = env.payload
+                    && ev.request_id == request_id
+                {
+                    return Some(ev);
                 }
             }
             Ok(Ok(_)) => {}
@@ -712,6 +715,13 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         // connect spawns its eventloop with the SUBSCRIBE already in
         // the queue). See the same race in test 1 below.
         let bad_id = "not-a-uuid";
+        // ADR-073: the node's reply topic is keyed by the URL segment
+        // after `agents/` — i.e. exactly the value we are testing for
+        // rejection. Subscribing to that topic lets the handler's
+        // "invalid instance_id" error reply reach us. (The handler
+        // returns the reply before any side effect, so the segment
+        // echo is intentional — the malformed id never touches FS
+        // or queue.)
         let bad_listener = tokio::spawn(wait_for_agent_event(
             GATE_TEST_PORT,
             GATE_NODE_ID,
@@ -761,7 +771,12 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         let empty_listener = tokio::spawn(wait_for_agent_event(
             GATE_TEST_PORT,
             GATE_NODE_ID,
-            "",
+            // Empty segment ⇒ `parse_control_topic` returns `None` and
+            // the command is silently dropped before any handler runs.
+            // Subscribe to the per-agent events topic that *would* be
+            // used if a handler ever fired; the contract under test is
+            // that the listener times out without seeing a reply.
+            "empty-listener",
             "req-bad-2",
             Duration::from_secs(5),
         ));

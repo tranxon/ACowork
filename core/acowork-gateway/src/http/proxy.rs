@@ -1641,20 +1641,7 @@ pub(crate) async fn proxy_to_runtime_with_method(
 
     let endpoint = {
         let reg = registry.read().await;
-        let direct = reg.get_endpoint(id);
-        match direct {
-            Some(ep) => Some(ep),
-            None => {
-                // ADR-073: legacy callers may still address by package
-                // id. Resolve to the instance key and retry the
-                // registry once (single-instance back-compat; multi-
-                // instance callers must use instance ids).
-                let gw = state.gateway_state.read().await;
-                let resolved = gw.resolve_installed_key(id);
-                drop(gw);
-                resolved.and_then(|key| reg.get_endpoint(&key))
-            }
-        }
+        reg.get_endpoint(id)
     };
 
     let endpoint = match endpoint {
@@ -1755,10 +1742,8 @@ pub(crate) async fn proxy_to_runtime_with_method(
 /// has not enrolled yet — callers treat that as "no credential to
 /// attach" rather than an error.
 ///
-/// ADR-073: `id` may be an instance identity or a legacy package id;
-/// the resolve helpers fall back to package lookup so reverse-proxied
-/// traffic addresses the right node even when the caller still speaks
-/// the old identity.
+/// ADR-073: `id` is the instance identity (UUIDv4). A package id
+/// never matches.
 ///
 /// Deliberately NOT gated on `mqtt.auth_enabled`: the node enforces
 /// this token on its HTTP proxy whenever IT holds one (acowork-node
@@ -1811,18 +1796,7 @@ pub(crate) async fn send_runtime_json(
 
     let endpoint = {
         let reg = registry.read().await;
-        let direct = reg.get_endpoint(id);
-        match direct {
-            Some(ep) => Some(ep),
-            None => {
-                // ADR-073: legacy package-id addressing fallback — see
-                // `proxy_to_runtime_with_method` for the rationale.
-                let gw = state.gateway_state.read().await;
-                let resolved = gw.resolve_installed_key(id);
-                drop(gw);
-                resolved.and_then(|key| reg.get_endpoint(&key))
-            }
-        }
+        reg.get_endpoint(id)
     };
 
     let endpoint = endpoint.ok_or_else(|| {
@@ -2416,7 +2390,7 @@ mod tests {
         {
             let mut gw = shared_state.write().await;
             gw.add_running(RunningAgentInfo {
-                instance_id: "com.test.proxy".to_string(),
+                instance_id: "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d".to_string(),
                 agent_id: "com.test.proxy".to_string(),
                 pid: 9999,
                 started_at: chrono::Utc::now(),
@@ -2442,7 +2416,9 @@ mod tests {
         // Re-implement the hook logic locally (mirrors `proxy_debug_rpc`)
         // so the test exercises the exact state-mutation code path.
         // Using the helper inline avoids needing AppState plumbing.
-        let id = "com.test.proxy";
+        // ADR-073: `running_agents` is keyed by INSTANCE identity — the
+        // package id is not a key.
+        let id = "0a1b2c3d-4e5f-4a6b-8c7d-8e9f0a1b2c3d";
         if response.status().is_success() {
             let mut gw = shared_state.write().await;
             if let Some(running) = gw.running_agents.get_mut(id)
@@ -2483,7 +2459,7 @@ mod tests {
         {
             let mut gw = shared_state.write().await;
             gw.add_running(RunningAgentInfo {
-                instance_id: "com.test.proxy_disable".to_string(),
+                instance_id: "1b2c3d4e-5f6a-4b7c-8d8e-9f0a1b2c3d4e".to_string(),
                 agent_id: "com.test.proxy_disable".to_string(),
                 pid: 9999,
                 started_at: chrono::Utc::now(),
@@ -2502,12 +2478,14 @@ mod tests {
             });
         }
 
-        // Sanity: starting state is Enabled.
+        // Sanity: starting state is Enabled. ADR-073: keyed by INSTANCE
+        // identity, not the package id.
+        let id = "1b2c3d4e-5f6a-4b7c-8d8e-9f0a1b2c3d4e";
         let pre = shared_state
             .read()
             .await
             .running_agents
-            .get("com.test.proxy_disable")
+            .get(id)
             .map(|r| r.debug_state);
         assert_eq!(pre, Some(DebugState::Enabled));
 
@@ -2518,7 +2496,6 @@ mod tests {
             .unwrap();
         // Re-implement the hook logic locally (mirrors `proxy_debug_rpc`)
         // so the test exercises the exact state-mutation code path.
-        let id = "com.test.proxy_disable";
         if response.status().is_success() {
             let mut gw = shared_state.write().await;
             if let Some(running) = gw.running_agents.get_mut(id)

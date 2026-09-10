@@ -1208,7 +1208,7 @@ mod tests {
         gw_state.running_agents.insert(
             "com.test.architect".to_string(),
             crate::gateway::state::RunningAgentInfo {
-                instance_id: "com.test.architect".to_string(),
+                instance_id: "3d4e5f6a-7b8c-4d9d-8e0e-bf1f2a3b4c5d".to_string(),
                 agent_id: "com.test.architect".to_string(),
                 pid: 9999,
                 started_at: chrono::Utc::now(),

@@ -829,9 +829,13 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                     {
                         // ADR-055 §3.2: an install completed (or a retained
                         // re-publish on node reconnect). Record whether this
-                        // is a NEW install so cron triggers register exactly
+                        // instance is NEW so cron triggers register exactly
                         // once (the async-install completion hook).
-                        let is_new = !gw.installed_agents.contains_key(&info.agent_id);
+                        // ADR-073: the table is keyed by INSTANCE identity,
+                        // and cron entries are instance-scoped too — a
+                        // trigger registered under a package id would never
+                        // resolve on the fire path.
+                        let is_new = !gw.installed_agents.contains_key(&info.instance_id);
                         let Some(aid) = gw.upsert_installed_from_node(&node_id_owned, &info) else {
                             return;
                         };
@@ -854,12 +858,18 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                         // ADR-055 §3.2 / S3.3: register the manifest-declared
                         // cron triggers on first install. The node no longer
                         // owns cron; the Gateway registers them once the
-                        // install-completed inventory arrives.
+                        // install-completed inventory arrives. ADR-073: the
+                        // trigger key is the INSTANCE identity — the same
+                        // key the fire path resolves.
                         if is_new
                             && let Ok(manifest) =
                                 acowork_core::AgentManifest::from_toml(&info.manifest_toml)
                         {
-                            crate::cron::register_agent_cron_triggers(&mut gw, &aid, &manifest);
+                            crate::cron::register_agent_cron_triggers(
+                                &mut gw,
+                                &info.instance_id,
+                                &manifest,
+                            );
                         }
 
                         tracing::info!(node_id = %node_id_owned, agent_id = %aid, "Aggregated installed agent from node");
@@ -1459,6 +1469,11 @@ mod tests {
     use super::*;
     use crate::gateway::state::GatewayState;
     use std::sync::Arc;
+
+    /// Test-only instance identities (ADR-073: must be UUIDv4).
+    const INSTANCE_ARCHITECT: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    const INSTANCE_STALE: &str = "8c9d0e1f-2a3b-4c4c-8d5d-be6f7a8b9c0d";
+    const INSTANCE_BOOTING: &str = "9d0e1f2a-3b4c-4d5d-8e6e-cf7a8b9c0d1e";
     use tokio::sync::RwLock;
 
     fn test_state() -> SharedState {
@@ -2284,9 +2299,9 @@ mod tests {
         {
             let mut gw = state.write().await;
             gw.installed_agents.insert(
-                "com.acowork.architect".to_string(),
+                INSTANCE_ARCHITECT.to_string(),
                 crate::gateway::state::AgentInfo {
-                    instance_id: "com.acowork.architect".to_string(),
+                    instance_id: INSTANCE_ARCHITECT.to_string(),
                     agent_id: "com.acowork.architect".to_string(),
                     version: "1.0.0".to_string(),
                     name: "Architect".to_string(),
@@ -2322,19 +2337,19 @@ mod tests {
 
         // No entry pre-condition.
         assert!(
-            !state.read().await.is_running("com.acowork.architect"),
+            !state.read().await.is_running(INSTANCE_ARCHITECT),
             "preflight: entry must NOT exist before the status transition"
         );
 
         // Dispatch the online-class status.
-        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
 
         // Post-condition: entry installed, pid=0 (node-hosted), connected=true.
         let entry = state
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .cloned()
             .expect("entry must be installed after status=online");
         assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
@@ -2349,25 +2364,25 @@ mod tests {
     #[tokio::test]
     async fn track_running_agent_for_status_is_idempotent_on_repeated_online() {
         let state = test_state();
-        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
         let started_at_first = state
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .map(|e| e.started_at)
             .expect("first online installs entry");
 
         // Sleep so the timestamp would observably change if the helper
         // naively re-inserted the entry.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
 
         let started_at_second = state
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .map(|e| e.started_at)
             .expect("entry must still exist after repeated online signal");
         assert_eq!(
@@ -2383,12 +2398,12 @@ mod tests {
     #[tokio::test]
     async fn track_running_agent_for_status_installs_entry_on_sleeping() {
         let state = test_state();
-        track_running_agent_for_status(&state, "com.acowork.architect", true).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, true).await;
         let entry = state
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .cloned()
             .expect("sleeping must install a node-hosted entry too");
         assert!(entry.connected, "sleeping entry is still connected");
@@ -2408,9 +2423,9 @@ mod tests {
         {
             let mut gw = state.write().await;
             gw.installed_agents.insert(
-                "com.acowork.architect".to_string(),
+                INSTANCE_ARCHITECT.to_string(),
                 crate::gateway::state::AgentInfo {
-                    instance_id: "com.acowork.architect".to_string(),
+                    instance_id: INSTANCE_ARCHITECT.to_string(),
                     agent_id: "com.acowork.architect".to_string(),
                     version: "1.0.0".to_string(),
                     name: "Architect".to_string(),
@@ -2451,13 +2466,13 @@ mod tests {
         let reg = crate::mqtt::agent_registry::new_shared_registry();
         reg.write()
             .await
-            .update_from_mqtt("acowork/agents/com.acowork.architect/status", b"online");
+            .update_from_mqtt(&format!("acowork/agents/{}/status", INSTANCE_ARCHITECT), b"online");
         assert!(
-            reg.read().await.is_online("com.acowork.architect"),
+            reg.read().await.is_online(INSTANCE_ARCHITECT),
             "preflight: broker says online"
         );
         assert!(
-            !state.read().await.is_running("com.acowork.architect"),
+            !state.read().await.is_running(INSTANCE_ARCHITECT),
             "preflight: gateway says NOT running (DESYNC)"
         );
 
@@ -2467,7 +2482,7 @@ mod tests {
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .cloned()
             .expect("reconcile must install the missing entry from broker online view");
         assert!(entry.connected, "reconciled entry must be connected");
@@ -2489,7 +2504,7 @@ mod tests {
         {
             let mut gw = state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
-                instance_id: "com.acowork.stale".to_string(),
+                instance_id: INSTANCE_STALE.to_string(),
                 agent_id: "com.acowork.stale".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now() - chrono::Duration::seconds(60),
@@ -2511,7 +2526,7 @@ mod tests {
         reconcile_running_agents(&state, &reg).await;
 
         assert!(
-            !state.read().await.is_running("com.acowork.stale"),
+            !state.read().await.is_running(INSTANCE_STALE),
             "stale entry must be dropped by reconcile (broker says offline)"
         );
     }
@@ -2531,7 +2546,7 @@ mod tests {
         {
             let mut gw = state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
-                instance_id: "com.acowork.booting".to_string(),
+                instance_id: INSTANCE_BOOTING.to_string(),
                 agent_id: "com.acowork.booting".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),
@@ -2553,7 +2568,7 @@ mod tests {
         reconcile_running_agents(&state, &reg).await;
 
         assert!(
-            state.read().await.is_running("com.acowork.booting"),
+            state.read().await.is_running(INSTANCE_BOOTING),
             "in-flight entry younger than RECONCILE_STALE_GRACE_SECS must survive reconcile"
         );
     }
@@ -2567,14 +2582,14 @@ mod tests {
         let reg = crate::mqtt::agent_registry::new_shared_registry();
         reg.write()
             .await
-            .update_from_mqtt("acowork/agents/com.acowork.architect/status", b"online");
+            .update_from_mqtt(&format!("acowork/agents/{}/status", INSTANCE_ARCHITECT), b"online");
 
-        track_running_agent_for_status(&state, "com.acowork.architect", false).await;
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
         let started_at = state
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .map(|e| e.started_at)
             .expect("preflight: entry exists");
 
@@ -2585,7 +2600,7 @@ mod tests {
             .read()
             .await
             .running_agents
-            .get("com.acowork.architect")
+            .get(INSTANCE_ARCHITECT)
             .cloned()
             .expect("entry must still exist after idempotent reconcile");
         assert_eq!(

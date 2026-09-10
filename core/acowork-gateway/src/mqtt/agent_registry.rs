@@ -147,17 +147,23 @@ impl AgentRegistry {
                             );
                             return;
                         };
-                        // ADR-073: the envelope may carry the instance
-                        // identity in `instance_id` (structured shape;
-                        // the dispatch loopback sets agent_id to "" and
-                        // puts the identity here). Prefer it; fall back
-                        // to the topic variable only for legacy
-                        // envelopes that predate the field.
-                        let instance_id = if status.instance_id.is_empty() {
-                            topic_instance_id.clone()
-                        } else {
-                            status.instance_id.clone()
-                        };
+                        // ADR-073: the envelope carries the instance identity in
+                        // `instance_id` (UUIDv4). The dispatch loopback
+                        // sets `agent_id` to "" and puts the identity in
+                        // `instance_id`. Use the envelope field
+                        // exclusively; the empty-instance_id legacy
+                        // fallback has been removed.
+                        let instance_id = status.instance_id.clone();
+                        if acowork_core::AgentInstanceId::from_string(instance_id.clone())
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                topic,
+                                instance_id = %status.instance_id,
+                                "agent status envelope carries non-UUID instance_id — ignoring"
+                            );
+                            return;
+                        }
                         let now = Instant::now();
                         let sleeping_at = if status.sleeping {
                             self.agents
@@ -335,22 +341,23 @@ mod tests {
         // as offline (the pre-fix behaviour that hid `ready=true`).
         use acowork_core::mqtt_proto::{data_envelope, AgentStatus as AgentStatusProto, DataEnvelope};
         use prost::Message as _;
+        let uuid = "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c";
         let envelope = DataEnvelope {
             version: 1,
             payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
-                agent_id: "com.example".to_string(),
+                agent_id: String::new(),
                 online: true,
                 sleeping: false,
-                // ADR-073: empty instance/node identity = legacy envelope
-                // (the registry keys on the topic's instance id anyway).
-                instance_id: String::new(),
-                node_id: String::new(),
+                // ADR-073: instance_id is the canonical identity; the
+                // topic variable must match it.
+                instance_id: uuid.to_string(),
+                node_id: "node-a".to_string(),
             })),
         };
         let bytes = envelope.encode_to_vec();
         let mut registry = AgentRegistry::new();
-        registry.update_from_mqtt("acowork/agents/com.example/status", &bytes);
-        assert!(registry.is_online("com.example"));
+        registry.update_from_mqtt(&format!("acowork/agents/{uuid}/status"), &bytes);
+        assert!(registry.is_online(uuid));
         assert_eq!(registry.online_count(), 1);
     }
 

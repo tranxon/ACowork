@@ -704,7 +704,7 @@ mod tests {
             let mut guard = cache.write().await;
             guard.bootstrap = Some(BootstrapState {
                 protocol_version: 1,
-                instance_id: "gen-A".to_string(),
+                instance_id: "9d0e1f2a-3b4c-4025-8465-157f8a9b0c1d".to_string(),
                 version: 7,
                 phase: acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
                 phase_detail: "old generation".to_string(),

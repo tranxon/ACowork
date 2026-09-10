@@ -268,7 +268,16 @@ impl DependencyNotReady {
 /// System Agent ID — always bundled with Desktop App.
 pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
 
-/// Auto-install the bundled System Agent if not already installed.
+/// Declare that the bundled System Agent must be installed.
+///
+/// The client states the intent once (`POST /api/agents/ensure`) and the
+/// backend decides whether anything has to happen: the Gateway answers
+/// from the node's install table and the node's serialized install gate
+/// guarantees at most one instance, no matter how many times or how
+/// concurrently this call is issued. This command therefore holds no
+/// "already installed?" logic — that decision belongs to the backend
+/// (ADR-073: one package may legitimately have several instances, so a
+/// package-level check on the client was both wrong and racy).
 ///
 /// Called by the frontend after `init_local_gateway` (local mode) or
 /// directly after `set_gateway_config` (remote mode, where the Gateway
@@ -310,19 +319,16 @@ pub async fn ensure_system_agent(
         return Err(e);
     }
 
-    // Check if System Agent is already installed
-    match client
-        .get(format!("{}/api/agents/{}", gateway_url, SYSTEM_AGENT_ID))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!("[SYS-AGENT] Already installed, skipping");
-            return Ok(());
-        }
-        _ => {}
-    }
-
+    // Declarative ensure: "make sure the System Agent is installed".
+    //
+    // Everything that used to be decided here — is it already installed?
+    // how many copies exist? — is decided by the backend now:
+    // `POST /api/agents/ensure` answers from the node's install table and
+    // the node's serialized install gate guarantees at most one instance
+    // even when this call is issued concurrently (e.g. React
+    // StrictMode double-invoking the boot effect). The client states the
+    // intent once and stops orchestrating.
+    //
     // Locate the bundled System Agent on disk
     let resource_dir = app_handle
         .path()
@@ -341,14 +347,14 @@ pub async fn ensure_system_agent(
     }
 
     tracing::info!(
-        "[SYS-AGENT] Installing bundled package from {:?}",
+        "[SYS-AGENT] Ensuring bundled package from {:?}",
         system_agent_package
     );
 
-    // Bounded retry loop for the install POST. Most failures during
-    // onboarding are races that answer non-2xx; we retry up to 5 times
-    // at 1.5 s intervals so a transient failure has a comfortable window
-    // to succeed without bothering the user.
+    // Bounded retry loop. Most failures during onboarding are races that
+    // answer non-2xx (the node has not announced NodeReady yet); retrying
+    // is safe *because* the endpoint is idempotent — it never depends on
+    // how many times it is called.
     //
     // OnboardingFlow's InstallAgentStep performs its own higher-level
     // retry when this function returns `Err(...)` — this internal loop
@@ -360,34 +366,37 @@ pub async fn ensure_system_agent(
     let mut attempt: usize = 0;
     loop {
         attempt += 1;
-        let form = reqwest::multipart::Form::new()
-            .part(
-                "package",
-                reqwest::multipart::Part::bytes(package_bytes.clone())
-                    .file_name("com.acowork.system.agent")
-                    .mime_str("application/octet-stream")
-                    .map_err(|e| DependencyNotReady::install_failed(format!("Invalid package mime: {}", e)))?,
-            )
-            .text("dev_mode", "true");
+        let form = reqwest::multipart::Form::new().part(
+            "package",
+            reqwest::multipart::Part::bytes(package_bytes.clone())
+                .file_name("com.acowork.system.agent")
+                .mime_str("application/octet-stream")
+                .map_err(|e| DependencyNotReady::install_failed(format!("Invalid package mime: {}", e)))?,
+        );
 
         match client
-            .post(format!("{}/api/agents/install", gateway_url))
+            .post(format!("{}/api/agents/ensure", gateway_url))
             .multipart(form)
             .send()
             .await
         {
             Ok(resp) => {
                 if resp.status().is_success() {
+                    // 200 = already present, 202 = install dispatched.
+                    // Both mean the System Agent will be there; the
+                    // Gateway tracks the install to completion.
+                    let body = resp.text().await.unwrap_or_default();
                     tracing::info!(
-                        "[SYS-AGENT] Auto-install succeeded (attempt {}/{})",
+                        "[SYS-AGENT] Ensure accepted (attempt {}/{}): {}",
                         attempt,
-                        INSTALL_MAX_ATTEMPTS
+                        INSTALL_MAX_ATTEMPTS,
+                        body
                     );
                     return Ok(());
                 }
                 let error = resp.text().await.unwrap_or_default();
                 tracing::warn!(
-                    "[SYS-AGENT] Install HTTP error (attempt {}/{}): {}",
+                    "[SYS-AGENT] Ensure HTTP error (attempt {}/{}): {}",
                     attempt,
                     INSTALL_MAX_ATTEMPTS,
                     error
@@ -395,7 +404,7 @@ pub async fn ensure_system_agent(
             }
             Err(e) => {
                 tracing::warn!(
-                    "[SYS-AGENT] Install call failed (attempt {}/{}): {}",
+                    "[SYS-AGENT] Ensure call failed (attempt {}/{}): {}",
                     attempt,
                     INSTALL_MAX_ATTEMPTS,
                     e

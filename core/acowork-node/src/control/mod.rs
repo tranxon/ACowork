@@ -18,6 +18,7 @@
 //! duplicates are filtered by [`dedup::RequestDedup`].
 
 pub mod dedup;
+pub mod install_exec;
 pub mod mqtt;
 
 use std::sync::Arc;
@@ -317,77 +318,113 @@ async fn handle_command(
             }
         }
         Some(Command::Install(cmd)) => {
-            // ADR-055 §3.2: install from a Gateway-hosted download URL
-            // (asynchronous install) or a node-local spooled path (Phase
-            // 2b single-machine). Resolve the source, then converge on
-            // the shared `install_package` path.
-            let install_dir = config.packages_dir();
-            let mut spooled: Option<std::path::PathBuf> = None;
-            let source_path: std::path::PathBuf = if cmd.local_path.is_empty() {
-                if cmd.package_url.is_empty() {
+            // ADR-073 install atomicity: this handler only validates the
+            // request shape and hands it to the node's single install
+            // slot (Android `PackageManagerService` model). The gate's
+            // worker performs the install — serialized across every
+            // caller — and publishes the retained inventory entry.
+            //
+            // Source resolution: a Gateway-hosted download URL
+            // (ADR-055 §3.2, asynchronous) or a node-local spooled path
+            // (Phase 2b single-machine). Both converge on the shared
+            // `install_package` path inside the executor.
+            if cmd.local_path.is_empty() && cmd.package_url.is_empty() {
+                return reply(
+                    "error",
+                    format!(
+                        "install '{}': neither package_url nor local_path provided",
+                        cmd.agent_id
+                    ),
+                );
+            }
+            // ADR-073: the instance identity is Gateway-issued and used
+            // verbatim (on-disk directory + Runtime flag), so a
+            // malformed one must be refused before it can reach the
+            // queue — never after.
+            let instance_id = match AgentInstanceId::from_string(cmd.instance_id.clone()) {
+                Ok(id) => id,
+                Err(e) => {
                     return reply(
                         "error",
-                        format!(
-                            "install '{}': neither package_url nor local_path provided",
-                            cmd.agent_id
-                        ),
+                        format!("install '{}': invalid instance_id: {}", cmd.agent_id, e),
                     );
                 }
-                let tmp = std::env::temp_dir().join(format!(
-                    "acowork-node-install-{}-{}.agent",
-                    std::process::id(),
-                    uuid::Uuid::new_v4()
-                ));
-                match download_package(&cmd.package_url, &tmp, node_token).await {
-                    Ok(()) => {
-                        spooled = Some(tmp.clone());
-                        tmp
-                    }
-                    Err(e) => {
-                        return reply(
-                            "error",
-                            format!("install '{}' download failed: {}", cmd.agent_id, e),
-                        );
-                    }
-                }
-            } else {
-                std::path::PathBuf::from(&cmd.local_path)
             };
-
-            // Keep the write lock scoped to the synchronous install;
-            // the retained-inventory publish must run outside it (see
-            // Uninstall — same lock-discipline class as 261a8f77).
-            let result = {
-                let mut node = state.write().await;
-                // Signature strictness follows the Gateway's dev_mode
-                // (ADR-055 §6.20): `true` allows unsigned packages.
-                // ADR-073: install lands under `{agent_id}/{instance_id}/`
-                // using the Gateway-issued instance_id verbatim.
-                let result = crate::package::install::install_package(
-                    &source_path,
-                    &install_dir,
-                    &mut node,
-                    cmd.dev_mode,
-                    &cmd.instance_id,
+            let Some(gate) = state.read().await.install_gate() else {
+                return reply(
+                    "error",
+                    "install gate not started (node not connected yet)".to_string(),
                 );
-                if let Some(tmp) = spooled {
-                    let _ = std::fs::remove_file(&tmp);
-                }
-                result
             };
 
-            match result {
-                Ok(info) => {
-                    // Publish retained inventory (ADR-055 §6.5) — the
-                    // Gateway aggregates this into installed_agents.
-                    if let Some(entry) = crate::package::build_installed_info(&info) {
-                        let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.instance_id);
-                        let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
-                    }
-                    reply("ok", format!("installed '{}' v{}", info.instance_id, info.version))
+            let source = if cmd.local_path.is_empty() {
+                acowork_core::install::InstallSource::registry(&cmd.package_url)
+            } else {
+                acowork_core::install::InstallSource::local_file(&cmd.local_path)
+            };
+            // ADR-059 §6: the gateway-side operation id travels as the
+            // command's `request_id`, so the queued job is correlated
+            // with the operation the caller is tracking.
+            let operation_id = acowork_core::operation::OperationId::from(command.request_id.clone());
+            let mut request = if cmd.ensure {
+                acowork_core::install::InstallRequest::ensure(
+                    operation_id,
+                    cmd.agent_id.clone(),
+                    instance_id,
+                    cmd.system,
+                    source,
+                )
+            } else {
+                acowork_core::install::InstallRequest::install(
+                    operation_id,
+                    cmd.agent_id.clone(),
+                    instance_id,
+                    cmd.system,
+                    source,
+                )
+            }
+            .with_dev_mode(cmd.dev_mode);
+
+            // Declarative requests resolve the existence precondition
+            // before queueing: an instance already on this node needs no
+            // queue slot at all (the gate re-checks after dequeue for
+            // the instances that appear while queued).
+            if cmd.ensure {
+                let state = state.read().await;
+                if let Some(existing) = install_exec::existing_instance_of(&state, &cmd.agent_id) {
+                    request = request.with_already_installed(existing);
                 }
-                Err(e) => reply("error", format!("install '{}' failed: {}", cmd.instance_id, e)),
+            }
+
+            // Reply status contract (mqtt::dispatch on the Gateway):
+            // `in_progress` = the job is queued on the node's single
+            // install slot, `ok`/`error` = terminal. A queued install
+            // must NOT answer `ok` — that would complete the caller's
+            // operation before anything was installed. The terminal
+            // event follows from [`install_exec::NodeInstallOutcomeSink`]
+            // once the gate has processed the job.
+            match gate.admit(request).await {
+                acowork_core::install::AdmitOutcome::Accepted { ticket, .. } => reply(
+                    "in_progress",
+                    format!(
+                        "install queued for '{}' (instance {})",
+                        ticket.agent_id, ticket.instance_id
+                    ),
+                ),
+                acowork_core::install::AdmitOutcome::Coalesced { ticket, .. } => reply(
+                    "in_progress",
+                    format!(
+                        "install already in progress for '{}' (instance {})",
+                        ticket.agent_id, ticket.instance_id
+                    ),
+                ),
+                acowork_core::install::AdmitOutcome::AlreadySatisfied { instance_id } => reply(
+                    "ok",
+                    format!(
+                        "install '{}' already satisfied by instance {}",
+                        cmd.agent_id, instance_id
+                    ),
+                ),
             }
         }
         Some(Command::AvatarUpdate(cmd)) => reply(
@@ -742,14 +779,22 @@ async fn handle_enroll_result(
 /// `None` for topics outside the control family.
 ///
 /// ADR-073: the topic variable under `agents/` is the INSTANCE identity
-/// (`nodes/{node}/agents/{instance_id}/control/{cmd}`); legacy topics
-/// carrying a package id still parse — the string is forwarded verbatim
-/// to the command handler which resolves it against the install table.
+/// (`nodes/{node}/agents/{instance_id}/control/{cmd}`) and MUST parse
+/// as a UUIDv4 — package-id topics are rejected (the UUID validation
+/// gate at the command entry will reject them anyway).
 fn parse_control_topic(topic: &str, own_node_id: &str) -> Option<(String, Option<String>)> {
     let agent_prefix = format!("acowork/nodes/{own_node_id}/agents/");
     let node_prefix = format!("acowork/nodes/{own_node_id}/control/");
     if let Some(rest) = topic.strip_prefix(&agent_prefix) {
         // rest = {instance_id}/control/{cmd}
+        //
+        // Routing decision only — we intentionally do NOT validate the
+        // UUID shape of `instance_id` here. Doing so would silently
+        // drop malformed agent-scoped commands and prevent the
+        // handler from emitting an error reply, defeating ADR-073's
+        // "reject before any side effect" contract (every handler
+        // re-validates `instance_id` via `AgentInstanceId::from_string`
+        // before touching FS / process / queue).
         let mut parts = rest.splitn(3, '/');
         let instance_id = parts.next().unwrap_or("");
         let control = parts.next().unwrap_or("");
@@ -830,6 +875,9 @@ impl NodeControlPlane {
         // The node HTTP server (proxy auth, Phase 5a) also reads the
         // live identity — cloned before message_callback moves it.
         let http_identity = bs_identity.clone();
+        // The install executor reads the token per download, so it needs
+        // its own handle (cloned before the bootstrap closure takes one).
+        let install_identity = bs_identity.clone();
 
         // ADR-055 Phase 5a: live CONNECT credential — starts as the
         // node_token (reconnect) or the enrollment token (first boot)
@@ -1119,6 +1167,28 @@ impl NodeControlPlane {
 
         // Route command replies through this connection.
         dispatcher::install(client.shared_handle());
+
+        // ADR-073 install atomicity: one install slot per node. Started
+        // here rather than in `NodeState::new()` because the gate's
+        // worker publishes retained inventory — it needs the client
+        // created above. Until this runs, an install command is refused
+        // with a clear error instead of being silently queued.
+        {
+            let executor: Arc<dyn crate::package::install_gate::InstallExecutor> =
+                Arc::new(install_exec::NodeInstallExecutor::new(
+                    state.clone(),
+                    &config,
+                    node_id.clone(),
+                    install_identity,
+                ));
+            // The sink completes the caller's operation once the slot has
+            // processed the job — the immediate reply only says "queued".
+            let sink: Arc<dyn crate::package::install_gate::InstallOutcomeSink> =
+                Arc::new(install_exec::NodeInstallOutcomeSink::new(node_id.clone()));
+            let gate = crate::package::install_gate::InstallGate::new();
+            state.write().await.set_install_gate(gate.clone());
+            tokio::spawn(async move { gate.run_worker(executor, sink).await });
+        }
 
         // ADR-055 §6.4: start the node reverse proxy (`:19900`) so the
         // Gateway reaches every local Runtime through one port. It is a
@@ -2224,6 +2294,8 @@ mod tests {
                     // ADR-073: valid instance id — the test targets the
                     // missing-source validation, not the UUID gate.
                     instance_id: TEST_INSTANCE_ID.to_string(),
+                    system: false,
+                    ensure: false,
                 },
             )),
         };
@@ -2232,9 +2304,165 @@ mod tests {
         assert!(reply.message.contains("package_url"));
     }
 
-    #[tokio::test]
-    async fn empty_command_answers_error() {
+    // ── Install → gate admission (ADR-073 install atomicity) ─────────
+
+    /// A gate with no worker running — the shape a handler test needs to
+    /// observe *admission* without performing a real install.
+    async fn gated_state() -> SharedNodeState {
         let state = test_state();
+        state
+            .write()
+            .await
+            .set_install_gate(crate::package::install_gate::InstallGate::new());
+        state
+    }
+
+    fn install_command(
+        instance_id: &str,
+        agent_id: &str,
+        local_path: &str,
+        ensure: bool,
+    ) -> NodeControlCommand {
+        NodeControlCommand {
+            node_id: "local".to_string(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            command: Some(node_control_command::Command::Install(
+                acowork_core::mqtt_proto::NodeInstall {
+                    agent_id: agent_id.to_string(),
+                    package_url: String::new(),
+                    local_path: local_path.to_string(),
+                    dev_mode: false,
+                    instance_id: instance_id.to_string(),
+                    system: false,
+                    ensure,
+                },
+            )),
+        }
+    }
+
+    /// The install regression from the triple-install incident: the
+    /// front-end may ask twice, but a declarative request for a package
+    /// this node already holds must not queue a second copy.
+    #[tokio::test]
+    async fn ensure_for_an_installed_package_is_not_queued() {
+        let state = gated_state().await;
+        let config = test_config();
+        let existing = uuid::Uuid::new_v4().to_string();
+        state.write().await.add_installed(crate::state::InstalledAgent {
+            instance_id: existing.clone(),
+            agent_id: "com.acowork.system".to_string(),
+            version: "1.0.0".to_string(),
+            name: "System".to_string(),
+            install_path: "D:/tmp/sys".to_string(),
+            manifest: acowork_core::AgentManifest::from_toml(
+                r#"
+                agent_id = "com.acowork.system"
+                version = "1.0.0"
+                name = "System"
+                description = "t"
+                author = "t"
+                runtime_version = "0.1.0"
+                [llm]
+                provider = "openai"
+                model = "gpt-4"
+                "#,
+            )
+            .unwrap(),
+        });
+
+        let cmd = install_command(
+            &uuid::Uuid::new_v4().to_string(),
+            "com.acowork.system",
+            "D:/tmp/pkg.agent",
+            true,
+        );
+        let reply = handle_command(&state, &config, &cmd, None).await;
+
+        assert_eq!(reply.status, "ok");
+        assert!(reply.message.contains("already satisfied"), "{}", reply.message);
+        let gate = state.read().await.install_gate().unwrap();
+        assert_eq!(gate.pending_len().await, 0);
+        assert!(gate.is_idle().await);
+    }
+
+    /// One instance id is one install: a replayed command coalesces into
+    /// the queued job instead of queueing a second one.
+    #[tokio::test]
+    async fn replayed_install_command_coalesces_into_the_queued_job() {
+        let state = gated_state().await;
+        let config = test_config();
+        let instance = uuid::Uuid::new_v4().to_string();
+        let cmd = install_command(&instance, "com.test.agent", "D:/tmp/pkg.agent", false);
+
+        let first = handle_command(&state, &config, &cmd, None).await;
+        let second = handle_command(&state, &config, &cmd, None).await;
+
+        // `in_progress` (not `ok`) — the job is only queued; the
+        // terminal event arrives from the outcome sink once the gate has
+        // processed it.
+        assert_eq!(first.status, "in_progress");
+        assert!(first.message.contains("queued"), "{}", first.message);
+        assert_eq!(second.status, "in_progress");
+        assert!(second.message.contains("already in progress"), "{}", second.message);
+        assert_eq!(state.read().await.install_gate().unwrap().pending_len().await, 1);
+    }
+
+    /// ADR-073: two instance ids are two installs of one package — both
+    /// are queued (serially), neither is refused.
+    #[tokio::test]
+    async fn two_instances_of_one_package_are_both_admitted() {
+        let state = gated_state().await;
+        let config = test_config();
+
+        for _ in 0..2 {
+            let cmd = install_command(
+                &uuid::Uuid::new_v4().to_string(),
+                "com.test.agent",
+                "D:/tmp/pkg.agent",
+                false,
+            );
+            let reply = handle_command(&state, &config, &cmd, None).await;
+            assert_eq!(reply.status, "in_progress");
+            assert!(reply.message.contains("queued"), "{}", reply.message);
+        }
+
+        assert_eq!(state.read().await.install_gate().unwrap().pending_len().await, 2);
+    }
+
+    /// Without a gate there is no install slot, so the command must fail
+    /// loudly rather than vanish into an unserviced queue.
+    #[tokio::test]
+    async fn install_before_the_gate_exists_answers_error() {
+        let state = test_state();
+        let config = test_config();
+        let cmd = install_command(
+            &uuid::Uuid::new_v4().to_string(),
+            "com.test.agent",
+            "D:/tmp/pkg.agent",
+            false,
+        );
+
+        let reply = handle_command(&state, &config, &cmd, None).await;
+        assert_eq!(reply.status, "error");
+        assert!(reply.message.contains("install gate"), "{}", reply.message);
+    }
+
+    /// A malformed instance id is refused at admission — it must never
+    /// reach the queue, where the landing directory is derived from it.
+    #[tokio::test]
+    async fn install_with_a_non_uuid_instance_is_refused() {
+        let state = gated_state().await;
+        let config = test_config();
+        let cmd = install_command("com.test.agent", "com.test.agent", "D:/tmp/pkg.agent", false);
+
+        let reply = handle_command(&state, &config, &cmd, None).await;
+        assert_eq!(reply.status, "error");
+        assert!(reply.message.contains("invalid instance_id"), "{}", reply.message);
+        assert_eq!(state.read().await.install_gate().unwrap().pending_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_command_answers_error() {        let state = test_state();
         let config = test_config();
         let cmd = NodeControlCommand {
             node_id: "local".to_string(),
@@ -2335,6 +2563,18 @@ mod tests {
         );
         assert_eq!(
             parse_control_topic(
+                &format!("acowork/nodes/local/agents/{TEST_INSTANCE_ID}/control/start"),
+                "local"
+            ),
+            Some(("local".to_string(), Some(TEST_INSTANCE_ID.to_string())))
+        );
+        // ADR-073: parse_control_topic is a routing decision only.
+        // It accepts ANY non-empty `agents/{x}/control/{cmd}` segment;
+        // UUID-shape validation is the handler's job (it can then
+        // publish an error reply). A package-id topic that lacks the
+        // `control` keyword still does not parse.
+        assert_eq!(
+            parse_control_topic(
                 "acowork/nodes/local/agents/com.example/control/start",
                 "local"
             ),
@@ -2349,10 +2589,10 @@ mod tests {
 
     #[test]
     fn control_topic_construction_matches_parsing() {
-        let topic = node_agent_control_topic("local", "com.example", "start");
+        let topic = node_agent_control_topic("local", TEST_INSTANCE_ID, "start");
         assert_eq!(
             parse_control_topic(&topic, "local"),
-            Some(("local".to_string(), Some("com.example".to_string())))
+            Some(("local".to_string(), Some(TEST_INSTANCE_ID.to_string())))
         );
     }
 

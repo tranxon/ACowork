@@ -81,6 +81,50 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Field numbers of the top-level fields of an encoded protobuf message,
+/// in wire order.
+///
+/// Lets a test pin *field numbers* (not just round-trip semantics): a
+/// plain encode/decode round-trip with the same schema cannot notice a
+/// renumbering, whereas the wire keys can.
+fn top_level_field_numbers(bytes: &[u8]) -> Vec<u64> {
+    fn read_varint(mut bytes: &[u8]) -> (u64, usize) {
+        let (mut value, mut shift, mut used) = (0u64, 0u32, 0usize);
+        loop {
+            let byte = *bytes.first().expect("varint must not be truncated");
+            bytes = &bytes[1..];
+            used += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return (value, used);
+            }
+            shift += 7;
+        }
+    }
+
+    let mut numbers = Vec::new();
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let (key, n) = read_varint(rest);
+        rest = &rest[n..];
+        numbers.push(key >> 3);
+        match key & 0x07 {
+            // VARINT — skip the value.
+            0 => rest = &rest[read_varint(rest).1..],
+            // LEN — skip the length prefix and the payload.
+            2 => {
+                let (len, n) = read_varint(rest);
+                rest = &rest[n + len as usize..];
+            }
+            // I32 / I64 — fixed-width, no length prefix.
+            5 => rest = &rest[4..],
+            1 => rest = &rest[8..],
+            wire => panic!("unexpected wire type {} in golden test", wire),
+        }
+    }
+    numbers
+}
+
 /// Decode helper — mirrors how Gateway/Node consume the payloads.
 fn decode_envelope(bytes: &[u8]) -> DataEnvelope {
     DataEnvelope::decode(bytes).expect("golden bytes must decode as DataEnvelope")
@@ -300,6 +344,58 @@ fn node_clone_upgrade_publish_command_wire_shape() {
     };
     assert!(build.sign);
     assert_eq!(build.key_dir, "/keys");
+}
+
+#[test]
+fn node_install_command_carries_lane_and_intent_flags() {
+    // The install gate (ADR-073) gives `NodeInstall` two booleans whose
+    // field numbers are part of the Gateway ↔ Node contract:
+    //   `system` (6) — put the job on the node's System lane;
+    //   `ensure` (7) — declarative "ensure present" instead of "install
+    //                  one more copy".
+    let install = acowork_core::mqtt_proto::NodeInstall {
+        agent_id: "com.acowork.system".to_string(),
+        package_url: "http://gw/api/packages/com.acowork.system/download".to_string(),
+        local_path: String::new(),
+        dev_mode: false,
+        instance_id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d".to_string(),
+        system: true,
+        ensure: true,
+    };
+    let numbers = top_level_field_numbers(&install.encode_to_vec());
+    assert!(numbers.contains(&6), "`system` must be field 6");
+    assert!(numbers.contains(&7), "`ensure` must be field 7");
+
+    // proto3 default-false fields are NOT on the wire, so a Gateway that
+    // predates these flags still produces a valid command that the node
+    // reads as "explicit install, user lane".
+    assert!(
+        top_level_field_numbers(&acowork_core::mqtt_proto::NodeInstall::default().encode_to_vec())
+            .is_empty(),
+        "default install must encode to zero bytes"
+    );
+
+    // Full envelope round-trip: both flags survive Gateway → Node.
+    let decoded = decode_envelope(
+        &envelope_with(data_envelope::Payload::NodeControlCommand(
+            NodeControlCommand {
+                node_id: "gpu-1".to_string(),
+                request_id: "req-0009".to_string(),
+                command: Some(node_control_command::Command::Install(install)),
+            },
+        ))
+        .encode_to_vec(),
+    );
+    let data_envelope::Payload::NodeControlCommand(cmd) = decoded.payload.expect("payload") else {
+        panic!("expected NodeControlCommand payload");
+    };
+    let Some(node_control_command::Command::Install(install)) = cmd.command else {
+        panic!("expected Install command");
+    };
+    assert!(install.system, "system lane flag must round-trip");
+    assert!(install.ensure, "declarative ensure flag must round-trip");
+    assert_eq!(install.instance_id, "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
+    assert_eq!(install.local_path, "", "url and local path are exclusive");
 }
 
 #[test]
