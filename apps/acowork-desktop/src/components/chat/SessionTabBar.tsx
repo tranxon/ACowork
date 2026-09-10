@@ -9,7 +9,7 @@ import {
   useContextMenu,
   type ContextMenuItem,
 } from "../common/ContextMenu";
-import { Plus, Clock, Loader2, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
+import { Plus, Clock, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
@@ -39,10 +39,14 @@ function formatRelativeTime(dateStr: string, t: (key: string, options?: Record<s
 
 interface SessionListDropdownProps {
   agentId: string;
+  /** Session currently shown in the chat area. Used to mirror the title
+   *  bar's "selected = accent" rule inside the dropdown so both surfaces
+   *  speak the same visual language (see icon block below). */
+  activeSessionId: string | undefined;
   onClose: () => void;
 }
 
-function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
+function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListDropdownProps) {
   const { t } = useTranslation();
   const agentStorage = useAgentStore((s) => s.agents[agentId]);
   const sessions = agentStorage?.sessions ?? [];
@@ -148,7 +152,13 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
           const isOpen = openSessionIds.includes(session.session_id);
           const isDeleting = confirmDelete === session.session_id;
           const sessionState = useChatStore.getState().getSessionState(agentId, session.session_id);
-          const isActive = isProcessing(sessionState?.sessionStatus);
+          const isProc = isProcessing(sessionState?.sessionStatus);
+          // Mirror the SessionTabBar's "selected = accent colour" rule so the
+          // dropdown and the title bar speak one visual language: the entry
+          // for the session currently shown in the chat area is the only one
+          // rendered in --color-accent, regardless of how many sessions are
+          // "open" (open tabs). All other entries stay muted zinc.
+          const isSelected = session.session_id === activeSessionId;
 
           return (
             <div
@@ -160,8 +170,25 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
                 className="flex min-w-0 flex-1 flex-col gap-0.5 text-left"
               >
                 <div className="flex items-center gap-2">
-                  {isActive ? (
-                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-accent)]" />
+                  {/* Icon — same four-state matrix as the SessionTabBar
+                      title tabs so the dropdown matches the title bar:
+                        • selected + idle        → FilledChatIcon accent
+                        • selected + processing  → FilledChatIcon accent + animate-pulse
+                        • unselected + idle      → OutlineChatIcon muted zinc
+                        • unselected + processing → FilledChatIcon foreground + animate-pulse
+                      The old <Loader2 animate-spin> is gone — processing is
+                      now expressed via the same chat-bubble breathing
+                      animation used in the title bar, keeping one global
+                      "still working" cue across the whole chat area. */}
+                  {isSelected ? (
+                    <FilledChatIcon
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]",
+                        isProc && "animate-pulse",
+                      )}
+                    />
+                  ) : isProc ? (
+                    <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-zinc-700 dark:text-zinc-200" />
                   ) : (
                     <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
                   )}
@@ -519,22 +546,35 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                   icon. The chat icon itself now breathes (animate-pulse)
                   when an unselected tab is still streaming, see below. */}
               {/* Chat icon — same pill bubble as the left NavBar.
-                  Three visual states (matches the NavBar's outline/filled
-                  toggle, plus a breathing variant for background tabs that
-                  are still streaming):
-                    • selected tab       → FilledChatIcon in --color-accent
-                      (the global highlight colour, most prominent)
-                    • unselected + streaming → FilledChatIcon (solid
+                  Four visual states (matches the NavBar's outline/filled
+                  toggle, plus breathing variants for tabs that are still
+                  processing — selected vs unselected only differ by colour,
+                  the breathing animation stays identical so they read as
+                  one consistent "processing" cue):
+                    • selected + idle        → FilledChatIcon in
+                      --color-accent (static, the global highlight colour,
+                      most prominent).
+                    • selected + processing  → FilledChatIcon in
+                      --color-accent with animate-pulse — same breathing
+                      rhythm as the unselected variant, just in accent
+                      colour so the user can still spot the active tab
+                      while it's working.
+                    • unselected + processing → FilledChatIcon (solid
                       silhouette) in the normal foreground colour with
                       animate-pulse — solid + breathing distinguishes it
                       from both idle tabs and the accent-coloured selected
                       tab. Replaces the old pulsing dot.
-                    • unselected + idle  → OutlineChatIcon in muted zinc
+                    • unselected + idle      → OutlineChatIcon in muted zinc.
                   Hidden during inline rename so the input gets the full
                   slot. */}
               {renamingSessionId !== sessionId &&
                 (isActive ? (
-                  <FilledChatIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                  <FilledChatIcon
+                    className={cn(
+                      "h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]",
+                      isProc && "animate-pulse",
+                    )}
+                  />
                 ) : isProc ? (
                   <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-zinc-700 dark:text-zinc-200" />
                 ) : (
@@ -645,6 +685,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
           {listOpen && (
             <SessionListDropdown
               agentId={agentId}
+              activeSessionId={activeSessionId}
               onClose={() => setListOpen(false)}
             />
           )}

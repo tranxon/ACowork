@@ -1821,7 +1821,7 @@ export function ChatPanel() {
           {chatScrolledFromTop && (
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/5 to-transparent dark:from-black/40"
+              className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/3 to-transparent dark:from-black/40"
             />
           )}
           <div

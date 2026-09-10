@@ -399,7 +399,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           cut off and resizing would break. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-right-panel-border bg-right-panel">
       {/* Tab title header */}
-      <div className="border-b border-right-panel-border px-3 pt-[11px] pb-[7px] text-xs font-medium text-zinc-500 dark:text-zinc-400">
+      <div className="border-b border-right-panel-border px-3 pt-[10px] pb-[7px] text-xs font-medium text-zinc-500 dark:text-zinc-400">
         {t(`rightPanel.${activeTab}`)}
       </div>
 
@@ -411,7 +411,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
         {rightPanelScrolled && (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/5 to-transparent dark:from-black/40"
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/3 to-transparent dark:from-black/40"
           />
         )}
 

@@ -1385,8 +1385,17 @@ export function FileEditorPanel({ width }: { width: number }) {
             {/* Editor area — Editor is mounted whenever there is at least one
                 open file. Switching tabs changes `path` (and therefore the
                 Monaco model) without recreating the Editor instance, so LSP
-                cross-file navigation no longer races with editor remounts. */}
-            <div className="relative flex-1 overflow-hidden">
+                cross-file navigation no longer races with editor remounts.
+
+                `border-x border-right-panel-border` paints left & right
+                hairlines that match the right-panel divider color
+                (`--color-right-panel-border`, zinc-200/50 — see globals.css
+                L49). The tab bar above is intentionally left untouched so
+                only the Monaco surface is framed. Borders live on the
+                editor container rather than the outer `rounded-xl` root so
+                the existing rounded bottom corners of the panel still
+                clip cleanly under `overflow-hidden`. */}
+            <div className="relative flex-1 overflow-hidden border-x border-right-panel-border">
                 {!activeFile ? (
                     <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
                         {t("fileEditor.emptyState")}

@@ -31,7 +31,7 @@
        right-panel section divider color so the box reads as part of
        the layout — tweak independently if it needs more / less
        contrast against `bg-right-panel`) with no `dark:` prefix needed. */
-  --color-chat-bubble: hsl(240 5.9% 90.6% / 0.4);
+  --color-chat-bubble: hsl(240 5.9% 92% / 0.5);
   /* = zinc-200/50 — message surface */
   --color-chat-title: hsl(240 4.8% 86.1% / 0.5);
   /* = zinc-300 — block title */
@@ -39,14 +39,14 @@
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
-  --color-chat-input-border: hsl(240 5.9% 90.6%);
+  --color-chat-input-border: hsl(240 5.9% 90.6% / 0.7);
   /* = zinc-200, #e4e4e7 — chat input box outline (matches the
      right-panel section divider hairlines like `border-zinc-200` on
      RightPanel's tab header / section dividers, so the input reads
      as part of the layout instead of disappearing into
      `bg-right-panel`. Independent from --color-chat-border — tweak
      here without touching the CodeBlock/Mermaid wrapper border. */
-  --color-right-panel-border: hsl(240 5.9% 90.6%);
+  --color-right-panel-border: hsl(240 5.9% 90.6% / 0.7);
   /* = zinc-200, #e4e4e7 — right-panel outer/divider hairline (light).
      Used by RightPanel.tsx (tab header bottom border, section
      dividers) and any future right-side surface borders. Mirrors
@@ -55,7 +55,7 @@
      with no `dark:` prefix needed — the .dark block below flips the
      value. Independent from --color-chat-border (which drives
      CodeBlock/Mermaid wrappers). */
-  --color-agentlist-border: hsl(240 5.9% 90.6%);
+  --color-agentlist-border: hsl(240 5.9% 90.6% / 0.7);
   /* = zinc-200, #e4e4e7 — left AgentList panel outer hairline (light).
      Used by AppLayout.tsx / AgentList.tsx for the sidebar container
      outline. Same value as --color-right-panel-border so the two
