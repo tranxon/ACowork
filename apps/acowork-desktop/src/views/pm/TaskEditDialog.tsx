@@ -115,12 +115,14 @@ export function TaskEditDialog({
   );
 
   const parentOptions = useMemo(
-    () =>
-      parentCandidates.map((task) => ({
+    () => [
+      { value: "", label: t("pm.task.noParent") },
+      ...parentCandidates.map((task) => ({
         value: task.id,
         label: task.title,
       })),
-    [parentCandidates],
+    ],
+    [parentCandidates, t],
   );
 
   const depOptions = useMemo(
@@ -281,7 +283,6 @@ export function TaskEditDialog({
               value={parentId}
               onChange={setParentId}
               options={parentOptions}
-              placeholder={{ value: "", label: t("pm.task.noParent") }}
             />
           </Field>
 
