@@ -46,7 +46,7 @@ PM 与 LSP 的**解耦动机不同**（LSP 因阻塞 runtime / 资源竞争被�
 
 1. **Gateway 彻底退出 PM 数据路径**：不再编译 PM 代码、不再 `nest_service` 挂载、不再持有 `PmService` 句柄
 2. **PM 作为独立进程**：独立二进制 `acowork-pm`、独立端口、独立生命周期
-3. **PM 存储独立于 Gateway**：数据目录 `$HOME/.acowork/acowork-pm/`，与 `acowork-gateway/`、`acowork-node/` **平级**（参考 [acowork-node 的 `default_node_home`](../../../core/acowork-node/src/config.rs#L121)），不再嵌套在 Gateway 数据目录下
+3. **PM 存储独立于 Gateway**：数据目录 `$HOME/.acowork/acowork-pm/`，与 `acowork-gateway/`、`acowork-node/` **平级**（参考 [acowork-core `default_node_home`](../../../core/acowork-core/src/node.rs#L287)），不再嵌套在 Gateway 数据目录下
 4. **Gateway 仅保留**：spawn / monitor / restart（复用 `acowork-core::supervisor`）+ 反向代理 `/api/pm/*` + 注入可信身份（X-Actor / X-MCP-Actor）
 5. **对外契约不变**：Desktop 仍走 `{gw}/api/pm/*`；远程 Agent 仍走 `http://{advertise_host}:{gw_http_port}/api/pm/mcp`——两端均无感知
 6. **安全改进**：X-Actor / X-MCP-Actor 由 Gateway 反代时注入，杜绝客户端伪造
@@ -132,7 +132,7 @@ PM 与 LSP 的**解耦动机不同**（LSP 因阻塞 runtime / 资源竞争被�
 | `core/acowork-pm/src/main.rs` | **新增**：独立二进制入口，加载 `PmConfig`，serve 完整 router（REST + MCP + `/health`） |
 | `core/acowork-pm/src/server.rs` | `start_dev` 从 P0 占位补全为完整 serve（当前只 serve `/health`，[server.rs:91](../../../core/acowork-pm/src/server.rs#L91)） |
 | `core/acowork-pm/src/config.rs` | `PmConfig` 增加 `port`（默认 18082）、`enabled`（默认 true）；端口冲突自动递增（恢复计划 v0.3 T0-5） |
-| `core/acowork-pm/src/config.rs` | **`default_data_dir()` 改为 `$HOME/.acowork/acowork-pm/`**（镜像 [acowork-node `default_node_home`](../../../core/acowork-node/src/config.rs#L121) 模式：`ACOWORK_PM_HOME` env > `$HOME/.acowork/acowork-pm` > `./.acowork-pm`），**替换当前 `directories::ProjectDirs`**（解析到 `%APPDATA%\com\acowork\pm`，与 `.acowork/` 布局不一致） |
+| `core/acowork-pm/src/config.rs` | **`default_data_dir()` 改为 `$HOME/.acowork/acowork-pm/`**（镜像 [`acowork-core` `default_node_home`](../../../core/acowork-core/src/node.rs#L287) 模式：`ACOWORK_PM_HOME` env > `$HOME/.acowork/acowork-pm` > `./.acowork-pm`），**替换当前 `directories::ProjectDirs`**（解析到 `%APPDATA%\com\acowork\pm`，与 `.acowork/` 布局不一致） |
 | `core/acowork-pm/src/health.rs` | **新增**：`/health` 端点（supervisor 探活契约，复用 `acowork-core::health`） |
 | `core/acowork-pm/Cargo.toml` | 增加 `[[bin]]` target；`acowork-core` 依赖（supervisor/health 契约） |
 
@@ -228,7 +228,7 @@ PM 数据目录直接定为 `$HOME/.acowork/acowork-pm/`（平级）。
 | 部署形态 | **独立进程**（推翻设计 v1.0 D-10"内嵌"） |
 | 独立端口 | 默认 18082，冲突自动递增（恢复计划 v0.3 T0-5） |
 | 生命周期 | Gateway supervisor（复用 `acowork-core::supervisor`，与 embed/LSP relay 一致） |
-| **存储目录** | **`$HOME/.acowork/acowork-pm/`，与 `acowork-gateway/`、`acowork-node/` 平级独立**（镜像 node 的 `default_node_home` 模式；替换 `directories::ProjectDirs`；删除 Gateway `prepare_pm_data_dir`） |
+| **存储目录** | **`$HOME/.acowork/acowork-pm/`，与 `acowork-gateway/`、`acowork-node/` 平级独立**（镜像 [`acowork-core` `default_node_home`](../../../core/acowork-core/src/node.rs#L287) 模式；替换 `directories::ProjectDirs`；删除 Gateway `prepare_pm_data_dir`） |
 | 数据迁移 | **无**（开发期无存量数据，YAGNI，不实现迁移逻辑） |
 | 对外契约 | Desktop `/api/pm/*` 与远程 `/api/pm/mcp` 均不变（Gateway 反代） |
 | 身份 | X-Actor / X-MCP-Actor 由 Gateway 反代注入（修复客户端伪造） |

@@ -18,6 +18,7 @@
 //! duplicates are filtered by [`dedup::RequestDedup`].
 
 pub mod dedup;
+pub mod install_exec;
 pub mod mqtt;
 
 use std::sync::Arc;
@@ -36,6 +37,7 @@ use acowork_core::node::{
     node_info_topic, node_lsps_topic, node_ready_topic, node_sidecar_status_topic,
     node_status_topic, NODE_PROTOCOL_VERSION,
 };
+use acowork_core::AgentInstanceId;
 
 use crate::config::{system_hostname, NodeConfig};
 use crate::error::NodeError;
@@ -61,7 +63,17 @@ pub struct NodeControlPlane {
 }
 
 /// Build the NodeInfo snapshot published on the retained info topic.
-pub fn build_node_info(identity: &NodeIdentity, config: &NodeConfig, agent_count: u32) -> NodeInfo {
+///
+/// `advertise_host` is the *live* public host (§6.3.3): the configured
+/// `advertise_host`, or — when `advertise_host_auto` is set — the LAN
+/// IP detected at connect time / heartbeat. Pass the value held in
+/// `state.live_advertise_host`.
+pub fn build_node_info(
+    identity: &NodeIdentity,
+    config: &NodeConfig,
+    advertise_host: &str,
+    agent_count: u32,
+) -> NodeInfo {
     NodeInfo {
         node_id: identity.node_id.clone(),
         machine_uid: identity.machine_uid.clone(),
@@ -76,8 +88,58 @@ pub fn build_node_info(identity: &NodeIdentity, config: &NodeConfig, agent_count
         agent_count,
         // ADR-055 §6.3 / L7-1: the reverse-proxy base URL the Gateway
         // uses to reach node-local HTTP services (fs_browse).
-        http_endpoint: config.proxy_advertise_endpoint(),
+        http_endpoint: config.proxy_advertise_endpoint_for(advertise_host),
     }
+}
+
+/// §6.3.3 self-healing: compute and store the node's *current* public
+/// host. With `advertise_host_auto` the LAN IP is re-detected on every
+/// (re)connect and every heartbeat (a cheap interface enumeration), so
+/// a laptop that switches Wi-Fi hotspots converges on the new address
+/// within one heartbeat — no node restart, no Runtime restart. Detection
+/// failure falls back to the configured `advertise_host` (127.0.0.1),
+/// which keeps the control plane loopback-functional. With a fixed
+/// `advertise_host` (remote deployments) the configured value is used
+/// verbatim and this is a pure no-op.
+fn refresh_live_advertise_host<S: std::ops::Deref<Target = NodeState>>(
+    state: S,
+    config: &NodeConfig,
+) -> String {
+    let host = if config.advertise_host_auto {
+        acowork_core::addr::detect_non_loopback_ipv4()
+            .filter(|h| h != "127.0.0.1")
+            .unwrap_or_else(|| config.advertise_host.clone())
+    } else {
+        config.advertise_host.clone()
+    };
+    let host = if host.is_empty() {
+        config.advertise_host.clone()
+    } else {
+        host
+    };
+    *state
+        .live_advertise_host
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = host.clone();
+    host
+}
+
+/// Extract the instance id from an agent-scoped control command
+/// (ADR-073). Returns `None` for the node-scoped `Ping`.
+fn agent_lifecycle_instance_id(command: Option<&node_control_command::Command>) -> Option<&str> {
+    use node_control_command::Command;
+    Some(match command? {
+        Command::Start(c) => &c.instance_id,
+        Command::Stop(c) => &c.instance_id,
+        Command::Install(c) => &c.instance_id,
+        Command::Uninstall(c) => &c.instance_id,
+        Command::SkillsImport(c) => &c.instance_id,
+        Command::Clone(c) => &c.instance_id,
+        Command::Upgrade(c) => &c.instance_id,
+        Command::PublishPrepare(c) => &c.instance_id,
+        Command::PublishBuild(c) => &c.instance_id,
+        Command::Ping(_) => return None,
+    })
 }
 
 /// Decode an incoming envelope and dispatch a command to its handler.
@@ -86,7 +148,6 @@ pub fn build_node_info(identity: &NodeIdentity, config: &NodeConfig, agent_count
 /// - `ping` → always succeeds (stateless);
 /// - `start`/`stop` → already-running / already-exited return success;
 /// - `install`/`uninstall`/`skills_import` → local package operations;
-/// - `avatar_update` → Phase 2c/3, answers `not_implemented`.
 async fn handle_command(
     state: &SharedNodeState,
     config: &NodeConfig,
@@ -116,50 +177,86 @@ async fn handle_command(
         result_json: Some(result_json),
     };
 
+    // ADR-073 / security: every agent-scoped command must carry a
+    // well-formed UUID instance id BEFORE it reaches any filesystem,
+    // process, or topic side effect — a spoofed/truncated id would
+    // otherwise key install dirs and MQTT topics arbitrarily. `Ping`
+    // is node-scoped and has no instance id.
+    if let Some(instance_id) = agent_lifecycle_instance_id(command.command.as_ref())
+        && AgentInstanceId::from_string(instance_id.to_string()).is_err()
+    {
+        return reply(
+            "error",
+            format!(
+                "invalid instance_id '{instance_id}' for '{}' (expected a valid UUID, ADR-073)",
+                command.request_id
+            ),
+        );
+    }
+
     match command.command.as_ref() {
         Some(Command::Ping(_)) => reply("ok", "pong".to_string()),
         Some(Command::Start(cmd)) => {
+            // §6.3.3: pass the CURRENT proxy endpoint to the spawned
+            // Runtime so its retained `http_endpoint` reflects the live
+            // LAN IP even if the machine just changed networks.
+            let live = refresh_live_advertise_host(state.read().await, config);
             let mut mgr = ProcessManager::new(
                 config.log_file_size_mb,
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
                 command.node_id.clone(),
-                Some(config.proxy_advertise_endpoint()),
+                Some(config.proxy_advertise_endpoint_for(&live)),
                 node_token.map(str::to_string),
             );
-            match mgr.start_agent(&cmd.agent_id, state, cmd.dev_mode, true).await {
+            match mgr
+                .start_agent(&cmd.instance_id, &cmd.agent_id, state, cmd.dev_mode, true)
+                .await
+            {
                 Ok(()) => {
                     state.read().await.save_snapshot(&config.home);
-                    reply("ok", format!("started '{}'", cmd.agent_id))
+                    reply("ok", format!("started '{}'", cmd.instance_id))
                 }
                 Err(NodeError::AgentAlreadyRunning(id)) => {
                     // Idempotent: start on a running agent succeeds.
                     reply("ok", format!("'{}' already running", id))
                 }
-                Err(e) => reply("error", format!("start '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => reply(
+                    "error",
+                    format!("start '{}' failed: {}", cmd.instance_id, e),
+                ),
             }
         }
         Some(Command::Stop(cmd)) => {
+            // Same live endpoint as Start — the Runtime is told where
+            // its reverse proxy lives when it (re)connects.
+            let live = refresh_live_advertise_host(state.read().await, config);
             let mut mgr = ProcessManager::new(
                 config.log_file_size_mb,
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
                 command.node_id.clone(),
-                Some(config.proxy_advertise_endpoint()),
+                Some(config.proxy_advertise_endpoint_for(&live)),
                 node_token.map(str::to_string),
             );
-            match mgr.stop_agent(&cmd.agent_id, state).await {
+            match mgr
+                .stop_agent(&cmd.instance_id, &cmd.agent_id, state)
+                .await
+            {
                 Ok(()) => {
                     state.read().await.save_snapshot(&config.home);
-                    reply("ok", format!("stopped '{}'", cmd.agent_id))
+                    reply("ok", format!("stopped '{}'", cmd.instance_id))
                 }
                 Err(NodeError::AgentNotRunning(id)) => {
                     // Idempotent: stop on an exited agent succeeds.
                     reply("ok", format!("'{}' already stopped", id))
                 }
-                Err(e) => reply("error", format!("stop '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => reply(
+                    "error",
+                    format!("stop '{}' failed: {}", cmd.instance_id, e),
+                ),
             }
         }
         Some(Command::Uninstall(cmd)) => {
@@ -171,29 +268,39 @@ async fn handle_command(
             // reaper regression).
             let result = {
                 let mut node = state.write().await;
-                crate::package::uninstall::uninstall_package(&cmd.agent_id, &install_dir, &mut node)
+                crate::package::uninstall::uninstall_package(
+                    &cmd.instance_id,
+                    &cmd.agent_id,
+                    &install_dir,
+                    &mut node,
+                )
             };
             match result {
                 Ok(()) => {
                     // Clear the retained inventory entry (ADR-055 §6.5) so
                     // the Gateway drops the agent from installed_agents.
-                    let installed_topic =
-                        node_agent_installed_topic(&command.node_id, &cmd.agent_id);
+                    // ADR-073: instance id is mandatory and UUID-validated
+                    // at the command gate — no agent_id fallback.
+                    let key = cmd.instance_id.clone();
+                    let installed_topic = node_agent_installed_topic(&command.node_id, &key);
                     let _ = dispatcher::clear_installed_info(installed_topic).await;
-                    reply("ok", format!("uninstalled '{}'", cmd.agent_id))
+                    reply("ok", format!("uninstalled '{}'", key))
                 }
                 Err(e) => reply("error", format!("uninstall '{}' failed: {}", cmd.agent_id, e)),
             }
         }
         Some(Command::SkillsImport(cmd)) => {
+            // ADR-073: instance id is mandatory and UUID-validated at the
+            // command gate — the agent id is display/package identity only.
+            let key = cmd.instance_id.clone();
             let skills_dir = {
                 let node = state.read().await;
-                match node.installed_agents.get(&cmd.agent_id) {
+                match node.installed_agents.get(&key) {
                     Some(info) => crate::package::skills::agent_skills_dir(&info.install_path),
                     None => {
                         return reply(
                             "error",
-                            format!("skills_import '{}': agent not installed", cmd.agent_id),
+                            format!("skills_import '{}': agent not installed", key),
                         );
                     }
                 }
@@ -204,85 +311,120 @@ async fn handle_command(
             ) {
                 Ok(name) => reply("ok", format!("skill '{}' imported", name)),
                 Err(e) => {
-                    reply("error", format!("skills_import '{}' failed: {}", cmd.agent_id, e))
+                    reply("error", format!("skills_import '{}' failed: {}", key, e))
                 }
             }
         }
         Some(Command::Install(cmd)) => {
-            // ADR-055 §3.2: install from a Gateway-hosted download URL
-            // (asynchronous install) or a node-local spooled path (Phase
-            // 2b single-machine). Resolve the source, then converge on
-            // the shared `install_package` path.
-            let install_dir = config.packages_dir();
-            let mut spooled: Option<std::path::PathBuf> = None;
-            let source_path: std::path::PathBuf = if cmd.local_path.is_empty() {
-                if cmd.package_url.is_empty() {
+            // ADR-073 install atomicity: this handler only validates the
+            // request shape and hands it to the node's single install
+            // slot (Android `PackageManagerService` model). The gate's
+            // worker performs the install — serialized across every
+            // caller — and publishes the retained inventory entry.
+            //
+            // Source resolution: a Gateway-hosted download URL
+            // (ADR-055 §3.2, asynchronous) or a node-local spooled path
+            // (Phase 2b single-machine). Both converge on the shared
+            // `install_package` path inside the executor.
+            if cmd.local_path.is_empty() && cmd.package_url.is_empty() {
+                return reply(
+                    "error",
+                    format!(
+                        "install '{}': neither package_url nor local_path provided",
+                        cmd.agent_id
+                    ),
+                );
+            }
+            // ADR-073: the instance identity is Gateway-issued and used
+            // verbatim (on-disk directory + Runtime flag), so a
+            // malformed one must be refused before it can reach the
+            // queue — never after.
+            let instance_id = match AgentInstanceId::from_string(cmd.instance_id.clone()) {
+                Ok(id) => id,
+                Err(e) => {
                     return reply(
                         "error",
-                        format!(
-                            "install '{}': neither package_url nor local_path provided",
-                            cmd.agent_id
-                        ),
+                        format!("install '{}': invalid instance_id: {}", cmd.agent_id, e),
                     );
                 }
-                let tmp = std::env::temp_dir().join(format!(
-                    "acowork-node-install-{}-{}.agent",
-                    std::process::id(),
-                    uuid::Uuid::new_v4()
-                ));
-                match download_package(&cmd.package_url, &tmp, node_token).await {
-                    Ok(()) => {
-                        spooled = Some(tmp.clone());
-                        tmp
-                    }
-                    Err(e) => {
-                        return reply(
-                            "error",
-                            format!("install '{}' download failed: {}", cmd.agent_id, e),
-                        );
-                    }
-                }
-            } else {
-                std::path::PathBuf::from(&cmd.local_path)
             };
-
-            // Keep the write lock scoped to the synchronous install;
-            // the retained-inventory publish must run outside it (see
-            // Uninstall — same lock-discipline class as 261a8f77).
-            let result = {
-                let mut node = state.write().await;
-                // Signature strictness follows the Gateway's dev_mode
-                // (ADR-055 §6.20): `true` allows unsigned packages.
-                let result = crate::package::install::install_package(
-                    &source_path,
-                    &install_dir,
-                    &mut node,
-                    cmd.dev_mode,
+            let Some(gate) = state.read().await.install_gate() else {
+                return reply(
+                    "error",
+                    "install gate not started (node not connected yet)".to_string(),
                 );
-                if let Some(tmp) = spooled {
-                    let _ = std::fs::remove_file(&tmp);
-                }
-                result
             };
 
-            match result {
-                Ok(info) => {
-                    // Publish retained inventory (ADR-055 §6.5) — the
-                    // Gateway aggregates this into installed_agents.
-                    if let Some(entry) = crate::package::build_installed_info(&info) {
-                        let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.agent_id);
-                        let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
-                    }
-                    reply("ok", format!("installed '{}' v{}", info.agent_id, info.version))
+            let source = if cmd.local_path.is_empty() {
+                acowork_core::install::InstallSource::registry(&cmd.package_url)
+            } else {
+                acowork_core::install::InstallSource::local_file(&cmd.local_path)
+            };
+            // ADR-059 §6: the gateway-side operation id travels as the
+            // command's `request_id`, so the queued job is correlated
+            // with the operation the caller is tracking.
+            let operation_id = acowork_core::operation::OperationId::from(command.request_id.clone());
+            let mut request = if cmd.ensure {
+                acowork_core::install::InstallRequest::ensure(
+                    operation_id,
+                    cmd.agent_id.clone(),
+                    instance_id,
+                    cmd.system,
+                    source,
+                )
+            } else {
+                acowork_core::install::InstallRequest::install(
+                    operation_id,
+                    cmd.agent_id.clone(),
+                    instance_id,
+                    cmd.system,
+                    source,
+                )
+            }
+            .with_dev_mode(cmd.dev_mode);
+
+            // Declarative requests resolve the existence precondition
+            // before queueing: an instance already on this node needs no
+            // queue slot at all (the gate re-checks after dequeue for
+            // the instances that appear while queued).
+            if cmd.ensure {
+                let state = state.read().await;
+                if let Some(existing) = install_exec::existing_instance_of(&state, &cmd.agent_id) {
+                    request = request.with_already_installed(existing);
                 }
-                Err(e) => reply("error", format!("install '{}' failed: {}", cmd.agent_id, e)),
+            }
+
+            // Reply status contract (mqtt::dispatch on the Gateway):
+            // `in_progress` = the job is queued on the node's single
+            // install slot, `ok`/`error` = terminal. A queued install
+            // must NOT answer `ok` — that would complete the caller's
+            // operation before anything was installed. The terminal
+            // event follows from [`install_exec::NodeInstallOutcomeSink`]
+            // once the gate has processed the job.
+            match gate.admit(request).await {
+                acowork_core::install::AdmitOutcome::Accepted { ticket, .. } => reply(
+                    "in_progress",
+                    format!(
+                        "install queued for '{}' (instance {})",
+                        ticket.agent_id, ticket.instance_id
+                    ),
+                ),
+                acowork_core::install::AdmitOutcome::Coalesced { ticket, .. } => reply(
+                    "in_progress",
+                    format!(
+                        "install already in progress for '{}' (instance {})",
+                        ticket.agent_id, ticket.instance_id
+                    ),
+                ),
+                acowork_core::install::AdmitOutcome::AlreadySatisfied { instance_id } => reply(
+                    "ok",
+                    format!(
+                        "install '{}' already satisfied by instance {}",
+                        cmd.agent_id, instance_id
+                    ),
+                ),
             }
         }
-        Some(Command::AvatarUpdate(cmd)) => reply(
-            "not_implemented",
-            format!("avatar_update '{}' not implemented until ADR-055 Phase 2c", cmd.agent_id),
-        ),
         Some(Command::Clone(cmd)) => {
             // Node-local clone (ADR-055 §6.6 L2-5): source and new agent
             // live on the same node, so the package directory is copied
@@ -298,6 +440,7 @@ async fn handle_command(
             let result = {
                 let mut node = state.write().await;
                 crate::package::clone::clone_agent(
+                    &cmd.instance_id,
                     &cmd.agent_id,
                     &cmd.new_agent_id,
                     mode,
@@ -312,13 +455,16 @@ async fn handle_command(
                     // cron via the install-completed is_new hook).
                     if let Some(entry) = crate::package::build_installed_info(&info) {
                         let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.agent_id);
+                            node_agent_installed_topic(&command.node_id, &info.instance_id);
                         let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
                     }
                     let json = serde_json::json!({ "install_path": info.install_path }).to_string();
                     reply_json(
                         "ok",
-                        format!("cloned '{}' -> '{}'", cmd.agent_id, cmd.new_agent_id),
+                        format!(
+                            "cloned '{}' -> '{}' (instance {})",
+                            cmd.agent_id, cmd.new_agent_id, info.instance_id
+                        ),
                         json,
                     )
                 }
@@ -368,6 +514,7 @@ async fn handle_command(
             let (result, upgraded_info) = {
                 let mut node = state.write().await;
                 let result = crate::package::upgrade::upgrade_package(
+                    &cmd.instance_id,
                     &cmd.agent_id,
                     &source_path,
                     &install_dir,
@@ -377,7 +524,10 @@ async fn handle_command(
                 if let Some(tmp) = spooled {
                     let _ = std::fs::remove_file(&tmp);
                 }
-                let upgraded_info = node.installed_agents.get(&cmd.agent_id).cloned();
+                // ADR-073: instance id is mandatory and UUID-validated at
+                // the command gate — no agent_id fallback for the key.
+                let key = cmd.instance_id.clone();
+                let upgraded_info = node.installed_agents.get(&key).cloned();
                 (result, upgraded_info)
             };
 
@@ -389,7 +539,7 @@ async fn handle_command(
                         && let Some(entry) = crate::package::build_installed_info(&info)
                     {
                         let installed_topic =
-                            node_agent_installed_topic(&command.node_id, &info.agent_id);
+                            node_agent_installed_topic(&command.node_id, &info.instance_id);
                         let _ = dispatcher::publish_installed_info(installed_topic, entry).await;
                     }
                     reply("ok", format!("upgraded '{}'", cmd.agent_id))
@@ -399,15 +549,26 @@ async fn handle_command(
         }
         Some(Command::PublishPrepare(cmd)) => {
             let mut node = state.write().await;
-            match crate::package::publish::prepare_publish(&cmd.agent_id, cmd.clean, &mut node) {
+            match crate::package::publish::prepare_publish(
+                &cmd.instance_id,
+                cmd.clean,
+                &mut node,
+            ) {
                 Ok(result) => {
                     let json = serde_json::to_string(&result).unwrap_or_else(|e| {
                         format!(r#"{{"error":"{}"}}"#, e)
                     });
-                    reply_json("ok", format!("publish prepare '{}' complete", cmd.agent_id), json)
+                    reply_json(
+                        "ok",
+                        format!("publish prepare '{}' complete", cmd.instance_id),
+                        json,
+                    )
                 }
                 Err(e) => {
-                    reply("error", format!("publish prepare '{}' failed: {}", cmd.agent_id, e))
+                    reply(
+                        "error",
+                        format!("publish prepare '{}' failed: {}", cmd.instance_id, e),
+                    )
                 }
             }
         }
@@ -424,6 +585,7 @@ async fn handle_command(
             };
             let node = state.read().await;
             match crate::package::publish::build_package(
+                &cmd.instance_id,
                 &cmd.agent_id,
                 &output_dir,
                 cmd.sign,
@@ -434,7 +596,9 @@ async fn handle_command(
                     let json = serde_json::to_string(&result).unwrap_or_default();
                     reply_json("ok", format!("built '{}'", result.output_path), json)
                 }
-                Err(e) => reply("error", format!("publish build '{}' failed: {}", cmd.agent_id, e)),
+                Err(e) => {
+                    reply("error", format!("publish build '{}' failed: {}", cmd.instance_id, e))
+                }
             }
         }
         None => reply("error", "empty command payload".to_string()),
@@ -470,8 +634,7 @@ async fn download_package(
     Ok(())
 }
 
-/// ADR-055 Phase 5a: build the NodeEnroll request envelope, or `None`
-/// when the node has no credential to present.
+/// ADR-055 Phase 5a: build the NodeEnroll request envelope.
 ///
 /// Enrollment is idempotent and re-run on every (re)connect: a node
 /// that already holds a Gateway-issued node_token presents it as the
@@ -481,18 +644,25 @@ async fn download_package(
 /// identity. A one-shot-only enrollment could otherwise strand a node
 /// with a token the Gateway no longer recognizes, turning every
 /// reverse-proxied request into a 403 "invalid node token".
-fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<DataEnvelope> {
+///
+/// A node with NO credential (no `--token`, no persisted node_token)
+/// still sends the request with an empty `enrollment_token` instead
+/// of staying silent: with `mqtt.auth_enabled = false` the Gateway
+/// skips token validation (ADR-055 §6.8) and mints the first
+/// long-lived token, which is what lets the fail-closed node reverse
+/// proxy open for the Gateway. With auth on the Gateway answers
+/// `rejected` ("enrollment token required"); the node keeps failing
+/// closed, matching the pre-Phase-5a behavior.
+fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> DataEnvelope {
     // The one-time enrollment token (first boot, passed via CLI) wins;
     // a persisted node_token doubles as the credential on re-enroll.
-    let Some(token) = config
+    let token = config
         .token
         .as_deref()
         .filter(|t| !t.is_empty())
         .or(identity.node_token.as_deref())
-    else {
-        return None; // No credential to present.
-    };
-    let info = build_node_info(identity, config, 0);
+        .unwrap_or_default();
+    let info = build_node_info(identity, config, &config.advertise_host, 0);
     let enroll = NodeEnroll {
         node_id: identity.node_id.clone(),
         machine_uid: identity.machine_uid.clone(),
@@ -503,24 +673,23 @@ fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<
         capabilities: info.capabilities,
         enrollment_token: token.to_string(),
     };
-    Some(DataEnvelope {
+    DataEnvelope {
         version: 1,
         payload: Some(data_envelope::Payload::NodeEnroll(enroll)),
-    })
+    }
 }
 
 /// Publish the enrollment request on `acowork/nodes/{id}/enroll`
-/// (QoS 1, non-retained). Returns true when a request was actually
-/// published. Re-run on every (re)connect by the bootstrap; it is a
-/// no-op once the node holds a node_token.
+/// (QoS 1, non-retained). Returns true when the request was actually
+/// published. Re-run on every (re)connect by the bootstrap —
+/// idempotent: the Gateway reuses the node's token when the presented
+/// credential still matches (see `build_enroll_payload`).
 async fn publish_enroll(
     client: &AsyncClient,
     identity: &NodeIdentity,
     config: &NodeConfig,
 ) -> bool {
-    let Some(envelope) = build_enroll_payload(identity, config) else {
-        return false;
-    };
+    let envelope = build_enroll_payload(identity, config);
     let topic = node_enroll_topic(&identity.node_id);
     match client
         .publish(
@@ -604,19 +773,32 @@ async fn handle_enroll_result(
     true
 }
 
-/// Extract (node_id, Some(agent_id)) from an agent-level control topic
-/// or (node_id, None) from a node-level control topic. Returns `None`
-/// for topics outside the control family.
+/// Extract (node_id, Some(instance_id)) from an agent-level control
+/// topic or (node_id, None) from a node-level control topic. Returns
+/// `None` for topics outside the control family.
+///
+/// ADR-073: the topic variable under `agents/` is the INSTANCE identity
+/// (`nodes/{node}/agents/{instance_id}/control/{cmd}`) and MUST parse
+/// as a UUIDv4 — package-id topics are rejected (the UUID validation
+/// gate at the command entry will reject them anyway).
 fn parse_control_topic(topic: &str, own_node_id: &str) -> Option<(String, Option<String>)> {
     let agent_prefix = format!("acowork/nodes/{own_node_id}/agents/");
     let node_prefix = format!("acowork/nodes/{own_node_id}/control/");
     if let Some(rest) = topic.strip_prefix(&agent_prefix) {
-        // rest = {agent_id}/control/{cmd}
+        // rest = {instance_id}/control/{cmd}
+        //
+        // Routing decision only — we intentionally do NOT validate the
+        // UUID shape of `instance_id` here. Doing so would silently
+        // drop malformed agent-scoped commands and prevent the
+        // handler from emitting an error reply, defeating ADR-073's
+        // "reject before any side effect" contract (every handler
+        // re-validates `instance_id` via `AgentInstanceId::from_string`
+        // before touching FS / process / queue).
         let mut parts = rest.splitn(3, '/');
-        let agent_id = parts.next().unwrap_or("");
+        let instance_id = parts.next().unwrap_or("");
         let control = parts.next().unwrap_or("");
-        if !agent_id.is_empty() && control == "control" {
-            return Some((own_node_id.to_string(), Some(agent_id.to_string())));
+        if !instance_id.is_empty() && control == "control" {
+            return Some((own_node_id.to_string(), Some(instance_id.to_string())));
         }
         return None;
     }
@@ -692,6 +874,9 @@ impl NodeControlPlane {
         // The node HTTP server (proxy auth, Phase 5a) also reads the
         // live identity — cloned before message_callback moves it.
         let http_identity = bs_identity.clone();
+        // The install executor reads the token per download, so it needs
+        // its own handle (cloned before the bootstrap closure takes one).
+        let install_identity = bs_identity.clone();
 
         // ADR-055 Phase 5a: live CONNECT credential — starts as the
         // node_token (reconnect) or the enrollment token (first boot)
@@ -729,8 +914,18 @@ impl NodeControlPlane {
                     tracing::warn!(error = %e, "Failed to publish node status=online");
                 }
 
+                // §6.3.3: re-detect the live LAN IP on every (re)connect
+                // and store it in shared state, so Start/Stop/heartbeat
+                // publish NodeInfo with the CURRENT address (a Wi-Fi
+                // hotspot switch is healed here without a restart).
+                let live_host = refresh_live_advertise_host(state.read().await, &config);
                 let agent_count = state.read().await.agents.len() as u32;
-                let info = build_node_info(&identity.read().await.clone(), &config, agent_count);
+                let info = build_node_info(
+                    &identity.read().await.clone(),
+                    &config,
+                    &live_host,
+                    agent_count,
+                );
                 let envelope = DataEnvelope {
                     version: 1,
                     payload: Some(data_envelope::Payload::NodeInfo(info)),
@@ -763,7 +958,7 @@ impl NodeControlPlane {
                     let Some(info) = crate::package::build_installed_info(&entry) else {
                         continue;
                     };
-                    let installed_topic = node_agent_installed_topic(&node_id, &info.agent_id);
+                    let installed_topic = node_agent_installed_topic(&node_id, &entry.instance_id);
                     let envelope = DataEnvelope {
                         version: 1,
                         payload: Some(data_envelope::Payload::InstalledAgentInfo(info)),
@@ -972,6 +1167,28 @@ impl NodeControlPlane {
         // Route command replies through this connection.
         dispatcher::install(client.shared_handle());
 
+        // ADR-073 install atomicity: one install slot per node. Started
+        // here rather than in `NodeState::new()` because the gate's
+        // worker publishes retained inventory — it needs the client
+        // created above. Until this runs, an install command is refused
+        // with a clear error instead of being silently queued.
+        {
+            let executor: Arc<dyn crate::package::install_gate::InstallExecutor> =
+                Arc::new(install_exec::NodeInstallExecutor::new(
+                    state.clone(),
+                    &config,
+                    node_id.clone(),
+                    install_identity,
+                ));
+            // The sink completes the caller's operation once the slot has
+            // processed the job — the immediate reply only says "queued".
+            let sink: Arc<dyn crate::package::install_gate::InstallOutcomeSink> =
+                Arc::new(install_exec::NodeInstallOutcomeSink::new(node_id.clone()));
+            let gate = crate::package::install_gate::InstallGate::new();
+            state.write().await.set_install_gate(gate.clone());
+            tokio::spawn(async move { gate.run_worker(executor, sink).await });
+        }
+
         // ADR-055 §6.4: start the node reverse proxy (`:19900`) so the
         // Gateway reaches every local Runtime through one port. It is a
         // best-effort service — if the port is taken (e.g. another node
@@ -985,9 +1202,10 @@ impl NodeControlPlane {
         // relay's parent-health watchdog has a live target from birth.
         let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
-            // ADR-055 §6.4 + L7-1: the node HTTP server hosts both the
-            // `/agents/{id}/*` reverse proxy and the `/fs/browse` remote
-            // filesystem browser on the same `:19900` listener.
+            // ADR-055 §6.4 + L7-1: the node HTTP server hosts the
+            // `/agents/{id}/*` reverse proxy, the `/fs/browse` remote
+            // filesystem browser and (ADR-009 §5) the read-only agent
+            // asset service on the same `:19900` listener.
             // ADR-055 Phase 5a §6.8: the node HTTP router carries the
             // live identity so the proxy can validate inbound
             // `X-ACowork-Node-Token` against the issued node_token.
@@ -996,7 +1214,8 @@ impl NodeControlPlane {
                 identity: http_identity,
             };
             let app = crate::proxy::router(node_http_state.clone())
-                .merge(crate::fs_browse::router(node_http_state));
+                .merge(crate::fs_browse::router(node_http_state.clone()))
+                .merge(crate::package_http::router(node_http_state));
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -1149,8 +1368,17 @@ impl NodeControlPlane {
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    // §6.3.3: refresh the live host on every heartbeat so
+                    // a network change converges within one interval.
+                    let live_host =
+                        refresh_live_advertise_host(self.state.read().await, &self.config);
                     let agent_count = self.state.read().await.agents.len() as u32;
-                    let info = build_node_info(&self.identity, &self.config, agent_count);
+                    let info = build_node_info(
+                        &self.identity,
+                        &self.config,
+                        &live_host,
+                        agent_count,
+                    );
                     let envelope = DataEnvelope {
                         version: 1,
                         payload: Some(data_envelope::Payload::NodeInfo(info)),
@@ -1307,7 +1535,8 @@ impl NodeControlPlane {
                 let _ = client
                     .publish(&status_topic, QoS::AtLeastOnce, true, "online".as_bytes())
                     .await;
-                let info = build_node_info(&id, &config, 0);
+                let live_host = refresh_live_advertise_host(state.read().await, &config);
+                let info = build_node_info(&id, &config, &live_host, 0);
                 let envelope = DataEnvelope {
                     version: 1,
                     payload: Some(data_envelope::Payload::NodeInfo(info)),
@@ -1442,7 +1671,8 @@ impl NodeControlPlane {
         // NodeInfo under the NEW name (machine_uid / hostname unchanged).
         let mut new_identity = identity.clone();
         new_identity.node_id = new_name.to_string();
-        let info = build_node_info(&new_identity, &config, installed.len() as u32);
+        let live_host = refresh_live_advertise_host(&state, &config);
+        let info = build_node_info(&new_identity, &config, &live_host, installed.len() as u32);
 
         let old_id_for_cb = old_id.clone();
         let new_id_for_cb = new_name.to_string();
@@ -1540,19 +1770,14 @@ impl NodeControlPlane {
     }
 }
 
-/// Validate a rename target: a valid slug, not the reserved `local`
-/// name, and different from the current name (ADR-055 §6.12).
+/// Validate a rename target: a valid slug, and different from the
+/// current name (ADR-055 §6.12). There is no reserved name — every
+/// node is named by its machine hostname slug.
 fn validate_rename_target(old_id: &str, new_name: &str) -> Result<(), NodeError> {
     if !acowork_core::node::node_id_is_valid(new_name) {
         return Err(NodeError::Identity(format!(
             "Invalid node name '{new_name}': must be 2-32 chars of [a-z0-9-], \
              no leading/trailing hyphen"
-        )));
-    }
-    if new_name == acowork_core::node::LOCAL_NODE_ID {
-        return Err(NodeError::Identity(format!(
-            "'{}' is reserved for the Gateway's own local node — choose another name",
-            acowork_core::node::LOCAL_NODE_ID
         )));
     }
     if new_name == old_id {
@@ -1590,14 +1815,14 @@ async fn migrate_retained(
     // 2. Republish the installed inventory under the NEW node_id.
     for entry in installed {
         if let Some(installed_info) = crate::package::build_installed_info(entry) {
-            let agent_id = installed_info.agent_id.clone();
+            let instance_id = installed_info.instance_id.clone();
             let envelope = DataEnvelope {
                 version: 1,
                 payload: Some(data_envelope::Payload::InstalledAgentInfo(installed_info)),
             };
             let _ = client
                 .publish(
-                    node_agent_installed_topic(new_id, &agent_id),
+                    node_agent_installed_topic(new_id, &instance_id),
                     QoS::AtLeastOnce,
                     true,
                     prost::Message::encode_to_vec(&envelope),
@@ -1627,7 +1852,7 @@ async fn clear_retained(
     for entry in installed {
         let _ = client
             .publish(
-                node_agent_installed_topic(node_id, &entry.agent_id),
+                node_agent_installed_topic(node_id, &entry.instance_id),
                 QoS::AtLeastOnce,
                 true,
                 Vec::new(),
@@ -1889,6 +2114,22 @@ mod tests {
         }
     }
 
+    /// ADR-073: any valid UUID works for lifecycle tests.
+    const TEST_INSTANCE_ID: &str = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+
+    fn start_command(instance_id: &str) -> NodeControlCommand {
+        use acowork_core::mqtt_proto::NodeStart;
+        NodeControlCommand {
+            node_id: "local".to_string(),
+            request_id: "req-start".to_string(),
+            command: Some(node_control_command::Command::Start(NodeStart {
+                agent_id: "com.test.agent".to_string(),
+                dev_mode: false,
+                instance_id: instance_id.to_string(),
+            })),
+        }
+    }
+
     fn test_state() -> SharedNodeState {
         Arc::new(RwLock::new(crate::state::NodeState::new(16)))
     }
@@ -1899,6 +2140,54 @@ mod tests {
             home: tmp.path().to_path_buf(),
             ..NodeConfig::default()
         }
+    }
+
+    // ── refresh_live_advertise_host (§6.3.3) ─────────────────────────
+
+    #[tokio::test]
+    async fn live_host_fixed_config_is_verbatim() {
+        let state = test_state();
+        let config = NodeConfig {
+            advertise_host: "10.0.0.5".to_string(),
+            advertise_host_auto: false,
+            ..test_config()
+        };
+        let host = refresh_live_advertise_host(state.read().await, &config);
+        assert_eq!(host, "10.0.0.5");
+        // The live slot mirrors the configured host.
+        assert_eq!(
+            *state
+                .read()
+                .await
+                .live_advertise_host
+                .lock()
+                .unwrap(),
+            "10.0.0.5"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_host_auto_is_consistent_and_nonempty() {
+        let state = test_state();
+        let config = NodeConfig {
+            advertise_host: "127.0.0.1".to_string(),
+            advertise_host_auto: true,
+            ..test_config()
+        };
+        let host = refresh_live_advertise_host(state.read().await, &config);
+        // Either a real LAN IP was detected, or detection failed and we
+        // fell back to the placeholder — but never empty, and the shared
+        // slot always matches what the caller uses for NodeInfo.
+        assert!(!host.is_empty());
+        assert_eq!(
+            *state
+                .read()
+                .await
+                .live_advertise_host
+                .lock()
+                .unwrap(),
+            host
+        );
     }
 
     #[tokio::test]
@@ -1912,6 +2201,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_gate_rejects_malformed_instance_id() {
+        let state = test_state();
+        let config = test_config();
+        let reply = handle_command(&state, &config, &start_command("not-a-uuid"), None).await;
+        // ADR-073: rejected at the gate — before any ProcessManager or
+        // filesystem side effect — so the reply carries the validation
+        // error, not a spawn attempt.
+        assert_eq!(reply.status, "error");
+        assert!(
+            reply.message.contains("invalid instance_id"),
+            "unexpected reply: {}",
+            reply.message
+        );
+        assert!(reply.message.contains("not-a-uuid"));
+    }
+
+    #[tokio::test]
+    async fn control_gate_rejects_empty_instance_id() {
+        let state = test_state();
+        let config = test_config();
+        let reply = handle_command(&state, &config, &start_command(""), None).await;
+        assert_eq!(reply.status, "error");
+        assert!(reply.message.contains("invalid instance_id"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_instance_id_extraction_maps_all_agent_commands() {
+        use acowork_core::mqtt_proto::NodeStop;
+        assert_eq!(
+            agent_lifecycle_instance_id(Some(&node_control_command::Command::Start(
+                acowork_core::mqtt_proto::NodeStart {
+                    agent_id: "com.test.agent".to_string(),
+                    dev_mode: false,
+                    instance_id: TEST_INSTANCE_ID.to_string(),
+                },
+            ))),
+            Some(TEST_INSTANCE_ID)
+        );
+        assert_eq!(
+            agent_lifecycle_instance_id(Some(&node_control_command::Command::Stop(NodeStop {
+                agent_id: "com.test.agent".to_string(),
+                reason: String::new(),
+                instance_id: TEST_INSTANCE_ID.to_string(),
+            }))),
+            Some(TEST_INSTANCE_ID)
+        );
+        // Node-scoped ping has no instance id → None.
+        assert_eq!(
+            agent_lifecycle_instance_id(Some(&node_control_command::Command::Ping(
+                Default::default()
+            ))),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn start_not_installed_answers_error() {
         let state = test_state();
         let config = test_config();
@@ -1922,6 +2267,9 @@ mod tests {
                 acowork_core::mqtt_proto::NodeStart {
                     agent_id: "com.example".to_string(),
                     dev_mode: false,
+                    // ADR-073: valid instance id so the test exercises the
+                    // real not-installed path, not the validation gate.
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -1944,6 +2292,11 @@ mod tests {
                     package_url: String::new(),
                     local_path: String::new(),
                     dev_mode: false,
+                    // ADR-073: valid instance id — the test targets the
+                    // missing-source validation, not the UUID gate.
+                    instance_id: TEST_INSTANCE_ID.to_string(),
+                    system: false,
+                    ensure: false,
                 },
             )),
         };
@@ -1952,9 +2305,165 @@ mod tests {
         assert!(reply.message.contains("package_url"));
     }
 
-    #[tokio::test]
-    async fn empty_command_answers_error() {
+    // ── Install → gate admission (ADR-073 install atomicity) ─────────
+
+    /// A gate with no worker running — the shape a handler test needs to
+    /// observe *admission* without performing a real install.
+    async fn gated_state() -> SharedNodeState {
         let state = test_state();
+        state
+            .write()
+            .await
+            .set_install_gate(crate::package::install_gate::InstallGate::new());
+        state
+    }
+
+    fn install_command(
+        instance_id: &str,
+        agent_id: &str,
+        local_path: &str,
+        ensure: bool,
+    ) -> NodeControlCommand {
+        NodeControlCommand {
+            node_id: "local".to_string(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            command: Some(node_control_command::Command::Install(
+                acowork_core::mqtt_proto::NodeInstall {
+                    agent_id: agent_id.to_string(),
+                    package_url: String::new(),
+                    local_path: local_path.to_string(),
+                    dev_mode: false,
+                    instance_id: instance_id.to_string(),
+                    system: false,
+                    ensure,
+                },
+            )),
+        }
+    }
+
+    /// The install regression from the triple-install incident: the
+    /// front-end may ask twice, but a declarative request for a package
+    /// this node already holds must not queue a second copy.
+    #[tokio::test]
+    async fn ensure_for_an_installed_package_is_not_queued() {
+        let state = gated_state().await;
+        let config = test_config();
+        let existing = uuid::Uuid::new_v4().to_string();
+        state.write().await.add_installed(crate::state::InstalledAgent {
+            instance_id: existing.clone(),
+            agent_id: "com.acowork.system".to_string(),
+            version: "1.0.0".to_string(),
+            name: "System".to_string(),
+            install_path: "D:/tmp/sys".to_string(),
+            manifest: acowork_core::AgentManifest::from_toml(
+                r#"
+                agent_id = "com.acowork.system"
+                version = "1.0.0"
+                name = "System"
+                description = "t"
+                author = "t"
+                runtime_version = "0.1.0"
+                [llm]
+                provider = "openai"
+                model = "gpt-4"
+                "#,
+            )
+            .unwrap(),
+        });
+
+        let cmd = install_command(
+            &uuid::Uuid::new_v4().to_string(),
+            "com.acowork.system",
+            "D:/tmp/pkg.agent",
+            true,
+        );
+        let reply = handle_command(&state, &config, &cmd, None).await;
+
+        assert_eq!(reply.status, "ok");
+        assert!(reply.message.contains("already satisfied"), "{}", reply.message);
+        let gate = state.read().await.install_gate().unwrap();
+        assert_eq!(gate.pending_len().await, 0);
+        assert!(gate.is_idle().await);
+    }
+
+    /// One instance id is one install: a replayed command coalesces into
+    /// the queued job instead of queueing a second one.
+    #[tokio::test]
+    async fn replayed_install_command_coalesces_into_the_queued_job() {
+        let state = gated_state().await;
+        let config = test_config();
+        let instance = uuid::Uuid::new_v4().to_string();
+        let cmd = install_command(&instance, "com.test.agent", "D:/tmp/pkg.agent", false);
+
+        let first = handle_command(&state, &config, &cmd, None).await;
+        let second = handle_command(&state, &config, &cmd, None).await;
+
+        // `in_progress` (not `ok`) — the job is only queued; the
+        // terminal event arrives from the outcome sink once the gate has
+        // processed it.
+        assert_eq!(first.status, "in_progress");
+        assert!(first.message.contains("queued"), "{}", first.message);
+        assert_eq!(second.status, "in_progress");
+        assert!(second.message.contains("already in progress"), "{}", second.message);
+        assert_eq!(state.read().await.install_gate().unwrap().pending_len().await, 1);
+    }
+
+    /// ADR-073: two instance ids are two installs of one package — both
+    /// are queued (serially), neither is refused.
+    #[tokio::test]
+    async fn two_instances_of_one_package_are_both_admitted() {
+        let state = gated_state().await;
+        let config = test_config();
+
+        for _ in 0..2 {
+            let cmd = install_command(
+                &uuid::Uuid::new_v4().to_string(),
+                "com.test.agent",
+                "D:/tmp/pkg.agent",
+                false,
+            );
+            let reply = handle_command(&state, &config, &cmd, None).await;
+            assert_eq!(reply.status, "in_progress");
+            assert!(reply.message.contains("queued"), "{}", reply.message);
+        }
+
+        assert_eq!(state.read().await.install_gate().unwrap().pending_len().await, 2);
+    }
+
+    /// Without a gate there is no install slot, so the command must fail
+    /// loudly rather than vanish into an unserviced queue.
+    #[tokio::test]
+    async fn install_before_the_gate_exists_answers_error() {
+        let state = test_state();
+        let config = test_config();
+        let cmd = install_command(
+            &uuid::Uuid::new_v4().to_string(),
+            "com.test.agent",
+            "D:/tmp/pkg.agent",
+            false,
+        );
+
+        let reply = handle_command(&state, &config, &cmd, None).await;
+        assert_eq!(reply.status, "error");
+        assert!(reply.message.contains("install gate"), "{}", reply.message);
+    }
+
+    /// A malformed instance id is refused at admission — it must never
+    /// reach the queue, where the landing directory is derived from it.
+    #[tokio::test]
+    async fn install_with_a_non_uuid_instance_is_refused() {
+        let state = gated_state().await;
+        let config = test_config();
+        let cmd = install_command("com.test.agent", "com.test.agent", "D:/tmp/pkg.agent", false);
+
+        let reply = handle_command(&state, &config, &cmd, None).await;
+        assert_eq!(reply.status, "error");
+        assert!(reply.message.contains("invalid instance_id"), "{}", reply.message);
+        assert_eq!(state.read().await.install_gate().unwrap().pending_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn empty_command_answers_error() {        let state = test_state();
         let config = test_config();
         let cmd = NodeControlCommand {
             node_id: "local".to_string(),
@@ -1977,6 +2486,7 @@ mod tests {
                     agent_id: "com.example".to_string(),
                     new_agent_id: "com.example.clone".to_string(),
                     mode: "skeleton".to_string(),
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -1997,6 +2507,7 @@ mod tests {
                     package_url: String::new(),
                     local_path: String::new(),
                     dev_mode: false,
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2016,6 +2527,7 @@ mod tests {
                 acowork_core::mqtt_proto::NodePublishPrepare {
                     agent_id: "com.example".to_string(),
                     clean: false,
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2036,6 +2548,7 @@ mod tests {
                     output_dir: String::new(),
                     sign: false,
                     key_dir: String::new(),
+                    instance_id: TEST_INSTANCE_ID.to_string(),
                 },
             )),
         };
@@ -2049,6 +2562,18 @@ mod tests {
             parse_control_topic("acowork/nodes/local/control/ping", "local"),
             Some(("local".to_string(), None))
         );
+        assert_eq!(
+            parse_control_topic(
+                &format!("acowork/nodes/local/agents/{TEST_INSTANCE_ID}/control/start"),
+                "local"
+            ),
+            Some(("local".to_string(), Some(TEST_INSTANCE_ID.to_string())))
+        );
+        // ADR-073: parse_control_topic is a routing decision only.
+        // It accepts ANY non-empty `agents/{x}/control/{cmd}` segment;
+        // UUID-shape validation is the handler's job (it can then
+        // publish an error reply). A package-id topic that lacks the
+        // `control` keyword still does not parse.
         assert_eq!(
             parse_control_topic(
                 "acowork/nodes/local/agents/com.example/control/start",
@@ -2065,22 +2590,19 @@ mod tests {
 
     #[test]
     fn control_topic_construction_matches_parsing() {
-        let topic = node_agent_control_topic("local", "com.example", "start");
+        let topic = node_agent_control_topic("local", TEST_INSTANCE_ID, "start");
         assert_eq!(
             parse_control_topic(&topic, "local"),
-            Some(("local".to_string(), Some("com.example".to_string())))
+            Some(("local".to_string(), Some(TEST_INSTANCE_ID.to_string())))
         );
     }
 
     #[test]
-    fn rename_target_valid_slug_is_accepted() {
+    fn rename_target_hostname_slug_is_accepted() {
+        // "local" is no longer reserved — it is a plain slug and is
+        // valid unless it equals the current name.
+        assert!(validate_rename_target("gpu-server", "local").is_ok());
         assert!(validate_rename_target("gpu-server", "gpu-2").is_ok());
-    }
-
-    #[test]
-    fn rename_target_reserved_local_is_rejected() {
-        let err = validate_rename_target("gpu-server", "local").unwrap_err();
-        assert!(err.to_string().contains("reserved"));
     }
 
     #[test]
@@ -2131,8 +2653,7 @@ mod tests {
             token: Some("tok-1234".to_string()),
             ..test_config()
         };
-        let envelope = build_enroll_payload(&test_identity(), &config)
-            .expect("enroll payload built when token present and no node_token");
+        let envelope = build_enroll_payload(&test_identity(), &config);
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };
@@ -2145,20 +2666,28 @@ mod tests {
     }
 
     #[test]
-    fn build_enroll_payload_none_without_token_or_when_enrolled() {
-        // No enrollment token and no persisted node_token → no payload.
-        assert!(build_enroll_payload(&test_identity(), &test_config()).is_none());
-        // Holds a node_token → still builds a payload (idempotent
-        // re-enrollment; the token doubles as the credential so the
-        // Gateway can re-sync its store after a loss).
+    fn build_enroll_payload_without_credential_keeps_empty_token() {
+        // No CLI token, no persisted node_token → the payload is still
+        // built, with an empty credential: the Gateway decides (auth
+        // off → mint the first token; auth on → reject). Staying
+        // silent here would strand the node with no token, and the
+        // fail-closed reverse proxy would 403 every request.
+        let envelope = build_enroll_payload(&test_identity(), &test_config());
+        let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
+            panic!("expected NodeEnroll payload");
+        };
+        assert!(enroll.enrollment_token.is_empty());
+
+        // Holds a node_token → the token doubles as the credential
+        // (idempotent re-enrollment; the Gateway can re-sync its store
+        // after a loss).
         let mut identity = test_identity();
         identity.node_token = Some("existing-token".to_string());
         let config = NodeConfig {
             token: None,
             ..test_config()
         };
-        let envelope = build_enroll_payload(&identity, &config)
-            .expect("enroll payload built when node_token present");
+        let envelope = build_enroll_payload(&identity, &config);
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };
@@ -2169,8 +2698,7 @@ mod tests {
             token: Some("tok-1234".to_string()),
             ..test_config()
         };
-        let envelope = build_enroll_payload(&identity, &config)
-            .expect("enroll payload built with CLI token");
+        let envelope = build_enroll_payload(&identity, &config);
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };

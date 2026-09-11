@@ -516,7 +516,7 @@ export function ToolsTab() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-right-panel p-3">
+    <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3">
       {/* ── Builtin Tools card ─────────────────────────────────────
           Level-1 collapsible card in the same language as the
           Debug-panel "Context Snapshots" list: chevron on the left,

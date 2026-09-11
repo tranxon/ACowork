@@ -103,11 +103,11 @@ fi
 TARGET_DIR="$WORKSPACE_ROOT/target/$PROFILE"
 
 # ── Total step count ──────────────────────────────────────────────────────────
-#   --start : 8  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Copy, Start)
-#   else    : 7  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Copy)
-TOTAL_STEPS=7
+#   --start : 9  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Doc, Copy, Start)
+#   else    : 8  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, PM, Doc, Copy)
+TOTAL_STEPS=8
 if [ "$START_GATEWAY" = "true" ]; then
-    TOTAL_STEPS=8
+    TOTAL_STEPS=9
 fi
 
 # ── Header ──────────────────────────────────────────────────────────────────
@@ -205,8 +205,10 @@ echo -e "${YELLOW}[1/$TOTAL_STEPS] Stopping old processes...${NC}"
 # but owned by a now-dead parent. Node Agent is included too (ADR-055 §6.11):
 # it is spawned by the Gateway, so a killed Gateway can orphan it. PM is a
 # standalone process (ADR-064) spawned by the Gateway supervisor; it self-exits
-# via the ADR-018 watchdog but the poll can lag, so kill it explicitly.
-for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm; do
+# via the ADR-018 watchdog but the poll can lag, so kill it explicitly. Doc
+# mirrors PM (ADR-064): standalone process `acowork-doc` on port 18081, same
+# watchdog caveat applies.
+for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm acowork-doc; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         pkill -f "$proc" 2>/dev/null || true
@@ -224,6 +226,10 @@ fi
 # Free PM port 18082 (ADR-064 standalone process).
 if command -v fuser &>/dev/null; then
     fuser -k 18082/tcp 2>/dev/null || true
+fi
+# Free Doc port 18081 (ADR-064 standalone process).
+if command -v fuser &>/dev/null; then
+    fuser -k 18081/tcp 2>/dev/null || true
 fi
 sleep 1
 echo -e "${GREEN}  ✓ Process cleanup complete${NC}"
@@ -381,6 +387,27 @@ else
 fi
 echo ""
 
+# ── Step 4.8: Build Doc service ──────────────────────────────────────────────
+#
+# Mirrors the PM service above: the Doc service is a standalone process
+# (`acowork-doc`), located via `current_exe().parent().join("acowork-doc")` —
+# so the binary MUST sit next to acowork-gateway. Without it the Gateway
+# supervisor logs "acowork-doc binary not found" and `/api/doc/*` returns 503
+# (document library unavailable).
+echo -e "${YELLOW}[4.8/$TOTAL_STEPS] Building Doc service ($PROFILE)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-doc)
+else
+    cargo_args=(cargo build -p acowork-doc)
+fi
+if "${cargo_args[@]}" 2>&1 | tail -20; then
+    echo -e "${GREEN}  ✓ Doc service compiled successfully${NC}"
+else
+    echo -e "${RED}  ✗ Doc service compile failed${NC}"
+    exit 1
+fi
+echo ""
+
 # ── Step 5: Copy resource files ─────────────────────────────────────────────
 #
 # The gateway (and embed) read these from `{exe_dir}/`. We only stage into the
@@ -440,7 +467,7 @@ fi
 echo -e "${YELLOW}[$TOTAL_STEPS/$TOTAL_STEPS] Done!${NC}"
 echo ""
 echo -e "${CYAN}Build artifacts:${NC}"
-ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" "$TARGET_DIR/acowork-doc" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
 if [ "$START_GATEWAY" = "true" ]; then

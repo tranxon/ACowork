@@ -111,7 +111,7 @@ export function MemoryNodeList({
         />
       ) : (
         <>
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div data-tab-scroll className="min-h-0 flex-1 overflow-y-auto">
             <ListBox variant="plain">
               {nodes.map((node) => {
                   const isSelected = node.node_id === selectedNodeId;

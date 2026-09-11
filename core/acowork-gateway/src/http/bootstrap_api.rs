@@ -133,8 +133,12 @@ mod tests {
     #[tokio::test]
     async fn phase_advances_to_ready() {
         let (state, registry) = test_state().await;
-        // All required subsystems ready → phase READY.
-        for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+        // All required subsystems ready → phase READY. node.local is
+        // intentionally NOT included: under the unified single-machine
+        // / remote topology it is no longer a Required subsystem (the
+        // local node subsumes the old `node.local` role via its
+        // machine-slug entry, e.g. `node.nytb`).
+        for id in ["vault", "mqtt", "publisher", "node.nytb", "system_agent"] {
             registry.register(id, ReadinessKind::Required).mark_ready(None);
         }
         // The orchestrator's background listener recomputes
@@ -153,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn optional_failure_yields_degraded() {
         let (state, registry) = test_state().await;
-        for id in ["vault", "mqtt", "publisher", "node.local", "system_agent"] {
+        for id in ["vault", "mqtt", "publisher", "node.nytb", "system_agent"] {
             registry.register(id, ReadinessKind::Required).mark_ready(None);
         }
         registry
@@ -167,7 +171,6 @@ mod tests {
         }
         assert_eq!(resp.phase, "DEGRADED");
     }
-
     #[tokio::test]
     async fn missing_orchestrator_is_503() {
         let dir = std::env::temp_dir().join(format!(
@@ -186,9 +189,12 @@ mod tests {
     /// serialised as the SCREAMING_SNAKE_CASE proto name.
     #[test]
     fn view_serialises_to_protocol_shape() {
+        // ADR-073: the bootstrap instance identity is a UUIDv4, not a
+        // human label — pin the exact value through serialisation.
+        let instance_id = "4e5f6a7b-8c9d-4e0e-8f1f-c02a3b4c5d6e";
         let view = BootstrapStateView {
             protocol_version: 1,
-            instance_id: "instance-json".to_string(),
+            instance_id: instance_id.to_string(),
             version: 4,
             phase: "DEGRADED".to_string(),
             phase_detail: "2/5 required ready".to_string(),
@@ -198,7 +204,7 @@ mod tests {
         let obj = json.as_object().unwrap();
         assert_eq!(obj.len(), 6, "exactly the 6 protocol fields");
         assert_eq!(obj["phase"], "DEGRADED");
-        assert_eq!(obj["instance_id"], "instance-json");
+        assert_eq!(obj["instance_id"], instance_id);
         assert_eq!(obj["version"], 4);
     }
 
@@ -209,7 +215,7 @@ mod tests {
     fn http_projection_matches_mqtt_proto_fields() {
         let snap = BootstrapSnapshot {
             protocol_version: 1,
-            instance_id: "instance-abc".to_string(),
+            instance_id: "5f6a7b8c-9d0e-4f1f-8021-d13b4c5d6e7f".to_string(),
             version: 5,
             phase: BootstrapPhase::Ready,
             phase_detail: "2/2 required ready".to_string(),

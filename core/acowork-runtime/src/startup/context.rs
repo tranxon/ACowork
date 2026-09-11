@@ -109,6 +109,13 @@ pub(crate) struct AgentBootContext {
     /// [`crate::agent::AgentCore::compaction_prompt`].
     pub compaction_prompt: Option<String>,
 
+    /// Per-agent skill registry (`skills/*/SKILL.md`), loaded once in
+    /// Phase A. The authoritative source for resolving a per-turn chat
+    /// `command` (skill name) into skill instructions — the frontend only
+    /// sends names. Injected into `AgentCore` in Phase B (see
+    /// `AgentCore::skill_registry`); shared across session clones.
+    pub skill_registry: Arc<crate::skills::parser::SkillRegistry>,
+
     // ── ADR-063: 7 additional package-level LLM prompt overrides ──
     //
     // Each field corresponds 1-to-1 to an entry in

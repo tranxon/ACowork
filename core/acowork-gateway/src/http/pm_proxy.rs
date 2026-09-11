@@ -426,6 +426,7 @@ mod tests {
         .expect("manifest parses");
         let mut gw = state.gateway_state.write().await;
         gw.add_installed(crate::gateway::state::AgentInfo {
+            instance_id: agent_id.to_string(),
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Architect".to_string(),

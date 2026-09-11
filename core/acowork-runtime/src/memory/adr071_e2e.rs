@@ -252,6 +252,8 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
         temp_dir.clone(),
         temp_dir.clone(),
         AGENT_ID.to_string(),
+        String::new(), // ADR-073: root-level /memory/* routes carry no agent-path guard, so the
+        // instance identity is unused here
         snapshots,
         latest,
         dispatch_tx,

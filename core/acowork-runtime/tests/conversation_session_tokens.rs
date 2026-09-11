@@ -163,6 +163,7 @@ async fn resume_tokens_feed_context_usage_emission() {
         32_768, // max_output_limit
         None,   // no context_window_override
         Some(&persisted), // ADR-027: cumulative totals must flow through
+        None,   // no persisted iteration count
     );
 
     assert_eq!(ctx.input_tokens, 45_000);
@@ -227,6 +228,7 @@ async fn resume_tokens_cumulative_totals_diverge_from_per_turn() {
         32_768,
         None,
         Some(&persisted),
+        None,
     );
 
     assert_eq!(ctx.input_tokens, 18_000, "per-turn input tokens");
@@ -427,6 +429,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         message_count: 7,
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None, // missing in legacy format
+        llm_call_counter: None,
         last_compaction_offset: None,
         corrupted: false,
     };
@@ -586,6 +589,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         message_count: 1,
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None,
+        llm_call_counter: None,
         last_compaction_offset: Some(1234),
         corrupted: false,
     };

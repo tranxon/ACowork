@@ -27,7 +27,7 @@ use acowork_core::mqtt_proto::{
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
     IterationLimitPausedPayload, LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport,
-    NewDataAvailablePayload, RecordCompletePayload,
+    NewDataAvailablePayload, NodeInfo, RecordCompletePayload,
     SessionMessage, StoppedPayload, StreamDeltaPayload,
     StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
 };
@@ -167,6 +167,34 @@ pub(crate) fn decode_lsps_payload(payload: &[u8]) -> LspRelayUpdate {
     }
 }
 
+/// Decode the node's reverse-proxy base URL from a retained
+/// `acowork/nodes/{node_id}/info` payload (`DataEnvelope<NodeInfo>`).
+///
+/// Returns `None` on any decode failure, a non-NodeInfo payload, or an
+/// empty `http_endpoint` (the node cleared its state). The base is the
+/// `http://{live_host}:{port}` part — the Runtime appends
+/// `/agents/{agent_id}` when re-publishing its own `http_endpoint`.
+pub(crate) fn decode_node_proxy_base(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+    let envelope = match DataEnvelope::decode(payload) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(error = %e, "node info payload is not a valid DataEnvelope");
+            return None;
+        }
+    };
+    match envelope.payload {
+        Some(data_envelope::Payload::NodeInfo(NodeInfo { http_endpoint, .. }))
+            if !http_endpoint.is_empty() =>
+        {
+            Some(http_endpoint)
+        }
+        _ => None,
+    }
+}
+
 // ── MQTT protobuf -> domain mapping helpers ─────────────────────────────
 //
 // Extracted from the inline poll-loop closures so they are independently
@@ -293,10 +321,12 @@ pub struct MqttConnectConfig<'a> {
     pub host: &'a str,
     pub port: u16,
     pub agent_id: &'a str,
+    /// ADR-073: instance identity (UUID v4) used for every
+    /// `acowork/agents/{instance_id}/...` topic and the broker
+    /// client id. Required — no fallback to `agent_id`.
+    pub instance_id: &'a str,
     pub agent_name: &'a str,
     pub agent_version: &'a str,
-    pub avatar: Option<&'a str>,
-    pub builtin_avatar: Option<&'a str>,
     pub config_json: &'a str,
     pub available_cache: SharedAvailableCache,
     pub control_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
@@ -384,6 +414,18 @@ pub struct MqttConnectConfig<'a> {
     /// the client connects anonymously (auth disabled broker).
     pub username: Option<&'a str>,
     pub password: Option<&'a str>,
+    /// §6.3.3: sink for the node's reverse-proxy base URL on CHANGE.
+    /// The event loop decodes the node's retained `NodeInfo`; when its
+    /// `http_endpoint` base differs from the last one, the new base is
+    /// pushed here. The owner (agent_init) re-publishes this Runtime's
+    /// retained `http_endpoint` so the Gateway keeps routing through
+    /// the node after a LAN IP change — no node / Runtime restart.
+    ///
+    /// Optional: None disables live endpoint re-publication (standalone
+    /// Runtimes have no node).
+    pub node_proxy_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<String>,
+    >,
 }
 
 /// Event payload for `publish_tool_approval_needed`.
@@ -419,8 +461,11 @@ pub struct RuntimeMqttClient {
     /// methods obtain a clone via `self.client().await`, ensuring they
     /// always use the current handle.
     shared_client: Arc<Mutex<AsyncClient>>,
-    /// The agent_id this client represents.
+    /// The agent_id this client represents (PACKAGE identity).
     agent_id: String,
+    /// ADR-073: instance identity (UUID v4) used for topic construction.
+    /// Falls back to `agent_id` for standalone / test mode.
+    instance_id: String,
     /// Cached inputs needed to re-run `run_bootstrap` on every
     /// (re)connect. See `docs/adr/zh/ADR-039-mqtt-client-lifecycle.md`.
     bootstrap_data: Arc<BootstrapData>,
@@ -438,6 +483,7 @@ impl Clone for RuntimeMqttClient {
             inner: self.inner.clone(),
             shared_client: Arc::clone(&self.shared_client),
             agent_id: self.agent_id.clone(),
+            instance_id: self.instance_id.clone(),
             bootstrap_data: Arc::clone(&self.bootstrap_data),
         }
     }
@@ -451,10 +497,13 @@ impl Clone for RuntimeMqttClient {
 /// subsequent `ConnAck`. See ADR-039.
 struct BootstrapData {
     agent_id: String,
+    /// ADR-073: instance identity (UUID v4) for topic construction.
+    instance_id: String,
+    /// ADR-073: current location (node hosting this Runtime). Empty for
+    /// standalone / Gateway-spawned runtimes. Populated from `--node-id`.
+    node_id: Option<String>,
     agent_name: String,
     agent_version: String,
-    avatar: String,
-    builtin_avatar: String,
     config_json: String,
     status_topic: String,
     meta_topic: String,
@@ -468,6 +517,32 @@ struct BootstrapData {
     /// (`acowork/nodes/{node_id}/lsps`). `None` when the Runtime runs
     /// without `--node-id` (standalone / Gateway-spawned).
     node_lsps_topic: Option<String>,
+    /// §6.3.3: the node's retained info topic
+    /// (`acowork/nodes/{node_id}/info`). `None` standalone. Subscribed
+    /// so the Runtime can watch the node's reverse-proxy base URL and
+    /// re-publish its own `http_endpoint` when the node changes
+    /// network (self-healing without a restart).
+    node_info_topic: Option<String>,
+    /// ADR-039 Phase 3 follow-up (post-2026-09-07 incident): the
+    /// `acowork/agents/{id}/ready` topic. Republished on every
+    /// (re)connect so a Gateway that reconnects after a sleep/wake —
+    /// or a fresh Gateway that subscribes mid-flight — sees the
+    /// Runtime's session-ready state without waiting for the next
+    /// heartbeat. Without this the `running_agents[id].ready` flag can
+    /// stay `false` until the Phase B/C work finishes again, which is
+    /// the exact divergence the post-wake bug depends on.
+    ready_topic: String,
+    /// Whether the session has EVER reached `ready=true` — set by
+    /// `RuntimeMqttClient::publish_ready` once Phase A completes.
+    /// Step 7 of `run_bootstrap` re-stamps the retained
+    /// `ready=true` on (re)connects only after this flag is set: on
+    /// the very first connect Phase A owns the ready signal, and
+    /// re-publishing it from Step 7 would open the Gateway's
+    /// `running && ready` gate up to `PULL_MAX_DURATION` before the
+    /// session can actually serve. Atomic — shared through
+    /// `Arc<BootstrapData>` between the handler task (Step 7) and the
+    /// `publish_ready` caller.
+    ready_ever: std::sync::atomic::AtomicBool,
 }
 
 /// Runtime entity handler for the shared [`MqttClient`] (ADR-065 Step 4).
@@ -503,6 +578,19 @@ struct RuntimeHandler {
     agent_id: String,
     /// The node's LSP relay topic (ADR-055 §6.7). `None` standalone.
     node_lsps_topic: Option<String>,
+    /// The node's retained info topic (§6.3.3). `None` standalone.
+    node_info_topic: Option<String>,
+    /// §6.3.3: sink for the node's reverse-proxy base URL whenever it
+    /// CHANGES (extracted from a fresh NodeInfo). The owner
+    /// (`agent_init.rs`) re-publishes this Runtime's retained
+    /// `http_endpoint` so the Gateway keeps routing through the node.
+    /// `None` standalone / tests.
+    node_proxy_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<String>,
+    >,
+    /// Last known node reverse-proxy base URL — dedupes the node's
+    /// 60 s heartbeat, which re-delivers an unchanged NodeInfo.
+    last_node_proxy_base: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Signals `connect()` when the first ConnAck bootstrap completes.
     first_conn_tx: tokio::sync::Mutex<Option<oneshot::Sender<Result<(), String>>>>,
 }
@@ -773,6 +861,34 @@ impl MqttClientHandler for RuntimeHandler {
             if let Some(ref tx) = self.lsps_update_tx {
                 let _ = tx.send(update);
             }
+        } else if let Some(info_topic) = self.node_info_topic.as_deref()
+            && topic == info_topic
+        {
+            // §6.3.3: the node re-published its NodeInfo — initial
+            // connect, 60 s heartbeat, or a LAN IP change after a Wi-Fi
+            // hotspot switch. Extract the node's CURRENT reverse-proxy
+            // base; when it differs from the last known one, forward the
+            // new base so agent_init re-publishes our retained
+            // `http_endpoint` (`{base}/agents/{id}`). The dedupe guard
+            // keeps the node's heartbeat from churning retained
+            // publishes on every 60 s tick.
+            if let Some(base) = decode_node_proxy_base(payload) {
+                let mut last = self
+                    .last_node_proxy_base
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if last.as_deref() != Some(base.as_str()) {
+                    *last = Some(base.clone());
+                    if let Some(ref tx) = self.node_proxy_update_tx
+                        && tx.send(base).is_err()
+                    {
+                        tracing::debug!(
+                            agent_id = %self.agent_id,
+                            "node proxy update receiver dropped (endpoint re-publish sink closed)"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -833,31 +949,41 @@ impl RuntimeMqttClient {
     pub async fn connect(
         cfg: MqttConnectConfig<'_>,
     ) -> Result<Self, RuntimeMqttClientError> {
-        let client_id = format!("agent:{}", cfg.agent_id);
+        // ADR-073: the broker client id identifies THIS RUNTIME INSTANCE.
+        // Two instances of the same package must never share a client id
+        // (the broker would disconnect one); the package `agent_id` is
+        // therefore never used here.
+        let instance_id = cfg.instance_id;
+        let client_id = format!("agent:{}", instance_id);
 
         // ADR-039: cache every input needed to re-run bootstrap on every
         // (re)connect (status/meta/config publish + persistent subscriptions).
         let bootstrap_data = Arc::new(BootstrapData {
             agent_id: cfg.agent_id.to_string(),
+            instance_id: instance_id.to_string(),
+            node_id: cfg.node_id.map(|s| s.to_string()),
             agent_name: cfg.agent_name.to_string(),
             agent_version: cfg.agent_version.to_string(),
-            avatar: cfg.avatar.unwrap_or("").to_string(),
-            builtin_avatar: cfg.builtin_avatar.unwrap_or("").to_string(),
             config_json: cfg.config_json.to_string(),
-            status_topic: format!("acowork/agents/{}/status", cfg.agent_id),
-            meta_topic: format!("acowork/agents/{}/meta", cfg.agent_id),
-            config_topic: format!("acowork/agents/{}/config", cfg.agent_id),
+            status_topic: format!("acowork/agents/{}/status", instance_id),
+            meta_topic: format!("acowork/agents/{}/meta", instance_id),
+            config_topic: format!("acowork/agents/{}/config", instance_id),
             control_filter: format!(
                 "acowork/agents/{}/sessions/control/#",
-                cfg.agent_id
+                instance_id
             ),
             control_filter_prefix: format!(
                 "acowork/agents/{}/sessions/control/",
-                cfg.agent_id
+                instance_id
             ),
             node_lsps_topic: cfg
                 .node_id
                 .map(acowork_core::node::node_lsps_topic),
+            node_info_topic: cfg
+                .node_id
+                .map(acowork_core::node::node_info_topic),
+            ready_topic: format!("acowork/agents/{}/ready", instance_id),
+            ready_ever: std::sync::atomic::AtomicBool::new(false),
         });
 
         // ADR-065 Step 4: build the entity-only config for the shared
@@ -911,7 +1037,14 @@ impl RuntimeMqttClient {
             work_dir: cfg.work_dir.clone(),
             agent_id: cfg.agent_id.to_string(),
             node_lsps_topic: bootstrap_data.node_lsps_topic.clone(),
+            node_info_topic: bootstrap_data.node_info_topic.clone(),
+            node_proxy_update_tx: cfg.node_proxy_update_tx.clone(),
+            last_node_proxy_base: std::sync::Arc::new(std::sync::Mutex::new(None)),
             first_conn_tx: tokio::sync::Mutex::new(Some(first_conn_tx)),
+            // ready_topic is not cloned into the handler struct — it
+            // lives on `bootstrap_data` (an `Arc<BootstrapData>` clone
+            // is held by the handler via `self.bootstrap_data` below)
+            // and `run_bootstrap` consumes only `bootstrap_data`.
         };
 
         let inner = MqttClient::connect(config, handler, None)
@@ -944,6 +1077,7 @@ impl RuntimeMqttClient {
             inner,
             shared_client,
             agent_id: cfg.agent_id.to_string(),
+            instance_id: instance_id.to_string(),
             bootstrap_data,
         };
 
@@ -956,7 +1090,8 @@ impl RuntimeMqttClient {
     /// invoke on every (re)connect to restore both retained state
     /// and persistent subscriptions.
     ///
-    /// Implements the "Bootstrap six-step contract" of ADR-039:
+    /// Implements the "Bootstrap seven-step contract" of ADR-039
+    /// (Step 7 added in the post-2026-09-07 incident follow-up):
     /// 1. PUBLISH `status = online` (Retained) - overrides the Last
     ///    Will payload (`offline`) set during `connect()`.
     /// 2. PUBLISH `meta` (Retained) - agent capability descriptor.
@@ -968,6 +1103,16 @@ impl RuntimeMqttClient {
     ///    (re)connect - the symptom that prompted ADR-039.
     /// 6. SUBSCRIBE `acowork/nodes/{node_id}/lsps` - node LSP relay
     ///    state (ADR-055 §6.7, only when `--node-id` is set).
+    /// 7. PUBLISH `ready = true` (Retained) - idempotent re-publish
+    ///    so a reconnecting Gateway sees the Runtime's session-ready
+    ///    state immediately. Phase A publishes `ready=true` on first
+    ///    start; without Step 7 here, a Runtime that reconnects after
+    ///    an OS sleep/wake (the wake path that previously dropped
+    ///    `running_agents[id].ready`) would leave the Gateway with
+    ///    `ready=false` until the next Phase A → publish_ready cycle,
+    ///    which does not run on a (re)connect.
+    /// 8. SUBSCRIBE `acowork/nodes/{node_id}/info` - node reverse-proxy
+    ///    base URL watch (§6.3.3, only when `--node-id` is set).
     async fn run_bootstrap(
         client: &AsyncClient,
         data: &BootstrapData,
@@ -983,8 +1128,14 @@ impl RuntimeMqttClient {
             agent_id: data.agent_id.clone(),
             name: data.agent_name.clone(),
             version: data.agent_version.clone(),
-            avatar: data.avatar.clone(),
-            builtin_avatar: data.builtin_avatar.clone(),
+            // ADR-009 §V-Q: the avatar / display name are resolved
+            // server-side (Gateway `list_agents` merges the Runtime's
+            // per-instance overrides). The Runtime reports none.
+            avatar: String::new(),
+            builtin_avatar: String::new(),
+            // ADR-073: instance + location metadata.
+            instance_id: data.instance_id.clone(),
+            node_id: data.node_id.clone().unwrap_or_default(),
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -1000,6 +1151,9 @@ impl RuntimeMqttClient {
         let config = AgentConfig {
             agent_id: data.agent_id.clone(),
             config_json: data.config_json.clone(),
+            // ADR-073: instance + location metadata.
+            instance_id: data.instance_id.clone(),
+            node_id: data.node_id.clone().unwrap_or_default(),
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -1033,6 +1187,64 @@ impl RuntimeMqttClient {
                 .await
                 .map_err(|e| {
                     RuntimeMqttClientError::Subscribe(format!("node lsps: {}", e))
+                })?;
+        }
+
+        // Step 7: PUBLISH `ready = true` (Retained) — gated on the
+        // session having been ready once.
+        //
+        // Phase A publishes `ready=true` after the first connect's
+        // global-resource pull completes and sets `ready_ever`. On any
+        // LATER (re)connect — OS sleep/wake, a dropped link — Phase A
+        // does not run again, so this step re-stamps the retained bit
+        // and the Gateway's `running_agents[id].ready` self-heals.
+        // Publishing on the very FIRST ConnAck would flip `ready=true`
+        // up to `PULL_MAX_DURATION` before the session can actually
+        // serve, so the gate keeps first-connect semantics with Phase
+        // A (the Desktop's `running && ready` gate stays closed until
+        // the pull completes).
+        //
+        // The payload is the plain text `"true"` / `"false"` shape the
+        // Gateway's `acowork/agents/+/ready` dispatch handler expects
+        // (see `core/acowork-gateway/src/mqtt/dispatch.rs::handle_plaintext_message`).
+        //
+        // Error semantics: a failed publish here MUST NOT abort the
+        // bootstrap. Steps 1–6 have already established status / meta /
+        // config / subscriptions; rolling them back because the ready
+        // bit could not be re-stamped would leave the Runtime in a
+        // strictly worse state than the one we entered with. We log
+        // at WARN and let the next (re)connect retry — the
+        // exponential backoff shared client guarantees there will be
+        // a next one. This is the canonical "recoverable error →
+        // automatic retry, user-invisible" pattern from the 2026-09-07
+        // incident review.
+        if data.ready_ever.load(std::sync::atomic::Ordering::Acquire)
+            && let Err(e) = client
+                .publish(&data.ready_topic, QoS::AtLeastOnce, true, "true")
+                .await
+        {
+            tracing::warn!(
+                agent_id = %data.agent_id,
+                error = %e,
+                "Step 7 (ready) republish failed; bootstrap continues, \
+                 Gateway will see ready=true on the next reconnect"
+            );
+        }
+
+        // Step 8: SUBSCRIBE the node's retained info topic (§6.3.3,
+        // only when `--node-id` is set). Lets the Runtime watch the
+        // node's reverse-proxy base URL and re-publish its own
+        // `http_endpoint` when the node changes network — self-healing
+        // without a node or Runtime restart. On a fresh broker the
+        // retained NodeInfo is re-delivered here right after ConnAck,
+        // which also repairs the endpoint if the node re-published it
+        // while we were disconnected.
+        if let Some(info_topic) = data.node_info_topic.as_deref() {
+            client
+                .subscribe(info_topic, QoS::AtLeastOnce)
+                .await
+                .map_err(|e| {
+                    RuntimeMqttClientError::Subscribe(format!("node info: {}", e))
                 })?;
         }
 
@@ -1085,7 +1297,7 @@ impl RuntimeMqttClient {
 
     /// Publish agent status (online/offline) as a plain text Retained message.
     pub async fn publish_status(&self, online: bool) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/status", self.agent_id);
+        let topic = format!("acowork/agents/{}/status", self.instance_id);
         let payload = if online { "online" } else { "offline" };
         self.client().await
             .publish(topic, QoS::AtLeastOnce, true, payload)
@@ -1108,7 +1320,16 @@ impl RuntimeMqttClient {
     /// restarts after the Runtime is already up will see the latest ready
     /// state on its first subscribe.
     pub async fn publish_ready(&self, ready: bool) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/ready", self.agent_id);
+        // Mark the session's ready history BEFORE publishing: once
+        // Phase A has completed, Step 7 of `run_bootstrap` may
+        // re-stamp the retained bit on any later reconnect, so the
+        // flag must not depend on this single publish succeeding (a
+        // failed publish means the link is about to retry anyway, and
+        // Step 7 will cover it then).
+        self.bootstrap_data
+            .ready_ever
+            .store(ready, std::sync::atomic::Ordering::Release);
+        let topic = format!("acowork/agents/{}/ready", self.instance_id);
         let payload = if ready { "true" } else { "false" };
         self.client().await
             .publish(topic, QoS::AtLeastOnce, true, payload)
@@ -1183,7 +1404,7 @@ impl RuntimeMqttClient {
     ) -> Result<(), RuntimeMqttClientError> {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
-            self.agent_id, session_id, event_type
+            self.instance_id, session_id, event_type
         );
         // Session messages are QoS 0 (fire-and-forget for streaming events)
         self.publish_envelope(&topic, envelope, MqttQoS::AtMostOnce, false)
@@ -1197,7 +1418,7 @@ impl RuntimeMqttClient {
         event_type: &str,
         envelope: &DataEnvelope,
     ) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/sessions/{}", self.agent_id, event_type);
+        let topic = format!("acowork/agents/{}/sessions/{}", self.instance_id, event_type);
         self.publish_envelope(&topic, envelope, MqttQoS::AtLeastOnce, false)
             .await
     }
@@ -1205,6 +1426,11 @@ impl RuntimeMqttClient {
     /// Get the agent_id this client represents.
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    /// ADR-073: get the instance identity used for topic construction.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Get a clone of the inner AsyncClient.
@@ -1241,7 +1467,7 @@ impl RuntimeMqttClient {
     /// [`Self::shutdown`] explicitly.
     pub async fn shutdown(&self) {
         let client = self.client().await;
-        let status_topic = format!("acowork/agents/{}/status", self.agent_id);
+        let status_topic = format!("acowork/agents/{}/status", self.instance_id);
         let _ = client
             .publish(status_topic, QoS::AtLeastOnce, true, "offline")
             .await;
@@ -1266,6 +1492,8 @@ pub type SharedRuntimeMqttClient = Arc<Mutex<RuntimeMqttClient>>;
 #[derive(Clone)]
 pub struct MqttChunkPublisher {
     agent_id: String,
+    /// ADR-073: instance identity for topic construction.
+    instance_id: String,
     shared_client: Arc<Mutex<AsyncClient>>,
 }
 
@@ -1274,6 +1502,7 @@ impl MqttChunkPublisher {
     pub fn from_runtime_client(client: &RuntimeMqttClient) -> Self {
         Self {
             agent_id: client.agent_id().to_string(),
+            instance_id: client.instance_id().to_string(),
             shared_client: Arc::clone(&client.shared_client),
         }
     }
@@ -1288,17 +1517,23 @@ impl MqttChunkPublisher {
         &self.agent_id
     }
 
+    /// ADR-073: return the instance identity used for topic construction.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     /// Clear a retained `messages/{event_type}` event for a session.
     ///
     /// Publishes a zero-byte payload with `retain = true` to the
-    /// `acowork/agents/{id}/sessions/{sid}/messages/{event_type}` topic.
+    /// `acowork/agents/{instance_id}/sessions/{sid}/messages/{event_type}`
+    /// topic.
     /// Per MQTT spec this deletes the previously stored retained message,
     /// preventing a reconnecting Desktop from receiving stale blocking
     /// events (tool approval / ask question) from a previous turn.
     pub async fn clear_retained_event(&self, session_id: &str, event_type: &str) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
-            self.agent_id, session_id, event_type
+            self.instance_id, session_id, event_type
         );
         if let Err(e) = self
             .client()
@@ -1323,7 +1558,7 @@ impl MqttChunkPublisher {
         event_type: &str,
         envelope: &DataEnvelope,
     ) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/sessions/{}", self.agent_id, event_type);
+        let topic = format!("acowork/agents/{}/sessions/{}", self.instance_id, event_type);
         let bytes = prost::Message::encode_to_vec(envelope);
         self.client().await
             .publish(topic, QoS::AtLeastOnce, false, bytes)
@@ -1354,7 +1589,7 @@ impl MqttChunkPublisher {
         };
         let topic = format!(
             "acowork/agents/{}/sessions/{}/opened",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.client().await
@@ -1384,7 +1619,7 @@ impl MqttChunkPublisher {
         };
         let topic = format!(
             "acowork/agents/{}/sessions/{}/not_opened",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.client().await
@@ -1426,7 +1661,7 @@ impl MqttChunkPublisher {
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/config",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let envelope = DataEnvelope {
             version: 1,
@@ -1463,7 +1698,7 @@ impl MqttChunkPublisher {
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/state",
-            self.agent_id, session_id
+            self.instance_id, session_id
         );
         let envelope = DataEnvelope {
             version: 1,
@@ -1518,7 +1753,7 @@ impl MqttChunkPublisher {
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
-            self.agent_id, session_id, event_type
+            self.instance_id, session_id, event_type
         );
         if let Err(e) = self
             .client()
@@ -2076,6 +2311,50 @@ mod tests {
         assert!(update.endpoint.is_none());
     }
 
+    // ── decode_node_proxy_base (§6.3.3) ──────────────────────────────
+
+    fn encode_node_info(http_endpoint: &str) -> Vec<u8> {
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::NodeInfo(NodeInfo {
+                node_id: "node-test".to_string(),
+                machine_uid: "mu".to_string(),
+                hostname: "host".to_string(),
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                node_version: "1.0.0".to_string(),
+                protocol_version: 1,
+                capabilities: vec!["control_plane".to_string()],
+                max_agents: 10,
+                agent_count: 0,
+                http_endpoint: http_endpoint.to_string(),
+            })),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    #[test]
+    fn decode_node_proxy_base_extracts_endpoint() {
+        let payload = encode_node_info("http://192.168.1.20:19900");
+        assert_eq!(decode_node_proxy_base(&payload).as_deref(), Some("http://192.168.1.20:19900"));
+    }
+
+    #[test]
+    fn decode_node_proxy_base_empty_endpoint_is_none() {
+        let payload = encode_node_info("");
+        assert!(decode_node_proxy_base(&payload).is_none());
+    }
+
+    #[test]
+    fn decode_node_proxy_base_empty_payload_is_none() {
+        assert!(decode_node_proxy_base(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_node_proxy_base_garbage_is_none() {
+        assert!(decode_node_proxy_base(b"not-a-protobuf").is_none());
+    }
+
     #[tokio::test]
     async fn test_runtime_mqtt_client_connects_and_publishes() {
         // Start a broker (using the Gateway's broker module). Threaded
@@ -2100,10 +2379,11 @@ mod tests {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.agent",
+                // ADR-073: broker client id + topics are keyed on the
+                // instance id (two instances of one package may coexist).
+                instance_id: "aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d",
                 agent_name: "Test Agent",
                 agent_version: "1.0.0",
-                avatar: None,
-                builtin_avatar: None,
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
@@ -2113,6 +2393,7 @@ mod tests {
                 embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
+                node_proxy_update_tx: None,
                 work_dir,
                 username: None,
                 password: None,
@@ -2130,7 +2411,7 @@ mod tests {
         sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_eventloop) = SubClient::new(sub_opts, 10);
         sub_client
-            .subscribe("acowork/agents/com.test.agent/#", QoS::AtLeastOnce)
+            .subscribe("acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/#", QoS::AtLeastOnce)
             .await
             .unwrap();
 
@@ -2152,19 +2433,19 @@ mod tests {
 
         assert!(
             received_topics
-                .contains(&"acowork/agents/com.test.agent/status".to_string()),
+                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/status".to_string()),
             "should receive status: {:?}",
             received_topics
         );
         assert!(
             received_topics
-                .contains(&"acowork/agents/com.test.agent/meta".to_string()),
+                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/meta".to_string()),
             "should receive meta: {:?}",
             received_topics
         );
         assert!(
             received_topics
-                .contains(&"acowork/agents/com.test.agent/config".to_string()),
+                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/config".to_string()),
             "should receive config: {:?}",
             received_topics
         );
@@ -2196,10 +2477,10 @@ mod tests {
                 host: "127.0.0.1",
                 port,
                 agent_id: "com.test.bootstrap",
+                // ADR-073: instance-scoped identity (see first test).
+                instance_id: "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d",
                 agent_name: "Bootstrap Test",
                 agent_version: "1.0.0",
-                avatar: None,
-                builtin_avatar: None,
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
@@ -2209,6 +2490,7 @@ mod tests {
                 embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
+                node_proxy_update_tx: None,
                 work_dir,
                 username: None,
                 password: None,
@@ -2244,7 +2526,7 @@ mod tests {
         sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_loop) = SubClient::new(sub_opts, 10);
         sub_client
-            .subscribe("acowork/agents/com.test.bootstrap/#", QoS::AtLeastOnce)
+            .subscribe("acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/#", QoS::AtLeastOnce)
             .await
             .unwrap();
 
@@ -2263,15 +2545,15 @@ mod tests {
         }
 
         assert!(
-            received.contains(&"acowork/agents/com.test.bootstrap/status".to_string()),
+            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/status".to_string()),
             "should receive status after multiple bootstraps"
         );
         assert!(
-            received.contains(&"acowork/agents/com.test.bootstrap/meta".to_string()),
+            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/meta".to_string()),
             "should receive meta after multiple bootstraps"
         );
         assert!(
-            received.contains(&"acowork/agents/com.test.bootstrap/config".to_string()),
+            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/config".to_string()),
             "should receive config after multiple bootstraps"
         );
 

@@ -310,36 +310,7 @@ async fn proxy_fs_browse_to_node(
     target: &str,
     path: &str,
 ) -> Result<Json<FsBrowseResponse>, ApiError> {
-    let registry = state
-        .node_registry
-        .as_ref()
-        .ok_or_else(|| ApiError::service_unavailable("Node registry not initialized"))?;
-
-    let endpoint = {
-        let reg = registry.read().await;
-        let node = reg
-            .get(target)
-            .ok_or_else(|| ApiError::not_found(&format!("Node '{}' not found", target)))?;
-        if !node.online {
-            return Err(ApiError::service_unavailable(&format!(
-                "Node '{}' is offline",
-                target
-            )));
-        }
-        match node
-            .info
-            .as_ref()
-            .and_then(|i| if i.http_endpoint.is_empty() { None } else { Some(i.http_endpoint.clone()) })
-        {
-            Some(ep) => ep,
-            None => {
-                return Err(ApiError::service_unavailable(&format!(
-                    "Node '{}' has no HTTP endpoint",
-                    target
-                )));
-            }
-        }
-    };
+    let endpoint = crate::http::proxy::node_http_endpoint(state, target).await?;
 
     let url = format!("{}/fs/browse?path={}", endpoint, urlencoding::encode(path));
 

@@ -30,14 +30,25 @@ import { llmAvailabilityFromWire } from "../lib/llmAvailability";
 // therefore carry no `sections`. Without this merge, the last session_state
 // to arrive would overwrite the sections delivered by the context_usage chunk,
 // and the input-box popover breakdown would always render 0%.
+//
+// The same holds for `iteration` (per-session lifetime LLM-call count):
+// session_state / fetchSessionState carry it only from the persisted meta,
+// which can briefly lag the live `context_usage` push — preserving the last
+// known value keeps the "Iterations" display from glitching to the
+// assistant-message fallback between pushes.
 function mergeContextUsage(
   prev: ContextUsageInfo | null | undefined,
   next: ContextUsageInfo,
 ): ContextUsageInfo {
+  const preserved: Partial<ContextUsageInfo> = {};
   if (prev?.sections && !next.sections) {
-    return { ...next, sections: prev.sections };
+    preserved.sections = prev.sections;
   }
-  return next;
+  if (prev?.iteration != null && next.iteration == null) {
+    preserved.iteration = prev.iteration;
+  }
+  if (Object.keys(preserved).length === 0) return next;
+  return { ...next, ...preserved };
 }
 
 // ---------------------------------------------------------------------------
@@ -155,10 +166,10 @@ export function mergeMessageWindow(
 
 function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
   const store = useAgentStore.getState();
-  const agentProfile = store.getProfile(agentId);
   const agent = store.agents[agentId]?.meta;
   return {
-    senderDisplayName: agentProfile?.displayName ?? agent?.display_name ?? agent?.name,
+    // ADR-009 §V-Q: name is server-side — no localStorage overlay.
+    senderDisplayName: agent?.display_name ?? agent?.name,
     senderRole: agent?.role,
   };
 }
@@ -842,9 +853,12 @@ async function doInitMqttListener(): Promise<void> {
 
   _mqttAgentEventUnlisten = await listen("agent-event", (event) => {
     const data = event.payload as Record<string, unknown>;
-    const agentId = data.agent_id as string;
+    // ADR-073: every `agent-event` carries the INSTANCE identity in
+    // `instance_id` — the store addressing key. Package `agent_id` is a
+    // category attribute with display value only and is never used here.
+    const agentId = data.instance_id as string;
     if (!agentId) {
-      // Events without an agent_id are ignored at the store level
+      // Events without an instance_id are ignored at the store level
       return;
     }
 
@@ -1054,7 +1068,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // safe to fire even if the backend has already dropped the session.
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "close_session",
         payloadJson: { session_id: sessionId },
       });
@@ -1074,7 +1088,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    *  ADR-034 Phase 5: dedicated compress_action command with compress_type. */
   sendCompressAction: (agentId: string, sessionId: string, compressType: number) => {
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "compress_action",
       payloadJson: { session_id: sessionId, compress_type: compressType },
     }).catch((err: unknown) => log.warn("[ChatStore] compress_action via MQTT failed:", err));
@@ -1092,7 +1106,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    */
   cancelTool: (agentId: string, sessionId: string, toolCallId: string) => {
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "cancel_tool",
       payloadJson: { session_id: sessionId, tool_call_id: toolCallId },
     }).catch((err: unknown) => log.warn("[ChatStore] cancel_tool via MQTT failed:", err));
@@ -1180,7 +1194,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // still ack correctly when the broker reconnects.
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "open_session",
         payloadJson: { session_id: sessionId },
       });
@@ -1427,7 +1441,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "chat_message",
         payloadJson: {
           session_id: sessionId,
@@ -1438,6 +1452,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         },
       });
       log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
+      // Touch the user's last-interaction timestamp so the next Gateway
+      // boot can pick this agent as the default (`/api/agents` sorts by
+      // `last_interaction_at`). Best-effort — failure is logged but does
+      // not roll back the sent message; the on-disk store is already
+      // idempotent on consecutive touches.
+      void fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/interactions`, {
+        method: "POST",
+      }).catch((err: unknown) => {
+        log.debug("[ChatStore] touch_interaction HTTP failed (non-fatal):", err);
+      });
       // ADR-050 C5: reconcile the optimistic user message + attachment
       // entries with the server once the backend has persisted them. See
       // `scheduleSendReconciliation` — without this the attachment chips
@@ -1480,7 +1504,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // ADR-034 Phase 5: Send stop via MQTT with reason
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "stop",
       payloadJson: { session_id: sessionId, reason: "user_requested" },
     }).catch((err: unknown) => log.warn("[ChatStore] stop via MQTT failed:", err));
@@ -1498,7 +1522,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // ADR-034 Phase 5: Send stop via MQTT with reason
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "stop",
       payloadJson: { session_id: sessionId, reason: "user_requested" },
     }).catch((err: unknown) => log.warn("[ChatStore] sendStop via MQTT failed:", err));
@@ -1560,7 +1584,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // this field, the LLM call would still target the previous provider's
     // base_url and yield 401 errors on the new model's endpoint.
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "model_switch",
       payloadJson: { model_id: model, session_id: sessionId, provider_id: provider },
     }).catch((err: unknown) => log.warn("[ChatStore] model_switch via MQTT failed:", err));
@@ -1568,7 +1592,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setSessionWorkspaceMqtt: (agentId: string, sessionId: string, workspaceId: string) => {
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "workspace_switch",
       payloadJson: { workspace_id: workspaceId, session_id: sessionId },
     }).catch((err: unknown) => log.warn("[ChatStore] workspace_switch via MQTT failed:", err));
@@ -1582,7 +1606,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // ADR-033: Send reasoning effort via MQTT
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "reasoning_effort",
       payloadJson: { effort, session_id: sessionId },
     }).catch((err: unknown) => log.warn("[ChatStore] reasoning_effort via MQTT failed:", err));
@@ -1594,7 +1618,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const sessionId = getAgentState(get(), agentId).activeSessionId;
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "continue_execution",
         payloadJson: {
           session_id: sessionId ?? "",
@@ -1608,7 +1632,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   publishUpdateSessionTitle: (agentId: string, sessionId: string, title: string) => {
     invoke("mqtt_publish_control", {
-      agentId,
+      instanceId: agentId,
       command: "update_session_title",
       payloadJson: { session_id: sessionId, title },
     }).catch((err: unknown) => log.warn("[ChatStore] update_session_title via MQTT failed:", err));
@@ -3120,7 +3144,7 @@ export function handleMessageEvent(
 
     // ── Agent lifecycle: status, meta, config ──
     case "agent_status": {
-      const aid = data.agent_id as string | undefined;
+      const aid = data.instance_id as string | undefined;
       const online = data.online as boolean | undefined;
       if (aid && online !== undefined) {
         // `sleeping` is included by the plain-text branch (Desktop
@@ -3161,20 +3185,22 @@ export function handleMessageEvent(
     }
 
     case "agent_meta": {
-      const aid = data.agent_id as string | undefined;
+      const aid = data.instance_id as string | undefined;
       if (aid) {
+        // ADR-009 §V-Q: avatar / display name are resolved server-side
+        // (Gateway `list_agents` merges the Runtime's per-instance
+        // overrides). The Runtime meta payload carries no avatar, so
+        // patching it here would clobber the effective value.
         useAgentStore.getState().patchAgentMeta(aid, {
           name: data.name as string | undefined,
           version: data.version as string | undefined,
-          avatar: data.avatar as string | undefined,
-          builtin_avatar: data.builtin_avatar as string | undefined,
         });
       }
       break;
     }
 
     case "agent_config": {
-      const aid = data.agent_id as string | undefined;
+      const aid = data.instance_id as string | undefined;
       if (aid && typeof data.config_json === "string") {
         try {
           const config = JSON.parse(data.config_json);
@@ -3252,7 +3278,7 @@ export function handleMessageEvent(
     case "memory_node_update": {
       log.debug("[ChatStore] Memory node update:", {
         node_id: data.node_id,
-        agent_id: data.agent_id,
+        instance_id: data.instance_id,
       });
       break;
     }

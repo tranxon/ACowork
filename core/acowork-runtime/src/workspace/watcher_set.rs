@@ -54,21 +54,22 @@ pub struct WorkspaceWatcherSet {
 }
 
 /// MQTT sink — encodes each aggregated event as a `DataEnvelope` and
-/// publishes it on `acowork/agents/{id}/workspaces/{wid}/fs-changed`
+/// publishes it on `acowork/agents/{instance_id}/workspaces/{wid}/fs-changed`
 /// at QoS 1 (at-least-once; a lost event would desync the Desktop's
 /// FileTree until the reconnect full-sync fallback).
+///
+/// ADR-073: the topic key is the Runtime INSTANCE id read from the
+/// bound MQTT client at publish time — never the package `agent_id`.
+/// The set's `agent_id` label survives only in the envelope payload
+/// (Desktop display) and in watcher bookkeeping.
 struct MqttFsEventSink {
-    agent_id: String,
     mqtt_slot: SharedMqttClientSlot,
 }
 
 #[async_trait::async_trait]
 impl WorkspaceFsEventSink for MqttFsEventSink {
     async fn publish(&self, event: WorkspaceFsChangeEvent) {
-        let topic = format!(
-            "acowork/agents/{}/workspaces/{}/fs-changed",
-            self.agent_id, event.workspace_id
-        );
+        let workspace_id = event.workspace_id.clone();
         let envelope = DataEnvelope {
             version: 1,
             payload: Some(data_envelope::Payload::WorkspaceFsChangeEvent(event)),
@@ -78,12 +79,20 @@ impl WorkspaceFsEventSink for MqttFsEventSink {
         let client = self.mqtt_slot.lock().await.clone();
         let Some(client) = client else {
             tracing::debug!(
-                topic = %topic,
                 "MQTT client not ready — workspace fs event dropped"
             );
             return;
         };
         let client: RuntimeMqttClient = client.lock().await.clone();
+        // ADR-073: the topic key is the bound client's INSTANCE id
+        // (client_id is also instance-scoped), so two instances of one
+        // package publish to disjoint fs-changed topics. The package
+        // `agent_id` survives only inside the envelope payload.
+        let topic = format!(
+            "acowork/agents/{}/workspaces/{}/fs-changed",
+            client.instance_id(),
+            workspace_id,
+        );
         if let Err(e) = client
             .publish_envelope(&topic, &envelope, MqttQoS::AtLeastOnce, false)
             .await
@@ -138,7 +147,6 @@ impl WorkspaceWatcherSet {
         let (watcher, targets_tx) = WorkspaceFsWatcher::new(root, &self.agent_id, workspace_id)?;
         let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(MqttFsEventSink {
-            agent_id: self.agent_id.clone(),
             mqtt_slot: self.mqtt_slot.clone(),
         });
         let task = tokio::spawn(watcher.run(sink, shutdown_rx));

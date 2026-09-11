@@ -34,6 +34,7 @@
 //! └── cli.rs        # §6.13.2 command surface (thin orchestration shell)
 //! ```
 
+pub mod package_http;
 pub mod cli;
 pub mod config;
 pub mod control;

@@ -356,6 +356,22 @@ mod tests {
         assert_eq!(req.default_model, Some("deepseek-chat".to_string()));
     }
 
+    /// `[security].allowed_node_ips` must NOT be changeable through
+    /// `PUT /api/config`. `UpdateConfigRequest` has no `security` field,
+    /// so a payload smuggling one in is silently ignored at
+    /// deserialization — the allowlist stays boot-time-only.
+    #[test]
+    fn test_update_config_request_ignores_security_field() {
+        let json = r#"{"log_level": "info", "security": {"allowed_node_ips": ["203.0.113.5"]}}"#;
+        let req: UpdateConfigRequest = serde_json::from_str(json).unwrap();
+        // The smuggled security payload is not surfaced as any field.
+        assert_eq!(req.log_level, Some("info".to_string()));
+        // And GatewayConfig has no runtime path that copies it — the only
+        // place `security` is ever populated is config load (TOML/env).
+        let cfg = crate::config::GatewayConfig::default();
+        assert!(cfg.security.allowed_node_ips.is_empty());
+    }
+
     #[test]
     fn test_config_response_serialization() {
         let resp = ConfigResponse {

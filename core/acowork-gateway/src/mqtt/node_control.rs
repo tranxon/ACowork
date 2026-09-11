@@ -58,6 +58,62 @@ pub struct NodeControlClient {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<NodeEvent>>>>,
 }
 
+/// Where the node should read the package from.
+pub enum NodePackageSource<'a> {
+    /// Gateway-hosted download URL (ADR-055 §3.2).
+    Url(&'a str),
+    /// Node-local path of an already-spooled package (Phase 2b
+    /// single-machine). Mutually exclusive with [`Self::Url`].
+    LocalPath(&'a str),
+}
+
+/// One install dispatch to a node.
+///
+/// ADR-073 §5: the Gateway mints the instance identity and states the
+/// intent; the node owns *when* it runs (one install slot per node).
+/// Grouping the fields here keeps both entry points (registry URL,
+/// spooled local path) building the identical `NodeInstall` payload —
+/// a missing `system`/`ensure` flag would otherwise silently change
+/// which lane, or which dedup rule, the install lands on.
+pub struct NodeInstallDispatch<'a> {
+    pub node_id: &'a str,
+    /// ADR-073 instance identity, used verbatim by the node.
+    pub instance_id: &'a str,
+    pub agent_id: &'a str,
+    pub source: NodePackageSource<'a>,
+    /// Signature strictness (ADR-055 §6.20).
+    pub dev_mode: bool,
+    /// `manifest.system` — the install takes the node's system lane.
+    pub system: bool,
+    /// Declarative "ensure present" intent: if any instance of the
+    /// package is already installed on the node, the request is a no-op
+    /// instead of landing another copy. `false` = explicit install of
+    /// one more copy.
+    pub ensure: bool,
+    /// ADR-059 §6 correlation id echoed in the node's `NodeEvent` reply.
+    /// The blocking [`NodeControlClient::install_agent`] path generates
+    /// its own request id instead, so this field is unused there.
+    pub operation_id: &'a str,
+}
+
+impl NodeInstallDispatch<'_> {
+    fn to_proto(&self) -> acowork_core::mqtt_proto::NodeInstall {
+        let (package_url, local_path) = match self.source {
+            NodePackageSource::Url(url) => (url.to_string(), String::new()),
+            NodePackageSource::LocalPath(path) => (String::new(), path.to_string()),
+        };
+        acowork_core::mqtt_proto::NodeInstall {
+            agent_id: self.agent_id.to_string(),
+            package_url,
+            local_path,
+            dev_mode: self.dev_mode,
+            instance_id: self.instance_id.to_string(),
+            system: self.system,
+            ensure: self.ensure,
+        }
+    }
+}
+
 impl NodeControlClient {
     pub fn new(client: Arc<GatewayMqttClient>) -> Self {
         Self {
@@ -67,11 +123,13 @@ impl NodeControlClient {
     }
 
     /// Publish a command and await the correlated NodeEvent reply.
-    async fn send(&self, node_id: &str, agent_id: &str, command: NodeControlCommand) -> Result<NodeEvent, NodeControlError> {
+    async fn send(&self, node_id: &str, instance_id: &str, command: NodeControlCommand) -> Result<NodeEvent, NodeControlError> {
         let request_id = command.request_id.clone();
         let cmd_name = command_name(&command);
-        let topic = node_agent_control_topic(node_id, agent_id, &cmd_name);
-        let reply_topic = node_agent_events_topic(node_id, agent_id);
+        // ADR-073: control-plane topics are scoped to the INSTANCE
+        // identity (`nodes/{node}/agents/{instance_id}/control/{cmd}`).
+        let topic = node_agent_control_topic(node_id, instance_id, &cmd_name);
+        let reply_topic = node_agent_events_topic(node_id, instance_id);
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(request_id.clone(), tx);
@@ -113,10 +171,13 @@ impl NodeControlClient {
     }
 
     /// Start an agent Runtime on a node.
-    pub async fn start_agent(&self, node_id: &str, agent_id: &str, dev_mode: bool) -> Result<NodeEvent, NodeControlError> {
+    ///
+    /// ADR-073: `instance_id` scopes the control topic; `agent_id` is the
+    /// package identity carried in the payload.
+    pub async fn start_agent(&self, node_id: &str, instance_id: &str, agent_id: &str, dev_mode: bool) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
@@ -124,6 +185,7 @@ impl NodeControlClient {
                     acowork_core::mqtt_proto::NodeStart {
                         agent_id: agent_id.to_string(),
                         dev_mode,
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -132,10 +194,10 @@ impl NodeControlClient {
     }
 
     /// Stop an agent Runtime on a node.
-    pub async fn stop_agent(&self, node_id: &str, agent_id: &str, reason: &str) -> Result<NodeEvent, NodeControlError> {
+    pub async fn stop_agent(&self, node_id: &str, instance_id: &str, agent_id: &str, reason: &str) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
@@ -143,6 +205,7 @@ impl NodeControlClient {
                     acowork_core::mqtt_proto::NodeStop {
                         agent_id: agent_id.to_string(),
                         reason: reason.to_string(),
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -151,16 +214,17 @@ impl NodeControlClient {
     }
 
     /// Uninstall an agent package on a node.
-    pub async fn uninstall_agent(&self, node_id: &str, agent_id: &str) -> Result<NodeEvent, NodeControlError> {
+    pub async fn uninstall_agent(&self, node_id: &str, instance_id: &str, agent_id: &str) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
                 command: Some(node_control_command::Command::Uninstall(
                     acowork_core::mqtt_proto::NodeUninstall {
                         agent_id: agent_id.to_string(),
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -169,20 +233,21 @@ impl NodeControlClient {
     }
 
     /// Install an agent package on a node from a node-local spooled path.
-    pub async fn install_agent(&self, node_id: &str, agent_id: &str, local_path: &str, dev_mode: bool) -> Result<NodeEvent, NodeControlError> {
+    ///
+    /// ADR-073: `instance_id` is generated by the Gateway at install
+    /// time and used verbatim by the node for the on-disk landing
+    /// directory `{agent_id}/{instance_id}/` and the Runtime's
+    /// `--agent-instance-id`.
+    pub async fn install_agent(&self, dispatch: NodeInstallDispatch<'_>) -> Result<NodeEvent, NodeControlError> {
+        let (node_id, instance_id) = (dispatch.node_id.to_string(), dispatch.instance_id.to_string());
         self.send(
-            node_id,
-            agent_id,
+            &node_id,
+            &instance_id,
             NodeControlCommand {
-                node_id: node_id.to_string(),
+                node_id: node_id.clone(),
                 request_id: Uuid::new_v4().to_string(),
                 command: Some(node_control_command::Command::Install(
-                    acowork_core::mqtt_proto::NodeInstall {
-                        agent_id: agent_id.to_string(),
-                        package_url: String::new(),
-                        local_path: local_path.to_string(),
-                        dev_mode,
-                    },
+                    dispatch.to_proto(),
                 )),
             },
         )
@@ -191,35 +256,30 @@ impl NodeControlClient {
 
     /// Install an agent package on a node from a Gateway-hosted download
     /// URL (ADR-055 §3.2). Fire-and-forget: the install is asynchronous —
-    /// the node pulls the package from the URL, installs it locally, and
-    /// the Gateway observes completion via the retained `installed`
-    /// inventory entry (the command's NodeEvent reply still carries the
-    /// `request_id` for diagnostics, but nothing blocks on it here).
+    /// the node pulls the package from the URL and lands it on its single
+    /// install slot; the Gateway observes completion via the retained
+    /// `installed` inventory entry (the command's NodeEvent reply still
+    /// carries the `request_id` for diagnostics, but nothing blocks on it
+    /// here).
     ///
     /// ADR-059 §6: `operation_id` is carried as the command's
     /// `request_id` so the node's NodeEvent reply (same id) can be
     /// correlated back to the tracked operation.
     pub async fn install_agent_by_url(
         &self,
-        node_id: &str,
-        agent_id: &str,
-        package_url: &str,
-        dev_mode: bool,
-        operation_id: &str,
+        dispatch: NodeInstallDispatch<'_>,
     ) -> Result<(), NodeControlError> {
+        let node_id = dispatch.node_id.to_string();
+        let operation_id = dispatch.operation_id.to_string();
+        let instance_id = dispatch.instance_id.to_string();
         let command = NodeControlCommand {
-            node_id: node_id.to_string(),
-            request_id: operation_id.to_string(),
+            node_id: node_id.clone(),
+            request_id: operation_id,
             command: Some(node_control_command::Command::Install(
-                acowork_core::mqtt_proto::NodeInstall {
-                    agent_id: agent_id.to_string(),
-                    package_url: package_url.to_string(),
-                    local_path: String::new(),
-                    dev_mode,
-                },
+                dispatch.to_proto(),
             )),
         };
-        let topic = node_agent_control_topic(node_id, agent_id, "install");
+        let topic = node_agent_control_topic(&node_id, &instance_id, "install");
         let envelope = DataEnvelope {
             version: 1,
             payload: Some(data_envelope::Payload::NodeControlCommand(command)),
@@ -235,13 +295,14 @@ impl NodeControlClient {
     pub async fn clone_agent(
         &self,
         node_id: &str,
+        instance_id: &str,
         agent_id: &str,
         new_agent_id: &str,
         mode: &str,
     ) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
@@ -250,6 +311,7 @@ impl NodeControlClient {
                         agent_id: agent_id.to_string(),
                         new_agent_id: new_agent_id.to_string(),
                         mode: mode.to_string(),
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -263,6 +325,7 @@ impl NodeControlClient {
     pub async fn upgrade_agent_by_url(
         &self,
         node_id: &str,
+        instance_id: &str,
         agent_id: &str,
         package_url: &str,
         dev_mode: bool,
@@ -276,10 +339,11 @@ impl NodeControlClient {
                     package_url: package_url.to_string(),
                     local_path: String::new(),
                     dev_mode,
+                    instance_id: instance_id.to_string(),
                 },
             )),
         };
-        let topic = node_agent_control_topic(node_id, agent_id, "upgrade");
+        let topic = node_agent_control_topic(node_id, instance_id, "upgrade");
         let envelope = DataEnvelope {
             version: 1,
             payload: Some(data_envelope::Payload::NodeControlCommand(command)),
@@ -295,12 +359,13 @@ impl NodeControlClient {
     pub async fn publish_prepare(
         &self,
         node_id: &str,
+        instance_id: &str,
         agent_id: &str,
         clean: bool,
     ) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
@@ -308,6 +373,7 @@ impl NodeControlClient {
                     acowork_core::mqtt_proto::NodePublishPrepare {
                         agent_id: agent_id.to_string(),
                         clean,
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -320,6 +386,7 @@ impl NodeControlClient {
     pub async fn publish_build(
         &self,
         node_id: &str,
+        instance_id: &str,
         agent_id: &str,
         output_dir: &str,
         sign: bool,
@@ -327,7 +394,7 @@ impl NodeControlClient {
     ) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
@@ -337,6 +404,7 @@ impl NodeControlClient {
                         output_dir: output_dir.to_string(),
                         sign,
                         key_dir: key_dir.to_string(),
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -345,10 +413,10 @@ impl NodeControlClient {
     }
 
     /// Import a skills ZIP on a node (path is node-local).
-    pub async fn skills_import(&self, node_id: &str, agent_id: &str, zip_path: &str) -> Result<NodeEvent, NodeControlError> {
+    pub async fn skills_import(&self, node_id: &str, instance_id: &str, agent_id: &str, zip_path: &str) -> Result<NodeEvent, NodeControlError> {
         self.send(
             node_id,
-            agent_id,
+            instance_id,
             NodeControlCommand {
                 node_id: node_id.to_string(),
                 request_id: Uuid::new_v4().to_string(),
@@ -356,6 +424,7 @@ impl NodeControlClient {
                     acowork_core::mqtt_proto::NodeSkillsImport {
                         agent_id: agent_id.to_string(),
                         zip_path: zip_path.to_string(),
+                        instance_id: instance_id.to_string(),
                     },
                 )),
             },
@@ -363,8 +432,32 @@ impl NodeControlClient {
         .await
     }
 
-    /// Interpret a NodeEvent reply: map to a Gateway-style error on
-    /// non-ok status (not_implemented → clear error).
+    /// Check an install-style reply: the node may answer `ok` (already
+    /// terminal, e.g. the package was already there) or `in_progress`
+    /// (accepted onto the node's install slot, still queued or running).
+    ///
+    /// Any other status is a real failure. Installs are serialized on the
+    /// node, so a queued reply is a success response — the caller
+    /// observes completion through the retained `installed` inventory
+    /// (ADR-055 §6.5) and the terminal `NodeEvent` that completes its
+    /// operation.
+    pub fn check_install_reply(agent_id: &str, event: &NodeEvent) -> Result<(), NodeControlError> {
+        match event.status.as_str() {
+            "ok" | "in_progress" => Ok(()),
+            "error" | "not_implemented" => Err(NodeControlError::CommandFailed {
+                agent_id: agent_id.to_string(),
+                message: event.message.clone(),
+            }),
+            other => Err(NodeControlError::CommandFailed {
+                agent_id: agent_id.to_string(),
+                message: format!("unexpected status '{}': {}", other, event.message),
+            }),
+        }
+    }
+
+    /// Check a node command reply. `ok` is the only success status —
+    /// commands that can legitimately answer `in_progress` use
+    /// [`Self::check_install_reply`] instead.
     pub fn check_reply(agent_id: &str, event: &NodeEvent) -> Result<(), NodeControlError> {
         match event.status.as_str() {
             "ok" => Ok(()),
@@ -389,7 +482,6 @@ fn command_name(command: &NodeControlCommand) -> String {
         Some(node_control_command::Command::Install(_)) => "install",
         Some(node_control_command::Command::Uninstall(_)) => "uninstall",
         Some(node_control_command::Command::SkillsImport(_)) => "skills_import",
-        Some(node_control_command::Command::AvatarUpdate(_)) => "avatar_update",
         Some(node_control_command::Command::Clone(_)) => "clone",
         Some(node_control_command::Command::Upgrade(_)) => "upgrade",
         Some(node_control_command::Command::PublishPrepare(_)) => "publish_prepare",
@@ -402,6 +494,33 @@ fn command_name(command: &NodeControlCommand) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(status: &str) -> NodeEvent {
+        NodeEvent {
+            node_id: "local".to_string(),
+            request_id: "op-1".to_string(),
+            status: status.to_string(),
+            message: String::new(),
+            result_json: None,
+        }
+    }
+
+    /// Installs are serialized on the node, so the reply means "accepted"
+    /// — a queued install is a success, and only a real failure is an
+    /// error.
+    #[test]
+    fn install_reply_accepts_queued_and_terminal_success() {
+        assert!(NodeControlClient::check_install_reply("a", &event("ok")).is_ok());
+        assert!(NodeControlClient::check_install_reply("a", &event("in_progress")).is_ok());
+        assert!(NodeControlClient::check_install_reply("a", &event("error")).is_err());
+    }
+
+    /// Other commands have no "accepted" state: a generic reply check
+    /// must not be loosened for them.
+    #[test]
+    fn generic_reply_rejects_in_progress() {
+        assert!(NodeControlClient::check_reply("a", &event("in_progress")).is_err());
+    }
 
     #[test]
     fn command_name_derivation() {

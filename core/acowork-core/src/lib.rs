@@ -12,6 +12,9 @@ pub mod mqtt_proto {
     include!(concat!(env!("OUT_DIR"), "/acowork.mqtt.v1.rs"));
 }
 
+pub mod addr;
+pub mod agent_instance_id;
+pub mod agent_overrides;
 pub mod budget;
 pub mod crlf;
 pub mod defaults;
@@ -20,6 +23,7 @@ pub mod error;
 pub mod error_codes;
 pub mod event_bus;
 pub mod health;
+pub mod install;
 pub mod intent;
 pub mod logging;
 pub mod manifest;
@@ -39,6 +43,8 @@ pub mod timeout_config;
 pub mod tools;
 
 // Re-exports for convenience
+pub use agent_instance_id::{AgentInstanceId, InstanceIdError};
+pub use agent_overrides::{AgentOverrides, overrides_path};
 pub use manifest::{
     AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ManifestConsolidationQuality,
     ManifestDedupQuality, ManifestEdgeWeightQuality, ManifestGraphExpandQuality,

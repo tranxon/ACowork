@@ -3,7 +3,9 @@
 //! Implements the Agent CRUD and lifecycle endpoints:
 //! - GET    /api/agents           — list all agents with status
 //! - GET    /api/agents/:id       — get agent detail
-//! - GET    /api/agents/:id/avatar — get agent's packaged avatar image
+//! - GET    /api/agents/:id/avatar — reverse-proxied to the hosting node
+//! - GET/PUT /api/agents/:id/avatar-config — reverse-proxied to the Runtime
+//! - POST /api/agents/:id/manifest/{avatar,file} — reverse-proxied to the node
 //! - POST   /api/agents/install  — install a .agent package
 //! - POST   /api/agents/:id/clone — clone an agent (skeleton or full)
 //! - DELETE /api/agents/:id       — uninstall an agent
@@ -20,14 +22,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
-use crate::http::agent_config::{
-    self, AvatarAssetEntry, AvatarAssetsResponse, AvatarConfigResponse, UpdateAvatarConfigRequest,
-};
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::lifecycle::process::is_process_alive;
+use crate::gateway::state::GatewayState;
+use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
 use crate::gateway::state::SYSTEM_AGENT_ID;
 use acowork_core::error_codes::StructuredErrorBody;
-use acowork_core::operation::OperationRecord;
+use acowork_core::operation::{OperationId, OperationRecord};
 use acowork_core::AgentManifest;
 
 /// Build the agent management router
@@ -38,16 +39,17 @@ pub fn agent_routes() -> Router<AppState> {
             "/api/agents/{id}",
             get(get_agent_detail).delete(uninstall_agent),
         )
-        .route("/api/agents/{id}/avatar", get(get_agent_avatar))
-        .route(
-            "/api/agents/{id}/manifest/avatar",
-            post(update_agent_manifest_avatar),
-        )
-        .route(
-            "/api/agents/{id}/manifest/file",
-            post(upload_agent_file),
-        )
         .route("/api/agents/install", post(install_agent))
+        // User-driven interaction timestamp touch. See `record_interaction`.
+        .route(
+            "/api/agents/{id}/interactions",
+            post(record_interaction),
+        )
+        // ADR-073: declarative "make sure this package is installed".
+        // Idempotent by construction (unlike `/install`, which always
+        // lands one more instance) — repeated callers converge on one
+        // instance, and the caller never has to orchestrate that.
+        .route("/api/agents/ensure", post(ensure_agent))
         // ADR-055 §3.2: package distribution source — remote Nodes pull
         // the uploaded `.agent` file from the Gateway's registry here.
         .route(
@@ -94,19 +96,15 @@ pub fn agent_routes() -> Router<AppState> {
         // the source of the "改动不生效" bug because the Gateway
         // dropped per-agent fields like `temperature` and
         // `max_output_tokens` instead of forwarding them to the Runtime.
-        // ADR-017: Avatar runtime config endpoints (work when agent is stopped)
-        .route(
-            "/api/agents/{id}/avatar-config",
-            get(get_avatar_config).put(update_avatar_config),
-        )
-        .route(
-            "/api/agents/{id}/manifest/avatar-assets",
-            get(list_avatar_assets),
-        )
-        .route(
-            "/api/agents/{id}/avatar-file",
-            get(get_avatar_file).delete(delete_avatar_file),
-        )
+        // ADR-009 §5: the avatar *config* endpoints are a pure reverse
+        // proxy to Runtime's `GET/PUT /agents/{id}/avatar-config` (routes
+        // live in `proxy::proxy_routes` with the other Runtime endpoints).
+        // The Gateway used to own an `avatar_cache.json` for them and
+        // mutate the in-memory manifest — a second writer of agent-private
+        // data, and (worse) a writer whose value nothing ever pushed into
+        // the Runtime, so a new avatar never survived an agent restart.
+        // The Runtime now persists the pick to the instance's
+        // `.overrides.json` (which also survives upgrades).
         // ADR-055 §6.7 (Phase 4): resolve the LSP relay endpoint of the
         // node hosting this agent, for Desktop code-editing features.
         .route(
@@ -120,7 +118,14 @@ pub fn agent_routes() -> Router<AppState> {
 /// Agent list entry
 #[derive(Serialize)]
 pub struct AgentListResponse {
+    /// ADR-073: instance identity (UUID v4, immutable, gateway-assigned
+    /// on install). The primary key of every agent-scoped registry.
+    pub instance_id: String,
+    /// ADR-073: package identity (from manifest, immutable).
     pub agent_id: String,
+    /// ADR-073: current location (node hosting this instance; mutable
+    /// on migration). Positional metadata only — never a registry key.
+    pub node_id: String,
     pub name: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -187,7 +192,12 @@ pub struct AgentListResponse {
 /// Agent detail response
 #[derive(Serialize)]
 pub struct AgentDetailResponse {
+    /// ADR-073: instance identity (UUID v4, immutable).
+    pub instance_id: String,
+    /// ADR-073: package identity (from manifest).
     pub agent_id: String,
+    /// ADR-073: current location (mutable on migration).
+    pub node_id: String,
     pub name: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -236,7 +246,13 @@ pub struct AgentModelResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-/// `GET /api/agents` — list all installed agents.
+/// `GET /api/agents` — list all installed agent instances.
+///
+/// ADR-073: every entry is an INSTANCE (one install action). A single
+/// package may appear multiple times with distinct `instance_id`s.
+/// Optional query filters:
+/// - `?agent_id=com.foo`  → package view: all instances of that package
+/// - `?node_id=node-a`    → all instances currently hosted on that node
 ///
 /// Sort order (sidebar contract):
 /// 1. System agent (`com.acowork.system`) is always pinned to the top.
@@ -244,7 +260,18 @@ pub struct AgentModelResponse {
 /// 3. Within each group, agents with `last_interaction_at` come first
 ///    sorted newest-first; agents that have never been interacted with
 ///    sink to the bottom of their group, ordered alphabetically by name.
-pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListResponse>> {
+#[derive(Debug, Deserialize)]
+pub struct AgentListQuery {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+pub async fn list_agents(
+    State(state): State<AppState>,
+    Query(query): Query<AgentListQuery>,
+) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
 
     // ADR-033: Read MQTT-based online status from AgentRegistry as a sub-status.
@@ -260,6 +287,10 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
         .installed_agents
         .values()
         .map(|info| {
+            // ADR-073: registries are keyed by INSTANCE identity. Cross-instance
+            // reads are impossible by construction (each instance has
+            // its own row in installed_agents and running_agents).
+            let running_info = gw.running(&info.instance_id);
             // Verify the process is actually alive (not just in running_agents).
             // pid=0 marks an ADR-055 node-hosted Runtime auto-tracked from its
             // MQTT ready signal — there is no local Gateway-side process to
@@ -268,7 +299,6 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             // by the MQTT LWT registry (`acowork/agents/{id}/status`), and a
             // dead Runtime flips to `offline`, which clears the entry via
             // `remove_running` in dispatch.rs.
-            let running_info = gw.running_agents.get(&info.agent_id);
             let actually_running = running_info
                 .map(|r| r.pid == 0 || is_process_alive(r.pid))
                 .unwrap_or(false);
@@ -280,16 +310,28 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             // path that ADR-040 removed, and is never updated. Fall back to
             // the legacy field when the registry is unavailable (tests).
             let connected = running_info.map(|r| r.connected).unwrap_or(false)
-                || mqtt_online_set.contains(&info.agent_id);
+                || mqtt_online_set.contains(&info.instance_id);
             let ready = running_info.map(|r| r.ready).unwrap_or(false);
             let last_interaction_at = gw
-                .get_interaction(&info.agent_id)
+                .get_interaction(&info.instance_id)
                 .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-            // ADR-017: Use manifest avatar for list (gRPC query would be too slow).
-            let (eff_avatar, eff_builtin, _) =
-                resolve_avatar_from_manifest(&info.manifest);
+            // ADR-009 §5: user preference first, packaged default second.
+            // Both halves are local now — the override came from the Node's
+            // retained inventory (stopped agents) or from the Runtime's
+            // avatar-config response (running ones), so listing never needs
+            // a per-agent HTTP round trip.
+            let overrides = gw.overrides_of(&info.instance_id);
+            let (eff_avatar, eff_builtin, _) = match overrides {
+                Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => {
+                    (ov.avatar.clone(), ov.builtin_avatar.clone(), "overrides")
+                }
+                _ => resolve_avatar_from_manifest(&info.manifest),
+            };
+            let eff_display_name = overrides
+                .and_then(|ov| ov.display_name.clone())
+                .or_else(|| info.manifest.display_name.clone());
             let mqtt_online = if state.agent_registry.is_some() {
-                Some(mqtt_online_set.contains(&info.agent_id))
+                Some(mqtt_online_set.contains(&info.instance_id))
             } else {
                 None
             };
@@ -302,16 +344,18 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 .as_ref()
                 .and_then(|reg| {
                     match reg.try_read() {
-                        Ok(guard) => guard.sleeping_at(&info.agent_id).map(|t| {
+                        Ok(guard) => guard.sleeping_at(&info.instance_id).map(|t| {
                             t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
                         }),
                         Err(_) => None,
                     }
                 });
             AgentListResponse {
+                instance_id: info.instance_id.clone(),
                 agent_id: info.agent_id.clone(),
+                node_id: info.node_id.clone(),
                 name: info.name.clone(),
-                display_name: info.manifest.display_name.clone(),
+                display_name: eff_display_name,
                 role: info.manifest.role.clone(),
                 avatar: eff_avatar,
                 builtin_avatar: eff_builtin,
@@ -330,9 +374,23 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             }
         })
         .collect();
+    // ADR-073: optional query filters (package view / node view).
+    if query.agent_id.is_some() || query.node_id.is_some() {
+        agents.retain(|a| {
+            let pkg_ok = query
+                .agent_id
+                .as_deref()
+                .is_none_or(|pkg| a.agent_id == pkg);
+            let node_ok = query
+                .node_id
+                .as_deref()
+                .is_none_or(|n| a.node_id == n);
+            pkg_ok && node_ok
+        });
+    }
     // Diagnostic: if senior-engineer is running, log its ready state
     // to help trace why frontend polls may not see ready=true promptly.
-    if let Some(sr) = gw.running_agents.get("com.acowork.senior-engineer") {
+    if let Some(sr) = gw.running("com.acowork.senior-engineer") {
         tracing::info!(
             "[DIAG] list_agents: senior-engineer running=true ready={} connected={}",
             sr.ready,
@@ -377,31 +435,45 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
 }
 
 /// `GET /api/agents/:id` — get agent detail
+///
+/// ADR-073: `:id` is the INSTANCE identity (UUIDv4).
 pub async fn get_agent_detail(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentDetailResponse>, ApiError> {
     let gw = state.gateway_state.read().await;
     let info = gw
-        .installed_agents
-        .get(&agent_id)
+        .installed(&agent_id)
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
-    let running_info = gw.running_agents.get(&agent_id);
-    // Verify the process is actually alive
+    let running_info = gw.running(&agent_id);
+    // Verify the process is actually alive. pid=0 marks an ADR-055
+    // node-hosted Runtime whose liveness is guaranteed by the MQTT LWT
+    // registry, not a local process probe.
     let actually_running = running_info
         .as_ref()
-        .map(|r| is_process_alive(r.pid))
+        .map(|r| r.pid == 0 || is_process_alive(r.pid))
         .unwrap_or(false);
     let connected = running_info.map(|r| r.connected).unwrap_or(false);
     let ready = running_info.map(|r| r.ready).unwrap_or(false);
-    // ADR-017: Use manifest avatar for detail page.
-    let (eff_avatar, eff_builtin, _) =
-        resolve_avatar_from_manifest(&info.manifest);
+    // ADR-009 §5: same override-first resolution as `list_agents` — the
+    // detail panel and the sidebar must not disagree about the name.
+    let overrides = gw.overrides_of(&info.instance_id);
+    let (eff_avatar, eff_builtin, _) = match overrides {
+        Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => {
+            (ov.avatar.clone(), ov.builtin_avatar.clone(), "overrides")
+        }
+        _ => resolve_avatar_from_manifest(&info.manifest),
+    };
+    let eff_display_name = overrides
+        .and_then(|ov| ov.display_name.clone())
+        .or_else(|| info.manifest.display_name.clone());
     let resp = AgentDetailResponse {
+        instance_id: info.instance_id.clone(),
         agent_id: info.agent_id.clone(),
+        node_id: info.node_id.clone(),
         name: info.name.clone(),
-        display_name: info.manifest.display_name.clone(),
+        display_name: eff_display_name,
         role: info.manifest.role.clone(),
         avatar: eff_avatar,
         builtin_avatar: eff_builtin,
@@ -423,252 +495,14 @@ pub async fn get_agent_detail(
     Ok(Json(resp))
 }
 
-/// `GET /api/agents/:id/avatar` — serve the agent's packaged avatar image.
+
+// ── ADR-073: route variable → instance identity ────────────────
+
+/// Resolve an agent's effective avatar from its manifest only.
 ///
-/// The avatar path in the manifest is a relative path inside the installed
-/// package directory. We resolve it to `<install_path>/<avatar>` and stream
-/// the file bytes with a content type derived from the extension.
-///
-/// Returns 404 if:
-/// - the agent is not installed
-/// - the manifest does not declare an `avatar` field
-/// - the resolved file does not exist
-/// - the resolved file escapes the install directory (path traversal guard)
-pub async fn get_agent_avatar(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Response<Body>, ApiError> {
-    let (install_path, avatar_rel) = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        let avatar = info.manifest.avatar.clone().ok_or_else(|| {
-            ApiError::not_found(&format!("Agent '{}' has no packaged avatar", agent_id))
-        })?;
-        (info.install_path.clone(), avatar)
-    };
-
-    let install_dir = std::path::Path::new(&install_path);
-    let avatar_path = install_dir.join(&avatar_rel);
-
-    // Canonicalize both to detect path traversal (e.g. "../../etc/passwd").
-    // If the install dir doesn't exist, fall through to 404.
-    let canonical_install = match std::fs::canonicalize(install_dir) {
-        Ok(p) => p,
-        Err(_) => {
-            return Err(ApiError::not_found(&format!(
-                "Install directory not found for agent '{}'",
-                agent_id
-            )));
-        }
-    };
-    let canonical_avatar = match std::fs::canonicalize(&avatar_path) {
-        Ok(p) => p,
-        Err(_) => {
-            return Err(ApiError::not_found(&format!(
-                "Avatar file not found for agent '{}': {}",
-                agent_id, avatar_rel
-            )));
-        }
-    };
-    if !canonical_avatar.starts_with(&canonical_install) {
-        tracing::warn!(
-            "Avatar path traversal blocked: agent={} avatar={} resolved={}",
-            agent_id,
-            avatar_rel,
-            canonical_avatar.display()
-        );
-        return Err(ApiError::not_found("Avatar path is outside the install directory"));
-    }
-
-    let bytes = std::fs::read(&canonical_avatar).map_err(|e| {
-        tracing::warn!(
-            "Failed to read avatar file '{}': {}",
-            canonical_avatar.display(),
-            e
-        );
-        ApiError::not_found(&format!("Failed to read avatar: {}", e))
-    })?;
-
-    let content_type = guess_avatar_content_type(&canonical_avatar);
-    // Long-lived immutable cache: the avatar bytes for a given (agent_id,
-    // manifest.avatar) tuple are stable until the package is re-installed.
-    // The Desktop client appends `?v=<manifest.version>` to bust the cache
-    // when the version changes, so a one-year `max-age` is safe and lets the
-    // browser/WebView skip the conditional request entirely on repeat views.
-    // `immutable` further tells caches the response body will never change
-    // for the lifetime of the URL, so the user agent may skip revalidation
-    // even when the user explicitly reloads the page.
-    let resp = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-        .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(&format!("Failed to build avatar response: {}", e)))?;
-    Ok(resp)
-}
-
-/// Best-effort MIME type detection for avatar files by extension.
-/// Supports the formats documented in `docs/02-agent-package.md` (PNG, JPG).
-fn guess_avatar_content_type(path: &std::path::Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
-}
-
-/// Request body for `POST /api/agents/{id}/manifest/avatar`.
-///
-/// Either field is optional. Pass `null` (or an empty string) to remove a
-/// previously set value. Omitting a field leaves it unchanged.
-#[derive(Debug, Default, Deserialize)]
-pub struct UpdateAvatarRequest {
-    /// Packaged image path (e.g. "assets/avatar.png"). Set to null/empty to remove.
-    #[serde(default)]
-    pub avatar: Option<String>,
-    /// Builtin avatar index (e.g. "icon-05"). Set to null/empty to remove.
-    #[serde(default)]
-    pub builtin_avatar: Option<String>,
-}
-
-/// `POST /api/agents/{id}/manifest/avatar` — update the avatar fields in the
-/// agent's installed `manifest.toml`. Used by the Publish wizard to bake the
-/// user's selection into the package before build.
-///
-/// Persists the in-memory `AgentInfo.manifest` AND writes the on-disk
-/// `manifest.toml` so the next `build_publish` reads the updated value.
-pub async fn update_agent_manifest_avatar(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(req): Json<UpdateAvatarRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let install_path = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        info.install_path.clone()
-    };
-
-    // Apply changes: empty string is treated the same as null (clear the field).
-    let new_avatar = req
-        .avatar
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let new_builtin_avatar = req
-        .builtin_avatar
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
-    // Validate builtin_avatar: must match icon-NN or N. Backend is permissive
-    // (the client is the source of truth for the icon set), but we reject
-    // obviously malformed values so a typo doesn't silently leak into the
-    // built package.
-    if let Some(ref value) = new_builtin_avatar
-        && !is_plausible_builtin_avatar_id(value) {
-            return Err(ApiError::bad_request(&format!(
-                "Invalid builtin_avatar value '{}': expected 'icon-NN' or numeric 1-99",
-                value
-            )));
-        }
-
-    let manifest_path = std::path::Path::new(&install_path).join("manifest.toml");
-
-    // Read-modify-write the on-disk manifest. We do this synchronously because
-    // publish flow is a single-user CLI operation.
-    let manifest_toml = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        ApiError::not_found(&format!(
-            "manifest.toml not found at {}: {}",
-            manifest_path.display(),
-            e
-        ))
-    })?;
-    let mut manifest: AgentManifest = AgentManifest::from_toml(&manifest_toml).map_err(|e| {
-        ApiError::internal(&format!("Failed to parse existing manifest.toml: {}", e))
-    })?;
-    if req.avatar.is_some() {
-        manifest.avatar = new_avatar.clone();
-    }
-    if req.builtin_avatar.is_some() {
-        manifest.builtin_avatar = new_builtin_avatar.clone();
-    }
-    let new_toml = manifest
-        .to_toml()
-        .map_err(|e| ApiError::internal(&format!("Failed to serialize manifest: {}", e)))?;
-    std::fs::write(&manifest_path, new_toml).map_err(|e| {
-        ApiError::internal(&format!(
-            "Failed to write manifest.toml at {}: {}",
-            manifest_path.display(),
-            e
-        ))
-    })?;
-
-    // Update the in-memory copy so the next list_agents/get_agent_detail
-    // returns the new values without requiring a Gateway restart.
-    {
-        let mut gw = state.gateway_state.write().await;
-        if let Some(info) = gw.installed_agents.get_mut(&agent_id) {
-            if req.avatar.is_some() {
-                info.manifest.avatar = new_avatar.clone();
-            }
-            if req.builtin_avatar.is_some() {
-                info.manifest.builtin_avatar = new_builtin_avatar.clone();
-            }
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "message": "Manifest avatar fields updated",
-        "agent_id": agent_id,
-        "avatar": new_avatar,
-        "builtin_avatar": new_builtin_avatar,
-    })))
-}
-
-/// Loose syntactic check for builtin_avatar values. Accepts "icon-NN" with
-/// 1-99, or bare numeric 1-99. The client is still the source of truth for
-/// whether the ID corresponds to a bundled icon — this is just a guard
-/// against obvious typos.
-fn is_plausible_builtin_avatar_id(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if let Some(num) = lower.strip_prefix("icon-") {
-        if let Ok(n) = num.parse::<u32>() {
-            return (1..=99).contains(&n);
-        }
-        return false;
-    }
-    if let Ok(n) = lower.parse::<u32>() {
-        return (1..=99).contains(&n);
-    }
-    false
-}
-
-// ── ADR-017: Avatar config helpers ─────────────────────────────────────
-
-/// Resolve effective avatar from manifest only (no Runtime query).
-///
-/// Used by `list_agents` and `get_agent_detail` where querying each running
-/// agent via gRPC would be too slow. The avatar-config endpoint does a
-/// full gRPC roundtrip when the agent is running.
-///
-/// Returns `(avatar, builtin_avatar, source)`.
-fn resolve_avatar_from_manifest(
+/// Returns `(avatar, builtin_avatar, source)`. The per-instance
+/// `.overrides.json` layer is applied by the callers.
+pub(crate) fn resolve_avatar_from_manifest(
     manifest: &AgentManifest,
 ) -> (Option<String>, Option<String>, &'static str) {
     if manifest.avatar.is_some() || manifest.builtin_avatar.is_some() {
@@ -677,551 +511,25 @@ fn resolve_avatar_from_manifest(
     (None, None, "fallback")
 }
 
-/// Whitelisted image extensions for avatar files.
-const AVATAR_FILE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
-
-/// Check if a relative path has an avatar-allowed extension.
-fn has_avatar_extension(path: &str) -> bool {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase());
-    match ext {
-        Some(e) => AVATAR_FILE_EXTENSIONS.contains(&e.as_str()),
-        None => false,
-    }
-}
-
-/// Validate that a relative path stays within the install directory.
-/// Returns the canonicalized absolute path or an error.
-fn validate_path_within_install(
-    install_path: &str,
-    relative_path: &str,
-) -> Result<std::path::PathBuf, ApiError> {
-    let install_dir = std::path::Path::new(install_path);
-    let canonical_install = std::fs::canonicalize(install_dir).map_err(|_| {
-        ApiError::not_found("Install directory not found for agent")
-    })?;
-    let target = install_dir.join(relative_path);
-    let canonical_target = std::fs::canonicalize(&target).map_err(|_| {
-        ApiError::not_found(&format!(
-            "File not found: {}",
-            relative_path
-        ))
-    })?;
-    if !canonical_target.starts_with(&canonical_install) {
-        return Err(ApiError::bad_request(
-            "Path traversal detected: path must stay within install directory",
-        ));
-    }
-    Ok(canonical_target)
-}
-
-/// `GET /api/agents/{id}/avatar-config` — get effective avatar configuration.
+/// Resolve an HTTP route variable (`{id}`) to the canonical instance
+/// identity + package identity pair.
 ///
-/// When the agent is running, queries the Runtime via gRPC (QueryConfig →
-/// ConfigSnapshot) for the current avatar config. When stopped, falls
-/// back to manifest.toml defaults.
-pub async fn get_avatar_config(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AvatarConfigResponse>, ApiError> {
-    let (manifest, is_running) = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        let is_running = gw.running_agents.get(&agent_id).map(|r| r.ready).unwrap_or(false);
-        (info.manifest.clone(), is_running)
-    };
-
-    // When running, query the Runtime for the current avatar config.
-    // ADR-033: gRPC removed — avatar config is read from persisted cache file
-    // on startup; live queries are not supported in MQTT mode.
-    // Always fall back to manifest.
-    let _ = is_running;
-
-    // Stopped (or gRPC failed): fall back to manifest.
-    let (avatar, builtin_avatar, source) = resolve_avatar_from_manifest(&manifest);
-    Ok(Json(AvatarConfigResponse {
-        agent_id,
-        avatar,
-        builtin_avatar,
-        source: source.to_string(),
-    }))
-}
-
-/// `PUT /api/agents/{id}/avatar-config` — update avatar configuration.
-///
-/// When the agent is running, pushes a `RuntimeConfigUpdate` via gRPC
-/// so the Runtime persists the change to `agent_config.json`.
-/// When stopped, updates `manifest.toml` directly.
-pub async fn update_avatar_config(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(req): Json<UpdateAvatarConfigRequest>,
-) -> Result<Json<AvatarConfigResponse>, ApiError> {
-    let (manifest, is_running) = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        let is_running = gw.running_agents.get(&agent_id).map(|r| r.ready).unwrap_or(false);
-        (info.manifest.clone(), is_running)
-    };
-
-    // Normalize: empty string = clear (None), non-empty = set, absent = don't change.
-    // Setting avatar clears builtin_avatar and vice versa.
-    let new_avatar = match &req.avatar {
-        Some(v) => {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                Some(None) // explicitly clear
-            } else {
-                Some(Some(trimmed.to_owned()))
-            }
-        }
-        None => None, // field absent — don't change
-    };
-    let new_builtin = match &req.builtin_avatar {
-        Some(v) => {
-            let trimmed = v.trim();
-            if trimmed.is_empty() {
-                Some(None)
-            } else {
-                // Validate builtin_avatar format
-                if !is_plausible_builtin_avatar_id(trimmed) {
-                    return Err(ApiError::bad_request(&format!(
-                        "Invalid builtin_avatar value '{}': expected 'icon-NN' or numeric 1-99",
-                        trimmed
-                    )));
-                }
-                Some(Some(trimmed.to_owned()))
-            }
-        }
-        None => None,
-    };
-
-    // Apply mutual exclusivity: setting avatar clears builtin and vice versa.
-    let (effective_avatar, effective_builtin) = {
-        let mut av = new_avatar.clone();
-        let mut ba = new_builtin.clone();
-        if let Some(Some(_)) = &av {
-            ba = Some(None);
-        }
-        if let Some(Some(_)) = &ba {
-            av = Some(None);
-        }
-        (av, ba)
-    };
-
-    // Snapshot for return value (before consuming in push/persist below).
-    let return_avatar = effective_avatar.clone();
-    let return_builtin = effective_builtin.clone();
-    let any_set = new_avatar.is_some() || new_builtin.is_some();
-
-    if is_running {
-        // ADR-033: gRPC removed — RuntimeConfigUpdate push is no longer
-        // supported. Runtime reads config from agent_config.json on startup
-        // and agent_config cache file for avatar. Persisting to the cache
-        // file below is sufficient.
-        if any_set {
-            tracing::info!(
-                agent_id = %agent_id,
-                "Avatar config updated (persisted to cache, Runtime will pick up on restart)"
-            );
-        }
-    }
-
-    // ADR-017: Persist avatar to the Gateway's avatar cache file (not manifest.toml).
-    // The cache file survives Gateway restarts and is the source of truth for
-    // list_agents when the agent is stopped. Running agents also get a gRPC
-    // push above; the Runtime persists to agent_config.json independently.
-    if any_set {
-        let data_dir = {
-            let gw = state.gateway_state.read().await;
-            gw.config
-                .as_ref()
-                .map(|c| std::path::PathBuf::from(&c.data_dir))
-                .unwrap_or_else(|| std::path::PathBuf::from("./data"))
-        };
-        let cache_avatar = effective_avatar.flatten();
-        let cache_builtin = effective_builtin.flatten();
-        agent_config::update_avatar_in_cache(
-            &data_dir,
-            &agent_id,
-            cache_avatar.clone(),
-            cache_builtin.clone(),
-        );
-
-        // Update in-memory manifest so list_agents returns the new value.
-        let mut gw = state.gateway_state.write().await;
-        if let Some(info) = gw.installed_agents.get_mut(&agent_id) {
-            info.manifest.avatar = cache_avatar;
-            info.manifest.builtin_avatar = cache_builtin;
-        }
-    }
-
-    // Return the effective avatar.
-    let (avatar, builtin_avatar, source) = if is_running && any_set {
-        // For running agents with changes, return the pushed values.
-        let av = return_avatar.flatten();
-        let ba = return_builtin.flatten();
-        if av.is_none() && ba.is_none() {
-            resolve_avatar_from_manifest(&manifest)
-        } else {
-            (av, ba, "runtime")
-        }
-    } else {
-        resolve_avatar_from_manifest(&manifest)
-    };
-
-    Ok(Json(AvatarConfigResponse {
-        agent_id,
-        avatar,
-        builtin_avatar,
-        source: source.to_string(),
-    }))
-}
-
-/// `GET /api/agents/{id}/manifest/avatar-assets` — list custom avatar files.
-///
-/// Scans `{install_path}/assets/` for files matching `avatar*.{ext}`.
-/// Sort: `avatar.ext` first, then `avatar-XX.ext` numerically.
-/// Does NOT require the agent to be running.
-pub async fn list_avatar_assets(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AvatarAssetsResponse>, ApiError> {
-    let install_path = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        info.install_path.clone()
-    };
-
-    let assets_dir = std::path::Path::new(&install_path).join("assets");
-    let mut entries: Vec<(String, Option<u32>)> = Vec::new();
-
-    if let Ok(read_dir) = std::fs::read_dir(&assets_dir) {
-        for entry in read_dir.flatten() {
-            let file_name = entry.file_name();
-            let name = match file_name.to_str() {
-                Some(n) => n,
-                None => continue,
-            };
-            // Match avatar*.{png,jpg,jpeg,gif,webp,svg}
-            let lower = name.to_ascii_lowercase();
-            if !lower.starts_with("avatar") {
-                continue;
-            }
-            if !has_avatar_extension(&lower) {
-                continue;
-            }
-            // Extract numeric suffix for sorting: "avatar.ext" → None (first),
-            // "avatar-XX.ext" → Some(XX)
-            let stem = std::path::Path::new(&lower)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            let sort_key = if stem == "avatar" {
-                None
-            } else if let Some(suffix) = stem.strip_prefix("avatar-") {
-                suffix.parse::<u32>().ok()
-            } else {
-                None
-            };
-            entries.push((format!("assets/{}", name), sort_key));
-        }
-    }
-
-    // Sort: avatar.* first, then avatar-XX.* numerically
-    entries.sort_by(|a, b| match (a.1, b.1) {
-        (None, None) => std::cmp::Ordering::Equal,
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(a_n), Some(b_n)) => a_n.cmp(&b_n),
-    });
-
-    let assets = entries
-        .into_iter()
-        .map(|(path, _)| AvatarAssetEntry {
-            relative_path: path,
-        })
-        .collect();
-
-    Ok(Json(AvatarAssetsResponse {
-        agent_id,
-        assets,
-    }))
-}
-
-/// Query params for avatar-file endpoint.
-#[derive(Debug, Deserialize)]
-pub struct AvatarFileQuery {
-    pub path: String,
-}
-
-/// `GET /api/agents/{id}/avatar-file?path=<relative>` — serve a custom avatar file.
-///
-/// Path traversal guard + extension whitelist. Returns image bytes.
-/// Does NOT require the agent to be running.
-pub async fn get_avatar_file(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Query(query): Query<AvatarFileQuery>,
-) -> Result<Response<Body>, ApiError> {
-    let install_path = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        info.install_path.clone()
-    };
-
-    // Extension whitelist check
-    if !has_avatar_extension(&query.path) {
-        return Err(ApiError::bad_request(
-            "Invalid file extension: only png, jpg, jpeg, gif, webp, svg are allowed",
-        ));
-    }
-
-    // Path traversal guard
-    let canonical_path = validate_path_within_install(&install_path, &query.path)?;
-
-    let bytes = std::fs::read(&canonical_path).map_err(|e| {
-        ApiError::not_found(&format!(
-            "Failed to read avatar file: {}",
-            e
-        ))
-    })?;
-
-    let content_type = match std::path::Path::new(&query.path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        _ => "application/octet-stream",
-    };
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(
-            header::CACHE_CONTROL,
-            "public, max-age=300",
-        )
-        .body(Body::from(bytes))
-        .unwrap())
-}
-
-/// `DELETE /api/agents/{id}/avatar-file?path=<relative>` — delete a custom avatar file.
-///
-/// Path traversal guard + extension whitelist. If the deleted file was the
-/// current avatar, clears that field too (via gRPC when running, manifest
-/// when stopped).
-pub async fn delete_avatar_file(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Query(query): Query<AvatarFileQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let (install_path, manifest, _is_running) = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        let is_running = gw.running_agents.get(&agent_id).map(|r| r.ready).unwrap_or(false);
-        (info.install_path.clone(), info.manifest.clone(), is_running)
-    };
-
-    // Extension whitelist check
-    if !has_avatar_extension(&query.path) {
-        return Err(ApiError::bad_request(
-            "Invalid file extension: only png, jpg, jpeg, gif, webp, svg are allowed",
-        ));
-    }
-
-    // Path traversal guard
-    let canonical_path = validate_path_within_install(&install_path, &query.path)?;
-
-    // Delete the file
-    std::fs::remove_file(&canonical_path).map_err(|e| {
-        ApiError::internal(&format!("Failed to delete avatar file: {}", e))
-    })?;
-
-    // If the deleted file was the current avatar, clear it.
-    let needs_clear = manifest.avatar.as_deref() == Some(query.path.as_str());
-    if needs_clear {
-        // ADR-033: gRPC removed — RuntimeConfigUpdate push no longer supported.
-        // Runtime reads avatar from agent_config.json on startup.
-        tracing::info!(
-            agent_id = %agent_id,
-            "Avatar file deleted, clearing from cache (Runtime will pick up on restart)"
-        );
-
-        // ADR-017: Clear avatar in the Gateway's cache file for BOTH running
-        // and stopped agents so the change survives a Gateway restart.
-        let data_dir = {
-            let gw = state.gateway_state.read().await;
-            gw.config
-                .as_ref()
-                .map(|c| std::path::PathBuf::from(&c.data_dir))
-                .unwrap_or_else(|| std::path::PathBuf::from("./data"))
-        };
-        agent_config::update_avatar_in_cache(&data_dir, &agent_id, None, None);
-
-        // Update in-memory manifest.
-        {
-            let mut gw = state.gateway_state.write().await;
-            if let Some(info) = gw.installed_agents.get_mut(&agent_id) {
-                info.manifest.avatar = None;
-            }
-        }
-    }
-
-    Ok(Json(serde_json::json!({
-        "message": "Avatar file deleted",
-        "path": query.path,
-    })))
-}
-///
-/// Write a single file into the agent's install directory at the given
-/// relative path. Used by the Publish wizard to upload a custom avatar
-/// image that the wizard then references from `manifest.toml`.
-///
-/// The relative path is restricted to plain image extensions
-/// (png/jpg/jpeg/gif/webp/svg) and is canonicalised to prevent escape
-/// from the install dir (path traversal guard).
-pub async fn upload_agent_file(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Query(params): Query<UploadFileQuery>,
-    mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let install_path = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        info.install_path.clone()
-    };
-
-    let relative = params.path.trim();
-    if relative.is_empty() {
-        return Err(ApiError::bad_request("Missing 'path' query parameter"));
-    }
-
-    // Whitelist image extensions — this endpoint is specifically for avatar
-    // uploads, not arbitrary files. New use cases should add their own
-    // endpoint with broader validation.
-    let ext = std::path::Path::new(relative)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase());
-    let allowed = matches!(
-        ext.as_deref(),
-        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("svg")
-    );
-    if !allowed {
-        return Err(ApiError::bad_request(&format!(
-            "Unsupported file extension: {}. Allowed: png, jpg, jpeg, gif, webp, svg",
-            ext.as_deref().unwrap_or("(none)")
-        )));
-    }
-
-    let install_dir = std::path::Path::new(&install_path);
-    let target_path = install_dir.join(relative);
-
-    // Path traversal guard: canonicalise and ensure the target is inside
-    // the install dir. If the install dir doesn't exist, fall through to 404.
-    let canonical_install = std::fs::canonicalize(install_dir).map_err(|e| {
-        ApiError::not_found(&format!(
-            "Install directory not found for agent '{}': {}",
-            agent_id, e
-        ))
-    })?;
-    if let Some(parent) = target_path.parent() {
-        // Best-effort: create parent directories if missing. This is needed
-        // because the canonicalize check below requires the parent to exist.
-        std::fs::create_dir_all(parent).ok();
-    }
-    let canonical_target = std::fs::canonicalize(target_path.parent().unwrap_or(install_dir))
-        .map_err(|e| {
-            ApiError::internal(&format!(
-                "Failed to resolve target directory for avatar upload: {}",
-                e
-            ))
-        })?;
-    if !canonical_target.starts_with(&canonical_install) {
-        tracing::warn!(
-            "Agent file upload blocked: agent={} path={} resolved={}",
-            agent_id,
-            relative,
-            canonical_target.display()
-        );
-        return Err(ApiError::bad_request("File path is outside the install directory"));
-    }
-
-    // Drain the multipart body. We only expect a single "file" field.
-    let mut bytes: Option<Vec<u8>> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
-    {
-        let name = field.name().unwrap_or_default().to_string();
-        if name == "file" {
-            let data = field.bytes().await.map_err(|e| {
-                ApiError::bad_request(&format!("Failed to read file field: {}", e))
-            })?;
-            bytes = Some(data.to_vec());
-            break;
-        }
-    }
-    let bytes = bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'file'"))?;
-    if bytes.is_empty() {
-        return Err(ApiError::bad_request("Uploaded file is empty"));
-    }
-    // 10 MB cap — avatars are small. Larger uploads likely indicate a misuse.
-    if bytes.len() > 10 * 1024 * 1024 {
-        return Err(ApiError::bad_request("Uploaded file exceeds 10 MB limit"));
-    }
-
-    std::fs::write(&target_path, &bytes).map_err(|e| {
-        ApiError::internal(&format!(
-            "Failed to write file '{}': {}",
-            target_path.display(),
-            e
-        ))
-    })?;
-
-    Ok(Json(serde_json::json!({
-        "message": "File uploaded",
-        "agent_id": agent_id,
-        "path": relative,
-        "size": bytes.len(),
-    })))
-}
-
-/// Query parameters for `upload_agent_file`.
-#[derive(Debug, Deserialize)]
-pub struct UploadFileQuery {
-    /// Relative file path within the agent's install directory
-    /// (e.g. "assets/avatar.png").
-    pub path: String,
+/// ADR-073: the route variable is the INSTANCE identity (UUIDv4). A
+/// package id never matches — callers must use the resolved instance id
+/// from the list endpoint, not the package id.
+pub(crate) async fn resolve_agent_identity(
+    state: &AppState,
+    id: &str,
+) -> Result<(String, String), ApiError> {
+    let gw = state.gateway_state.read().await;
+    let inst = gw
+        .resolve_installed_key(id)
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", id)))?;
+    let aid = gw
+        .installed(&inst)
+        .map(|i| i.agent_id.clone())
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", id)))?;
+    Ok((inst, aid))
 }
 
 /// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
@@ -1412,10 +720,19 @@ pub async fn get_agent_lsp_endpoint(
 ///
 /// The Gateway's own `dev_mode` flag is forwarded to the node to select
 /// signature strictness (ADR-055 §6.20).
-pub async fn install_agent(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
+/// Fields shared by `POST /api/agents/install` and
+/// `POST /api/agents/ensure`.
+struct AgentUploadForm {
+    package_bytes: Vec<u8>,
+    node_id: String,
+    /// ADR-059 §7.3 precondition — only meaningful for the explicit
+    /// install path; a declarative ensure has no version precondition to
+    /// violate (it does not depend on the caller's view).
+    expected_version: Option<u64>,
+}
+
+/// Read the install/ensure multipart body.
+async fn read_agent_upload(mut multipart: Multipart) -> Result<AgentUploadForm, ApiError> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
     // ADR-059 §7.3: optional optimistic-concurrency precondition — the
@@ -1457,7 +774,215 @@ pub async fn install_agent(
     if package_bytes.is_empty() {
         return Err(ApiError::bad_request("Package file is empty"));
     }
-    let node_id = node_id.unwrap_or_else(|| acowork_core::node::LOCAL_NODE_ID.to_string());
+
+    Ok(AgentUploadForm {
+        package_bytes,
+        node_id: node_id.unwrap_or_else(acowork_core::node::local_node_id),
+        expected_version,
+    })
+}
+
+/// The node control-plane client, or a loud failure when MQTT is off.
+fn node_control_client(state: &AppState) -> Result<NodeControlClient, ApiError> {
+    state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))
+}
+
+/// ADR-059 §2.3: the install/ensure command is a (fire-and-forget) MQTT
+/// publish — if the target Node's control plane has not announced
+/// `NodeReady`, the command would be silently dropped. Reject with 409
+/// `dependency_not_ready` (structured error, Phase 3.2) so the caller
+/// retries once `GET /api/bootstrap` reaches READY. This covers BOTH
+/// "never enrolled" and "enrolled but not ready": the node publishes its
+/// enroll request before NodeReady (bootstrap order, ADR-059 §7.2), so
+/// `node.{id}` cannot be ready while the node is unknown to the
+/// registry.
+async fn ensure_node_ready(state: &AppState, node_id: &str) -> Result<(), ApiError> {
+    let Some(registry) = state.bootstrap_registry.as_ref() else {
+        // No bootstrap registry (MQTT disabled) — the dispatch path fails
+        // later with a clearer error.
+        return Ok(());
+    };
+    if registry.is_ready(&crate::bootstrap::SubsystemId(format!("node.{}", node_id))) {
+        return Ok(());
+    }
+    let (phase, phase_detail) = state
+        .gateway_state
+        .read()
+        .await
+        .bootstrap
+        .orchestrator
+        .as_ref()
+        .map(|o| {
+            let s = o.snapshot();
+            // SCREAMING_SNAKE_CASE serde name — the same string the HTTP
+            // projection uses (`BOOTING`, `READY`, …).
+            let phase = serde_json::to_string(&s.phase)
+                .map(|p| p.trim_matches('"').to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            (phase, s.phase_detail)
+        })
+        .unwrap_or_else(|| ("unknown".to_string(), "orchestrator unavailable".to_string()));
+    Err(ApiError::conflict_structured(
+        StructuredErrorBody::dependency_not_ready(Some(phase), Some(phase_detail), 500),
+    ))
+}
+
+/// Where a declarative ensure request resolves to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EnsureResolution {
+    /// An instance of this package is already on the target node — by
+    /// ADR-073 instance identity.
+    Present(String),
+    /// Nothing known locally; the request must be dispatched to the node
+    /// (which re-checks the same precondition before touching the disk).
+    Dispatch,
+}
+
+/// Resolve a declarative ensure against the Gateway's view of the target
+/// node's inventory.
+///
+/// The Gateway's view lags the node (it is fed by retained inventory
+/// messages), so this is a fast path and never the authority: a miss here
+/// only means "ask the node".
+pub(crate) fn resolve_ensure(
+    gw: &GatewayState,
+    agent_id: &str,
+    node_id: &str,
+) -> EnsureResolution {
+    let mut matches = gw
+        .installed_agents
+        .values()
+        .filter(|info| info.agent_id == agent_id && info.node_id == node_id)
+        .map(|info| info.instance_id.clone())
+        .collect::<Vec<_>>();
+    // Stable pick when one package has several instances on one node: any
+    // of them satisfies an existence claim, but the answer must not
+    // change between calls.
+    matches.sort();
+    match matches.into_iter().next() {
+        Some(instance_id) => EnsureResolution::Present(instance_id),
+        None => EnsureResolution::Dispatch,
+    }
+}
+
+/// Response for `POST /api/agents/ensure` (ADR-073 declarative install).
+#[derive(Debug, Serialize)]
+pub struct EnsureAck {
+    /// Package whose presence was ensured.
+    pub agent_id: String,
+    /// Instance this request resolves to. On the already-present path it
+    /// is the instance the node holds; on the dispatch path it is the
+    /// candidate the Gateway minted — the node may still satisfy the
+    /// request from an instance the Gateway has not seen yet.
+    pub instance_id: String,
+    /// `true` when the package was already present: no install was
+    /// dispatched and this request creates nothing.
+    pub already_present: bool,
+    /// ADR-059 §6 tracking id — present only when an install was
+    /// dispatched. The node's terminal event completes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+}
+
+/// `POST /api/agents/ensure` — declarative "make sure this package is
+/// installed on this node".
+///
+/// The difference from `/install` is *intent*, and it is the whole point
+/// of this endpoint: `/install` always lands one more instance (ADR-073
+/// multi-instance is legal, and stays legal), while `/ensure` answers
+/// "is it there?" and creates at most one instance no matter how many
+/// callers ask. It is idempotent by construction, so a caller may retry
+/// freely — serialization and the existence check live on the node
+/// (`InstallKind::Ensure` + the install gate), never in the caller.
+///
+/// Returns `200 OK` with `already_present = true` when the package is
+/// already on the target node (nothing published), or `202 Accepted` with
+/// an operation id when an install was dispatched.
+pub async fn ensure_agent(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<EnsureAck>), ApiError> {
+    let form = read_agent_upload(multipart).await?;
+    let node_id = form.node_id;
+
+    // The package must be opened to learn its `agent_id`; the staged temp
+    // file is deleted when this scope ends, whichever way it ends.
+    let staged = StagedPackage::stage(&form.package_bytes)?;
+    let agent_id = staged.manifest.agent_id.clone();
+
+    // Fast path: the package is already on the node, so there is nothing
+    // to dispatch — and no reason to require the node to be ready.
+    let present = {
+        let gw = state.gateway_state.read().await;
+        resolve_ensure(&gw, &agent_id, &node_id)
+    };
+    if let EnsureResolution::Present(instance_id) = present {
+        return Ok((
+            StatusCode::OK,
+            Json(EnsureAck {
+                agent_id,
+                instance_id,
+                already_present: true,
+                operation_id: None,
+            }),
+        ));
+    }
+
+    let node_control = node_control_client(&state)?;
+    ensure_node_ready(&state, &node_id).await?;
+    check_node_compatible(&state, &node_id).await?;
+
+    // Persist the source and build the download URL the node will use.
+    let package_url = publish_to_registry(&state, &staged, &node_id).await?;
+
+    // ADR-073 决策 5: the Gateway mints the candidate instance identity.
+    // The node may still answer "already satisfied" (an instance the
+    // Gateway has not seen yet) — that is what `ensure` means.
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let record = OperationRecord::new(0);
+    let operation_id = record.operation_id.clone();
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+
+    node_control
+        .install_agent_by_url(NodeInstallDispatch {
+            node_id: &node_id,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::Url(&package_url),
+            dev_mode: gateway_dev_mode(&state).await,
+            system: staged.manifest.system,
+            // The intent: at most one instance, no matter how many
+            // callers ask (the node re-checks after dequeue).
+            ensure: true,
+            operation_id: operation_id.as_str(),
+        })
+        .await
+        .map_err(|e| ApiError::internal(&format!("Ensure dispatch failed: {}", e)))?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnsureAck {
+            agent_id,
+            instance_id,
+            already_present: false,
+            operation_id: Some(operation_id),
+        }),
+    ))
+}
+
+pub async fn install_agent(
+    State(state): State<AppState>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
+    let form = read_agent_upload(multipart).await?;
+    let package_bytes = form.package_bytes;
+    let node_id = form.node_id;
+    let expected_version = form.expected_version;
 
     // Persist the source into the package registry and build the download
     // URL the node will use (advertise_host = the address other machines
@@ -1465,6 +990,12 @@ pub async fn install_agent(
     let (manifest, package_url) =
         register_package_in_registry(&state, &package_bytes, &node_id).await?;
     let agent_id = manifest.agent_id.clone();
+
+    // ADR-073 决策 5: the Gateway generates the instance identity at
+    // install time. It decides the node-side landing directory
+    // `{agent_id}/{instance_id}/` and the Runtime's
+    // `--agent-instance-id`; the node never invents it.
+    let instance_id = uuid::Uuid::new_v4().to_string();
 
     // Dispatch the asynchronous install (fire-and-forget). Completion is
     // observed via the node's retained installed inventory, not here.
@@ -1482,56 +1013,84 @@ pub async fn install_agent(
     // node publishes its enroll request before NodeReady (bootstrap
     // order, ADR-059 §7.2), so `node.{id}` cannot be ready while the
     // node is unknown to the registry.
-    if let Some(registry) = state.bootstrap_registry.as_ref()
-        && !registry.is_ready(&crate::bootstrap::SubsystemId(format!("node.{}", node_id)))
-    {
-        let (phase, phase_detail) = state
-            .gateway_state
-            .read()
-            .await
-            .bootstrap.orchestrator
-            .as_ref()
-            .map(|o| {
-                let s = o.snapshot();
-                // SCREAMING_SNAKE_CASE serde name — the same string the
-                // HTTP projection uses (`BOOTING`, `READY`, …).
-                let phase = serde_json::to_string(&s.phase)
-                    .map(|p| p.trim_matches('"').to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                (phase, s.phase_detail)
-            })
-            .unwrap_or_else(|| ("unknown".to_string(), "orchestrator unavailable".to_string()));
-        return Err(ApiError::conflict_structured(
-            StructuredErrorBody::dependency_not_ready(
-                Some(phase),
-                Some(phase_detail),
-                500,
-            ),
-        ));
-    }
+    ensure_node_ready(&state, &node_id).await?;
     // ADR-059 §6: open an Accepted operation BEFORE dispatch — the node's
     // NodeEvent reply (same `request_id`) transitions it to
     // Completed/Failed. The ack carries the operation_id so the client
     // can correlate the async outcome.
     let record = OperationRecord::new(expected_version.unwrap_or(0));
-    let ack = OperationAck::from_record(&record);
+    let mut ack = OperationAck::from_record(&record);
+    // ADR-073: surface the gateway-generated instance identity in the
+    // install ack so the client can address the instance immediately.
+    ack.instance_id = Some(instance_id.clone());
     let operation_id = record.operation_id.clone();
     if let Some(store) = state.operation_store.as_ref() {
         store.insert(record);
     }
 
     node_control
-        .install_agent_by_url(
-            &node_id,
-            &agent_id,
-            &package_url,
-            gateway_dev_mode(&state).await,
-            operation_id.as_str(),
-        )
+        .install_agent_by_url(NodeInstallDispatch {
+            node_id: &node_id,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::Url(&package_url),
+            dev_mode: gateway_dev_mode(&state).await,
+            // `manifest.system` decides the node's install lane.
+            system: manifest.system,
+            // `POST /api/agents/install` is an explicit install of one
+            // more copy (ADR-073 multi-instance) — a declarative
+            // "ensure present" is a different intent and a different
+            // endpoint.
+            ensure: false,
+            operation_id: operation_id.as_str(),
+        })
         .await
         .map_err(|e| ApiError::internal(&format!("Install dispatch failed: {}", e)))?;
 
     Ok((StatusCode::ACCEPTED, Json(ack)))
+}
+
+/// An uploaded `.agent` spooled to a temp file, with its parsed
+/// manifest.
+///
+/// The upload is only ever a staging area — the durable copy is the
+/// registry entry — so the temp file is deleted on drop, including on
+/// the paths that return early (ensure's already-present fast path).
+struct StagedPackage {
+    path: std::path::PathBuf,
+    manifest: AgentManifest,
+}
+
+impl StagedPackage {
+    fn stage(package_bytes: &[u8]) -> Result<Self, ApiError> {
+        let path = std::env::temp_dir().join(format!(
+            "acowork-install-{}-{}.agent",
+            std::process::id(),
+            timestamp_nanos(),
+        ));
+        if let Err(e) = std::fs::write(&path, package_bytes) {
+            return Err(ApiError::internal(&format!(
+                "Failed to write upload to temp file: {}",
+                e
+            )));
+        }
+        // A `.agent` is a ZIP; the manifest must be read out of it before
+        // the registry copy gets a stable name (the URL is derived from
+        // `agent_id`, which only the manifest knows).
+        match extract_manifest_from_package(&path) {
+            Ok(manifest) => Ok(Self { path, manifest }),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                Err(ApiError::bad_request(&format!("{}", e)))
+            }
+        }
+    }
+}
+
+impl Drop for StagedPackage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// Spool package bytes to a temp file, extract the manifest, and persist
@@ -1544,73 +1103,59 @@ async fn register_package_in_registry(
     package_bytes: &[u8],
     node_id: &str,
 ) -> Result<(AgentManifest, String), ApiError> {
-    let temp_file = std::env::temp_dir().join(format!(
-        "acowork-install-{}-{}.agent",
-        std::process::id(),
-        timestamp_nanos(),
-    ));
-    if let Err(e) = std::fs::write(&temp_file, package_bytes) {
+    let staged = StagedPackage::stage(package_bytes)?;
+    let url = publish_to_registry(state, &staged, node_id).await?;
+    Ok((staged.manifest.clone(), url))
+}
+
+/// Copy a staged package into the Gateway's registry and build the
+/// download URL the target node will fetch it from.
+///
+/// The URL host must be reachable *from the node*: the local node is
+/// loopback-bound, so it dials the HTTP bind host — auto-detecting a LAN
+/// advertise host (ADR-055 D3) would make the download fail with
+/// connection refused whenever the listener is 127.0.0.1-only. Remote
+/// nodes get the advertise host, which is what they can route to.
+async fn publish_to_registry(
+    state: &AppState,
+    staged: &StagedPackage,
+    node_id: &str,
+) -> Result<String, ApiError> {
+    let agent_id = &staged.manifest.agent_id;
+    let gw = state.gateway_state.read().await;
+    let config = gw
+        .config
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?;
+    let registry_dir = config.package_registry_dir();
+    if let Err(e) = std::fs::create_dir_all(&registry_dir) {
         return Err(ApiError::internal(&format!(
-            "Failed to write upload to temp file: {}",
+            "Failed to create registry dir: {}",
             e
         )));
     }
-
-    let manifest = match extract_manifest_from_package(&temp_file) {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp_file);
-            return Err(ApiError::bad_request(&format!("{}", e)));
-        }
-    };
-    let agent_id = manifest.agent_id.clone();
-
-    let (registry_path, package_url) = {
-        let gw = state.gateway_state.read().await;
-        let config = gw
-            .config
-            .as_ref()
-            .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?;
-        let registry_dir = config.package_registry_dir();
-        if let Err(e) = std::fs::create_dir_all(&registry_dir) {
-            return Err(ApiError::internal(&format!(
-                "Failed to create registry dir: {}",
-                e
-            )));
-        }
-        let registry_path = registry_dir.join(format!("{}.agent", agent_id));
-        // The download URL must be reachable from the target node. The
-        // local node is loopback-bound, so it must dial the HTTP bind
-        // host — auto-detecting a LAN advertise host (ADR-055 D3) would
-        // make the download fail with connection refused whenever the
-        // listener is 127.0.0.1-only. Remote nodes get the advertise
-        // host, which is what they can actually route to.
-        let url_host = if node_id == acowork_core::node::LOCAL_NODE_ID {
-            // A wildcard bind must still be dialed via loopback.
-            if config.http.host == "0.0.0.0" || config.http.host == "::" {
-                "127.0.0.1"
-            } else {
-                config.http.host.as_str()
-            }
+    let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+    let url_host = if node_id == acowork_core::node::local_node_id() {
+        // A wildcard bind must still be dialed via loopback.
+        if config.http.host == "0.0.0.0" || config.http.host == "::" {
+            "127.0.0.1"
         } else {
-            gw.advertise_host.as_str()
-        };
-        let url = format!(
-            "http://{}:{}/api/packages/{}/download",
-            url_host, config.http.port, agent_id
-        );
-        (registry_path, url)
+            config.http.host.as_str()
+        }
+    } else {
+        gw.advertise_host.as_str()
     };
-    if let Err(e) = std::fs::copy(&temp_file, &registry_path) {
-        let _ = std::fs::remove_file(&temp_file);
+    let url = format!(
+        "http://{}:{}/api/packages/{}/download",
+        url_host, config.http.port, agent_id
+    );
+    if let Err(e) = std::fs::copy(&staged.path, &registry_path) {
         return Err(ApiError::internal(&format!(
             "Failed to store package in registry: {}",
             e
         )));
     }
-    let _ = std::fs::remove_file(&temp_file);
-
-    Ok((manifest, package_url))
+    Ok(url)
 }
 
 /// Extract the `manifest.toml` from a `.agent` package ZIP (path-based).
@@ -1653,24 +1198,36 @@ pub(crate) fn extract_manifest_from_package(
 /// Track a node-hosted running agent in `GatewayState` after a
 /// successful node start (ADR-055 §6.2). `pid` is 0 — the Gateway
 /// observes liveness via MQTT status/ready topics, not the PID.
+/// `agent_id` is the resolved instance identity (ADR-073); callers
+/// obtain it from `resolve_agent_identity` before invoking this helper.
 async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
+    // Resolve everything from an immutable snapshot first; the write
+    // lock is only taken for the final upsert (avoids E0502).
+    let (resolved_agent_id, workspace) = {
+        let gw = state.gateway_state.read().await;
+        let info = gw.installed(agent_id);
+        let resolved_agent_id = info
+            .map(|i| i.agent_id.clone())
+            .unwrap_or_default();
+        let workspace = info
+            .map(|i| {
+                std::path::PathBuf::from(&i.install_path)
+                    .join("workspace")
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        (resolved_agent_id, workspace)
+    };
+
     let mut gw = state.gateway_state.write().await;
-    let workspace = gw
-        .installed_agents
-        .get(agent_id)
-        .map(|i| {
-            std::path::PathBuf::from(&i.install_path)
-                .join("workspace")
-                .to_string_lossy()
-                .to_string()
-        })
-        .unwrap_or_default();
     gw.add_running(crate::gateway::state::RunningAgentInfo {
-        agent_id: agent_id.to_string(),
+        instance_id: agent_id.to_string(),
+        agent_id: resolved_agent_id,
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
-        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+        node_id: acowork_core::node::local_node_id(),
         connected: false,
         ready: false,
         dev_mode,
@@ -1738,10 +1295,14 @@ pub async fn clone_agent(
 
     // Route to the node hosting the source agent (ADR-055 §6.6 L2-5 —
     // clone is a node-local operation on the source's node).
+    // ADR-073: the route variable is the INSTANCE identity (UUIDv4);
+    // resolve to the canonical instance key. A non-UUID input returns
+    // 404 from `resolve_agent_identity`.
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let node_id = {
         let gw = state.gateway_state.read().await;
-        gw.installed_agents
-            .get(&agent_id)
+        gw.installed(&instance_id)
             .map(|i| i.node_id.clone())
             .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
     };
@@ -1757,10 +1318,16 @@ pub async fn clone_agent(
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     check_node_compatible(&state, &node_id).await?;
     let event = node_control
-        .clone_agent(&node_id, &agent_id, &req.new_agent_id, mode)
+        .clone_agent(
+            &node_id,
+            &instance_id,
+            &resolved_agent_id,
+            &req.new_agent_id,
+            mode,
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;
 
     // The node reports the new install_path via result_json (JSON).
@@ -1829,12 +1396,14 @@ pub async fn upgrade_agent(
     }
 
     // Upgrade targets an existing agent — default to the node hosting it.
+    // ADR-073: the route variable is the INSTANCE identity (UUIDv4).
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let node_id = match node_id {
         Some(n) => n,
         None => {
             let gw = state.gateway_state.read().await;
-            gw.installed_agents
-                .get(&agent_id)
+            gw.installed(&instance_id)
                 .map(|i| i.node_id.clone())
                 .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
         }
@@ -1844,10 +1413,10 @@ pub async fn upgrade_agent(
     // agent_id matches the upgrade target.
     let (manifest, package_url) =
         register_package_in_registry(&state, &package_bytes, &node_id).await?;
-    if manifest.agent_id != agent_id {
+    if manifest.agent_id != resolved_agent_id {
         return Err(ApiError::bad_request(&format!(
             "Package agent_id '{}' does not match upgrade target '{}'",
-            manifest.agent_id, agent_id
+            manifest.agent_id, resolved_agent_id
         )));
     }
 
@@ -1858,14 +1427,23 @@ pub async fn upgrade_agent(
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     check_node_compatible(&state, &node_id).await?;
     node_control
-        .upgrade_agent_by_url(&node_id, &agent_id, &package_url, gateway_dev_mode(&state).await)
+        .upgrade_agent_by_url(
+            &node_id,
+            &instance_id,
+            &resolved_agent_id,
+            &package_url,
+            gateway_dev_mode(&state).await,
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Upgrade dispatch failed: {}", e)))?;
 
     Ok((
         StatusCode::ACCEPTED,
         Json(MessageResponse {
-            message: format!("Upgrade dispatched to node '{}': {}", node_id, agent_id),
+            message: format!(
+                "Upgrade dispatched to node '{}': {}",
+                node_id, resolved_agent_id
+            ),
         }),
     ))
 }
@@ -1896,19 +1474,25 @@ pub async fn uninstall_agent(
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let event = node_control
-        .uninstall_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id)
+        .uninstall_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
 
     // Drop the installed entry immediately (the node's retained clear is
     // the eventual-consistency backstop for a fresh Gateway).
-    state.gateway_state.write().await.remove_installed(&agent_id);
+    state.gateway_state.write().await.remove_installed(&instance_id);
 
     Ok(Json(MessageResponse {
-        message: format!("Agent uninstalled: {}", agent_id),
+        message: format!("Agent uninstalled: {}", resolved_agent_id),
     }))
 }
 
@@ -1919,6 +1503,27 @@ pub async fn uninstall_agent(
 pub struct StartAgentRequest {
     /// Start in developer mode (enables Debug Protocol: HTTP RPC + MQTT events per ADR-048)
     pub dev_mode: bool,
+}
+
+
+/// `POST /api/agents/:id/interactions` — record a user-driven interaction
+/// for the given `instance_id` (ADR-073). Returns 204 No Content.
+///
+/// Idempotent within the same second (the persisted timestamp is
+/// `Utc::now()`; identical consecutive touches produce the same row).
+/// Does not validate `instance_id` against `installed_agents`: a touch
+/// for an already-uninstalled agent leaves a harmless orphan entry that
+/// `list_agents` never surfaces (it only iterates `installed_agents`).
+/// `touch_interaction` itself is best-effort on persistence (warns on
+/// disk-save failure but keeps the in-memory update), so this handler
+/// stays non-blocking on disk hiccups.
+pub async fn record_interaction(
+    State(state): State<AppState>,
+    Path(instance_id): Path<String>,
+) -> StatusCode {
+    let mut gw = state.gateway_state.write().await;
+    gw.touch_interaction(&instance_id, chrono::Utc::now());
+    StatusCode::NO_CONTENT
 }
 
 
@@ -1937,12 +1542,6 @@ pub async fn start_agent(
                 agent_id
             )));
         }
-        if gw.is_running(&agent_id) {
-            return Err(ApiError::bad_request(&format!(
-                "Agent {} is already running",
-                agent_id
-            )));
-        }
     }
 
     // ADR-055 idempotent fast-path: when the Runtime is already online
@@ -1957,45 +1556,164 @@ pub async fn start_agent(
     // Auto-sleep (`sleeping`) keeps the process alive but suspends the
     // session, so a start must still reach the Node to wake it — only a
     // live (non-sleeping) online state short-circuits.
+    //
+    // INVARIANT: the fast-path is ONLY safe when the broker's
+    // authoritative view (`agent_registry`) AND the local process
+    // table (`running_agents`) agree. The original 2026-09-07 bug was
+    // caused by treating `registry.is_online = true` as sufficient
+    // without checking that `running_agents` already contained the
+    // entry — the result was a 200 on a desynced Gateway whose UI
+    // kept showing the agent as 休眠.
+    //
+    // Reconciliation rule (post-incident):
+    //   registry online ∧ running_agents has entry   → idempotent 200.
+    //   registry online ∧ running_agents MISSING     → DESYNC.
+    //       Self-heal: call `reconcile_running_agents` (which re-derives
+    //       `running_agents` from `agent_registry` — the SoT) and retry
+    //       the fast-path once. If the retry still finds desync, that
+    //       is a structural inconsistency — fall through to the node
+    //       control path so the Node can re-stamp the entry, with a
+    //       structured warning logged for the operator.
+    //   registry sleeping/offline ∧ running_agents has entry → not a
+    //       fast-path candidate; the guard below rejects the duplicate
+    //       start (stop first) until the broker view converges.
+    //   registry sleeping/offline ∧ running_agents MISSING   → not a
+    //       fast-path candidate; fall through to node control.
     if let Some(ref reg) = state.agent_registry {
-        let live_online = {
-            let reg = reg.read().await;
-            reg.is_online(&agent_id) && reg.sleeping_at(&agent_id).is_none()
+        // Single read so we don't race the reconcile loop on
+        // `running_agents` between the snapshot and the entry check.
+        let (live_online, has_entry) = {
+            let reg_guard = reg.read().await;
+            let reg_online = reg_guard.is_online(&agent_id)
+                && reg_guard.sleeping_at(&agent_id).is_none();
+            let gw_guard = state.gateway_state.read().await;
+            let in_running = gw_guard.is_running(&agent_id);
+            (reg_online, in_running)
         };
-        if live_online {
+        if live_online && has_entry {
             tracing::info!(
                 agent_id,
-                "POST /start short-circuited: agent already online (idempotent)"
+                "POST /start short-circuited: agent already online (idempotent, SoT-consistent)"
             );
             return Ok(Json(MessageResponse {
                 message: format!("Agent already running: {}", agent_id),
             }));
         }
+        if live_online && !has_entry {
+            // DESYNC: the broker says the Runtime is up but the Gateway's
+            // local view dropped the entry (the 2026-09-07 symptom).
+            //
+            // Strategy: this is a RECOVERABLE transient. The reconcile
+            // loop should have caught it within `RECONCILE_INTERVAL_SECS`,
+            // but it is reasonable to trigger an on-demand reconcile so
+            // the click feels instant. We fire the reconcile + retry the
+            // fast-path; only if the retry still finds desync do we
+            // surface the inconsistency by falling through to the node
+            // control path (which can re-stamp the entry directly).
+            //
+            // We deliberately do NOT swallow this as a 200 — that was
+            // the bug.
+            tracing::warn!(
+                agent_id,
+                "POST /start: registry online but running_agents missing (desync) — reconciling"
+            );
+            crate::mqtt::dispatch::reconcile_running_agents(
+                &state.gateway_state,
+                reg,
+            )
+            .await;
+            let still_desynced = {
+                let gw_guard = state.gateway_state.read().await;
+                !gw_guard.is_running(&agent_id)
+            };
+            if !still_desynced {
+                tracing::info!(
+                    agent_id,
+                    "POST /start: reconcile restored running_agents entry; idempotent 200"
+                );
+                return Ok(Json(MessageResponse {
+                    message: format!(
+                        "Agent already running: {} (reconciled)",
+                        agent_id
+                    ),
+                }));
+            }
+            tracing::warn!(
+                agent_id,
+                "POST /start: reconcile did NOT restore the entry — falling through to node control to re-stamp"
+            );
+            // Fall through; do NOT return 200.
+        }
+    }
+
+    // Local process table has an entry the broker view does not
+    // consider live-online (registry `sleeping` / `offline`, or no
+    // registry wired): the idempotent fast-path above does not apply.
+    // Reject the duplicate start exactly like the pre-fast-path code
+    // did — a stop (or broker-view convergence) must come first.
+    if state.gateway_state.read().await.is_running(&agent_id) {
+        return Err(ApiError::bad_request(&format!(
+            "Agent {} is already running",
+            agent_id
+        )));
     }
 
     // ADR-055 §6.2: delegate start to the local node via the control
     // plane instead of spawning the Runtime directly.
+    //
+    // Error layering (2026-09-07 incident review):
+    //   - Every error path surfaces a structured `ApiError` (HTTP
+    //     status + machine-readable `StructuredErrorCode` body) so the
+    //     Desktop can render a precise toast instead of a generic
+    //     "something went wrong".
+    //   - TRANSIENT failures (publish hiccup, command timeout) carry a
+    //     `retry_hint`; the client retries automatically with backoff
+    //     and the user sees nothing.
+    //   - STRUCTURAL failures (agent_not_installed on the node side,
+    //     unknown_node, bad-request) carry NO retry hint; the user
+    //     must act (e.g. install the agent package).
     let node_control = state.node_control.clone().ok_or_else(|| {
-        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+        // Broker disabled — there is no control plane. Unrecoverable
+        // for this Gateway instance until the operator re-enables MQTT.
+        ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Node control plane unavailable (MQTT disabled)",
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_control_plane_disabled".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        )
     })?;
-    check_node_compatible(&state, acowork_core::node::LOCAL_NODE_ID).await?;
+    check_node_compatible(&state, &acowork_core::node::local_node_id()).await?;
+    // ADR-073: route the command to the instance identity.
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let event = node_control
-        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, req.dev_mode)
+        .start_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            req.dev_mode,
+        )
         .await
-        .map_err(|e| match e {
-            crate::mqtt::node_control::NodeControlError::Timeout { request_id } => {
-                ApiError::gateway_timeout(&format!(
-                    "Start timed out waiting for node reply (request_id {})",
-                    request_id
-                ))
-            }
-            other => ApiError::internal(&format!("Start failed: {}", other)),
-        })?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
-        .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("start", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("Start rejected by node: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                operation_id: None,
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
 
     // Track the running entry in GatewayState (node-hosted, pid 0).
-    track_running_agent(&state, &agent_id, req.dev_mode).await;
+    track_running_agent(&state, &instance_id, req.dev_mode).await;
 
     // When starting in debug mode, bump Gateway's log level to DEBUG
     // so the Settings UI reflects the effective log level.
@@ -2031,6 +1749,123 @@ pub async fn start_agent(
     }))
 }
 
+/// Map a [`crate::mqtt::node_control::NodeControlError`] into a layered
+/// [`ApiError`] (2026-09-07 incident follow-up).
+///
+/// The layering principle (from the incident review):
+///
+/// | Error variant              | Layer | HTTP | StructuredCode            | Retry hint | UX                      |
+/// |----------------------------|-------|------|---------------------------|------------|-------------------------|
+/// | `Timeout`                  | trans | 504  | `HandshakeTimeout`        | yes        | invisible (auto-retry)  |
+/// | `Publish`                  | trans | 503  | `DependencyNotReady`      | yes        | invisible (auto-retry)  |
+/// | `NoClient`                 | struct| 503  | `DependencyNotReady`      | no         | toast: broker disabled  |
+/// | `NodeOffline`              | struct| 503  | `DependencyNotReady`      | no         | toast: node enrolling   |
+/// | `CommandFailed`            | struct| 422  | `OperationExpired`        | no         | toast: node rejected it |
+///
+/// The retry hint (`retry_after_ms` + `retry_count`) asks the Desktop
+/// to re-issue the command automatically. The wire format carries no
+/// backoff multiplier, so the hint is a fixed per-attempt delay (the
+/// Desktop may apply its own scaling between attempts).
+///
+/// `op_name` (`"start"` / `"stop"` / `"restart-debug"`) is included in
+/// the human message so the log/UI can attribute the failure without
+/// reading the structured body.
+fn map_node_control_error(
+    op_name: &str,
+    agent_id: &str,
+    e: crate::mqtt::node_control::NodeControlError,
+) -> ApiError {
+    use crate::mqtt::node_control::NodeControlError as E;
+    use acowork_core::error_codes::{RetryHint, StructuredErrorCode};
+    match e {
+        // TRANSIENT — command round-trip exceeded the deadline. The
+        // node may be slow to recover (sleep/wake, MCP reconnect,
+        // cold-start of a large workspace). The retry hint asks the
+        // Desktop to re-issue automatically; user sees nothing.
+        // retry_after_ms=1500 matches the gateway_command_timeout
+        // (10s) / 2 floor so the first retry lands inside the same
+        // wake window.
+        E::Timeout { request_id } => ApiError::structured(
+            StatusCode::GATEWAY_TIMEOUT,
+            &format!(
+                "{op_name}: node did not answer within the deadline (request_id {request_id})"
+            ),
+            StructuredErrorBody {
+                code: StructuredErrorCode::HandshakeTimeout,
+                phase_detail: Some(format!(
+                    "{op_name}_node_command_timeout agent={agent_id}"
+                )),
+                retry_hint: Some(RetryHint {
+                    retry_after_ms: Some(1500),
+                    retry_count: 5,
+                }),
+                ..Default::default()
+            },
+        ),
+
+        // TRANSIENT — the broker is unreachable from the Gateway side.
+        // Either the publisher transiently dropped or the broker
+        // itself restarted. The retry hint asks the Desktop to
+        // re-issue automatically; user sees nothing.
+        E::Publish(msg) => ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("{op_name}: MQTT publish failed ({msg})"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some(format!("{op_name}_mqtt_publish_transient_failure")),
+                retry_hint: Some(RetryHint {
+                    retry_after_ms: Some(2000),
+                    retry_count: 5,
+                }),
+                ..Default::default()
+            },
+        ),
+
+        // STRUCTURAL — no MQTT client wired (broker disabled in
+        // config). Operator must act.
+        E::NoClient => ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("{op_name}: node control plane unavailable (broker disabled)"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_broker_disabled_in_config".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ),
+
+        // STRUCTURAL — the named node has not announced `NodeReady`
+        // yet (or has been demoted). Client should wait for bootstrap
+        // to complete; no automatic retry because the node's lifecycle
+        // is gated on the bootstrap barrier.
+        E::NodeOffline { node_id } => ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("{op_name}: node '{node_id}' is offline or not yet ready"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some(format!("node_offline node_id={node_id}")),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ),
+
+        // STRUCTURAL — the node replied with an error (e.g.
+        // `agent_not_installed`, `spawn_failed`, `permission_denied`).
+        // This is the node-side definitive answer; retrying would
+        // produce the same answer.
+        E::CommandFailed { agent_id: aid, message } => ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("{op_name}: node rejected command for '{aid}': {message}"),
+            StructuredErrorBody {
+                code: StructuredErrorCode::OperationExpired,
+                phase_detail: Some(format!("{op_name}_command_failed agent={aid} message={message}")),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ),
+    }
+}
+
 /// `POST /api/agents/:id/stop` — stop a running agent
 pub async fn stop_agent(
     State(state): State<AppState>,
@@ -2048,14 +1883,39 @@ pub async fn stop_agent(
 
     // ADR-055 §6.2: delegate stop to the local node.
     let node_control = state.node_control.clone().ok_or_else(|| {
-        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+        ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stop: node control plane unavailable (MQTT disabled)",
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_control_plane_disabled".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        )
     })?;
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let event = node_control
-        .stop_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, "user")
+        .stop_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            "user",
+        )
         .await
-        .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
-        .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("stop", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("stop: node rejected command: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
 
     // Pre-emptively drop the running entry (mirrors the old stop path).
     state.gateway_state.write().await.remove_running(&agent_id);
@@ -2121,25 +1981,64 @@ pub async fn restart_agent_in_debug(
 
     // ADR-055 §6.2: restart-in-debug = node stop + node start(dev_mode).
     let node_control = state.node_control.clone().ok_or_else(|| {
-        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+        ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "restart-debug: node control plane unavailable (MQTT disabled)",
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::DependencyNotReady,
+                phase_detail: Some("mqtt_control_plane_disabled".to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        )
     })?;
 
     // Stop current process
+    let (instance_id, resolved_agent_id) =
+        resolve_agent_identity(&state, &agent_id).await?;
     let stop_event = node_control
-        .stop_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, "debug-restart")
+        .stop_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            "debug-restart",
+        )
         .await
-        .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &stop_event)
-        .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("restart-debug:stop", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &stop_event)
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("restart-debug: stop before restart failed: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
     state.gateway_state.write().await.remove_running(&agent_id);
 
     // Start with dev_mode=true
     let start_event = node_control
-        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, true)
+        .start_agent(
+            &acowork_core::node::local_node_id(),
+            &instance_id,
+            &resolved_agent_id,
+            true,
+        )
         .await
-        .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &start_event)
-        .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
+        .map_err(|e| map_node_control_error("restart-debug:start", &instance_id, e))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &start_event)
+        .map_err(|e| ApiError::structured(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("restart-debug: start with dev_mode=true failed: {}", e),
+            StructuredErrorBody {
+                code: acowork_core::error_codes::StructuredErrorCode::OperationExpired,
+                phase_detail: Some(e.to_string()),
+                retry_hint: None,
+                ..Default::default()
+            },
+        ))?;
     track_running_agent(&state, &agent_id, true).await;
 
     // Bump Gateway's log level to DEBUG so the Settings UI reflects it.
@@ -2231,132 +2130,6 @@ pub async fn get_agent_model(
 
 // ── Agent config handlers ─────────────────────────────────────────────
 
-/// Read the system prompt from the agent's prompts directory.
-/// Concatenates all .md and .txt files sorted by filename.
-/// Read the system prompt from the agent's prompts directory.
-///
-/// **Deprecated (ADR-009)**: Gateway no longer reads agent workspace files.
-/// This function is kept for reference but should not be called in production code.
-#[allow(dead_code)]
-fn read_system_prompt(install_path: &str) -> Option<String> {
-    let prompts_dir = std::path::Path::new(install_path).join("prompts");
-    if !prompts_dir.exists() {
-        return None;
-    }
-    let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(&prompts_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .is_some_and(|ext| ext == "md" || ext == "txt")
-            })
-            .collect(),
-        Err(_) => return None,
-    };
-    if files.is_empty() {
-        return None;
-    }
-    files.sort();
-    let mut prompt = String::new();
-    for file in &files {
-        match std::fs::read_to_string(file) {
-            Ok(content) => {
-                if !prompt.is_empty() {
-                    prompt.push('\n');
-                }
-                prompt.push_str(&content);
-            }
-            Err(_) => continue,
-        }
-    }
-    if prompt.is_empty() {
-        None
-    } else {
-        Some(prompt)
-    }
-}
-
-/// Read the tool names declared in the agent's manifest.toml.
-///
-/// **Deprecated (ADR-009)**: Gateway no longer reads agent workspace files.
-/// active_tools should come from per-agent config only.
-#[allow(dead_code)]
-fn read_manifest_tools(install_path: &str) -> Vec<String> {
-    let manifest_path = std::path::Path::new(install_path).join("manifest.toml");
-    if !manifest_path.exists() {
-        return Vec::new();
-    }
-    match std::fs::read_to_string(&manifest_path) {
-        Ok(toml_str) => match AgentManifest::from_toml(&toml_str) {
-            Ok(manifest) => manifest.tools.iter().map(|t| t.name.clone()).collect(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Write updated `[[tools]]` declarations back to manifest.toml.
-///
-/// **Deprecated (ADR-009)**: Gateway no longer writes to agent workspace files.
-/// active_tools persistence is handled by Runtime ({work_dir}/config/agent_config.json).
-#[allow(dead_code)]
-fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
-    let manifest_path = std::path::Path::new(install_path).join("manifest.toml");
-    let content = match std::fs::read_to_string(&manifest_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Failed to read manifest for tools write-back: {}", e);
-            return;
-        }
-    };
-
-    // Rebuild the manifest: remove all [[tools]] lines, then append new ones
-    let mut lines: Vec<String> = Vec::new();
-    let mut skip_tools_block = false;
-    let mut changed = false;
-
-    for line in content.lines() {
-        if line.trim_start().starts_with("[[tools]]") {
-            skip_tools_block = true;
-            changed = true;
-            continue;
-        }
-        if skip_tools_block {
-            // Also skip inline table lines like `[tools.rag]`
-            if line.trim_start().starts_with('[') {
-                skip_tools_block = false;
-                lines.push(line.to_string());
-            }
-            // else: still in tools block (config sub-keys), skip
-            continue;
-        }
-        lines.push(line.to_string());
-    }
-
-    if !changed && active_tools.is_empty() {
-        return; // No tools declared, nothing to change
-    }
-
-    // Append new [[tools]] entries
-    for tool_name in active_tools {
-        lines.push("[[tools]]".to_string());
-        lines.push(format!("name = \"{}\"", tool_name));
-    }
-
-    let new_content = lines.join("\n") + "\n";
-    if let Err(e) = std::fs::write(&manifest_path, new_content) {
-        tracing::warn!("Failed to write manifest tools: {}", e);
-    } else {
-        tracing::info!(
-            agent_install_path = %install_path,
-            tool_count = active_tools.len(),
-            "Updated manifest.toml tools section"
-        );
-    }
-}
-
 // ── Search provider per-agent config ─────────────────────────────────
 
 /// Response for per-agent search provider list
@@ -2411,8 +2184,13 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {
-        acowork_core::AgentManifest {
+    /// Test-only instance identity for "com.acowork.architect" / "com.acowork.senior-engineer".
+    const INSTANCE_ARCHITECT: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    const INSTANCE_SENIOR_ENG: &str = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e";
+    const INSTANCE_FOO_BAZ: &str = "4d5e6f7a-8b9c-4d0e-9f1a-3b4c5d6e7f8a";
+    const INSTANCE_WEATHER: &str = "5e6f7a8b-9c0d-4e1f-a02b-4c5d6e7f8a9b";
+
+    fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {        acowork_core::AgentManifest {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -2438,19 +2216,40 @@ mod tests {
         }
     }
 
-    /// Build an AppState with `agent_id` installed and the MQTT agent
-    /// registry seeded with the given status payload. `node_control` is
-    /// left `None` so a handler that fails to short-circuit errors with
-    /// "Node control plane unavailable" — proving the fast-path was hit.
-    async fn state_with_registry_status(agent_id: &str, status: &[u8]) -> AppState {
+    /// Build an AppState with an empty GatewayState (no registry —
+    /// `list_agents` degrades gracefully when `agent_registry` is None).
+    fn test_state() -> AppState {
+        let gw = Arc::new(RwLock::new(GatewayState::new(
+            "/tmp/acowork-list-test-vault",
+        )));
+        AppState::new(gw, Arc::new(HttpAuth::new(false)))
+    }
+
+    /// Build an AppState with package `agent_id` installed as instance
+    /// `instance_id`, and the MQTT agent registry seeded with the given
+    /// status payload for that instance.
+    ///
+    /// ADR-073: the install table and the MQTT status registry are both
+    /// keyed by INSTANCE identity, so the two inputs are passed
+    /// separately — using one string for both is exactly the conflation
+    /// the ADR removes. Handlers are therefore called with `instance_id`
+    /// in the route path. `node_control` is left `None` so a handler that
+    /// fails to short-circuit errors with "Node control plane
+    /// unavailable" — proving the fast-path was hit.
+    async fn state_with_registry_status(
+        agent_id: &str,
+        instance_id: &str,
+        status: &[u8],
+    ) -> AppState {
         let gw = Arc::new(RwLock::new(GatewayState::new(
             "/tmp/acowork-start-test-vault",
         )));
         {
             let mut g = gw.write().await;
             g.installed_agents.insert(
-                agent_id.to_string(),
+                instance_id.to_string(),
                 AgentInfo {
+                    instance_id: instance_id.to_string(),
                     agent_id: agent_id.to_string(),
                     version: "1.0.0".to_string(),
                     name: "Test Agent".to_string(),
@@ -2461,9 +2260,10 @@ mod tests {
             );
         }
         let reg = crate::mqtt::agent_registry::new_shared_registry();
-        reg.write()
-            .await
-            .update_from_mqtt(&format!("acowork/agents/{}/status", agent_id), status);
+        reg.write().await.update_from_mqtt(
+            &format!("acowork/agents/{}/status", instance_id),
+            status,
+        );
 
         let mut state = AppState::new(gw, Arc::new(HttpAuth::new(false)));
         state.agent_registry = Some(reg);
@@ -2478,11 +2278,12 @@ mod tests {
         // COMMAND_TIMEOUT (30s) while the Node recovers.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
+            INSTANCE_SENIOR_ENG,
             b"online",
         ).await;
         let result = start_agent(
             State(state),
-            Path("com.acowork.senior-engineer".to_string()),
+            Path(INSTANCE_SENIOR_ENG.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -2506,11 +2307,12 @@ mod tests {
         // rather than returning the idempotent 200.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
+            INSTANCE_SENIOR_ENG,
             b"sleeping",
         ).await;
         let result = start_agent(
             State(state),
-            Path("com.acowork.senior-engineer".to_string()),
+            Path(INSTANCE_SENIOR_ENG.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -2535,11 +2337,12 @@ mod tests {
         // node-control path must run.
         let state = state_with_registry_status(
             "com.acowork.senior-engineer",
+            INSTANCE_SENIOR_ENG,
             b"offline",
         ).await;
         let result = start_agent(
             State(state),
-            Path("com.acowork.senior-engineer".to_string()),
+            Path(INSTANCE_SENIOR_ENG.to_string()),
             Json(StartAgentRequest { dev_mode: false }),
         )
         .await;
@@ -2567,15 +2370,17 @@ mod tests {
         // even though the MQTT LWT registry says it is online. Liveness
         // for pid=0 is guaranteed by the registry instead.
         let state =
-            state_with_registry_status("com.acowork.senior-engineer", b"online").await;
+            state_with_registry_status("com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, b"online")
+                .await;
         {
             let mut gw = state.gateway_state.write().await;
             gw.add_running(crate::gateway::state::RunningAgentInfo {
+                instance_id: INSTANCE_SENIOR_ENG.to_string(),
                 agent_id: "com.acowork.senior-engineer".to_string(),
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                node_id: acowork_core::node::local_node_id(),
                 connected: true,
                 ready: true,
                 dev_mode: false,
@@ -2587,7 +2392,14 @@ mod tests {
             });
         }
 
-        let Json(resp) = list_agents(State(state)).await;
+        let Json(resp) = list_agents(
+            State(state),
+            Query(AgentListQuery {
+                agent_id: None,
+                node_id: None,
+            }),
+        )
+        .await;
         let entry = resp
             .iter()
             .find(|a| a.agent_id == "com.acowork.senior-engineer")
@@ -2603,11 +2415,105 @@ mod tests {
         );
     }
 
+    /// ADR-073: a single package may be installed as MULTIPLE instances
+    /// (same Node or cross-Node). `GET /api/agents` must return one
+    /// entry per instance (distinct `instance_id`), and the
+    /// `?agent_id=` / `?node_id=` filters must slice that list without
+    /// collapsing duplicates.
+    #[tokio::test]
+    async fn list_agents_lists_same_package_instances_and_filters_by_package_and_node() {
+        let state = test_state();
+        {
+            let mut gw = state.gateway_state.write().await;
+            // Two instances of the same package, on two different nodes.
+            for (inst, node) in [
+                ("6a7a8a9a-0b1b-4c2c-8d3d-9e4e5f6a7b8c", "node-a"),
+                ("7b8b9c0d-1c2c-4d3d-8e4e-af5f6a7b8c9d", "node-b"),
+            ] {
+                gw.add_installed(crate::gateway::state::AgentInfo {
+                    instance_id: inst.to_string(),
+                    agent_id: "com.foo.bar".to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "Foo Bar".to_string(),
+                    install_path: format!("/tmp/pkg/{}", inst),
+                    manifest: test_manifest("com.foo.bar"),
+                    node_id: node.to_string(),
+                });
+            }
+            // A different package for the node filter cross-check.
+            gw.add_installed(crate::gateway::state::AgentInfo {
+                instance_id: INSTANCE_FOO_BAZ.to_string(),
+                agent_id: "com.foo.baz".to_string(),
+                version: "1.0.0".to_string(),
+                name: "Foo Baz".to_string(),
+                install_path: "/tmp/pkg/inst-b1".to_string(),
+                manifest: test_manifest("com.foo.baz"),
+                node_id: "node-b".to_string(),
+            });
+        }
+
+        // Unfiltered: one entry per INSTANCE, never collapsed by agent_id.
+        let Json(all) = list_agents(
+            State(state.clone()),
+            Query(AgentListQuery {
+                agent_id: None,
+                node_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(all.len(), 3, "3 instances must be listed, none collapsed");
+        let foo_instances: Vec<_> = all
+            .iter()
+            .filter(|a| a.agent_id == "com.foo.bar")
+            .map(|a| a.instance_id.clone())
+            .collect();
+        // HashMap iteration order is unspecified — compare as sets.
+        let mut sorted_instances = foo_instances.clone();
+        sorted_instances.sort();
+        assert_eq!(
+            sorted_instances,
+            vec!["6a7a8a9a-0b1b-4c2c-8d3d-9e4e5f6a7b8c".to_string(), "7b8b9c0d-1c2c-4d3d-8e4e-af5f6a7b8c9d".to_string()],
+            "both instances of the same package must survive the list"
+        );
+
+        // Package view: ?agent_id=com.foo.bar → exactly its 2 instances.
+        let Json(pkg_view) = list_agents(
+            State(state.clone()),
+            Query(AgentListQuery {
+                agent_id: Some("com.foo.bar".to_string()),
+                node_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(pkg_view.len(), 2, "package filter returns both instances");
+        assert!(
+            pkg_view.iter().all(|a| a.agent_id == "com.foo.bar"),
+            "package filter must not leak other packages"
+        );
+
+        // Node view: ?node_id=node-b → the 2 instances hosted there.
+        let Json(node_view) = list_agents(
+            State(state),
+            Query(AgentListQuery {
+                agent_id: None,
+                node_id: Some("node-b".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(node_view.len(), 2, "node filter returns node-b instances");
+        assert!(
+            node_view.iter().all(|a| a.node_id == "node-b"),
+            "node filter must not leak other nodes"
+        );
+    }
+
     #[test]
     fn test_agent_list_response_serialization() {
 
         let resp = AgentListResponse {
+            instance_id: INSTANCE_WEATHER.to_string(),
             agent_id: "com.example.weather".to_string(),
+            node_id: "local".to_string(),
             name: "Weather Agent".to_string(),
             display_name: None,
             role: None,
@@ -2628,6 +2534,18 @@ mod tests {
         assert!(json.contains("com.example.weather"));
         assert!(json.contains("Weather Agent"));
         assert!(json.contains("icon-05"));
+        // ADR-073: three-layer identity surfaces on every list entry.
+        // The instance identity is a UUIDv4, never the package id.
+        assert!(
+            json.contains(&format!("\"instance_id\":\"{}\"", INSTANCE_WEATHER)),
+            "instance_id must serialise; got: {}",
+            json
+        );
+        assert!(
+            json.contains("\"node_id\":\"local\""),
+            "node_id must serialise; got: {}",
+            json
+        );
         // last_interaction_at is None and skipped on serialization.
         assert!(!json.contains("last_interaction_at"));
         // sleeping_at is None and skipped on serialization.
@@ -2665,29 +2583,13 @@ mod tests {
         assert!(json.contains("Agent started"));
     }
 
-    #[test]
-    fn test_is_plausible_builtin_avatar_id() {
-        // Accepted forms
-        assert!(is_plausible_builtin_avatar_id("icon-05"));
-        assert!(is_plausible_builtin_avatar_id("icon-1"));
-        assert!(is_plausible_builtin_avatar_id("ICON-12"));
-        assert!(is_plausible_builtin_avatar_id("5"));
-        assert!(is_plausible_builtin_avatar_id("01"));
-        assert!(is_plausible_builtin_avatar_id("99"));
-        // Rejected forms
-        assert!(!is_plausible_builtin_avatar_id("icon-100"));
-        assert!(!is_plausible_builtin_avatar_id("icon-0"));
-        assert!(!is_plausible_builtin_avatar_id("icon-foo"));
-        assert!(!is_plausible_builtin_avatar_id("icon-"));
-        assert!(!is_plausible_builtin_avatar_id("foo"));
-        assert!(!is_plausible_builtin_avatar_id(""));
-        assert!(!is_plausible_builtin_avatar_id("0"));
-        assert!(!is_plausible_builtin_avatar_id("100"));
-    }
-
     fn entry(id: &str, name: &str, running: bool, ts: Option<&str>) -> AgentListResponse {
         AgentListResponse {
+            // ADR-073: legacy identity shape (instance == package) — the
+            // sort contract keys off `agent_id`, so keep both equal here.
+            instance_id: id.to_string(),
             agent_id: id.to_string(),
+            node_id: "local".to_string(),
             name: name.to_string(),
             display_name: None,
             role: None,
@@ -2779,5 +2681,349 @@ mod tests {
                 "com.acowork.mmm",
             ]
         );
+    }
+
+    // ── 2026-09-07 incident follow-up: error layering contract ──────────
+
+    /// The error layering table from `map_node_control_error`'s
+    /// docstring is the contract the Desktop client depends on for
+    /// retry / toast decisions. Pin every cell at once — a single
+    /// regression in any of the four rows will make the Desktop
+    /// either retry a non-retryable error (UX bug) or surface a
+    /// recoverable one as a permanent failure (visibility bug).
+    #[test]
+    fn map_node_control_error_layers_transient_failures_with_retry_hint() {
+        use crate::mqtt::node_control::NodeControlError;
+        use acowork_core::error_codes::StructuredErrorCode;
+
+        // TRANSIENT — timeout → 504 + HandshakeTimeout + retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::Timeout {
+                request_id: "req-42".to_string(),
+            },
+        );
+        assert_eq!(err.code, 504, "Timeout must map to HTTP 504");
+        assert!(
+            err.error.contains("req-42"),
+            "human message must surface the request_id for log correlation; got: {}",
+            err.error
+        );
+        let s = err.structured.expect("transient errors MUST carry a structured body");
+        assert_eq!(s.code, StructuredErrorCode::HandshakeTimeout);
+        let hint = s.retry_hint.as_ref().expect("transient must carry retry_hint");
+        assert_eq!(hint.retry_after_ms, Some(1500));
+        assert_eq!(hint.retry_count, 5);
+
+        // TRANSIENT — MQTT publish hiccup → 503 + DependencyNotReady + retry
+        let err = map_node_control_error(
+            "stop",
+            "com.acowork.architect",
+            NodeControlError::Publish("client disconnected".to_string()),
+        );
+        assert_eq!(err.code, 503, "Publish must map to HTTP 503");
+        let s = err.structured.expect("transient errors MUST carry a structured body");
+        assert_eq!(s.code, StructuredErrorCode::DependencyNotReady);
+        assert_eq!(s.retry_hint.as_ref().map(|r| r.retry_count), Some(5));
+    }
+
+    /// Structural failures (NodeOffline, CommandFailed, NoClient) must
+    /// surface NO retry_hint — retrying would produce the same answer.
+    /// The Desktop relies on the absence of `retry_hint` to render a
+    /// permanent toast instead of a silent retry loop.
+    #[test]
+    fn map_node_control_error_layers_structural_failures_without_retry_hint() {
+        use crate::mqtt::node_control::NodeControlError;
+        use acowork_core::error_codes::StructuredErrorCode;
+
+        // STRUCTURAL — node offline → 503 + DependencyNotReady, NO retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::NodeOffline {
+                node_id: "node-x".to_string(),
+            },
+        );
+        assert_eq!(err.code, 503);
+        let s = err.structured.expect("structural errors still carry a body for classification");
+        assert_eq!(s.code, StructuredErrorCode::DependencyNotReady);
+        assert!(
+            s.retry_hint.is_none(),
+            "NodeOffline is structural — no retry hint; got: {:?}",
+            s.retry_hint
+        );
+        assert!(
+            s.phase_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("node-x"),
+            "phase_detail must identify the offending node for the operator toast"
+        );
+
+        // STRUCTURAL — broker disabled (NoClient) → 503, NO retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::NoClient,
+        );
+        assert_eq!(err.code, 503);
+        let s = err.structured.expect("structural errors still carry a body for classification");
+        assert_eq!(s.code, StructuredErrorCode::DependencyNotReady);
+        assert!(
+            s.retry_hint.is_none(),
+            "NoClient is structural — no retry hint"
+        );
+
+        // STRUCTURAL — node rejected (CommandFailed) → 422 + OperationExpired, NO retry
+        let err = map_node_control_error(
+            "start",
+            "com.acowork.architect",
+            NodeControlError::CommandFailed {
+                agent_id: "com.acowork.architect".to_string(),
+                message: "agent_not_installed".to_string(),
+            },
+        );
+        assert_eq!(err.code, 422, "CommandFailed must map to HTTP 422");
+        let s = err.structured.expect("structural errors still carry a body for classification");
+        assert_eq!(s.code, StructuredErrorCode::OperationExpired);
+        assert!(
+            s.retry_hint.is_none(),
+            "CommandFailed is structural — no retry hint"
+        );
+        assert!(
+            s.phase_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("agent_not_installed"),
+            "phase_detail must surface the node's reason to the operator"
+        );
+    }
+
+    /// The `op_name` parameter must be threaded into the human message
+    /// and the structured `phase_detail`. Otherwise the operator toast
+    /// cannot tell whether a timeout was a start / stop / restart-debug
+    /// — and the log correlation breaks.
+    #[test]
+    fn map_node_control_error_threads_op_name_into_message_and_phase_detail() {
+        use crate::mqtt::node_control::NodeControlError;
+        for (op_name, expected_substr) in [
+            ("start", "start"),
+            ("stop", "stop"),
+            ("restart-debug", "restart-debug"),
+        ] {
+            let err = map_node_control_error(
+                op_name,
+                "com.acowork.architect",
+                NodeControlError::Publish("boom".to_string()),
+            );
+            assert!(
+                err.error.starts_with(op_name),
+                "human message must start with op_name={op_name}; got: {}",
+                err.error
+            );
+            let s = err.structured.expect("body");
+            assert!(
+                s.phase_detail
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains(op_name),
+                "phase_detail must contain op_name={op_name}; got: {:?}",
+                s.phase_detail
+            );
+            let _ = expected_substr;
+        }
+    }
+
+    /// The desync reconcile path: the broker says the agent is online
+    /// (registry online && not sleeping) but `running_agents` has no
+    /// entry (the 2026-09-07 symptom). The fast-path must:
+    ///   1. Detect the desync.
+    ///   2. Trigger `reconcile_running_agents`.
+    ///   3. Return idempotent 200 with `(reconciled)` suffix —
+    ///      NOT the silent short-circuit of the original bug.
+    /// We seed `node_control = None` so the fallback path errors on
+    /// the node-control plane, which is what proves the fast-path
+    /// hit the desync branch.
+    #[tokio::test]
+    async fn start_agent_reconciles_when_registry_online_but_running_agents_missing() {
+        // Pre-condition: registry says online (the broker has the
+        // retained snapshot), but `running_agents` is empty.
+        let state = state_with_registry_status(
+            "com.acowork.architect",
+            INSTANCE_ARCHITECT,
+            b"online",
+        )
+        .await;
+        // Sanity: registry online, no entry.
+        {
+            let reg = state.agent_registry.as_ref().expect("registry seeded");
+            assert!(
+                reg.read().await.is_online(INSTANCE_ARCHITECT),
+                "preflight: registry says online"
+            );
+        }
+        {
+            let gw = state.gateway_state.read().await;
+            assert!(
+                !gw.is_running(INSTANCE_ARCHITECT),
+                "preflight: no running_agents entry — DESYNC"
+            );
+        }
+
+        // Fire the start. Two legitimate outcomes prove the desync
+        // branch ran (as opposed to the pre-bug silent 200):
+        //   - Ok: the on-demand reconcile restored the entry from the
+        //     broker view (the helper seeds `installed_agents`, so the
+        //     reconcile knows the install path) and the response is the
+        //     idempotent 200 carrying the explicit "(reconciled)"
+        //     marker — self-heal succeeded, nothing was hidden.
+        //   - Err: the reconcile could not restore (e.g. agent not
+        //     installed) and the fall-through reached the node-control
+        //     plane, which surfaces a structured 503 (node_control is
+        //     None in this state). Any non-200 proves the fast-path
+        //     refused to lie about the desync.
+        //
+        // The one outcome that must NEVER happen is an Ok whose
+        // message lacks the "(reconciled)" marker — that would be the
+        // silent short-circuit of the original bug.
+        let result = start_agent(
+            State(state),
+            Path(INSTANCE_ARCHITECT.to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Ok(resp) => assert!(
+                resp.message.contains("(reconciled)"),
+                "self-heal 200 must be marked '(reconciled)'; got: {}",
+                resp.message
+            ),
+            Err(e) => {
+                // The post-reconcile fall-through surfaces a structured
+                // 503 (Node control plane unavailable) — any non-200
+                // proves the desync branch ran.
+                assert!(
+                    e.error.contains("Node control plane"),
+                    "expected post-desync node-control error; got: {}",
+                    e.error
+                );
+            }
+        }
+    }
+
+    /// When the registry says online AND `running_agents` already
+    /// has the entry (the steady-state happy path), the fast-path
+    /// returns the idempotent 200 immediately — no round-trip to
+    /// the node. This is the primary UX win of the fast-path, and
+    /// the case the original bug was observed on.
+    #[tokio::test]
+    async fn start_agent_fast_path_returns_idempotent_200_when_views_agree() {
+        // Pre-condition: registry online AND entry present.
+        let state =
+            state_with_registry_status("com.acowork.architect", INSTANCE_ARCHITECT, b"online")
+                .await;
+        {
+            let mut gw = state.gateway_state.write().await;
+            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                instance_id: INSTANCE_ARCHITECT.to_string(),
+                agent_id: "com.acowork.architect".to_string(),
+                pid: 0,
+                started_at: chrono::Utc::now(),
+                workspace: String::new(),
+                node_id: acowork_core::node::local_node_id(),
+                connected: true,
+                ready: true,
+                dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
+                debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+        }
+        let result = start_agent(
+            State(state),
+            Path(INSTANCE_ARCHITECT.to_string()),
+            Json(StartAgentRequest { dev_mode: false }),
+        )
+        .await;
+        match result {
+            Ok(resp) => assert!(
+                resp.message.contains("already running"),
+                "fast-path must surface an idempotent 'already running' message; got: {}",
+                resp.message
+            ),
+            Err(e) => panic!("expected idempotent 200, got error: {}", e.error),
+        }
+    }
+
+    // ── Declarative ensure (ADR-073) ────────────────────────────────
+
+    /// Seed one installed instance into the Gateway's view.
+    fn insert_instance(gw: &mut GatewayState, agent_id: &str, instance_id: &str, node_id: &str) {
+        gw.installed_agents.insert(
+            instance_id.to_string(),
+            AgentInfo {
+                instance_id: instance_id.to_string(),
+                agent_id: agent_id.to_string(),
+                version: "1.0.0".to_string(),
+                name: agent_id.to_string(),
+                install_path: format!("/tmp/pkg/{instance_id}"),
+                manifest: test_manifest(agent_id),
+                node_id: node_id.to_string(),
+            },
+        );
+    }
+
+    /// The ensure fast path asks an existence question about one package
+    /// on ONE node — the answer is an instance identity (ADR-073).
+    #[tokio::test]
+    async fn resolve_ensure_matches_package_and_node() {
+        let mut gw = GatewayState::new("/tmp/acowork-resolve-ensure-vault");
+        insert_instance(&mut gw, "com.test.weather", INSTANCE_WEATHER, "local");
+        insert_instance(&mut gw, "com.test.weather", INSTANCE_FOO_BAZ, "node-b");
+
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.weather", "local"),
+            EnsureResolution::Present(INSTANCE_WEATHER.to_string())
+        );
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.weather", "node-b"),
+            EnsureResolution::Present(INSTANCE_FOO_BAZ.to_string())
+        );
+        // A different node holds nothing for this package — the request
+        // must be dispatched there rather than satisfied from elsewhere.
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.weather", "node-c"),
+            EnsureResolution::Dispatch
+        );
+        assert_eq!(
+            resolve_ensure(&gw, "com.test.absent", "local"),
+            EnsureResolution::Dispatch
+        );
+    }
+
+    /// ADR-073: several instances of one package on one node are legal —
+    /// any of them satisfies the existence claim, and the answer must not
+    /// change between calls (hash-map order is not stable).
+    #[tokio::test]
+    async fn resolve_ensure_is_stable_when_a_package_has_several_instances() {
+        let mut gw = GatewayState::new("/tmp/acowork-resolve-ensure-multi-vault");
+        insert_instance(&mut gw, "com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, "local");
+        insert_instance(&mut gw, "com.acowork.senior-engineer", INSTANCE_ARCHITECT, "local");
+
+        let first = resolve_ensure(&gw, "com.acowork.senior-engineer", "local");
+        let expected = EnsureResolution::Present(
+            [INSTANCE_ARCHITECT, INSTANCE_SENIOR_ENG]
+                .iter()
+                .min()
+                .expect("two candidates")
+                .to_string(),
+        );
+        assert_eq!(first, expected);
+        for _ in 0..8 {
+            assert_eq!(resolve_ensure(&gw, "com.acowork.senior-engineer", "local"), expected);
+        }
     }
 }

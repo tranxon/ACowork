@@ -28,9 +28,10 @@ use tokio::sync::broadcast;
 
 /// Stable opaque identifier for a registered subsystem.
 ///
-/// Defined as a `String` newtype so subsystem authors can use any
-/// domain-specific naming (`"vault"`, `"node.local"`, `"embedding"`,
-/// …) without forcing changes to the orchestrator.
+/// Defined as a String newtype so subsystem authors can use any
+/// domain-specific naming (`"vault"`, per-node entries such as
+/// `"node.nytb"`, `"embedding"`, ...) without forcing changes to the
+/// orchestrator.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SubsystemId(pub String);
 

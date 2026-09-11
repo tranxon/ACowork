@@ -98,6 +98,28 @@ pub struct StructuredErrorBody {
     pub deadline_ms: Option<u64>,
 }
 
+impl Default for StructuredErrorBody {
+    /// Empty body — every field is `None` / zero. Construct-then-fill
+    /// pattern for callers that don't want to enumerate all 10 optional
+    /// fields (e.g. ad-hoc 503 / 422 responses layered on top of the
+    /// closed `StructuredErrorCode` set).
+    fn default() -> Self {
+        Self {
+            code: StructuredErrorCode::OperationUncertain,
+            current_phase: None,
+            phase_detail: None,
+            retry_hint: None,
+            operation_id: None,
+            last_known_phase: None,
+            current_version: None,
+            client_expected_version: None,
+            lease_deadline_ms: None,
+            endpoint: None,
+            deadline_ms: None,
+        }
+    }
+}
+
 impl StructuredErrorBody {
     /// `dependency_not_ready` — carries only the phase picture and a
     /// retry hint (ADR-059 §6.3: the client retries once phase = READY).
@@ -229,5 +251,69 @@ mod tests {
         assert!(json.get("retry_hint").is_none());
         assert!(json.get("current_version").is_none());
         assert!(json.get("lease_deadline_ms").is_none());
+    }
+
+    /// `Default` is the construct-then-fill backbone for ad-hoc
+    /// 503 / 422 responses layered on top of the closed
+    /// `StructuredErrorCode` set (2026-09-07 incident follow-up).
+    /// The contract: every optional field is `None`, `code` is the
+    /// protocol-default `OperationUncertain`. Pinning this prevents
+    /// drift if a new optional field is added to the struct — a
+    /// `..Default::default()` spread must keep working at every
+    /// call-site that adopts a new field.
+    #[test]
+    fn structured_error_body_default_has_all_optional_fields_none() {
+        let body = StructuredErrorBody::default();
+        // The protocol default for an unset code is `operation_uncertain`
+        // (the most conservative classification; clients always re-check).
+        assert_eq!(body.code, StructuredErrorCode::OperationUncertain);
+        assert!(body.current_phase.is_none());
+        assert!(body.phase_detail.is_none());
+        assert!(body.retry_hint.is_none());
+        assert!(body.operation_id.is_none());
+        assert!(body.last_known_phase.is_none());
+        assert!(body.current_version.is_none());
+        assert!(body.client_expected_version.is_none());
+        assert!(body.lease_deadline_ms.is_none());
+        assert!(body.endpoint.is_none());
+        assert!(body.deadline_ms.is_none());
+    }
+
+    /// The `..Default::default()` spread pattern must work for every
+    /// optional field. After spreading, callers can overwrite only
+    /// the fields they care about — the rest stay `None` and are
+    /// omitted from the wire (OCP, ADR-059 §5.4.4).
+    #[test]
+    fn structured_error_body_default_spread_omits_unset_fields() {
+        let body = StructuredErrorBody {
+            code: StructuredErrorCode::HandshakeTimeout,
+            phase_detail: Some("timeout agent=foo".to_string()),
+            retry_hint: Some(RetryHint {
+                retry_after_ms: Some(1500),
+                retry_count: 5,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["code"], "handshake_timeout");
+        assert_eq!(json["phase_detail"], "timeout agent=foo");
+        assert_eq!(json["retry_hint"]["retry_after_ms"], 1500);
+        assert_eq!(json["retry_hint"]["retry_count"], 5);
+        // Every other field absent on the wire.
+        for omitted in [
+            "current_phase",
+            "operation_id",
+            "last_known_phase",
+            "current_version",
+            "client_expected_version",
+            "lease_deadline_ms",
+            "endpoint",
+            "deadline_ms",
+        ] {
+            assert!(
+                json.get(omitted).is_none(),
+                "field {omitted} must be absent when default = None; got {json}"
+            );
+        }
     }
 }

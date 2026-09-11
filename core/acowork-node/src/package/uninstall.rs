@@ -11,21 +11,28 @@ use crate::error::{NodeError, Result};
 use crate::state::NodeState;
 
 /// Uninstall a .agent package
+///
+/// ADR-073: the target is located by instance identity (`instance_id`,
+/// falling back to the package id for legacy commands).
 pub fn uninstall_package(
+    instance_id: &str,
     agent_id: &str,
     _install_dir: &Path,
     state: &mut NodeState,
 ) -> Result<()> {
+    // ADR-073: the install table is keyed by instance identity.
+    let key = instance_id.to_string();
+
     // Check if agent is installed
     let info = state
         .installed_agents
-        .get(agent_id)
-        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?
+        .get(&key)
+        .ok_or_else(|| NodeError::AgentNotFound(key.clone()))?
         .clone();
 
     // Check if agent is running
-    if state.is_running(agent_id) {
-        return Err(NodeError::AgentAlreadyRunning(agent_id.to_string()));
+    if state.is_running(&key) {
+        return Err(NodeError::AgentAlreadyRunning(key.clone()));
     }
 
     // Remove install directory
@@ -35,10 +42,18 @@ pub fn uninstall_package(
             .map_err(|e| NodeError::Package(format!("Failed to remove install dir: {}", e)))?;
     }
 
-    // Remove from state
-    state.remove_installed(agent_id);
+    // Remove the user-preference overrides file too. It is a *sibling*
+    // of the instance dir (ADR-009 §5: survives upgrade), so the
+    // `remove_dir_all` above does not touch it; leaving it behind
+    // orphans the file for every re-install under a new instance id.
+    if let Some(path) = acowork_core::overrides_path(agent_dir, &info.instance_id) {
+        let _ = std::fs::remove_file(&path);
+    }
 
-    tracing::info!("Uninstalled agent: {}", agent_id);
+    // Remove from state
+    state.remove_installed(&key);
+
+    tracing::info!("Uninstalled agent instance: {} ({})", key, agent_id);
     Ok(())
 }
 
@@ -50,7 +65,7 @@ mod tests {
     fn test_uninstall_not_installed() {
         let mut state = NodeState::new(16);
         let install_dir = Path::new("/tmp/nonexistent");
-        let result = uninstall_package("com.test.unknown", install_dir, &mut state);
+        let result = uninstall_package("", "com.test.unknown", install_dir, &mut state);
         assert!(result.is_err());
     }
 }

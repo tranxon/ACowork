@@ -20,6 +20,7 @@ pub mod mqtt;
 pub mod operation_store;
 pub mod rate;
 pub mod resource_cache;
+pub mod security;
 pub mod util;
 pub mod vault;
 

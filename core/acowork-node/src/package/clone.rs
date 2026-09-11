@@ -25,32 +25,43 @@ pub enum CloneMode {
 /// Clone a source agent to a new agent ID.
 ///
 /// Returns the new InstalledAgent or an error if the clone fails.
+///
+/// ADR-073: the source is located by instance identity (`source_instance_id`,
+/// falling back to the package id for legacy commands); the target is a NEW
+/// instance (fresh UUID) installed under
+/// `{install_dir}/{new_agent_id}/{new_instance_id}/`.
 pub fn clone_agent(
+    source_instance_id: &str,
     source_agent_id: &str,
     new_agent_id: &str,
     mode: CloneMode,
     install_dir: &Path,
     state: &mut NodeState,
 ) -> Result<InstalledAgent> {
+    // ADR-073: the install table is keyed by instance identity.
+    let source_key = source_instance_id.to_string();
+
     // 1. Validate source exists
     let source_info = state
         .installed_agents
-        .get(source_agent_id)
-        .ok_or_else(|| NodeError::AgentNotFound(source_agent_id.to_string()))?;
+        .get(&source_key)
+        .ok_or_else(|| NodeError::AgentNotFound(source_key.clone()))?;
 
     // 2. System agent cannot be cloned
     if source_info.manifest.system {
         return Err(NodeError::Package(format!(
             "System agent '{}' cannot be cloned",
-            source_agent_id
+            source_key
         )));
     }
 
-    // 3. Check conflict
-    if state.is_installed(new_agent_id) {
+    // 3. Check conflict — the target is a NEW instance; only a collision
+    //    on the same instance_id (impossible for a fresh UUID) would fail.
+    let new_instance_id = uuid::Uuid::new_v4().to_string();
+    if state.is_installed(&new_instance_id) {
         return Err(NodeError::Package(format!(
-            "Agent '{}' is already installed. Uninstall or choose a different ID.",
-            new_agent_id
+            "Instance '{}' is already installed. Uninstall or choose a different ID.",
+            new_instance_id
         )));
     }
 
@@ -70,7 +81,7 @@ pub fn clone_agent(
         )));
     }
 
-    let target_path = install_dir.join(new_agent_id);
+    let target_path = install_dir.join(new_agent_id).join(&new_instance_id);
     std::fs::create_dir_all(&target_path).map_err(|e| {
         NodeError::Package(format!(
             "Failed to create target directory '{}': {}",
@@ -133,6 +144,7 @@ pub fn clone_agent(
 
     // 8. Register cloned agent
     let info = InstalledAgent {
+        instance_id: new_instance_id,
         agent_id: new_agent_id.to_string(),
         version: new_manifest.version.clone(),
         name: format!("{} (clone)", new_manifest.name),
@@ -141,7 +153,8 @@ pub fn clone_agent(
     };
 
     tracing::info!(
-        "Cloned agent: {} → {} (mode={:?})",
+        "Cloned agent instance: {} ({} → {}, mode={:?})",
+        info.instance_id,
         source_agent_id,
         new_agent_id,
         mode
@@ -272,6 +285,7 @@ mod tests {
         ))
         .unwrap();
         state.add_installed(InstalledAgent {
+            instance_id: format!("inst-{agent_id}"),
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -295,6 +309,7 @@ mod tests {
         add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
 
         let result = clone_agent(
+            "inst-com.test.weather",
             "com.test.weather",
             "com.test.weather-clone",
             CloneMode::Skeleton,
@@ -305,10 +320,13 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.agent_id, "com.test.weather-clone");
         assert!(info.manifest.dev, "Cloned agent should have dev=true");
-        assert!(state.is_installed("com.test.weather-clone"));
+        // ADR-073: the target is a fresh instance under {agent_id}/{uuid}/
+        assert!(state.is_installed(&info.instance_id));
 
         // Verify skeleton dirs copied
-        let target = install_dir.join("com.test.weather-clone");
+        let target = install_dir
+            .join("com.test.weather-clone")
+            .join(&info.instance_id);
         assert!(target.join("prompts").exists(), "prompts should be copied");
         assert!(target.join("config").exists(), "config should be copied");
         // Skills should NOT be copied in skeleton mode
@@ -335,6 +353,7 @@ mod tests {
         add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
 
         let result = clone_agent(
+            "inst-com.test.weather",
             "com.test.weather",
             "com.test.weather-full-clone",
             CloneMode::Full,
@@ -345,7 +364,9 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.agent_id, "com.test.weather-full-clone");
 
-        let target = install_dir.join("com.test.weather-full-clone");
+        let target = install_dir
+            .join("com.test.weather-full-clone")
+            .join(&info.instance_id);
         assert!(
             target.join("skills").exists(),
             "skills should be copied in full mode"
@@ -379,6 +400,7 @@ mod tests {
         let manifest_toml = std::fs::read_to_string(source_dir.join("manifest.toml")).unwrap();
         let manifest = acowork_core::AgentManifest::from_toml(&manifest_toml).unwrap();
         state.add_installed(InstalledAgent {
+            instance_id: "inst-com.acowork.system".to_string(),
             agent_id: "com.acowork.system".to_string(),
             version: "1.0.0".to_string(),
             name: "System Agent".to_string(),
@@ -387,6 +409,7 @@ mod tests {
         });
 
         let result = clone_agent(
+            "inst-com.acowork.system",
             "com.acowork.system",
             "com.acowork.system-clone",
             CloneMode::Skeleton,
@@ -418,16 +441,17 @@ mod tests {
         add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
 
         let result = clone_agent(
+            "inst-com.test.weather",
             "com.test.weather",
-            "com.test.weather-clone", // already exists
+            "com.test.weather-clone", // same package id is now allowed —
+            // ADR-073 distinguishes instances from packages
             CloneMode::Skeleton,
             &install_dir,
             &mut state,
         );
-        assert!(
-            result.is_err(),
-            "Clone to existing agent_id should be rejected"
-        );
+        // ADR-073: cloning to the same agent_id creates a NEW instance
+        // (fresh UUID), so it no longer collides.
+        assert!(result.is_ok(), "Same-package clone should succeed");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -443,6 +467,7 @@ mod tests {
         let mut state = NodeState::new(16);
 
         let result = clone_agent(
+            "",
             "com.test.nonexistent",
             "com.test.new",
             CloneMode::Skeleton,

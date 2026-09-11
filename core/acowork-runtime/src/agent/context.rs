@@ -1241,6 +1241,7 @@ mod tests {
             max_output_limit,
             None,
             None,
+            None,
         );
 
         assert_eq!(fresh.context_window, persisted.context_window);
@@ -1259,7 +1260,7 @@ mod tests {
     fn test_build_context_usage_from_persisted_zero_tokens() {
         // New session with no token data yet → should produce 0 input/output
         let caps = test_caps(200_000, 8_192);
-        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None, None);
+        let info = build_context_usage_from_persisted(&caps, 0, 0, 32_768, None, None, None);
         assert_eq!(info.input_tokens, 0);
         assert_eq!(info.output_tokens, 0);
         assert_eq!(info.total_tokens, 0);
@@ -1294,6 +1295,7 @@ mod tests {
             32_768,
             None,
             Some(&cumulative),
+            Some(9),
         );
 
         // Per-turn fields populated from last_input/last_output scalars.
@@ -1313,6 +1315,8 @@ mod tests {
             "cumulative total_input_tokens must NOT equal per-turn input_tokens",
         );
         assert!(info.total_input_tokens.unwrap() > info.input_tokens);
+        // Persisted per-session iteration count carried through.
+        assert_eq!(info.iteration, Some(9));
     }
 
     #[test]
@@ -1737,6 +1741,10 @@ pub fn compute_context_usage(
         agent_total_cache_write_tokens: None,
         // ADR-067: see compute_section_sizes; populated by callers with a ContextBuilder
         sections: None,
+        // LLM-call iteration count is patched by the caller
+        // (process_llm_response_usage) before push, so this builder
+        // doesn't need to know the counter.
+        iteration: None,
     }
 }
 
@@ -1769,6 +1777,7 @@ pub fn build_context_usage_from_persisted(
     max_output_tokens_limit: u64,
     context_window_cap: Option<u64>,
     cumulative_tokens: Option<&crate::conversation::SessionTokens>,
+    llm_call_counter: Option<u32>,
 ) -> acowork_core::protocol::ContextUsageInfo {
     let mut info = {
         let usage = acowork_core::providers::traits::UsageInfo {
@@ -1791,6 +1800,11 @@ pub fn build_context_usage_from_persisted(
         info.cache_write_tokens = Some(t.last_cache_write);
         patch_session_totals(&mut info, t);
     }
+    // Per-session lifetime LLM-call count ("Iterations" display),
+    // persisted in `SessionMeta.llm_call_counter`. Mirrors the live
+    // `ContextUsage` push so the retained `session_state` snapshot and
+    // the `fetchSessionState` pull carry the same count as the push.
+    info.iteration = llm_call_counter;
     info
 }
 

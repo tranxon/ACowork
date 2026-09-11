@@ -125,7 +125,8 @@ function ensureSessionState(
 
 interface DebugEventPayload {
   type: "onStep" | "onContextBuilt" | "onStateChange";
-  agent_id: string;
+  /** ADR-073: instance identity — the store addressing key. */
+  instance_id: string;
   session_id: string;
   // onStep
   iteration?: number;
@@ -447,7 +448,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     // events flow for every dev-mode agent on the shared MQTT
     // subscription; sessions of other agents are irrelevant here.
     const store = get();
-    if (!event.agent_id || event.agent_id !== store.debugAgentId) return;
+    if (!event.instance_id || event.instance_id !== store.debugAgentId) return;
 
     // Route events by session_id so background sessions' state is
     // updated correctly even when not currently displayed.

@@ -66,6 +66,11 @@ pub struct AppState {
     /// (install / provider write / identity write) from `Accepted` to
     /// a terminal state, keyed by `operation_id`.
     pub operation_store: Option<crate::operation_store::SharedOperationStore>,
+    /// Peer-IP allowlist (security backstop, `[security].allowed_node_ips`).
+    /// Populated at boot from the Gateway config; empty = allow everyone.
+    /// Enforced by the `ip_allowlist_middleware` for requests that carry a
+    /// real `ConnectInfo` (i.e. every request that arrived over TCP).
+    pub ip_allowlist: crate::security::IpAllowlist,
 }
 
 impl AppState {
@@ -86,6 +91,7 @@ impl AppState {
             node_registry: None,
             bootstrap_registry: None,
             operation_store: None,
+            ip_allowlist: crate::security::IpAllowlist::default(),
         }
     }
 }
@@ -114,11 +120,67 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
     response
 }
 
+/// Peer-IP allowlist enforcement (security backstop).
+///
+/// Reads `AppState::ip_allowlist` (populated at boot from
+/// `[security].allowed_node_ips`). Empty list → pass-through (default).
+///
+/// The peer IP comes from Axum's `ConnectInfo<SocketAddr>` extension,
+/// which is only attached when the router is served via
+/// `into_make_service_with_connect_info::<SocketAddr>()` (see
+/// `crate::http::server::start_http_server`). Requests that arrive
+/// **without** ConnectInfo (in-process tests, internal callers that
+/// invoke the router directly) are trusted and pass through — they are
+/// already on a trusted code path; the allowlist exists to gate
+/// *network* peers, and every network peer goes through the TCP
+/// listener that supplies ConnectInfo.
+///
+/// A blocked peer receives `403 Forbidden` with a JSON body and a WARN
+/// log line (IP + URI), so an operator can detect scan / probe traffic.
+pub(crate) async fn ip_allowlist_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let allowlist = &state.ip_allowlist;
+    if allowlist.is_empty() {
+        return next.run(req).await;
+    }
+    // Peek at the request for the log line without consuming it.
+    let uri = req.uri().to_string();
+    match req
+        .extensions()
+        .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0)
+    {
+        // Real network connection: enforce the allowlist.
+        Some(peer) if allowlist.allows_socket(peer) => next.run(req).await,
+        Some(peer) => {
+            tracing::warn!(
+                peer = %peer.ip(),
+                uri = %uri,
+                "blocked by security.allowed_node_ips (HTTP)"
+            );
+            let body = axum::Json(serde_json::json!({
+                "error": "forbidden",
+                "detail": "peer IP not allowed by gateway security policy",
+            }));
+            (StatusCode::FORBIDDEN, body).into_response()
+        }
+        // No ConnectInfo — trusted in-process path.
+        None => next.run(req).await,
+    }
+}
+
 /// Build the HTTP router with all routes.
 ///
 /// ADR-064: PM 不再内嵌（`nest_service` 已删除），`/api/pm/*` 由
 /// [`crate::http::pm_proxy::pm_proxy_routes`] 反向代理到独立进程。
 pub fn build_router(state: AppState) -> Router {
+    // Peer-IP allowlist middleware needs the state again after
+    // `.with_state(state)` moves it — clone up front.
+    let allowlist_state = state.clone();
+
     // CORS — permissive for all deployments.
     //
     // `CorsLayer::permissive()` alone — deliberately WITHOUT
@@ -194,6 +256,13 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
+        // Peer-IP allowlist — outermost layer so it gates *every*
+        // route (including /health and unknown paths). Empty list =
+        // pass-through. See `ip_allowlist_middleware`.
+        .layer(middleware::from_fn_with_state(
+            allowlist_state,
+            ip_allowlist_middleware,
+        ))
 }
 
 // ── Health check (liveness-only) ─────────────────────────────────────
@@ -318,6 +387,13 @@ pub struct OperationAck {
     pub resource_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_error: Option<StructuredErrorBody>,
+    /// ADR-073: the instance identity created by this operation
+    /// (install / clone only). Lets the Desktop render the new
+    /// instance immediately instead of polling the retained
+    /// inventory. `None` for operations that do not create an
+    /// instance (start/stop/upgrade/…).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 impl OperationAck {
@@ -329,6 +405,7 @@ impl OperationAck {
             state: record.state,
             resource_version: record.resource_version,
             terminal_error: record.terminal_error.clone(),
+            instance_id: None,
         }
     }
 }
@@ -501,11 +578,40 @@ impl ApiError {
             structured: Some(Box::new(body)),
         }
     }
+
+    /// Generic structured error constructor (2026-09-07 incident
+    /// follow-up). The closed `StructuredErrorCode` set in
+    /// `acowork-core::error_codes` covers the whole API surface, but
+    /// some endpoints (e.g. `start_agent`) want to attach a code to a
+    /// status code that doesn't have a dedicated helper (`503`,
+    /// `422`, …). This constructor lets the handler pick both
+    /// independently.
+    ///
+    /// The convention is:
+    ///   - `code` = intended HTTP status (`u16`).
+    ///   - `error` = short human-readable line, **safe for end users**
+    ///     (do not leak internal paths or PII).
+    ///   - `structured` = machine-readable protocol body. Callers pick
+    ///     a `StructuredErrorCode` that classifies the failure for
+    ///     client-side retry / rendering decisions.
+    pub fn structured(
+        status: StatusCode,
+        message: &str,
+        body: StructuredErrorBody,
+    ) -> Self {
+        Self {
+            error: message.to_string(),
+            code: status.as_u16(),
+            structured: Some(Box::new(body)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
 
     fn test_app_state() -> AppState {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -534,6 +640,109 @@ mod tests {
         assert_eq!(resp.status, "ok");
         assert!(!resp.version.is_empty());
         assert!(resp.port > 0);
+    }
+
+    /// Peer-IP allowlist middleware: empty list = pass-through.
+    #[tokio::test]
+    async fn allowlist_empty_passes_everything() {
+        let mut state = test_app_state();
+        state.ip_allowlist = crate::security::IpAllowlist::default(); // empty
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Peer-IP allowlist middleware: allowed peer passes.
+    #[tokio::test]
+    async fn allowlist_allows_permitted_peer() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let mut request = request;
+        let peer: std::net::SocketAddr = "192.168.1.20:54321".parse().unwrap();
+        request.extensions_mut().insert(
+            axum::extract::connect_info::ConnectInfo(peer),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Peer-IP allowlist middleware: blocked peer gets 403 — even on /health.
+    #[tokio::test]
+    async fn allowlist_blocks_disallowed_peer_with_403() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let mut request = request;
+        let peer: std::net::SocketAddr = "203.0.113.9:54321".parse().unwrap();
+        request.extensions_mut().insert(
+            axum::extract::connect_info::ConnectInfo(peer),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Peer-IP allowlist middleware: loopback is always allowed even when
+    /// the list is restrictive.
+    #[tokio::test]
+    async fn allowlist_always_allows_loopback() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        let mut request = request;
+        let peer: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        request.extensions_mut().insert(
+            axum::extract::connect_info::ConnectInfo(peer),
+        );
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Peer-IP allowlist middleware: in-process requests without
+    /// ConnectInfo (internal callers, direct router tests) pass through —
+    /// the allowlist gates *network* peers only.
+    #[tokio::test]
+    async fn allowlist_passes_request_without_connect_info() {
+        let mut state = test_app_state();
+        let entry = crate::security::AllowlistEntry::parse("192.168.1.20").unwrap();
+        state.ip_allowlist = crate::security::IpAllowlist::new(vec![entry]);
+        let router = build_router(state);
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("build request");
+        // NOTE: no ConnectInfo extension inserted.
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -642,6 +851,99 @@ mod tests {
         let mut state = test_app_state();
         state.operation_store = Some(crate::operation_store::OperationStore::new_shared());
         let _router = build_router(state);
+    }
+
+    // ── 2026-09-07 incident follow-up: structured error layer ─────────
+
+    /// `ApiError::structured` is the generic constructor for endpoints
+    /// that need an HTTP status (`503` / `422` / `504`) without a
+    /// dedicated helper. Pin the wire shape so a future refactor of
+    /// the JSON encoding cannot silently lose the structured body —
+    /// the Desktop's retry / toast logic depends on `structured.code`.
+    #[test]
+    fn api_error_structured_carries_status_message_and_body() {
+        use acowork_core::error_codes::{RetryHint, StructuredErrorCode};
+        use axum::http::StatusCode;
+        let body = acowork_core::error_codes::StructuredErrorBody {
+            code: StructuredErrorCode::HandshakeTimeout,
+            phase_detail: Some("start_node_command_timeout agent=foo".to_string()),
+            retry_hint: Some(RetryHint {
+                retry_after_ms: Some(1500),
+                retry_count: 5,
+            }),
+            ..Default::default()
+        };
+        let err = ApiError::structured(StatusCode::GATEWAY_TIMEOUT, "node did not answer", body);
+        // HTTP layer: status code lifted to top-level `code`.
+        assert_eq!(err.code, 504);
+        assert_eq!(err.error, "node did not answer");
+        // Protocol layer: structured body preserved untouched.
+        let (structured_code, structured_phase_detail, structured_retry_after_ms, structured_retry_count) = {
+            let s = err
+                .structured
+                .as_ref()
+                .expect("structured must be Some when constructed via ::structured()");
+            (
+                s.code,
+                s.phase_detail.clone(),
+                s.retry_hint.as_ref().and_then(|r| r.retry_after_ms),
+                s.retry_hint.as_ref().map(|r| r.retry_count),
+            )
+        };
+        assert_eq!(structured_code, StructuredErrorCode::HandshakeTimeout);
+        assert_eq!(
+            structured_phase_detail.as_deref(),
+            Some("start_node_command_timeout agent=foo")
+        );
+        assert_eq!(structured_retry_after_ms, Some(1500));
+        assert_eq!(structured_retry_count, Some(5));
+        // Wire encoding: status + human + nested structured all present.
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], 504);
+        assert_eq!(json["error"], "node did not answer");
+        assert_eq!(json["structured"]["code"], "handshake_timeout");
+        assert_eq!(json["structured"]["retry_hint"]["retry_count"], 5);
+    }
+
+    /// `ApiError::structured` is the only path that carries
+    /// `structured: Some(_)` for HTTP 503 / 422 / 504 — the legacy
+    /// `internal` / `bad_request` / `service_unavailable` helpers
+    /// intentionally leave it `None`. Pin this contract so a future
+    /// helper consolidation does not accidentally drop the body on
+    /// the wire (the Desktop distinguishes 503-with-body from
+    /// 503-without-body via this field).
+    #[test]
+    fn legacy_api_error_helpers_have_no_structured_body() {
+        use axum::http::StatusCode;
+        // 500 / 400 / 404 / 503 / 504 / 401 / 409 / 422 — none of
+        // these carry a structured body (the closed
+        // `StructuredErrorCode` set has its own dedicated constructors
+        // where a body is meaningful).
+        for err in [
+            ApiError::internal("boom"),
+            ApiError::bad_request("nope"),
+            ApiError::not_found("missing"),
+            ApiError::unauthorized("denied"),
+            ApiError::service_unavailable("down"),
+            ApiError::gateway_timeout("late"),
+            ApiError::conflict("not ready"),
+            ApiError::unprocessable_entity("invalid"),
+        ] {
+            assert!(
+                err.structured.is_none(),
+                "legacy helper must NOT auto-fill a structured body; got {:?} for {} {}",
+                err.structured,
+                err.code,
+                err.error
+            );
+        }
+        // And the dedicated structured helper does.
+        let structured_err = ApiError::structured(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mqtt offline",
+            acowork_core::error_codes::StructuredErrorBody::default(),
+        );
+        assert!(structured_err.structured.is_some());
     }
 }
 

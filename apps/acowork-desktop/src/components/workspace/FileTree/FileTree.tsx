@@ -475,6 +475,7 @@ export function FileTree({
     return (
         <div
             ref={scrollRef}
+            data-tab-scroll
             className="file-tree-scroller flex-1 min-h-0 overflow-auto"
             /* Right-click on the empty area (scrollbar gutter / padding /
              * below-the-last-row space) opens the workspace-root menu.

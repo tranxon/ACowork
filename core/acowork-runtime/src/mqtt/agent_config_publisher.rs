@@ -35,23 +35,26 @@ use acowork_core::mqtt_proto::{data_envelope, AgentConfig, DataEnvelope};
 
 use crate::mqtt::client::{MqttQoS, RuntimeMqttClient};
 
-/// Publisher that re-emits the retained `acowork/agents/{id}/config`
+/// Publisher that re-emits the retained `acowork/agents/{instance_id}/config`
 /// snapshot.
 ///
 /// Cheap-to-clone handle (matches [`MqttChunkPublisher`]).
 #[derive(Clone)]
 pub struct MqttAgentConfigPublisher {
     agent_id: String,
+    /// ADR-073: instance identity for topic construction.
+    instance_id: String,
     shared_client: Arc<Mutex<AsyncClient>>,
 }
 
 impl MqttAgentConfigPublisher {
     /// Build from an already-running [`RuntimeMqttClient`]. Holds no
-    /// state beyond the shared client handle and agent_id, so it can
+    /// state beyond the shared client handle and ids, so it can
     /// be constructed at any point after Phase A.
     pub fn from_runtime_client(client: &RuntimeMqttClient) -> Self {
         Self {
             agent_id: client.agent_id().to_string(),
+            instance_id: client.instance_id().to_string(),
             shared_client: client.shared_handle(),
         }
     }
@@ -61,7 +64,12 @@ impl MqttAgentConfigPublisher {
         &self.agent_id
     }
 
-    /// Re-publish the retained `acowork/agents/{id}/config` snapshot.
+    /// ADR-073: instance identity this publisher is bound to.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Re-publish the retained `acowork/agents/{instance_id}/config` snapshot.
     ///
     /// `config_json` is the merged `AgentConfig` payload (use case
     /// result for the patch path; freshly serialized from
@@ -77,9 +85,12 @@ impl MqttAgentConfigPublisher {
             payload: Some(data_envelope::Payload::AgentConfig(AgentConfig {
                 agent_id: self.agent_id.clone(),
                 config_json,
+                // ADR-073: instance metadata for the retained snapshot.
+                instance_id: self.instance_id.clone(),
+                node_id: String::new(),
             })),
         };
-        let topic = format!("acowork/agents/{}/config", self.agent_id);
+        let topic = format!("acowork/agents/{}/config", self.instance_id);
         let payload = prost::Message::encode_to_vec(&envelope);
         let client = self.shared_client.lock().await.clone();
         if let Err(e) = client
@@ -119,6 +130,7 @@ mod tests {
         let (client, _eventloop) = rumqttc::AsyncClient::new(opts, 1);
         let publisher = MqttAgentConfigPublisher {
             agent_id: "com.example.Agent".to_string(),
+            instance_id: "inst-com.example.Agent".to_string(),
             shared_client: Arc::new(Mutex::new(client)),
         };
         assert_eq!(publisher.agent_id(), "com.example.Agent");
@@ -136,6 +148,9 @@ mod tests {
             payload: Some(data_envelope::Payload::AgentConfig(AgentConfig {
                 agent_id: "com.test.agent".to_string(),
                 config_json: config_json.clone(),
+                // ADR-073: empty instance/node identity = legacy envelope.
+                instance_id: String::new(),
+                node_id: String::new(),
             })),
         };
         let bytes = envelope.encode_to_vec();

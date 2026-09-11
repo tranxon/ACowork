@@ -530,6 +530,7 @@ mod tests {
                 "#;
                 let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
                 guard.add_installed(crate::gateway::state::AgentInfo {
+                    instance_id: format!("com.test.{}", i),
                     agent_id: format!("com.test.{}", i),
                     version: "1.0.0".to_string(),
                     name: format!("Test Agent {}", i),

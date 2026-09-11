@@ -884,7 +884,13 @@ impl GatewayClient {
 /// Agent list entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentListEntry {
+    /// ADR-073: instance identity (UUID v4, immutable). `None` when the
+    /// Gateway predates the field (legacy single-instance shape) — the
+    /// frontend falls back to `agent_id`.
+    pub instance_id: Option<String>,
     pub agent_id: String,
+    /// ADR-073: current location (node hosting this instance).
+    pub node_id: Option<String>,
     pub name: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -911,7 +917,11 @@ pub struct AgentListEntry {
 /// Agent detail response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDetailResponse {
+    /// ADR-073: instance identity (UUID v4, immutable).
+    pub instance_id: Option<String>,
     pub agent_id: String,
+    /// ADR-073: current location (mutable on migration).
+    pub node_id: Option<String>,
     pub name: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -968,6 +978,10 @@ pub struct OperationAck {
     pub resource_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_error: Option<StructuredErrorBody>,
+    /// ADR-073: instance identity created by this operation
+    /// (install / clone only). `None` for other operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 /// Clone response

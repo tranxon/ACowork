@@ -1,24 +1,29 @@
 //! Episode distillation & compaction — LLM-based semantic extraction from conversations.
 //!
-//! ## Unified strategy (ADR-011: 摘要即蒸馏)
+//! ## Compact Model role (ADR-011, revised)
 //!
-//! Compaction and distillation are unified into a single Compact Model call.
-//! The natural-language summary text serves dual purpose:
-//! - Replaces the middle section of in-memory history (context compression)
-//! - Written to Grafeo as an episodic memory (knowledge persistence)
+//! The compact model produces a natural-language summary used for two purposes:
+//! - **Context compaction**: replaces the middle section of in-memory history
+//!   when the 80% token threshold trips, so the next LLM call fits in budget.
+//! - **Quality gate**: the summary must pass `is_low_quality` before it can
+//!   replace history (raw tool output / reasoning dumps must not leak in).
 //!
-//! ## Trigger moments
+//! ## What the runtime does NOT do automatically (post-2026-09-10)
 //!
-//! 1. **Context compaction** (80% token usage) — `compact_full_context()`
-//!    produces a summary, replaces middle section in memory, writes to Grafeo.
-//! 2. **Session close** — `distill_on_session_end()` distills the tail
-//!    (everything after the last compaction) or the full session.
+//! Compaction is no longer a writer to Grafeo (was: `write_summary_to_provider`
+//! called from `loop_context` after every successful compact). Session-close
+//! tail distillation also no longer writes to Grafeo (`loop_session`).
+//! Memory persistence is delegated to the agent itself via the `memory_store`
+//! tool, driven by prompt guidance in the agent's `prompts/system.md`.
+//! Rationale: keeping memory writes user-visible and agent-decided instead of
+//! a silent system side-effect.
 //!
-//! Both are best-effort and non-blocking.
+//! ## Best-effort, non-blocking
+//!
+//! Compaction is best-effort: on quality-gate failure the history is left
+//! untouched and the user-facing error surfaces (see ADR-061 §11.3).
 
-use std::io::{BufRead, BufReader};
-use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -32,7 +37,6 @@ use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Pro
 pub use acowork_memory::DistilledEpisode;
 
 use crate::agent::loop_session::strip_think_block;
-use crate::embedding::EmbeddingProvider;
 use crate::error::{Result, RuntimeError};
 
 // ---------------------------------------------------------------------------
@@ -451,132 +455,6 @@ impl EpisodeDistiller {
         .await
     }
 
-    /// Distill an entire conversation session upon close.
-    ///
-    /// Reads the JSONL file and produces a session-level natural-language summary.
-    /// If the session content is shorter than `min_distill_chars`, the session
-    /// is **skipped** (an episode with an empty summary is returned) — the raw
-    /// conversation text is NEVER used as the summary (no raw-text fallback:
-    /// role labels and tool echoes must not land in episodic memory). Callers
-    /// must not write the episode when the returned summary is empty.
-    ///
-    /// `identity_context` is threaded into the system prompt when an LLM call
-    /// is made so the summary lands in the user's preferred language. When the
-    /// session is skipped, no LLM is invoked and `usage` in the returned tuple
-    /// is `UsageInfo::default()`.
-    ///
-    /// `compaction_prompt` is the agent-specific summarization directive from
-    /// `prompts/summary.md`; `None` falls back to the built-in
-    /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`].
-    ///
-    /// Returns `(episode, usage)` per ADR-027 so callers can record raw
-    /// Provider usage in [`crate::conversation::SessionTokens`].
-    ///
-    /// `#[allow(clippy::too_many_arguments)]` follows the project convention
-    /// for thin pass-through facades (cf. `AgentCore::new_with_observer`,
-    /// `SessionCore::new`): every argument is semantically independent and
-    /// arrives from a different call-site context, so bundling them into a
-    /// config struct would hurt readability without reducing surface area.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn distill_on_session_end(
-        session_path: &Path,
-        session_id: &str,
-        provider: &dyn Provider,
-        model_name: &str,
-        min_distill_chars: usize,
-        distill_max_tokens: u32,
-        identity_context: Option<&str>,
-        compaction_prompt: Option<&str>,
-    ) -> Result<(DistilledEpisode, UsageInfo)> {
-        let messages_text = read_jsonl_content(session_path)?;
-        if messages_text.is_empty() {
-            return Err(RuntimeError::Tool(
-                "Cannot distill empty session".to_string(),
-            ));
-        }
-
-        // Short sessions are SKIPPED, not summarized with raw text: falling
-        // back to the raw conversation would land role labels and tool
-        // echoes in episodic memory. Skipping is not a failure — the session
-        // is simply not worth remembering.
-        if messages_text.len() < min_distill_chars {
-            tracing::debug!(
-                len = messages_text.len(),
-                threshold = min_distill_chars,
-                "Session content is short — skipping distillation (no raw-text fallback)"
-            );
-            return Ok((
-                DistilledEpisode {
-                    session_id: session_id.to_string(),
-                    summary: String::new(),
-                    source_session_id: session_id.to_string(),
-                    consolidated: false,
-                },
-                UsageInfo::default(),
-            ));
-        }
-
-        let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        let (summary, usage) = compact_with_llm(
-            &prompt,
-            provider,
-            model_name,
-            distill_max_tokens,
-            identity_context,
-            compaction_prompt.unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT),
-        )
-        .await?;
-
-        Ok((
-            DistilledEpisode {
-                session_id: session_id.to_string(),
-                summary,
-                source_session_id: session_id.to_string(),
-                consolidated: false,
-            },
-            usage,
-        ))
-    }
-
-    /// Write a natural-language summary directly to Grafeo as an episodic memory.
-    ///
-    /// This is the unified write path for both compaction summaries and
-    /// session-close tail distillations. Parses the summary and triple
-    /// metadata from the compact model output and creates a DistilledEpisode.
-    ///
-    /// If `embedding_provider` is `Some`, generates an embedding vector
-    /// from the summary text (200ms timeout) and stores it on the node
-    /// for future vector-based retrieval.
-    ///
-    /// Returns `Err` when the summary fails the strict quality gate (the
-    /// output is discarded, never stored) or when Grafeo rejects the write.
-    /// Callers decide how to surface the failure (log vs. user notification).
-    pub async fn write_summary_to_provider(
-        summary_text: &str,
-        session_id: &str,
-        memory_provider: &Option<Arc<dyn acowork_memory::MemoryProvider>>,
-        embedding_provider: Option<&dyn EmbeddingProvider>,
-    ) -> Result<()> {
-        let Some(provider) = memory_provider else {
-            return Ok(());
-        };
-        let manager =
-            crate::memory::MemoryManager::new(crate::memory::MemoryManagerConfig::default());
-        // Strict parse: a summary that fails the quality gate is discarded —
-        // parse_compact_output's raw-text fallback is intentionally NOT used.
-        let parsed = parse_compact_output_strict(summary_text)?;
-        let episode = DistilledEpisode {
-            session_id: session_id.to_string(),
-            summary: parsed.summary,
-            source_session_id: session_id.to_string(),
-            consolidated: false,
-        };
-        manager
-            .record_distilled(provider.as_ref(), &episode, embedding_provider)
-            .await?;
-        Ok(())
-    }
-
     /// Select the cheapest model from a list of `ModelCapabilitiesInfo`.
     ///
     /// Cost is estimated as `input_per_million + output_per_million`.
@@ -670,42 +548,6 @@ pub(crate) fn format_messages(messages: &[ChatMessage]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Read all non-metadata lines from a JSONL conversation file.
-fn read_jsonl_content(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut lines_vec: Vec<String> = Vec::new();
-    let mut is_first_line = true;
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Skip the first line (session metadata)
-        if is_first_line {
-            is_first_line = false;
-            continue;
-        }
-
-        // Try to parse as ConversationEntry and extract role + content
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let role = entry
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            lines_vec.push(format!("[{}]: {}", role, content));
-        }
-    }
-
-    Ok(lines_vec.join("\n"))
 }
 
 /// Send a compaction prompt to the LLM and return the plain-text response.
@@ -999,51 +841,6 @@ mod tests {
             matches!(err, RuntimeError::Summary(SummaryError::MissingBlock)),
             "marker-less dump must fail the quality gate, got: {err:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn distill_on_session_end_skips_short_sessions_without_llm() {
-        // Short sessions are SKIPPED (empty summary + zero usage) — the raw
-        // conversation text must never be used as the summary (no raw-text
-        // fallback: role labels and tool echoes must not land in memory).
-        let dir = std::env::temp_dir().join(format!(
-            "acowork-distill-short-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("session.jsonl");
-        std::fs::write(
-            &path,
-            "{}\n{\"role\":\"user\",\"content\":\"你好，帮我看看这个问题\"}\n",
-        )
-        .unwrap();
-
-        // If the skip logic regressed and the LLM were called, the stub
-        // would return a gate-passing summary and the empty-summary assert
-        // below would fail.
-        let provider = StubProvider::new(
-            "<summary>should never be called for a short session</summary>",
-        );
-        let (episode, usage) = EpisodeDistiller::distill_on_session_end(
-            &path,
-            "sess-short",
-            &provider,
-            "model",
-            10_000, // min_distill_chars — far above the file length
-            1024,
-            None,
-            None,
-        )
-        .await
-        .expect("short session must skip, not fail");
-        assert!(
-            episode.summary.is_empty(),
-            "short session must yield an empty summary, got: {:?}",
-            episode.summary
-        );
-        assert_eq!(usage.prompt_tokens, 0, "no LLM call → zero usage");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -1448,11 +1245,15 @@ mod tests {
 
     #[test]
     fn parse_compact_output_sanitizes_summary_block() {
-        // The episodic-memory path (parse_compact_output → record_distilled)
-        // must not land tool echoes into the stored summary.
+        // Sanitize contract: even if a future write path stores summaries in
+        // Grafeo (e.g. via agent-driven `memory_store`), tool echoes must
+        // never survive into the parsed summary text. This guards the
+        // legacy-internal `parse_compact_output` path; `parse_compact_output_strict`
+        // (the gate-enforced variant) covers the same invariant via the
+        // quality gate.
         let raw = "<summary>用户要求查找 UI 元素。\n[Tool(bash)]: grep ...\n定位到 Banner。</summary>";
         let parsed = parse_compact_output(raw);
-        assert!(!parsed.summary.contains("[Tool(bash)]"), "episodic summary must be clean");
+        assert!(!parsed.summary.contains("[Tool(bash)]"), "summary must be clean of tool echoes");
         assert!(parsed.summary.contains("用户要求查找 UI 元素"));
         assert!(parsed.summary.contains("Banner"));
     }

@@ -347,11 +347,11 @@ impl GatewayMqttClient {
     /// QoS: AtLeastOnce — control commands must not be lost.
     pub async fn publish_control_command(
         &self,
-        agent_id: &str,
+        instance_id: &str,
         command: acowork_core::mqtt_proto::ControlCommand,
     ) -> Result<(), GatewayMqttClientError> {
         let topic = format!("acowork/agents/{}/sessions/control/{}",
-            agent_id,
+            instance_id,
             match &command.command {
                 // ── Session lifecycle ──
                 Some(acowork_core::mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",

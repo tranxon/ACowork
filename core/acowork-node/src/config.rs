@@ -34,6 +34,13 @@ pub struct NodeConfig {
     /// node's reverse proxy. Defaults to `127.0.0.1` (single-machine
     /// topology); set to a non-loopback IP for remote deployments.
     pub advertise_host: String,
+    /// When `true` (CLI `--advertise-host auto`), `advertise_host` is
+    /// treated as a *placeholder*: the Node Agent re-detects the
+    /// machine's current LAN IP at connect time (`detect_local_ip`)
+    /// and publishes it live via NodeInfo (§6.3.3 self-healing). If
+    /// detection fails it falls back to `advertise_host` (127.0.0.1),
+    /// keeping control-plane loopback intact.
+    pub advertise_host_auto: bool,
     /// Bind address for the node reverse proxy (§6.4). Defaults to
     /// `0.0.0.0` so remote nodes are reachable without reconfiguring
     /// the bind; the advertise_host remains the reachable address.
@@ -54,7 +61,7 @@ pub struct NodeConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
-            home: default_node_home(),
+            home: acowork_core::node::default_node_home(),
             packages_dir: None,
             gateway_host: acowork_core::defaults::GATEWAY_MQTT_HOST.to_string(),
             gateway_mqtt_port: acowork_core::defaults::GATEWAY_MQTT_PORT,
@@ -62,6 +69,7 @@ impl Default for NodeConfig {
             token: None,
             max_agents: acowork_core::node::NODE_DEFAULT_MAX_AGENTS,
             advertise_host: "127.0.0.1".to_string(),
+            advertise_host_auto: false,
             proxy_bind: "0.0.0.0".to_string(),
             proxy_port: acowork_core::node::NODE_PROXY_PORT,
             lsp_relay_port: crate::sidecar::lsp_relay::LSP_RELAY_DEFAULT_PORT,
@@ -83,6 +91,15 @@ impl NodeConfig {
     /// `http_endpoint`.
     pub fn proxy_advertise_endpoint(&self) -> String {
         format!("http://{}:{}", self.advertise_host, self.proxy_port)
+    }
+
+    /// Like [`Self::proxy_advertise_endpoint`], but for a caller-supplied
+    /// host. Used by the self-healing path (§6.3.3): the live LAN IP is
+    /// recomputed at connect time and re-published as `http://{host}:{port}`
+    /// so already-running Runtimes and the Gateway both converge on the
+    /// current address without a restart.
+    pub fn proxy_advertise_endpoint_for(&self, host: &str) -> String {
+        format!("http://{}:{}", host, self.proxy_port)
     }
 
     /// Resolve the agent package install directory: the explicit
@@ -118,71 +135,23 @@ impl NodeConfig {
     }
 }
 
-/// Default node home directory, resolution order:
-///   `ACOWORK_NODE_HOME` env > `$HOME/.acowork/acowork-node/`
-///   (Windows: `%USERPROFILE%\.acowork\acowork-node`) > `./.acowork-node`.
-///
-/// The env override lets multi-instance runs and the ADR-055 node
-/// topology verification isolate node state; the Gateway-spawned local
-/// node inherits it from the parent environment automatically.
-pub fn default_node_home() -> PathBuf {
-    if let Some(dir) = std::env::var_os("ACOWORK_NODE_HOME")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir);
-    }
-    // Windows has no `HOME` env var (only `USERPROFILE`); without this
-    // branch the node silently fell back to `./.acowork-node` in the cwd,
-    // scattering node state across whatever directory started the process.
-    #[cfg(windows)]
-    if let Some(profile) = std::env::var_os("USERPROFILE")
-        && !profile.is_empty()
-    {
-        return PathBuf::from(profile)
-            .join(".acowork")
-            .join("acowork-node");
-    }
-    if let Some(home) = std::env::var_os("HOME")
-        && !home.is_empty()
-    {
-        return PathBuf::from(home)
-            .join(".acowork")
-            .join("acowork-node");
-    }
-    PathBuf::from(".").join(".acowork-node")
-}
-
 /// Resolve the node home from an optional `--home` override.
+///
+/// The default value is sourced from [`acowork_core::node::default_node_home`]
+/// — shared with `acowork-gateway` so both sides derive a single
+/// Node home directory without `acowork-gateway` depending on
+/// `acowork-node` (ADR-055 §6.20 dependency red line).
 pub fn resolve_home(explicit: Option<&Path>) -> PathBuf {
-    explicit.map(Path::to_path_buf).unwrap_or_else(default_node_home)
+    explicit
+        .map(Path::to_path_buf)
+        .unwrap_or_else(acowork_core::node::default_node_home)
 }
 
-/// Best-effort system hostname without a dedicated crate: libc
-/// `gethostname` on Unix, `COMPUTERNAME` on Windows, "localhost"
-/// fallback.
+/// Best-effort system hostname — shared implementation lives in
+/// `acowork-core` (used identically by the Gateway to compute the
+/// local node id, so both sides always agree).
 pub fn system_hostname() -> String {
-    #[cfg(unix)]
-    {
-        let mut buf = [0u8; 256];
-        // SAFETY: `gethostname` writes at most `buf.len()` bytes into
-        // the provided buffer and NUL-terminates on success.
-        let rc = unsafe {
-            libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-        };
-        if rc == 0 {
-            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            if let Ok(s) = std::str::from_utf8(&buf[..end]) {
-                return s.to_string();
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(name) = std::env::var("COMPUTERNAME") {
-            return name;
-        }
-    }
-    "localhost".to_string()
+    acowork_core::node::system_hostname()
 }
 
 #[cfg(test)]

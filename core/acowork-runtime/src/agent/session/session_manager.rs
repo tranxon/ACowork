@@ -1129,6 +1129,7 @@ impl SessionManager {
                     max_output,
                     self.core.context_window_override,
                     Some(&persisted),
+                    conv.llm_call_counter(),
                 );
                 serde_json::to_string(&ctx).ok()
             });
@@ -1357,7 +1358,20 @@ impl SessionManager {
     /// or the channel is closed (SessionTask has died).
     ///
     /// **Full vs Closed distinction**: when the channel is merely full,
-    /// the session handle is NOT removed — the session is healthy but
+    /// Per-turn skill command injection: resolve a chat `command` (skill
+    /// name) into the skill's instruction block via the agent's
+    /// `SkillRegistry` (loaded Phase A, injected Phase B). The registry is
+    /// the authoritative source — the frontend only ever sends names.
+    /// Returns `None` for unknown/empty commands so the caller can fall
+    /// back to no skill injection.
+    pub(crate) fn resolve_skill_instructions(&self, command: &str) -> Option<String> {
+        self.core.skill_registry.instructions_for(command)
+    }
+
+    /// ADR-034 Phase 7: Send a message to a session by ID.
+    ///
+    /// NOTE: when the session's channel is full (backpressure), the
+    /// session handle is NOT removed — the session is healthy but
     /// experiencing backpressure. When the channel is closed (e.g. the
     /// SessionTask panicked), the stale handle IS auto-removed so
     /// subsequent calls get a clean "Session not found" instead of
@@ -3114,9 +3128,10 @@ After installation, ask the user to re-enable the MCP server.",
         // acowork/agents/<id>/debug/events/<event_type>.
         if let Some(mqtt_client) = mqtt_client {
             let event_rx = event_bus.subscribe();
-            let agent_id = self.core.config.agent_id.clone();
+            // ADR-073: debug event topics are per-instance.
+            let instance_id = self.core.config.instance_id().to_string();
             let publisher = crate::mqtt::DebugEventMqttPublisher::new(
-                agent_id,
+                instance_id,
                 mqtt_client,
                 event_rx,
             );
@@ -4339,6 +4354,7 @@ mod tests {
                 message_count: 0,
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),
                 tokens: None,
+                llm_call_counter: None,
                 last_compaction_offset: None,
                 corrupted: false,
             },

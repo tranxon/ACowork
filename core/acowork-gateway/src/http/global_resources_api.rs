@@ -402,10 +402,24 @@ mod tests {
     /// exercise every `BootstrapPhase` branch (Booting / Ready /
     /// Degraded / Failed / ShuttingDown) without standing up real
     /// subsystems. `None` exercises the orchestrator-not-attached path.
+    //
+    // Unique-per-call directory suffix: tests in this module run
+    // concurrently inside one process, and a shared fixed path made
+    // `remove_dir_all` + `create_dir_all` race each other (sporadic
+    // OS error 183).
+    static DIR_SEQ: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// ADR-059 §5.3: the Gateway generation id is a UUIDv4. Tests must
+    /// use one coherent value — the snapshot the handler projects and
+    /// the orchestrator that produced it carry the same instance id.
+    const GATEWAY_GENERATION: &str = "6a7b8c9d-0e1f-4022-8132-e24c5d6e7f8a";
+
     async fn test_state_with_snapshot(snapshot: Option<BootstrapSnapshot>) -> AppState {
         let dir = std::env::temp_dir().join(format!(
-            "acowork-test-global-resources-api-{}",
-            std::process::id()
+            "acowork-test-global-resources-api-{}-{}",
+            std::process::id(),
+            DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -417,7 +431,7 @@ mod tests {
         if let Some(s) = snapshot {
             let registry = SubsystemReadinessRegistry::new_shared();
             let orchestrator = BootstrapOrchestrator::from_snapshot_for_test(
-                "test-instance".to_string(),
+                GATEWAY_GENERATION.to_string(),
                 registry,
                 s,
             );
@@ -435,7 +449,7 @@ mod tests {
     fn snapshot_with_phase(phase: BootstrapPhase, detail: &str) -> BootstrapSnapshot {
         BootstrapSnapshot {
             protocol_version: 1,
-            instance_id: "test-instance".to_string(),
+            instance_id: GATEWAY_GENERATION.to_string(),
             version: 7,
             phase,
             phase_detail: detail.to_string(),
@@ -533,7 +547,7 @@ mod tests {
             "Retry-After is only set on 503 responses"
         );
         let body = response_body_json(resp, 16384).await;
-        assert_eq!(body["instance_id"], "test-instance");
+        assert_eq!(body["instance_id"], GATEWAY_GENERATION);
         assert_eq!(body["topics"].as_object().unwrap().len(), 6);
         for (_topic, b64) in body["topics"].as_object().unwrap() {
             let b64 = b64.as_str().expect("topic value is base64 string");
@@ -557,7 +571,7 @@ mod tests {
         let resp = get_global_resources(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_body_json(resp, 16384).await;
-        assert_eq!(body["instance_id"], "test-instance");
+        assert_eq!(body["instance_id"], GATEWAY_GENERATION);
         assert_eq!(body["topics"].as_object().unwrap().len(), 6);
     }
 

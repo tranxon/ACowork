@@ -25,6 +25,15 @@
 //! (e.g. `rounded-b-md border-t … bg-zinc-50 dark:bg-zinc-900/60`) so
 //! level-1 header vs level-2 rows stay visually separated, and set the
 //! header `surface="inset"` so its hover stays legible above that body.
+//!
+//! The outer wrapper only takes `flex-1` when `open` — otherwise it
+//! collapses to the header's natural height. Without this guard, a
+//! caller that wraps an ExpandableRow in a `flex flex-col overflow-hidden`
+//! container (MemoryPanel's "记忆搜索" card is the canonical case)
+//! would leave the collapsed body region as a blank slab: the body is
+//! removed from the DOM but the wrapper still stretches to fill the
+//! remaining height, so the titlebar appears at the top with empty
+//! space below it.
 import type { KeyboardEvent, ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "../../../lib/utils";
@@ -82,7 +91,7 @@ export function ExpandableRow({
   };
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className={cn("flex min-h-0 min-w-0 flex-col", open && "flex-1")}>
       <div
         role="button"
         tabIndex={interactive ? 0 : -1}

@@ -63,7 +63,7 @@ const COMMAND_ACTIVE_HEARTBEAT = "active_heartbeat";
 /**
  * Start broadcasting `active_heartbeat` MQTT control commands for the
  * given agent ID at `ACTIVE_HEARTBEAT_INTERVAL_MS` cadence. Stops
- * automatically on unmount or when `agentId` changes / becomes null.
+ * automatically on unmount or when `instanceId` changes / becomes null.
  *
  * Pure observer hook — no return value, no side effects on store state.
  * Errors from the Tauri invoke are logged at `debug` level (not `error`)
@@ -71,15 +71,15 @@ const COMMAND_ACTIVE_HEARTBEAT = "active_heartbeat";
  * tick will retry, and the Runtime's freshness window absorbs short
  * gaps without false-positive auto-sleep.
  */
-export function useActiveHeartbeat(agentId: string | null): void {
+export function useActiveHeartbeat(instanceId: string | null): void {
   useEffect(() => {
-    if (!agentId) {
+    if (!instanceId) {
       return;
     }
 
     const sendHeartbeat = () => {
       void invoke("mqtt_publish_control", {
-        agentId,
+        instanceId,
         command: COMMAND_ACTIVE_HEARTBEAT,
         payloadJson: {},
       }).catch((err: unknown) => {
@@ -96,7 +96,7 @@ export function useActiveHeartbeat(agentId: string | null): void {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [agentId]);
+  }, [instanceId]);
 }
 
 /**

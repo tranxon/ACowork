@@ -163,6 +163,8 @@ impl AgentLoop {
                     agent_total_cache_read_tokens: None,
                     agent_total_cache_write_tokens: None,
                     sections: None,
+                    // No LLM call here — context_window override only.
+                    iteration: None,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -710,7 +712,11 @@ impl AgentLoop {
             // three-tier fallback chain mirrors the chain the *selection* phase
             // already uses (ADR-056 §3.2), so the user only loses history when
             // **all three** distillation targets fail.
-            let memory_provider = self.core.memory_provider().cloned();
+            //
+            // (post-2026-09-10: the resolved memory_provider is no longer
+            // consumed here — compact summaries are not auto-written to
+            // Grafeo. Memory persistence is delegated to the agent via the
+            // `memory_store` tool, driven by `prompts/system.md` guidance.)
             let targets = self.resolve_distill_targets();
             tracing::info!(
                 tier = ?targets.first().map(|t| t.tier),
@@ -1058,31 +1064,23 @@ impl AgentLoop {
                         }
                     }
 
-                    // Write compaction summary to Grafeo
-                    let session_id = self
-                        .session
-                        .conversation
-                        .as_ref()
-                        .map(|c| c.session_id().to_string())
-                        .unwrap_or_default();
-                    if let Err(e) = crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
-                        &summary,
-                        &session_id,
-                        &memory_provider,
-                        self.core.embedding_provider.as_deref(),
-                    )
-                    .await
-                    {
-                        // Write failure is infrastructure-level: the compaction
-                        // itself already succeeded (history replaced), so log
-                        // and continue — the user-facing error surface stays
-                        // reserved for LLM generation failures.
-                        tracing::warn!(
-                            error = %e,
-                            session_id = %session_id,
-                            "Failed to write compaction summary to provider (non-fatal)"
-                        );
-                    }
+                    // Compaction no longer writes the summary to Grafeo (was:
+                    // `EpisodeDistiller::write_summary_to_provider`). Memory
+                    // persistence is delegated to the agent itself — see
+                    // `prompts/system.md` for the prompt guidance asking the
+                    // LLM to call `memory_store` when a task is complete.
+                    // The summary still replaces the in-memory history slice
+                    // above, so the next LLM call sees a compact context.
+                    tracing::debug!(
+                        session_id = %self
+                            .session
+                            .conversation
+                            .as_ref()
+                            .map(|c| c.session_id())
+                            .unwrap_or(""),
+                        summary_len = summary.len(),
+                        "compaction summary not auto-written to Grafeo; agent must call memory_store to persist"
+                    );
 
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
@@ -1197,6 +1195,13 @@ impl AgentLoop {
                     agent_total_cache_read_tokens: None,
                     agent_total_cache_write_tokens: None,
                     sections: None,
+                    // Post-compaction recompute push. The compaction's own
+                    // summary LLM call goes through `compact_via_llm`, a
+                    // separate path that does NOT bump the per-session
+                    // `llm_call_counter` (only real dialog responses in
+                    // `process_llm_response_usage` bump), so no count here —
+                    // this push only reflects the new context shape.
+                    iteration: None,
                 };
                 // ADR-028 + ADR-066: patch session + agent totals in one place.
                 let mut ctx_info = ctx_info;
@@ -1592,6 +1597,8 @@ impl AgentLoop {
                         agent_total_cache_read_tokens: None,
                         agent_total_cache_write_tokens: None,
                         sections: None,
+                        // Filled in just before the push below.
+                        iteration: None,
                     }
                 };
                 tracing::debug!(
@@ -1686,6 +1693,16 @@ impl AgentLoop {
                 {
                     conv.cache_context_usage_sections(sections.clone());
                 }
+
+                // Bump the per-session LLM-call counter (returns the
+                // post-increment 1-based value) and stamp it onto the push.
+                // The counter lives on the conversation session and is
+                // persisted in meta.json (`SessionMeta.llm_call_counter`),
+                // so it is monotonic for the session's lifetime and
+                // survives restarts — unlike the `max_iterations` per-burst
+                // loop counter which resets on Continue (loop_.rs).
+                ctx_usage.iteration =
+                    self.session.conversation.as_ref().map(|c| c.bump_llm_call_counter());
 
                 if !self
                     .session_core

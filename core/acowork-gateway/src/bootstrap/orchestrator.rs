@@ -174,9 +174,16 @@ fn now_ms() -> u64 {
 /// // Subsystems register themselves and receive a handle:
 /// let vault_handle = registry.register("vault", ReadinessKind::Required);
 /// let publisher_handle = registry.register("publisher", ReadinessKind::Required);
+/// // Per-node readiness is registered dynamically as nodes come
+/// // online (see mqtt/dispatch.rs):
+/// let node_handle = registry.register(
+///     format!("node.{node_id}"),
+///     ReadinessKind::Required,
+/// );
 ///
 /// vault_handle.mark_ready(None);
 /// publisher_handle.mark_ready(None);
+/// node_handle.mark_ready(None);
 /// ```
 pub struct BootstrapOrchestrator {
     instance_id: String,

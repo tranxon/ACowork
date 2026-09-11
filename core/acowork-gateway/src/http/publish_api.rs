@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use acowork_core::mqtt_proto::NodeEvent;
 
 use crate::http::routes::{ApiError, AppState};
+use crate::mqtt::node_control::{NodeInstallDispatch, NodePackageSource};
 
 /// Build the publish API router
 pub fn publish_routes() -> Router<AppState> {
@@ -56,16 +57,19 @@ pub async fn prepare_publish(
     Path(agent_id): Path<String>,
     Json(req): Json<PrepareRequest>,
 ) -> Result<Json<PrepareResponse>, ApiError> {
-    let node_id = node_id_of(&state, &agent_id).await?;
+    // ADR-073: resolve the route variable to the instance identity.
+    let (instance_id, resolved_agent_id) =
+        crate::http::agents::resolve_agent_identity(&state, &agent_id).await?;
+    let node_id = node_id_of(&state, &instance_id).await?;
     let node_control = state
         .node_control
         .clone()
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     let event = node_control
-        .publish_prepare(&node_id, &agent_id, req.clean)
+        .publish_prepare(&node_id, &instance_id, &resolved_agent_id, req.clean)
         .await
         .map_err(|e| ApiError::internal(&format!("Publish prepare failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Publish prepare failed: {}", e)))?;
 
     Ok(Json(parse_result::<PrepareResponse>(&event)?))
@@ -96,17 +100,27 @@ pub async fn build_publish(
     Path(agent_id): Path<String>,
     Json(req): Json<BuildRequest>,
 ) -> Result<Json<BuildResponse>, ApiError> {
-    let node_id = node_id_of(&state, &agent_id).await?;
+    // ADR-073: resolve the route variable to the instance identity.
+    let (instance_id, resolved_agent_id) =
+        crate::http::agents::resolve_agent_identity(&state, &agent_id).await?;
+    let node_id = node_id_of(&state, &instance_id).await?;
     let node_control = state
         .node_control
         .clone()
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     // Empty output_dir → the node builds into its own packages_dir.
     let event = node_control
-        .publish_build(&node_id, &agent_id, "", req.sign, req.key_dir.as_deref().unwrap_or(""))
+        .publish_build(
+            &node_id,
+            &instance_id,
+            &resolved_agent_id,
+            "",
+            req.sign,
+            req.key_dir.as_deref().unwrap_or(""),
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Publish build failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    crate::mqtt::node_control::NodeControlClient::check_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Publish build failed: {}", e)))?;
 
     Ok(Json(parse_result::<BuildResponse>(&event)?))
@@ -119,8 +133,7 @@ async fn node_id_of(
     agent_id: &str,
 ) -> Result<String, ApiError> {
     let gw = state.gateway_state.read().await;
-    gw.installed_agents
-        .get(agent_id)
+    gw.installed(agent_id)
         .map(|i| i.node_id.clone())
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))
 }
@@ -157,32 +170,42 @@ pub async fn install_locally(
     )
     .map_err(|e| ApiError::bad_request(&format!("{}", e)))?;
     let agent_id = manifest.agent_id.clone();
+    // ADR-073: a local install is a NEW instance — the Gateway
+    // generates the identity.
+    let instance_id = uuid::Uuid::new_v4().to_string();
 
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
+    let target_node = acowork_core::node::local_node_id();
     let event = node_control
-        .install_agent(
-            acowork_core::node::LOCAL_NODE_ID,
-            &agent_id,
-            &req.package_path,
-            crate::http::agents::gateway_dev_mode(&state).await,
-        )
+        .install_agent(NodeInstallDispatch {
+            node_id: &target_node,
+            instance_id: &instance_id,
+            agent_id: &agent_id,
+            source: NodePackageSource::LocalPath(&req.package_path),
+            dev_mode: crate::http::agents::gateway_dev_mode(&state).await,
+            system: manifest.system,
+            ensure: false,
+            operation_id: "",
+        })
         .await
         .map_err(|e| ApiError::internal(&format!("Install-locally failed: {}", e)))?;
-    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+    // Installs are serialized on the node's single install slot, so the
+    // reply is `in_progress` for a queued job and `ok` only when it was
+    // already present — never a terminal "installed". Completion (and
+    // cron registration on the Gateway side) follows from the retained
+    // `installed` inventory entry the node publishes when the install
+    // lands.
+    crate::mqtt::node_control::NodeControlClient::check_install_reply(&instance_id, &event)
         .map_err(|e| ApiError::internal(&format!("Install-locally failed: {}", e)))?;
 
-    {
-        let mut gw = state.gateway_state.write().await;
-        crate::cron::register_agent_cron_triggers(&mut gw, &agent_id, &manifest);
-    }
-
     Ok((
-        StatusCode::CREATED,
+        StatusCode::ACCEPTED,
         Json(serde_json::json!({
-            "message": format!("Package installed locally: {}", agent_id),
+            "message": format!("Package install accepted locally: {}", agent_id),
             "agent_id": agent_id,
+            "instance_id": instance_id,
         })),
     ))
 }

@@ -65,7 +65,7 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
 /** Gateway connection settings */
 function GatewayTab() {
   const { t } = useTranslation();
-  const { status, health, localState, checkHealth, checkLocalStatus, startLocalGateway, stopLocalGateway } = useGatewayStore();
+  const { status, health, localState, localOwnership, checkHealth, checkLocalStatus, startLocalGateway, stopLocalGateway } = useGatewayStore();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
   const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
@@ -181,6 +181,11 @@ function GatewayTab() {
   // the user stop/restart it via the UI. If a Gateway is reachable but was
   // started outside of Tauri, we still show "Running" but no stop/restart buttons.
   const localIsTauriManaged = localState === "running";
+  // A Gateway that answers at the configured URL but was NOT spawned by this
+  // Desktop session (manual start, another machine, or kept running after a
+  // previous quit). Desktop must never force-stop it — and the exit dialog
+  // only appears for owned processes (tray quit handler).
+  const localIsForeign = localOwnership === "foreign" && localIsRunning;
 
   return (
     <div className="max-w-lg space-y-4">
@@ -241,7 +246,7 @@ function GatewayTab() {
           )}
 
           <div className="mt-3 flex gap-2">
-            {!localIsTauriManaged && !localIsStarting && (
+            {!localIsTauriManaged && !localIsForeign && !localIsStarting && (
               <button
                 onClick={handleStartLocal}
                 disabled={starting}
@@ -269,7 +274,7 @@ function GatewayTab() {
               </>
             )}
           </div>
-          {localIsRunning && !localIsTauriManaged && (
+          {localIsForeign && (
             <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400">
               {t("settings.gatewayRunningExternal")}
             </p>
@@ -367,7 +372,7 @@ function GatewayTab() {
           ) : (
             <ListBox variant="plain">
               {agents.map((agent) => (
-                <RuntimeRow key={agent.agent_id} agent={agent} />
+                <RuntimeRow key={agent.instance_id} agent={agent} />
               ))}
             </ListBox>
           )}
@@ -384,7 +389,9 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${getGatewayUrl()}/api/agents/${agent.agent_id}/model`)
+    // ADR-073: `/api/agents/{id}` addresses the INSTANCE — using the
+    // package `agent_id` would misroute in multi-instance deployments.
+    fetch(`${getGatewayUrl()}/api/agents/${agent.instance_id}/model`)
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!cancelled && data) {
@@ -393,7 +400,7 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
       })
       .catch(() => { });
     return () => { cancelled = true; };
-  }, [agent.agent_id]);
+  }, [agent.instance_id]);
 
   return (
     <ListRow

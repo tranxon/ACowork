@@ -1540,7 +1540,8 @@ impl HistoryManager {
         // Fast path: same round already injected by a prior compression.
         if let Some(ref last_id) = self.last_injected_todo_call_id
             && let Some((asst, _)) = self.find_last_todo_write_round()
-            && asst.tool_calls
+            && asst
+                .tool_calls
                 .as_ref()
                 .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == *last_id))
         {

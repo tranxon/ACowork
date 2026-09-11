@@ -1,12 +1,14 @@
 //! Per-agent last-interaction timestamp store.
 //!
-//! Persists `agent_id -> last_interaction_at` as a single JSON file under
+//! Persists `instance_id -> last_interaction_at` as a single JSON file under
 //! `<data_dir>/agent_interactions.json`. Used by the front-end agent list
 //! to surface a "most recently interacted" order. Atomic write via the
 //! write-to-temp + rename pattern shared with `cron::store::CronStore`.
 //!
-//! The map is keyed on `agent_id` (not on a run-instance), so the timestamp
-//! survives an agent stop/restart cycle.
+//! ADR-073: the key is the agent `instance_id` (the install-time UUID, the
+//! single identity an agent is addressed by on the wire). It is NOT a
+//! stable per-package key — `instance_id` is regenerated on every install
+//! / reinstall, so the timestamp does NOT survive an agent reinstall.
 
 use std::collections::HashMap;
 use std::io;

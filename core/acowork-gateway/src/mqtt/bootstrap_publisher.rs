@@ -206,7 +206,7 @@ mod tests {
 
         let snap = BootstrapSnapshot {
             protocol_version: 1,
-            instance_id: "instance-B".to_string(),
+            instance_id: "7b8c9d0e-1f2a-4023-8243-f35d6e7f8a9b".to_string(),
             version: 7,
             phase: BootstrapPhase::Ready,
             phase_detail: "1/1 required ready".to_string(),

@@ -364,11 +364,16 @@ fn parse_field(field: &str, min: u8, max: u8, name: &str) -> Result<Vec<u8>, Str
 ///
 /// ADR-055 Phase 2b.3: extracted from `package_manager/install.rs` (the
 /// node no longer registers cron — cron is a Gateway global-resource
-/// concern, §6.5). Called by the HTTP install handler after the node
-/// confirms the install.
+/// concern, §6.5). Called once the install-completed inventory arrives.
+///
+/// ADR-073: `instance_id` is the INSTANCE identity, not the package id.
+/// The scheduler loop resolves a firing trigger with
+/// [`GatewayState::resolve_installed_key`](crate::gateway::state::GatewayState::resolve_installed_key),
+/// which only knows instance identities — a package-id trigger key would
+/// register successfully and then never fire.
 pub fn register_agent_cron_triggers(
     state: &mut crate::gateway::state::GatewayState,
-    agent_id: &str,
+    instance_id: &str,
     manifest: &acowork_core::AgentManifest,
 ) {
     let cron_triggers = manifest.cron_triggers();
@@ -380,19 +385,19 @@ pub fn register_agent_cron_triggers(
         let params = trigger.params.clone().unwrap_or(serde_json::json!({}));
         match state
             .cron_scheduler
-            .register(agent_id, schedule, action, params.clone())
+            .register(instance_id, schedule, action, params.clone())
         {
             Ok(cron_id) => {
                 tracing::info!(
-                    "Registered cron trigger: agent={} cron_id={} schedule={}",
-                    agent_id,
+                    "Registered cron trigger: instance={} cron_id={} schedule={}",
+                    instance_id,
                     cron_id,
                     schedule
                 );
                 if let Some(store) = &state.cron_store {
                     let entry = StoredCronEntry {
                         id: cron_id.clone(),
-                        agent_id: agent_id.to_string(),
+                        agent_id: instance_id.to_string(),
                         schedule: schedule.clone(),
                         action: action.to_string(),
                         params: serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string()),
@@ -410,8 +415,8 @@ pub fn register_agent_cron_triggers(
             }
             Err(e) => {
                 tracing::warn!(
-                    "Invalid cron schedule in manifest for agent {}: schedule={} error={}",
-                    agent_id,
+                    "Invalid cron schedule in manifest for instance {}: schedule={} error={}",
+                    instance_id,
                     schedule,
                     e
                 );
@@ -452,92 +457,134 @@ pub async fn run_cron_scheduler(
                 .collect()
         };
 
-        for (agent_id, action, params) in triggers {
-            tracing::info!("Cron fired: agent={} action={}", agent_id, action);
+        for (trigger_id, action, params) in triggers {
+            tracing::info!("Cron fired: trigger={} action={}", trigger_id, action);
 
-            // Check if agent is running; if not, try to start it
+            // ADR-073: every registry key / MQTT topic / ControlCommand on
+            // this path is addressed by the INSTANCE identity. Resolve the
+            // canonical instance key up-front and fail loudly when the
+            // trigger key does not correspond to any installed instance.
+            let (instance_id, package_id) = {
+                let gw = gateway_state.read().await;
+                let inst = match gw.resolve_installed_key(&trigger_id) {
+                    Some(inst) => inst,
+                    None => {
+                        tracing::error!(
+                            "Cron: trigger key '{}' does not resolve to any installed instance \
+                             (expected an instance UUID); skipping trigger action={}",
+                            trigger_id,
+                            action
+                        );
+                        continue;
+                    }
+                };
+                let pkg = match gw.installed(&inst) {
+                    Some(i) => i.agent_id.clone(),
+                    None => {
+                        tracing::error!(
+                            "Cron: resolved instance '{}' for trigger '{}' has no install record; \
+                             skipping trigger action={}",
+                            inst,
+                            trigger_id,
+                            action
+                        );
+                        continue;
+                    }
+                };
+                (inst, pkg)
+            };
+
+            // Check if the instance is running; if not, try to start it.
             let is_running = {
                 let gw = gateway_state.read().await;
-                gw.is_running(&agent_id)
+                gw.is_running(&instance_id)
             };
 
             if !is_running {
-                tracing::info!("Cron: agent {} not running, attempting to start", agent_id);
-                let is_installed = {
-                    let gw = gateway_state.read().await;
-                    gw.is_installed(&agent_id)
+                tracing::info!(
+                    "Cron: instance {} (agent {}) not running, attempting to start",
+                    instance_id,
+                    package_id
+                );
+                // ADR-055 §6.2: start via the local node control plane
+                // (the node hosts the Runtime).
+                let Some(node_control) = &node_control else {
+                    tracing::error!(
+                        "Cron: node control unavailable, cannot start instance {}",
+                        instance_id
+                    );
+                    continue;
                 };
-                if is_installed {
-                    // ADR-055 §6.2: start via the local node control
-                    // plane (the node hosts the Runtime).
-                    let Some(node_control) = &node_control else {
-                        tracing::error!(
-                            "Cron: node control unavailable, cannot start agent {}",
-                            agent_id
-                        );
-                        continue;
-                    };
-                    match node_control
-                        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, false)
-                        .await
-                    {
-                        Ok(event) => {
-                            match crate::mqtt::node_control::NodeControlClient::check_reply(
-                                &agent_id, &event,
-                            ) {
-                                Ok(()) => {
-                                    tracing::info!(
-                                        "Cron: started agent {} for scheduled trigger",
-                                        agent_id
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Cron: failed to start agent {}: {}",
-                                        agent_id,
-                                        e
-                                    );
-                                    continue;
-                                }
+                match node_control
+                    .start_agent(
+                        &acowork_core::node::local_node_id(),
+                        &instance_id,
+                        &package_id,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(event) => {
+                        match crate::mqtt::node_control::NodeControlClient::check_reply(
+                            &instance_id, &event,
+                        ) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "Cron: started instance {} for scheduled trigger",
+                                    instance_id
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Cron: failed to start instance {}: {}",
+                                    instance_id,
+                                    e
+                                );
+                                continue;
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("Cron: failed to start agent {}: {}", agent_id, e);
-                            continue;
-                        }
                     }
-                } else {
-                    tracing::warn!("Cron: agent {} not installed, skipping trigger", agent_id);
-                    continue;
+                    Err(e) => {
+                        tracing::error!(
+                            "Cron: failed to start instance {}: {}",
+                            instance_id,
+                            e
+                        );
+                        continue;
+                    }
                 }
             }
 
-            // ADR-033: Publish IntentReceived via MQTT ControlCommand
+            // ADR-033: Publish IntentReceived via MQTT ControlCommand.
+            // The control topic and the ControlCommand both carry the
+            // INSTANCE identity — the package `agent_id` never addresses
+            // a runtime on the wire.
             let pushed = if let Some(ref mqtt) = mqtt_client {
                 let intent_cmd = acowork_core::mqtt_proto::Intent {
-                    from: format!("cron:{}", agent_id),
+                    from: format!("cron:{}", trigger_id),
                     action: action.clone(),
                     params_json: serde_json::to_string(&params).unwrap_or_default(),
                 };
                 let control_cmd = acowork_core::mqtt_proto::ControlCommand {
-                    agent_id: agent_id.clone(),
+                    instance_id: instance_id.clone(),
                     command: Some(
                         acowork_core::mqtt_proto::control_command::Command::Intent(intent_cmd),
                     ),
                 };
-                match mqtt.publish_control_command(&agent_id, control_cmd).await {
+                match mqtt.publish_control_command(&instance_id, control_cmd).await {
                     Ok(()) => {
                         tracing::info!(
-                            "Cron intent published via MQTT: agent={} action={}",
-                            agent_id,
+                            "Cron intent published via MQTT: instance={} trigger={} action={}",
+                            instance_id,
+                            trigger_id,
                             action
                         );
                         true
                     }
                     Err(e) => {
                         tracing::error!(
-                            "Cron: failed to publish intent via MQTT: agent={} action={} error={}",
-                            agent_id,
+                            "Cron: failed to publish intent via MQTT: instance={} action={} error={}",
+                            instance_id,
                             action,
                             e
                         );
@@ -546,8 +593,8 @@ pub async fn run_cron_scheduler(
                 }
             } else {
                 tracing::warn!(
-                    "Cron trigger skipped: MQTT client not available for agent={} action={}",
-                    agent_id,
+                    "Cron trigger skipped: MQTT client not available for instance={} action={}",
+                    instance_id,
                     action
                 );
                 false
@@ -555,8 +602,9 @@ pub async fn run_cron_scheduler(
 
             if !pushed {
                 tracing::warn!(
-                    "Cron trigger failed to push: agent={} action={}",
-                    agent_id,
+                    "Cron trigger failed to push: instance={} trigger={} action={}",
+                    instance_id,
+                    trigger_id,
                     action
                 );
             }
@@ -769,5 +817,63 @@ mod tests {
 
         let calendar_entries = scheduler.entries_for_agent("com.example.calendar");
         assert_eq!(calendar_entries.len(), 1);
+    }
+
+    /// ADR-073: manifest-declared triggers are registered under the
+    /// INSTANCE identity, not the package id.
+    ///
+    /// The scheduler loop resolves a firing trigger with
+    /// `GatewayState::resolve_installed_key`, which only knows instance
+    /// identities — a package-id key registers successfully and then
+    /// never fires (silently, as an error log). Pin the key here so the
+    /// registration site cannot drift back to the package id.
+    #[test]
+    fn manifest_triggers_are_keyed_by_instance_identity() {
+        const INSTANCE: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+        const TOML: &str = r#"
+            agent_id = "com.example.weather"
+            version = "1.0.0"
+            name = "Weather Agent"
+            description = "test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [[triggers]]
+            type = "cron"
+            schedule = "0 * * * *"
+            action = "refresh"
+        "#;
+        let manifest = acowork_core::AgentManifest::from_toml(TOML).unwrap();
+
+        let mut state = crate::gateway::state::GatewayState::new("/tmp/acowork-cron-key-test");
+        state.add_installed(crate::gateway::state::AgentInfo {
+            instance_id: INSTANCE.to_string(),
+            agent_id: manifest.agent_id.clone(),
+            version: "1.0.0".to_string(),
+            name: "Weather Agent".to_string(),
+            install_path: "/tmp/weather".to_string(),
+            manifest: manifest.clone(),
+            node_id: "local".to_string(),
+        });
+
+        register_agent_cron_triggers(&mut state, INSTANCE, &manifest);
+
+        assert_eq!(
+            state.cron_scheduler.entries_for_agent(INSTANCE).len(),
+            1,
+            "the trigger must be keyed by the instance identity"
+        );
+        assert!(
+            state
+                .cron_scheduler
+                .entries_for_agent("com.example.weather")
+                .is_empty(),
+            "a package-id key would never resolve on the fire path"
+        );
+        assert_eq!(
+            state.resolve_installed_key(INSTANCE).as_deref(),
+            Some(INSTANCE)
+        );
+        assert!(state.resolve_installed_key("com.example.weather").is_none());
     }
 }

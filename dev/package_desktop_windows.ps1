@@ -87,6 +87,21 @@ if (Test-Path $PmBin) {
     Write-Host "      Without it, /api/pm/* returns 503 (PM unavailable)." -ForegroundColor Yellow
 }
 
+# Bundle Doc service binary (sibling of acowork-gateway.exe, ADR-064).
+# Mirrors the PM service above: the Gateway supervisor locates it via
+# `current_exe().parent().join("acowork-doc.exe")`; without this copy the Doc
+# supervisor logs "acowork-doc binary not found" and `/api/doc/*` returns 503
+# (document library unavailable).
+$DocBin = Join-Path $WorkspaceRoot "target\release\acowork-doc.exe"
+if (Test-Path $DocBin) {
+    Copy-Item -Path $DocBin -Destination (Join-Path $BinDir "acowork-doc.exe") -Force
+    Write-Host "Bundled Doc service binary: $DocBin" -ForegroundColor Green
+} else {
+    Write-Host "WARN: acowork-doc.exe not found at $DocBin." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Without it, /api/doc/* returns 503 (Doc unavailable)." -ForegroundColor Yellow
+}
+
 Push-Location $DesktopDir
 try {
     npm run tauri build

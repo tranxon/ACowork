@@ -89,6 +89,13 @@ import { log } from "../../lib/logger";
 // exist. The same pattern is already used in RightPanel.tsx.
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
+// Monaco-style top-edge shadow: the messages area shows a soft gradient
+// under the session tab bar's hairline whenever it is scrolled away from
+// the very top, so the boundary reads as a depth edge (same affordance as
+// a scrolled code view in Monaco). Dead-zone threshold keeps the shadow
+// from flickering on tiny scrollTop jitter from scroll anchoring.
+const CHAT_TOP_SHADOW_THRESHOLD_PX = 4;
+
 /**
  * Data-driven scroll snapshot.  Stored per session key when the user
  * navigates away, consumed by useScrollController on return.
@@ -170,6 +177,13 @@ export function ChatPanel() {
   const { addToast } = useToast();
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
+
+  // ── Chat-top scroll shadow ─────────────────────────────────────
+  // Monaco-style edge shadow (see CHAT_TOP_SHADOW_THRESHOLD_PX above).
+  // Drives a gradient overlay right under the session tab bar. Updated in
+  // the messages container's onScroll; setting the same boolean value is
+  // a no-op re-render, so updating it on every scroll event is cheap.
+  const [chatScrolledFromTop, setChatScrolledFromTop] = useState(false);
 
   // ── Toolbar responsive collapse ──────────────────────────────────
   // The bottom toolbar (model / think / workspace / skills + upload buttons)
@@ -689,7 +703,8 @@ export function ChatPanel() {
    */
   const vmlRef = useRef<VirtualMessageListHandle | null>(null);
 
-  const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
+  // ADR-009 §V-Q: server-side name only (no localStorage override).
+  const agentDisplayName = selectedAgent?.display_name ?? selectedAgent?.name;
 
   // Read saved scroll snapshot for data-driven restoration.
   // The snapshot carries { atBottom, firstVisibleBlockId } and is consumed
@@ -1593,12 +1608,14 @@ export function ChatPanel() {
 
   // Tool approval: send decision via MQTT, then clear inline state
   const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
-    const agentId = String(approval.agent_id ?? selectedAgentId ?? "");
+    // ADR-073: the approval event carries no `agent_id` — identity is the
+    // instance key from the connection context (`selectedAgentId`).
+    const instanceId = String(selectedAgentId ?? "");
     const requestId = String(approval.request_id ?? "");
     const sessionId = approval.session_id;
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId,
         command: "approval_decision",
         payloadJson: {
           session_id: sessionId ?? "",
@@ -1622,11 +1639,11 @@ export function ChatPanel() {
   // Ask question answer: send answer via MQTT, then clear the answered question from the queue
   const handleQuestionAnswer = async (requestId: string, answer: string) => {
     if (!selectedAgentId) return;
-    const agentId = String(selectedAgentId);
+    const instanceId = String(selectedAgentId);
     const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId,
         command: "question_answer",
         payloadJson: {
           session_id: sessionId ?? "",
@@ -1638,7 +1655,7 @@ export function ChatPanel() {
       log.error("[ChatPanel] Failed to send question answer:", err);
     }
     // Clear the answered question from the queue by requestId
-    useChatStore.getState().resolveQuestion(agentId, requestId);
+    useChatStore.getState().resolveQuestion(selectedAgentId, requestId);
   };
 
   // Auto-send queued messages when agent finishes execution
@@ -1686,7 +1703,10 @@ export function ChatPanel() {
           <Tooltip content={t("chatPanel.startAgent")} variant="plain">
             <button
               onClick={async () => {
-                await startAgentAndSyncUI(selectedAgent.agent_id);
+                // ADR-073: start is instance-scoped — use the instance key,
+                // not the package `agent_id` (ambiguous in multi-instance).
+                if (!selectedAgentId) return;
+                await startAgentAndSyncUI(selectedAgentId);
               }}
               className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
             >
@@ -1794,9 +1814,21 @@ export function ChatPanel() {
             e.preventDefault();
           }}
         >
+          {/* Monaco-style top-edge shadow — fades in when the messages
+              area is scrolled away from the top (chatScrolledFromTop).
+              Sits above the scroll container but below the jump-to-top
+              button (same z-10, earlier in DOM). pointer-events-none so
+              it never blocks selection or wheel scrolling. */}
+          {chatScrolledFromTop && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/3 to-transparent dark:from-black/40"
+            />
+          )}
           <div
             ref={messagesContainerRef}
             onScroll={() => {
+                              setChatScrolledFromTop((messagesContainerRef.current?.scrollTop ?? 0) > CHAT_TOP_SHADOW_THRESHOLD_PX);
                               lastScrollTopRef.current = (messagesContainerRef.current?.scrollTop ?? 0);
                               lastScrollHeightRef.current = (messagesContainerRef.current?.scrollHeight ?? 0);
                               const fvbId = vmlRef.current?.getFirstVisibleBlockId();
@@ -2212,7 +2244,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-xl border border-chat-input-border bg-right-panel">
+        <div className="mx-3 mb-3 rounded-xl border border-chat-input-border bg-right-panel shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">

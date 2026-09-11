@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
 import { clearAgentAvatarCache } from "../lib/avatar";
 import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus } from "../lib/types";
-import { isProcessing } from "../lib/types";
+import { instanceIdOf, isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -19,7 +19,6 @@ export const SYSTEM_AGENT_ID = "com.acowork.system";
 // ══════════════════════════════════════════════════════════════════════════
 
 export interface AgentProfileSettings {
-  displayName?: string;
   /** @deprecated ADR-017 — avatar is now server-side (agent_config.json).
    *  Kept for backward compat with existing localStorage profiles. */
   avatarIconId?: string | null;
@@ -50,7 +49,6 @@ export interface AgentProfileSettings {
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
-  displayName: undefined,
   avatarIconId: null,
   modelId: undefined,
   providerId: undefined,
@@ -92,7 +90,6 @@ function saveAllProfiles(profiles: Record<string, AgentProfileSettings>) {
 
 function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSettings {
   return {
-    displayName: s.displayName,
     avatarIconId: validateIconId(s.avatarIconId),
     modelId: s.modelId,
     providerId: s.providerId,
@@ -370,7 +367,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             ...raw,
             debug_state: raw.debug_state ?? "disabled",
           };
-          const existing = state.agents[meta.agent_id];
+          // ADR-073: the storage map is keyed by INSTANCE identity —
+          // the Gateway always supplies `instance_id` on AgentInfo.
+          const id = instanceIdOf(meta);
+          const existing = state.agents[id];
           if (existing) {
             // Fold in `running` from the latest snapshot — if the
             // Runtime auto-slept (or crashed) between MQTT events, the
@@ -391,15 +391,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             // say the agent is gone; the MQTT `agent_status` handler further
             // double-checks offline transitions against `/health`.
             const gateway_says_alive = !!meta.running || !!meta.connected;
-            next[meta.agent_id] = {
+            next[id] = {
               ...existing,
               meta,
               online: gateway_says_alive ? existing.online : false,
               sleeping: gateway_says_alive ? existing.sleeping : false,
             };
           } else {
-            const profile = storedProfiles[meta.agent_id] ?? { ...DEFAULT_PROFILE };
-            next[meta.agent_id] = createStorage(meta, profile);
+            // ADR-073: profiles persisted pre-multi-instance are keyed by
+            // package id — fall back so existing customisations survive
+            // the identity-model upgrade.
+            const profile =
+              storedProfiles[id] ?? storedProfiles[meta.agent_id] ?? { ...DEFAULT_PROFILE };
+            next[id] = createStorage(meta, profile);
           }
         }
 
@@ -423,10 +427,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             const ts = a.last_interaction_at ? Date.parse(a.last_interaction_at) : -1;
             if (!Number.isNaN(ts) && ts > bestTs) {
               bestTs = ts;
-              bestId = a.agent_id;
+              bestId = instanceIdOf(a);
             }
           }
-          selId = bestId ?? list[0].agent_id;
+          selId = bestId ?? instanceIdOf(list[0]);
         }
 
         return { agents: next, selectedAgentId: selId, loading: false };
@@ -523,7 +527,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   },
 
   uninstallAgent: async (agentId) => {
-    if (agentId === SYSTEM_AGENT_ID) throw new Error("System Agent cannot be uninstalled");
+    // ADR-073: `agentId` here is the INSTANCE id; guard the system
+    // package by its manifest identity (the system agent's instance id
+    // is a UUID and never equals SYSTEM_AGENT_ID once multi-instance
+    // is live).
+    if (get().agents[agentId]?.meta.agent_id === SYSTEM_AGENT_ID) {
+      throw new Error("System Agent cannot be uninstalled");
+    }
     try {
       // Capture version before removal — needed to clear the avatar blob cache
       const version = get().agents[agentId]?.meta.version;
@@ -533,15 +543,23 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // Clear avatar blob URL cache so a re-install fetches fresh bytes
       clearAgentAvatarCache(agentId, version);
 
-      // Clean up profile from localStorage
+      // Clean up profile from localStorage (keyed by instance id, with
+      // legacy package-id fallback).
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           const profiles = JSON.parse(raw) as Record<string, unknown>;
-          if (profiles[agentId]) {
-            delete profiles[agentId];
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+          const meta = get().agents[agentId]?.meta;
+          const profileKeys = new Set<string>([agentId]);
+          if (meta?.agent_id) profileKeys.add(meta.agent_id);
+          let changed = false;
+          for (const k of profileKeys) {
+            if (profiles[k]) {
+              delete profiles[k];
+              changed = true;
+            }
           }
+          if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
         }
       } catch {
         // localStorage unavailable — non-fatal
@@ -561,7 +579,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         if (selId === agentId) {
           const remaining = Object.values(next);
           const sys = remaining.find((s) => s.meta.agent_id === SYSTEM_AGENT_ID);
-          selId = sys?.meta.agent_id ?? (remaining[0]?.meta.agent_id ?? null);
+          selId = sys ? instanceIdOf(sys.meta) : (remaining[0] ? instanceIdOf(remaining[0].meta) : null);
         }
         return { agents: next, selectedAgentId: selId };
       });
@@ -805,7 +823,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       if (lastActiveWs) body.workspace_id = lastActiveWs;
 
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "create_session",
         payloadJson: body,
       });
@@ -863,7 +881,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // session). Still tell the backend to release its task.
         try {
           await invoke("mqtt_publish_control", {
-            agentId,
+            instanceId: agentId,
             command: "close_session",
             payloadJson: { session_id: sessionId },
           });
@@ -891,7 +909,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   deleteSession: async (agentId: string, sessionId: string) => {
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "delete_session",
         payloadJson: { session_id: sessionId },
       });
@@ -957,7 +975,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
     try {
       await invoke("mqtt_publish_control", {
-        agentId,
+        instanceId: agentId,
         command: "update_session_title",
         payloadJson: { session_id: sessionId, title },
       });

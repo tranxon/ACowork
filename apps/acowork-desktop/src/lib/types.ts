@@ -5,6 +5,28 @@ export type GatewayMode = "local" | "remote";
 /** Local Gateway process state */
 export type LocalGatewayState = "idle" | "starting" | "running" | "stopped" | "error";
 
+/**
+ * Who is responsible for the Gateway Desktop is talking to.
+ *
+ * Orthogonal to `LocalGatewayState` (single-topology design): the state
+ * machine describes the local *process*, ownership describes *agency*.
+ *   - "owned"   — the current Desktop session spawned the Gateway child
+ *                 (a live `gateway_process` handle exists).
+ *   - "foreign" — a Gateway answers at the configured URL, but this
+ *                 Desktop session did NOT spawn it (started manually,
+ *                 left running after a previous quit with "keep running",
+ *                 or running on another machine). Desktop must never
+ *                 force-stop a foreign Gateway.
+ *   - "none"    — nothing reachable yet / ownership unknown.
+ */
+export type GatewayOwnership = "owned" | "foreign" | "none";
+
+/** Result of the Rust `init_local_gateway` / `start_local_gateway` commands */
+export interface GatewayBootResult {
+  base_url: string;
+  ownership: GatewayOwnership;
+}
+
 /** Gateway health check response */
 export interface HealthResponse {
   status: string;
@@ -15,6 +37,8 @@ export interface HealthResponse {
 /** Agent list entry — matches Gateway HTTP API GET /api/agents */
 export interface AgentListResponse {
   agent_id: string;
+  /** ADR-073: instance identity (UUID) — canonical addressing key. */
+  instance_id: string;
   name: string;
   display_name: string | null;
   role: string | null;
@@ -65,7 +89,18 @@ export interface NodeInfo {
 
 /** Agent list entry — matches Gateway API */
 export interface AgentInfo {
+  /**
+   * ADR-073: instance identity (UUID v4, immutable). Every agent list
+   * entry is an INSTANCE — the Gateway always populates this field and
+   * every registry key / MQTT topic on the frontend is instance-scoped.
+   */
+  instance_id: string;
   agent_id: string;
+  /**
+   * ADR-073: current location (node hosting this instance; mutable on
+   * migration). Display-only metadata — never a registry key.
+   */
+  node_id?: string;
   name: string;
   display_name?: string;
   role?: string;
@@ -114,7 +149,14 @@ export interface AgentInfo {
 
 /** Agent detail response */
 export interface AgentDetail {
+  /**
+   * ADR-073: instance identity (UUID v4, immutable). Always present —
+   * the Gateway serialises it on every agent payload.
+   */
+  instance_id: string;
   agent_id: string;
+  /** ADR-073: current location (mutable on migration). */
+  node_id?: string;
   name: string;
   display_name?: string;
   role?: string;
@@ -698,6 +740,13 @@ export interface ContextUsageInfo {
    *  are exact (UTF-8 `.len()`), not a heuristic.  See
    *  `ContextUsageSection` in `./contextUsageBreakdown`. */
   sections?: ContextUsageSection[];
+  /** 1-based per-session lifetime LLM-call counter for the current session.
+   *  Persisted in the session's meta.json, so it is monotonic across
+   *  `Continue` after `max_iterations` and survives Runtime restarts —
+   *  matches the count a resumed/historical session shows. `undefined` on
+   *  older Runtimes; RightPanel falls back to assistant-message count in
+   *  that case. */
+  iteration?: number;
 }
 
 /** Navigation view type */
@@ -969,7 +1018,7 @@ export interface SkillExecutionHistoryResponse {
 export interface ToolApprovalNeededEvent {
   type: "tool_approval_needed";
   request_id: string;
-  agent_id: string;
+  /** ADR-073: identity lives in the event envelope's `instance_id` (store key), never here. */
   tool_name: string;
   risk_level: "Low" | "Medium" | "High";
   /** Session ID that originated this approval (used for multi-session routing) */
@@ -1156,6 +1205,18 @@ export function getProcessingPhase(s: SessionStatus | undefined | null): Process
  */
 export function isProcessing(s: SessionStatus | undefined | null): boolean {
   return getProcessingPhase(s) !== "idle";
+}
+
+/**
+ * ADR-073: canonical agent addressing key — the INSTANCE identity.
+ * The Gateway always populates `instance_id` (no legacy fallback to
+ * the package `agent_id`, which is display/package identity only).
+ * Every registry key on the frontend (agentStore map, selectedAgentId,
+ * chat/workspace stores) MUST go through this helper so addressing
+ * stays instance-scoped.
+ */
+export function instanceIdOf(meta: Pick<AgentInfo, "instance_id">): string {
+  return meta.instance_id;
 }
 
 /**
@@ -1960,7 +2021,8 @@ export interface CloudEmbeddingProviderResponse {
 
 /** Migration progress for a single agent — matches GET /api/embedding-models/migration-progress */
 export interface AgentMigrationProgress {
-  agent_id: string;
+  /** ADR-073: instance identity (UUID). */
+  instance_id: string;
   request_id: string;
   target_model_id: string;
   target_dimension: number;
@@ -1982,7 +2044,8 @@ export interface MigrationProgressResponse {
 
 /** Agent entry returned in migration-required response */
 export interface MigrationAgentEntry {
-  agent_id: string;
+  /** ADR-073: instance identity (UUID) — canonical addressing key. */
+  instance_id: string;
   name: string;
   is_running: boolean;
   has_active_sessions: boolean;
@@ -2008,8 +2071,11 @@ export interface AvatarConfigResponse {
   avatar: string | null;
   /** Effective builtin avatar icon ID (e.g. "icon-05"). Null when none. */
   builtin_avatar: string | null;
-  /** Source of the effective value: "runtime" | "config" | "manifest" | "fallback" */
-  source: "runtime" | "config" | "manifest" | "fallback";
+  /** Effective display name: server-side override > `manifest.display_name`.
+   *  Null when neither is set (callers fall back to `manifest.name`). */
+  display_name: string | null;
+  /** Source of the effective value: "overrides" | "manifest" | "fallback" */
+  source: "overrides" | "manifest" | "fallback";
 }
 
 /** PUT request body for PUT /api/agents/:id/avatar-config */
@@ -2018,6 +2084,9 @@ export interface UpdateAvatarConfigRequest {
   avatar?: string;
   /** Set to an icon ID to select, "" to clear, omit to leave unchanged */
   builtin_avatar?: string;
+  /** Rename the agent (stored server-side, ADR-009 §V-Q). "" clears it
+   *  back to `manifest.display_name`; omit to leave unchanged. */
+  display_name?: string;
 }
 
 /** A single avatar asset file in the install directory */

@@ -149,6 +149,25 @@ pub(crate) async fn start_http_server(
     app_state.bootstrap_registry = bootstrap_registry;
     app_state.operation_store = operation_store;
 
+    // Peer-IP allowlist (security backstop). Read from the loaded Gateway
+    // config — this happens AFTER config load, so the values include the
+    // env override applied in `GatewayConfig::load`. Boot-time only.
+    {
+        let gw = app_state.gateway_state.read().await;
+        if let Some(config) = gw.config.as_ref() {
+            let allowlist = config.security.to_allowlist();
+            if !allowlist.is_empty() {
+                tracing::info!(
+                    entries = allowlist.len(),
+                    "security.allowed_node_ips enabled (HTTP + MQTT peer filter)"
+                );
+            }
+            app_state.ip_allowlist = allowlist;
+        } else {
+            tracing::debug!("security: no gateway config snapshot — allowlist disabled (allow all)");
+        }
+    }
+
     // Clean up stale pidfile from a previous run (if any). This is purely
     // for housekeeping — mutual exclusion is handled by port probing below.
     cleanup_stale_pidfile(data_dir);
@@ -184,9 +203,16 @@ pub(crate) async fn start_http_server(
         actual_port
     );
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| GatewayError::Config(format!("HTTP server error: {}", e)))?;
+    axum::serve(
+        listener,
+        // `into_make_service_with_connect_info` attaches the peer
+        // `SocketAddr` as a per-request extension. The IP allowlist
+        // middleware (`routes::ip_allowlist_middleware`) reads it to
+        // enforce `[security].allowed_node_ips`.
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|e| GatewayError::Config(format!("HTTP server error: {}", e)))?;
 
     Ok(())
 }

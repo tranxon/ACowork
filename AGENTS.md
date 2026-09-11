@@ -104,6 +104,11 @@ Agent Runtime (universal binary, Rust)
 - Design docs zh + en; Rust code comments (`//`, `//!`, `///`) MUST be English
 - Workspace members source of truth: `core/Cargo.toml [workspace] members`
 - Desktop App = presentation/interaction only — no business logic, no state persistence
+- **Gateway boundary = communication + resource management + reverse proxy.** Agent-private data (skills, prompts, conversations, memory, per-agent embedding, `{install_path}/assets`) is read and written **only through Runtime HTTP** (`core/acowork-gateway/src/http/proxy.rs`), never by direct filesystem access. Since ADR-055 `install_path` is a node-local path, so a Gateway-side `fs` read works in a single-machine setup and returns 5xx the moment Gateway and Node are on different hosts. Enforced by `run_gateway_fs_redline` in `dev/ci.sh`; rationale and the frozen ceilings in [ADR-009 §5](docs/adr/zh/ADR-009-gateway-workspace-isolation.md).
+
+## File Reference
+Point to files with Markdown links only: e.g. `[src/lib/foo.ts](src/lib/foo.ts)` or `[src/lib/foo.ts:42](src/lib/foo.ts#L42)`. 
+Do not wrap paths in quotes — they become unclickable.
 
 ## Rules (Do NOT)
 

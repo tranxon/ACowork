@@ -19,10 +19,15 @@
 //!   `proxy_to_runtime_with_method` (chat streaming goes over MQTT, not
 //!   HTTP — ADR-035); SSE/WebSocket streaming lands with the LSP
 //!   sidecar in Phase 4.
-//! - **Auth** (Phase 5a, §6.8): once the node holds a Gateway-issued
-//!   `node_token`, inbound requests MUST carry it in
-//!   `X-ACowork-Node-Token` or they get `403` with `X-Error-Origin:
-//!   node`. Not-yet-enrolled nodes keep the pre-5a open behavior.
+//! - **Auth** (Phase 5a, §6.8): inbound requests MUST carry the
+//!   Gateway-issued `node_token` in `X-ACowork-Node-Token` or they get
+//!   `403` with `X-Error-Origin: node`. A node that has **not** enrolled
+//!   yet holds no token and therefore refuses everything: the Gateway
+//!   learns this endpoint from the enrollment handshake, so
+//!   pre-enrollment traffic can only be a stray client on the network.
+//!   `proxy_bind` defaults to `0.0.0.0`, which makes fail-closed the
+//!   difference between a closed and an open LAN port on `/fs/browse`
+//!   and the package write routes.
 //!
 //! **Node keeps the `{agent_id} → loopback port` mapping private**
 //! (§6.4): the port comes from [`crate::state::AgentSlot::http_port`],
@@ -104,29 +109,9 @@ async fn proxy_agent(
     body: axum::body::Bytes,
 ) -> Response {
     // ADR-055 Phase 5a §6.8: a Gateway-issued node_token turns this
-    // proxy into an auth boundary — inbound requests MUST present it
-    // via `X-ACowork-Node-Token` (constant-time compare). Nodes that
-    // have not enrolled yet (token None) keep the open behavior.
-    if let Some(expected) = state.identity.read().await.node_token.clone() {
-        let provided = headers
-            .get("X-ACowork-Node-Token")
-            .and_then(|v| v.to_str().ok());
-        let ok = provided.is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
-        if !ok {
-            tracing::warn!(
-                agent_id = %id,
-                "Node proxy rejected request: missing/invalid X-ACowork-Node-Token"
-            );
-            return (
-                StatusCode::FORBIDDEN,
-                [(HeaderName::from_static("x-error-origin"), HeaderValue::from_static("node"))],
-                axum::Json(serde_json::json!({
-                    "error": "invalid node token",
-                    "id": id,
-                })),
-            )
-                .into_response();
-        }
+    // proxy into an auth boundary.
+    if let Some(denied) = authorize(&state, &headers, &id).await {
+        return denied;
     }
 
     // Resolve the agent's loopback HTTP port from the node process table.
@@ -175,6 +160,13 @@ async fn proxy_agent(
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            // ADR-009 §5: `PUT avatar-config` is the one Runtime write
+            // whose result the retained inventory mirrors
+            // (`overrides_json`). Refresh it, otherwise the durable copy
+            // keeps the pre-write value until this node reconnects.
+            if status.is_success() && method == Method::PUT && rest == "avatar-config" {
+                crate::package::republish_installed_info(&state, &id).await;
+            }
             let resp_headers = response.headers().clone();
             let body = response.bytes().await.unwrap_or_default();
 
@@ -202,6 +194,64 @@ async fn proxy_agent(
                 .into_response()
         }
     }
+}
+
+/// ADR-055 Phase 5a §6.8: validate the inbound `X-ACowork-Node-Token`.
+///
+/// Every route that exposes node-local state is an auth boundary:
+/// inbound requests MUST present the Gateway-issued `node_token`
+/// (constant-time compare).
+///
+/// **Fail closed.** A node without a token has not enrolled, and the
+/// Gateway cannot address it (it learns the endpoint from the
+/// enrollment handshake), so no legitimate caller exists. Refusing is
+/// what keeps a freshly started node from serving `/fs/browse` and the
+/// package write routes to anyone who can reach `proxy_bind` (default
+/// `0.0.0.0:19900`).
+///
+/// Returns `None` when the request is authorized, or the `403` response
+/// to send back otherwise. Shared by the Runtime reverse proxy, the
+/// read-only asset service and the package routes so every hop has one
+/// policy, not three.
+pub(crate) async fn authorize(
+    state: &NodeHttpState,
+    headers: &HeaderMap,
+    id: &str,
+) -> Option<Response> {
+    let Some(expected) = state.identity.read().await.node_token.clone() else {
+        tracing::warn!(
+            agent_id = %id,
+            "Node rejected request: this node has not enrolled yet (no token)"
+        );
+        return Some(forbidden(id, "node has no enrollment token yet"));
+    };
+    let provided = headers
+        .get("X-ACowork-Node-Token")
+        .and_then(|v| v.to_str().ok());
+    if provided.is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes())) {
+        return None;
+    }
+    tracing::warn!(
+        agent_id = %id,
+        "Node rejected request: missing/invalid X-ACowork-Node-Token"
+    );
+    Some(forbidden(id, "invalid node token"))
+}
+
+/// The `403` every auth failure answers with.
+fn forbidden(id: &str, reason: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(
+            HeaderName::from_static("x-error-origin"),
+            HeaderValue::from_static("node"),
+        )],
+        axum::Json(serde_json::json!({
+            "error": reason,
+            "id": id,
+        })),
+    )
+        .into_response()
 }
 
 /// Strip hop-by-hop headers (RFC 7230 §6.1) — same list as the
@@ -336,11 +386,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unenrolled_proxy_is_open() {
+    async fn unenrolled_proxy_is_fail_closed() {
+        // No token exists yet → refuse. Serving this port (default bind
+        // `0.0.0.0:19900`) before enrollment would expose the Runtime
+        // proxy, `/fs/browse` and the package write routes to the LAN.
         let app = router(http_state(None));
-        // No token required pre-enrollment; unknown agent → 503.
         let resp = app.oneshot(proxy_request(None)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     fn health_request() -> axum::http::Request<Body> {

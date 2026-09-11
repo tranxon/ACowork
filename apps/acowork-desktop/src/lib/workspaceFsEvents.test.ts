@@ -81,7 +81,7 @@ function setFiles(files: OpenFile[]) {
 
 function fsEvent(changes: Array<{ kind: string; path: string }>): WorkspaceFsChangeEvent {
     return {
-        agent_id: "agent-1",
+        instance_id: "agent-1",
         workspace_id: "ws-1",
         changes: changes.map((c) => ({ ...c, timestamp_ms: Date.now() } as never)),
         window_end_ms: Date.now(),

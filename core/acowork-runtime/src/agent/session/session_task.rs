@@ -632,6 +632,7 @@ impl SessionTask {
                     max_output,
                     agent_loop.core.context_window_override,
                     Some(&persisted),
+                    conv.llm_call_counter(),
                 );
                 if let Some(ref tx) = chunk_tx {
                     let _ = tx

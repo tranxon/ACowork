@@ -247,6 +247,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             // `<package_dir>/prompts/`.
             loaded.package_dir.clone(),
             loaded.manifest.agent_id.clone(),
+            // ADR-073: the instance identity (UUID) — the Runtime's HTTP
+            // `/agents/{id}/*` routes accept only this id in the path, so
+            // the Gateway's instance-scoped reverse-proxy reaches the right
+            // process (see `HttpState::instance_matches`).
+            config.instance_id().to_string(),
             session_snapshots.clone(),
             latest_session.clone(),
             http_dispatch_shared,
@@ -331,6 +336,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // codebase tool is registered / unregistered in all sessions.
         let (lsps_update_tx, lsps_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::LspRelayUpdate>();
+        // §6.3.3: sink for the node's reverse-proxy base URL on change
+        // (LAN IP switch). The MQTT event loop decodes the retained
+        // `acowork/nodes/{id}/info` push; when the base changed, we
+        // re-publish this Runtime's retained `http_endpoint` so the
+        // Gateway keeps routing through the node — no restart.
+        let (node_proxy_update_tx, mut node_proxy_update_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
@@ -342,10 +354,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 host: config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
                 port: mqtt_port,
                 agent_id: &loaded.manifest.agent_id,
+                // ADR-073: instance identity (required — injected by the
+                // Node at spawn time via --agent-instance-id).
+                instance_id: config.instance_id(),
                 agent_name: &loaded.manifest.name,
                 agent_version: &loaded.manifest.version,
-                avatar: None,
-                builtin_avatar: None,
                 config_json: &config_json,
                 available_cache: cache.clone(),
                 control_tx,
@@ -355,6 +368,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 embedding_update_tx: Some(embedding_update_tx),
                 node_id: config.node_id.as_deref(),
                 lsps_update_tx: Some(lsps_update_tx),
+                node_proxy_update_tx: Some(node_proxy_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
                 username: config.mqtt_username.as_deref(),
                 password: config.mqtt_password.as_deref(),
@@ -376,19 +390,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     //
                     // ADR-055 §6.4: when the Node injects
                     // `--http-advertise-endpoint` (the Node reverse-proxy
-                    // base URL), publish `{base}/agents/{id}` so the
-                    // Gateway routes through the Node. The Runtime only
+                    // base URL), publish `{base}/agents/{instance_id}` so
+                    // the Gateway routes through the Node. The Runtime only
                     // concatenates — node-internal topology stays private
-                    // to the Node.
+                    // to the Node. ADR-073: the proxy path variable is the
+                    // instance identity.
+                    let instance_id = config.instance_id().to_string();
                     let endpoint = match &config.http_advertise_endpoint {
                         Some(base) => format!(
                             "{}/agents/{}",
                             base.trim_end_matches('/'),
-                            loaded.manifest.agent_id
+                            instance_id
                         ),
                         None => format!("http://127.0.0.1:{}", port),
                     };
-                    let topic = format!("acowork/agents/{}/http_endpoint", loaded.manifest.agent_id);
+                    let topic = format!("acowork/agents/{}/http_endpoint", instance_id);
                     match client.publish_raw(
                         &topic,
                         endpoint.as_bytes(),
@@ -397,11 +413,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     ).await {
                         Ok(()) => tracing::info!(
                             agent_id=%loaded.manifest.agent_id,
+                            instance_id=%instance_id,
                             %endpoint,
                             "Published retained http_endpoint for Gateway reverse-proxy discovery"
                         ),
                         Err(e) => tracing::error!(
                             agent_id=%loaded.manifest.agent_id,
+                            instance_id=%instance_id,
                             %endpoint,
                             error=%e,
                             "Failed to publish retained http_endpoint — Gateway will return 503 until the Runtime restarts and re-publishes"
@@ -418,6 +436,56 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 // which downstream sites (`subsystems.rs` / `gateway_loop.rs`)
                 // still consume by `&RuntimeMqttClient` reference.
                 *mqtt_client_slot.lock().await = Some(Arc::new(tokio::sync::Mutex::new(client.clone())));
+
+                // §6.3.3: live re-publication of the retained
+                // `http_endpoint`. When the node changes network (Wi-Fi
+                // hotspot switch), the MQTT event loop decodes the fresh
+                // retained NodeInfo and pushes the new reverse-proxy base
+                // here; we re-publish `{base}/agents/{id}` retained so
+                // the Gateway keeps routing through the node — no node or
+                // Runtime restart, no agent restart.
+                {
+                    let endpoint_client = client.clone();
+                    let endpoint_agent_id = loaded.manifest.agent_id.clone();
+                    let endpoint_instance_id = config.instance_id().to_string();
+                    tokio::spawn(async move {
+                        while let Some(base) = node_proxy_update_rx.recv().await {
+                            let endpoint = format!(
+                                "{}/agents/{}",
+                                base.trim_end_matches('/'),
+                                endpoint_instance_id
+                            );
+                            let topic = format!(
+                                "acowork/agents/{}/http_endpoint",
+                                endpoint_instance_id
+                            );
+                            match endpoint_client
+                                .publish_raw(
+                                    &topic,
+                                    endpoint.as_bytes(),
+                                    crate::mqtt::client::MqttQoS::AtLeastOnce,
+                                    true,
+                                )
+                                .await
+                            {
+                                Ok(()) => tracing::info!(
+                                    agent_id = %endpoint_agent_id,
+                                    instance_id = %endpoint_instance_id,
+                                    %endpoint,
+                                    "Re-published retained http_endpoint after node proxy change (§6.3.3)"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    agent_id = %endpoint_agent_id,
+                                    instance_id = %endpoint_instance_id,
+                                    %endpoint,
+                                    error = %e,
+                                    "Failed to re-publish retained http_endpoint after node proxy change"
+                                ),
+                            }
+                        }
+                    });
+                }
+
                 mqtt_client = Some(client);
                 available_cache = Some(cache);
                 control_rx = Some(ctrl_rx);
@@ -553,16 +621,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         load_or_trace("distiller-judge.md", "distiller Step 4 judge prompt");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
+    // Kept alive on the boot context (not discarded) so Phase B injects it
+    // into AgentCore — the runtime resolves per-turn chat `command` (skill
+    // name) against it, and skills are the agent's own package content, not
+    // something the frontend should supply.
     let skills_dir = loaded.package_dir.join("skills");
-    let _skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
-        .unwrap_or_else(|e| {
+    let skill_registry = Arc::new(
+        crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir).unwrap_or_else(|e| {
             tracing::warn!(
                 skills_dir = %skills_dir.display(),
                 error = %e,
                 "Failed to load skills registry, proceeding without skills"
             );
             crate::skills::parser::SkillRegistry::new()
-        });
+        }),
+    );
 
     // ── Step 3: Initialize LLM Provider ─────────────────────────────
     let mut gateway_current_provider_id: Option<String> = None;
@@ -1163,6 +1236,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_tool_specs,
         system_prompt,
         compaction_prompt,
+        // Per-turn skill command injection: registry loaded in Step 3.5
+        // above, injected into AgentCore in Phase B (session_init.rs).
+        skill_registry,
         // ADR-063: 4 additional package-level overrides (Phase A loaded
         // each from `prompts/<file>.md`; see load_or_trace above). Wired
         // through `AgentBootContext` so Phase B's session_init.rs can
