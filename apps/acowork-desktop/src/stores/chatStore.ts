@@ -1441,6 +1441,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         },
       });
       log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
+      // Touch the user's last-interaction timestamp so the next Gateway
+      // boot can pick this agent as the default (`/api/agents` sorts by
+      // `last_interaction_at`). Best-effort — failure is logged but does
+      // not roll back the sent message; the on-disk store is already
+      // idempotent on consecutive touches.
+      void fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/interactions`, {
+        method: "POST",
+      }).catch((err: unknown) => {
+        log.debug("[ChatStore] touch_interaction HTTP failed (non-fatal):", err);
+      });
       // ADR-050 C5: reconcile the optimistic user message + attachment
       // entries with the server once the backend has persisted them. See
       // `scheduleSendReconciliation` — without this the attachment chips

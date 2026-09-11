@@ -235,10 +235,11 @@ pub struct GatewayState {
     pub resource_cache: ResourceCache,
     /// Embedding service process state (None if not started).
     pub embed_process: Option<EmbedProcessState>,
-    /// Last user-interaction timestamp per agent (`agent_id` -> UTC time).
-    /// In-memory mirror of the on-disk interaction store; source of truth
-    /// for the `GET /api/agents` sort order. Persists across agent
-    /// stop/restart because the key is the install id, not a run-instance.
+    /// Last user-interaction timestamp per agent (`instance_id` -> UTC time,
+    /// ADR-073). In-memory mirror of the on-disk interaction store; source
+    /// of truth for the `GET /api/agents` sort order. Key is the install
+    /// UUID, regenerated on every reinstall — see `interaction_store` module
+    /// doc for the surviving-restart semantics.
     pub last_interactions: HashMap<String, DateTime<Utc>>,
     /// Disk-backed persistence for `last_interactions`. `None` means
     /// in-memory only (tests, package-manager helpers). `Some` in the
@@ -617,26 +618,27 @@ impl GatewayState {
         self.advertise_host = host;
     }
 
-    /// Record a user-driven interaction for `agent_id` and persist
-    /// if a disk-backed store is attached. Best-effort: a save failure
-    /// is logged but does not propagate, so callers (HTTP handlers)
+    /// Record a user-driven interaction for an agent `instance_id` (ADR-073)
+    /// and persist if a disk-backed store is attached. Best-effort: a save
+    /// failure is logged but does not propagate, so callers (HTTP handlers)
     /// stay non-blocking on persistence hiccups.
-    pub fn touch_interaction(&mut self, agent_id: &str, when: DateTime<Utc>) {
-        self.last_interactions.insert(agent_id.to_string(), when);
+    pub fn touch_interaction(&mut self, instance_id: &str, when: DateTime<Utc>) {
+        self.last_interactions.insert(instance_id.to_string(), when);
         if let Some(store) = &self.interaction_store
             && let Err(e) = store.save(&self.last_interactions)
         {
             tracing::warn!(
                 error = %e,
-                agent_id,
+                instance_id,
                 "Failed to persist interaction store; in-memory state updated"
             );
         }
     }
 
-    /// Look up the last user-interaction timestamp for `agent_id`.
-    pub fn get_interaction(&self, agent_id: &str) -> Option<DateTime<Utc>> {
-        self.last_interactions.get(agent_id).copied()
+    /// Look up the last user-interaction timestamp for an agent
+    /// `instance_id` (ADR-073).
+    pub fn get_interaction(&self, instance_id: &str) -> Option<DateTime<Utc>> {
+        self.last_interactions.get(instance_id).copied()
     }
 }
 
@@ -760,6 +762,26 @@ mod tests {
         // instance_id.
         state.set_instance_id("instance-B".to_string());
         assert_eq!(state.instance_id, "instance-A");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_touch_and_get_interaction_round_trip() {
+        // ADR-073: key is the agent `instance_id` (install-time UUID),
+        // not the package `agent_id`. Two instances of the same package
+        // must keep independent timestamps.
+        let dir = temp_vault_dir("touch-interaction");
+        let mut state = GatewayState::new(&dir);
+
+        let when_a = Utc::now();
+        let when_b = when_a + chrono::Duration::seconds(60);
+        state.touch_interaction("inst-aaaa-1111", when_a);
+        state.touch_interaction("inst-bbbb-2222", when_b);
+
+        assert_eq!(state.get_interaction("inst-aaaa-1111"), Some(when_a));
+        assert_eq!(state.get_interaction("inst-bbbb-2222"), Some(when_b));
+        // Lookup by package id (the legacy wrong key) must miss.
+        assert_eq!(state.get_interaction("com.acowork.foo"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

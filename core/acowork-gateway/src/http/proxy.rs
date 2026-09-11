@@ -2259,9 +2259,12 @@ pub(crate) async fn proxy_to_runtime_with_method(
 /// proxy/mod.rs), regardless of the broker auth flag, so the Gateway
 /// must attach the token whenever the store has one — otherwise every
 /// reverse-proxied request 403s with "invalid node token" (loading
-/// session stalls on `latest-session`). When auth is off and the node
-/// never enrolled, both sides hold no token and the proxy stays open,
-/// so the two sides remain consistent either way.
+/// session stalls on `latest-session`). A node that has not enrolled
+/// yet fails closed, so the two sides converge through the enrollment
+/// handshake instead: the node re-sends its enrollment request on
+/// every (re)connect — with an empty credential when it holds none —
+/// and with auth off the Gateway mints the first token on that
+/// request.
 async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> {
     let gw = state.gateway_state.read().await;
     let broker_auth = gw.mqtt_broker_auth.as_ref()?;

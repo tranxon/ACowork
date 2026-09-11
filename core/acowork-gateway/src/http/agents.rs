@@ -40,6 +40,11 @@ pub fn agent_routes() -> Router<AppState> {
             get(get_agent_detail).delete(uninstall_agent),
         )
         .route("/api/agents/install", post(install_agent))
+        // User-driven interaction timestamp touch. See `record_interaction`.
+        .route(
+            "/api/agents/{id}/interactions",
+            post(record_interaction),
+        )
         // ADR-073: declarative "make sure this package is installed".
         // Idempotent by construction (unlike `/install`, which always
         // lands one more instance) — repeated callers converge on one
@@ -1498,6 +1503,27 @@ pub async fn uninstall_agent(
 pub struct StartAgentRequest {
     /// Start in developer mode (enables Debug Protocol: HTTP RPC + MQTT events per ADR-048)
     pub dev_mode: bool,
+}
+
+
+/// `POST /api/agents/:id/interactions` — record a user-driven interaction
+/// for the given `instance_id` (ADR-073). Returns 204 No Content.
+///
+/// Idempotent within the same second (the persisted timestamp is
+/// `Utc::now()`; identical consecutive touches produce the same row).
+/// Does not validate `instance_id` against `installed_agents`: a touch
+/// for an already-uninstalled agent leaves a harmless orphan entry that
+/// `list_agents` never surfaces (it only iterates `installed_agents`).
+/// `touch_interaction` itself is best-effort on persistence (warns on
+/// disk-save failure but keeps the in-memory update), so this handler
+/// stays non-blocking on disk hiccups.
+pub async fn record_interaction(
+    State(state): State<AppState>,
+    Path(instance_id): Path<String>,
+) -> StatusCode {
+    let mut gw = state.gateway_state.write().await;
+    gw.touch_interaction(&instance_id, chrono::Utc::now());
+    StatusCode::NO_CONTENT
 }
 
 

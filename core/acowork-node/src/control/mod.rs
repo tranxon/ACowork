@@ -634,8 +634,7 @@ async fn download_package(
     Ok(())
 }
 
-/// ADR-055 Phase 5a: build the NodeEnroll request envelope, or `None`
-/// when the node has no credential to present.
+/// ADR-055 Phase 5a: build the NodeEnroll request envelope.
 ///
 /// Enrollment is idempotent and re-run on every (re)connect: a node
 /// that already holds a Gateway-issued node_token presents it as the
@@ -645,17 +644,24 @@ async fn download_package(
 /// identity. A one-shot-only enrollment could otherwise strand a node
 /// with a token the Gateway no longer recognizes, turning every
 /// reverse-proxied request into a 403 "invalid node token".
-fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<DataEnvelope> {
+///
+/// A node with NO credential (no `--token`, no persisted node_token)
+/// still sends the request with an empty `enrollment_token` instead
+/// of staying silent: with `mqtt.auth_enabled = false` the Gateway
+/// skips token validation (ADR-055 §6.8) and mints the first
+/// long-lived token, which is what lets the fail-closed node reverse
+/// proxy open for the Gateway. With auth on the Gateway answers
+/// `rejected` ("enrollment token required"); the node keeps failing
+/// closed, matching the pre-Phase-5a behavior.
+fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> DataEnvelope {
     // The one-time enrollment token (first boot, passed via CLI) wins;
     // a persisted node_token doubles as the credential on re-enroll.
-    let Some(token) = config
+    let token = config
         .token
         .as_deref()
         .filter(|t| !t.is_empty())
         .or(identity.node_token.as_deref())
-    else {
-        return None; // No credential to present.
-    };
+        .unwrap_or_default();
     let info = build_node_info(identity, config, &config.advertise_host, 0);
     let enroll = NodeEnroll {
         node_id: identity.node_id.clone(),
@@ -667,24 +673,23 @@ fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<
         capabilities: info.capabilities,
         enrollment_token: token.to_string(),
     };
-    Some(DataEnvelope {
+    DataEnvelope {
         version: 1,
         payload: Some(data_envelope::Payload::NodeEnroll(enroll)),
-    })
+    }
 }
 
 /// Publish the enrollment request on `acowork/nodes/{id}/enroll`
-/// (QoS 1, non-retained). Returns true when a request was actually
-/// published. Re-run on every (re)connect by the bootstrap; it is a
-/// no-op once the node holds a node_token.
+/// (QoS 1, non-retained). Returns true when the request was actually
+/// published. Re-run on every (re)connect by the bootstrap —
+/// idempotent: the Gateway reuses the node's token when the presented
+/// credential still matches (see `build_enroll_payload`).
 async fn publish_enroll(
     client: &AsyncClient,
     identity: &NodeIdentity,
     config: &NodeConfig,
 ) -> bool {
-    let Some(envelope) = build_enroll_payload(identity, config) else {
-        return false;
-    };
+    let envelope = build_enroll_payload(identity, config);
     let topic = node_enroll_topic(&identity.node_id);
     match client
         .publish(
@@ -2648,8 +2653,7 @@ mod tests {
             token: Some("tok-1234".to_string()),
             ..test_config()
         };
-        let envelope = build_enroll_payload(&test_identity(), &config)
-            .expect("enroll payload built when token present and no node_token");
+        let envelope = build_enroll_payload(&test_identity(), &config);
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };
@@ -2662,20 +2666,28 @@ mod tests {
     }
 
     #[test]
-    fn build_enroll_payload_none_without_token_or_when_enrolled() {
-        // No enrollment token and no persisted node_token → no payload.
-        assert!(build_enroll_payload(&test_identity(), &test_config()).is_none());
-        // Holds a node_token → still builds a payload (idempotent
-        // re-enrollment; the token doubles as the credential so the
-        // Gateway can re-sync its store after a loss).
+    fn build_enroll_payload_without_credential_keeps_empty_token() {
+        // No CLI token, no persisted node_token → the payload is still
+        // built, with an empty credential: the Gateway decides (auth
+        // off → mint the first token; auth on → reject). Staying
+        // silent here would strand the node with no token, and the
+        // fail-closed reverse proxy would 403 every request.
+        let envelope = build_enroll_payload(&test_identity(), &test_config());
+        let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
+            panic!("expected NodeEnroll payload");
+        };
+        assert!(enroll.enrollment_token.is_empty());
+
+        // Holds a node_token → the token doubles as the credential
+        // (idempotent re-enrollment; the Gateway can re-sync its store
+        // after a loss).
         let mut identity = test_identity();
         identity.node_token = Some("existing-token".to_string());
         let config = NodeConfig {
             token: None,
             ..test_config()
         };
-        let envelope = build_enroll_payload(&identity, &config)
-            .expect("enroll payload built when node_token present");
+        let envelope = build_enroll_payload(&identity, &config);
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };
@@ -2686,8 +2698,7 @@ mod tests {
             token: Some("tok-1234".to_string()),
             ..test_config()
         };
-        let envelope = build_enroll_payload(&identity, &config)
-            .expect("enroll payload built with CLI token");
+        let envelope = build_enroll_payload(&identity, &config);
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };
