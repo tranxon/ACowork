@@ -1129,6 +1129,7 @@ impl SessionManager {
                     max_output,
                     self.core.context_window_override,
                     Some(&persisted),
+                    conv.llm_call_counter(),
                 );
                 serde_json::to_string(&ctx).ok()
             });
@@ -4353,6 +4354,7 @@ mod tests {
                 message_count: 0,
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),
                 tokens: None,
+                llm_call_counter: None,
                 last_compaction_offset: None,
                 corrupted: false,
             },

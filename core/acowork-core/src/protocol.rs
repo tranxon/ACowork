@@ -856,6 +856,17 @@ pub struct ContextUsageInfo {
     /// the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sections: Option<Vec<ContextUsageSection>>,
+    /// 1-based per-session LLM-call counter (monotonic for the session's
+    /// lifetime, does NOT reset when the user clicks Continue after
+    /// `max_iterations`). Per-session metadata persisted in the session's
+    /// meta.json — a resumed/historical session shows the same count and
+    /// a Continue keeps accumulating. Populated only on `ContextUsage`
+    /// events tied to a real LLM response; absent on context-window
+    /// config changes / post-compaction pushes that don't reflect a new
+    /// call. `None` on Runtimes pre-dating this field — the frontend
+    /// falls back to assistant-message count in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iteration: Option<u32>,
 }
 
 /// One entry in [`ContextUsageInfo::sections`].
@@ -2412,6 +2423,7 @@ mod tests {
             agent_total_cache_read_tokens: Some(1600),
             agent_total_cache_write_tokens: Some(100),
             sections: None,
+            iteration: Some(42),
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ContextUsageInfo = serde_json::from_str(&json).unwrap();
@@ -2424,6 +2436,8 @@ mod tests {
         // Non-cache fields also preserved.
         assert_eq!(parsed.input_tokens, 1000);
         assert_eq!(parsed.usage_percent, 1);
+        // Iteration field roundtrips.
+        assert_eq!(parsed.iteration, Some(42));
     }
 
     /// Cache fields are `skip_serializing_if = "Option::is_none"`. When
@@ -2451,6 +2465,7 @@ mod tests {
             agent_total_cache_read_tokens: None,
             agent_total_cache_write_tokens: None,
             sections: None,
+            iteration: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         // Cache fields absent → no `"cache_..."` substring in the JSON.
@@ -2460,6 +2475,8 @@ mod tests {
         assert!(!json.contains("total_cache_write_tokens"), "field omitted");
         assert!(!json.contains("agent_total_cache_read_tokens"), "field omitted");
         assert!(!json.contains("agent_total_cache_write_tokens"), "field omitted");
+        // iteration is also `skip_serializing_if = Option::is_none`.
+        assert!(!json.contains("iteration"), "field omitted");
     }
 
     /// Backward compatibility: an older Runtime (ADR-066 not yet

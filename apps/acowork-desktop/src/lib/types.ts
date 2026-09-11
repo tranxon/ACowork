@@ -740,6 +740,13 @@ export interface ContextUsageInfo {
    *  are exact (UTF-8 `.len()`), not a heuristic.  See
    *  `ContextUsageSection` in `./contextUsageBreakdown`. */
   sections?: ContextUsageSection[];
+  /** 1-based per-session lifetime LLM-call counter for the current session.
+   *  Persisted in the session's meta.json, so it is monotonic across
+   *  `Continue` after `max_iterations` and survives Runtime restarts —
+   *  matches the count a resumed/historical session shows. `undefined` on
+   *  older Runtimes; RightPanel falls back to assistant-message count in
+   *  that case. */
+  iteration?: number;
 }
 
 /** Navigation view type */

@@ -163,6 +163,8 @@ impl AgentLoop {
                     agent_total_cache_read_tokens: None,
                     agent_total_cache_write_tokens: None,
                     sections: None,
+                    // No LLM call here — context_window override only.
+                    iteration: None,
                 };
                 tracing::info!(
                     context_window = effective_window,
@@ -1193,6 +1195,13 @@ impl AgentLoop {
                     agent_total_cache_read_tokens: None,
                     agent_total_cache_write_tokens: None,
                     sections: None,
+                    // Post-compaction recompute push. The compaction's own
+                    // summary LLM call goes through `compact_via_llm`, a
+                    // separate path that does NOT bump the per-session
+                    // `llm_call_counter` (only real dialog responses in
+                    // `process_llm_response_usage` bump), so no count here —
+                    // this push only reflects the new context shape.
+                    iteration: None,
                 };
                 // ADR-028 + ADR-066: patch session + agent totals in one place.
                 let mut ctx_info = ctx_info;
@@ -1588,6 +1597,8 @@ impl AgentLoop {
                         agent_total_cache_read_tokens: None,
                         agent_total_cache_write_tokens: None,
                         sections: None,
+                        // Filled in just before the push below.
+                        iteration: None,
                     }
                 };
                 tracing::debug!(
@@ -1682,6 +1693,16 @@ impl AgentLoop {
                 {
                     conv.cache_context_usage_sections(sections.clone());
                 }
+
+                // Bump the per-session LLM-call counter (returns the
+                // post-increment 1-based value) and stamp it onto the push.
+                // The counter lives on the conversation session and is
+                // persisted in meta.json (`SessionMeta.llm_call_counter`),
+                // so it is monotonic for the session's lifetime and
+                // survives restarts — unlike the `max_iterations` per-burst
+                // loop counter which resets on Continue (loop_.rs).
+                ctx_usage.iteration =
+                    self.session.conversation.as_ref().map(|c| c.bump_llm_call_counter());
 
                 if !self
                     .session_core

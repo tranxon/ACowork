@@ -30,14 +30,25 @@ import { llmAvailabilityFromWire } from "../lib/llmAvailability";
 // therefore carry no `sections`. Without this merge, the last session_state
 // to arrive would overwrite the sections delivered by the context_usage chunk,
 // and the input-box popover breakdown would always render 0%.
+//
+// The same holds for `iteration` (per-session lifetime LLM-call count):
+// session_state / fetchSessionState carry it only from the persisted meta,
+// which can briefly lag the live `context_usage` push — preserving the last
+// known value keeps the "Iterations" display from glitching to the
+// assistant-message fallback between pushes.
 function mergeContextUsage(
   prev: ContextUsageInfo | null | undefined,
   next: ContextUsageInfo,
 ): ContextUsageInfo {
+  const preserved: Partial<ContextUsageInfo> = {};
   if (prev?.sections && !next.sections) {
-    return { ...next, sections: prev.sections };
+    preserved.sections = prev.sections;
   }
-  return next;
+  if (prev?.iteration != null && next.iteration == null) {
+    preserved.iteration = prev.iteration;
+  }
+  if (Object.keys(preserved).length === 0) return next;
+  return { ...next, ...preserved };
 }
 
 // ---------------------------------------------------------------------------

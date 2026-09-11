@@ -113,6 +113,7 @@ fn patch_session_totals_populates_all_cumulative_fields() {
         agent_total_cache_read_tokens: None,
         agent_total_cache_write_tokens: None,
         sections: None,
+        iteration: None,
     };
     // Before patch: cache fields default to None.
     assert_eq!(info.total_input_tokens, None);
@@ -186,6 +187,7 @@ async fn push_path_carries_total_cache_fields_after_resume() {
         32_768,
         None,
         Some(&persisted),
+        None,
     );
 
     // Per-turn cache (last turn only — comes from SessionTokens.last_*).
@@ -245,6 +247,7 @@ async fn cumulative_cache_accumulates_across_calls() {
         32_768,
         None,
         Some(&persisted),
+        None,
     );
 
     // Per-turn values are the most-recent round only.
@@ -287,6 +290,7 @@ async fn openai_zero_cache_write_surfaces_as_some_zero() {
         32_768,
         None,
         Some(&persisted),
+        None,
     );
 
     // cache_read populated (OpenAI does report cached_tokens).
@@ -333,6 +337,7 @@ async fn anthropic_cache_write_round_trips() {
         32_768,
         None,
         Some(&persisted),
+        None,
     );
 
     // Last-turn cache_write is 0 (round 2 wrote 0) but cumulative is 3000.
@@ -361,6 +366,7 @@ fn legacy_scalar_path_leaves_cache_fields_absent() {
         32_768,
         None,
         None, // no cumulative snapshot
+        None, // no persisted iteration count
     );
 
     assert_eq!(info.input_tokens, 45_000);

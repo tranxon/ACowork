@@ -78,6 +78,10 @@ impl super::loop_::AgentLoop {
                 // with the runtime trim/compaction thresholds.
                 self.core.resolved_context_cap(),
                 Some(&persisted),
+                // Per-session lifetime LLM-call count so the retained
+                // session_state snapshot carries the same "Iterations" as
+                // the live ContextUsage push.
+                conv.llm_call_counter(),
             );
             // ADR-067: this path builds from persisted tokens and has no
             // `ContextBuilder`, so it cannot recompute sections. Merge the

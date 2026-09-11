@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -73,6 +74,45 @@ export function ProfileTab() {
       .then((r) => setAvatarAssets(r.assets))
       .catch(() => {});
   }, [avatarPopupOpen]);
+
+  // ── Avatar picker popup positioning ─────────────────────────────
+  // The picker popup used to be `absolute` inside the avatar button's
+  // `.relative` wrapper. The ProfileTab wraps everything in a
+  // collapsible `ListBox` card (`overflow-hidden` so the rounded card
+  // clips its children — see ListBox.tsx), which clipped the popup.
+  // Fix mirrors the right-panel AgentSetupTab: render the popup via
+  // `createPortal` to `document.body` with `position: fixed`, anchored
+  // to the avatar button's measured viewport rect.
+  //   - `avatarAnchorRef` → the `.relative` wrapper around the button
+  //   - `avatarPopupPos` → { top, left } viewport coords for the popup
+  //   - Position is computed synchronously on open (no first-frame
+  //     flash) and re-computed on resize / capture-phase scroll so the
+  //     popup tracks the button when the panel or page scrolls.
+  const avatarAnchorRef = useRef<HTMLDivElement>(null);
+  const [avatarPopupPos, setAvatarPopupPos] = useState<{ top: number; left: number } | null>(null);
+
+  const computeAvatarPopupPos = useCallback(() => {
+    const el = avatarAnchorRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    // 8px gap below the avatar button — same visual as the old
+    // `absolute left-0 top-full mt-2` placement.
+    setAvatarPopupPos({ top: rect.bottom + 8, left: rect.left });
+  }, []);
+
+  useEffect(() => {
+    if (!avatarPopupOpen) return;
+    computeAvatarPopupPos();
+    window.addEventListener("resize", computeAvatarPopupPos);
+    // Capture-phase scroll: catches scrolling of the settings panel /
+    // card containers, not just the window, so the fixed popup stays
+    // glued to the avatar button.
+    window.addEventListener("scroll", computeAvatarPopupPos, true);
+    return () => {
+      window.removeEventListener("resize", computeAvatarPopupPos);
+      window.removeEventListener("scroll", computeAvatarPopupPos, true);
+    };
+  }, [avatarPopupOpen, computeAvatarPopupPos]);
 
   // ── Load backend user profile ──────────────────────────────────────
   const [backendUser, setBackendUser] = useState<BackendUserProfile | null>(null);
@@ -242,9 +282,12 @@ export function ProfileTab() {
 
         {/* Avatar preview — click to open picker popup */}
         <div className="flex items-center gap-4">
-          <div className="relative">
+          <div className="relative" ref={avatarAnchorRef}>
             <button
-              onClick={() => setAvatarPopupOpen((v) => !v)}
+              onClick={() => {
+                if (!avatarPopupOpen) computeAvatarPopupPos();
+                setAvatarPopupOpen((v) => !v);
+              }}
               className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
             >
               <UserAvatar
@@ -260,15 +303,24 @@ export function ProfileTab() {
               </span>
             </button>
 
-            {/* Avatar picker popup */}
-            {avatarPopupOpen && (
-              <>
+            {/* Avatar picker popup — rendered via createPortal to
+                  document.body so the ListBox card's overflow-hidden
+                  does not clip it (same pattern as the right-panel
+                  AgentSetupTab and the Tooltip/ContextMenu). `position:
+                  fixed` anchors to the avatar button's measured viewport
+                  coords (avatarPopupPos). */}
+            {avatarPopupOpen &&
+              createPortal(
+                <>
                 {/* Click-outside overlay */}
                 <div
                   className="fixed inset-0 z-40"
                   onClick={() => setAvatarPopupOpen(false)}
                 />
-                <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700">
+                <div
+                  className="fixed z-50 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
+                  style={{ top: avatarPopupPos?.top ?? 0, left: avatarPopupPos?.left ?? 0 }}
+                >
                   {/* Tabs */}
                   <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
                     <button
@@ -361,8 +413,9 @@ export function ProfileTab() {
                     </div>
                   )}
                 </div>
-              </>
-            )}
+                </>,
+                document.body,
+              )}
           </div>
           <div>
             <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">

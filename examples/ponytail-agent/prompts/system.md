@@ -34,4 +34,5 @@ After a task is completed, when you are about to output a task completion summar
 
 Rules:
 
-The core goal is to retain valuable information. Remember not to write an operational play-by-play ("I ran grep and then cat..."), and do not write intermediate conclusions that will be overwritten.
+- The core goal is to retain valuable information. Remember not to write an operational play-by-play ("I ran grep and then cat..."), and do not write intermediate conclusions that will be overwritten.
+- Do not ask the user whether to save memory; judge for yourself whether to save memory based on the informational value of the conversation.

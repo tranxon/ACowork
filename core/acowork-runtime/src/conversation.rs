@@ -280,6 +280,17 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<SessionTokens>,
 
+    /// Per-session lifetime LLM-call counter — the right-status-panel
+    /// "Iterations" display. 1-based: the first LLM response sets it to 1
+    /// and it only ever increases for the life of the session; it does NOT
+    /// reset when the user clicks Continue after `max_iterations` (that
+    /// per-burst loop counter resets in `loop_.rs`; this one is session
+    /// metadata). Persisted here so a resumed/historical session shows the
+    /// same count and a Continue keeps accumulating. `None` until the
+    /// first LLM call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_call_counter: Option<u32>,
+
     // ── Compaction ──
     /// Absolute byte offset of the most recent compaction marker.
     /// `None` if no compaction has occurred.
@@ -553,6 +564,11 @@ pub struct ConversationSession {
     /// ADR-027: snapshot + cumulative token counts (raw Provider values).
     /// `None` means no LLM call has been recorded yet.
     tokens: std::sync::Mutex<Option<SessionTokens>>,
+    /// Per-session lifetime LLM-call counter, mirrored from
+    /// `SessionMeta.llm_call_counter`. The single mutation owner is
+    /// [`Self::bump_llm_call_counter`] (mirroring `accumulate_llm_usage`
+    /// for tokens); `None` means no LLM call has been recorded yet.
+    llm_call_counter: std::sync::Mutex<Option<u32>>,
     /// Running message count, incremented on every `append_message`.
     message_count: AtomicU64,
     /// Last time the meta file was written from `append_message`.
@@ -655,6 +671,7 @@ impl ConversationSession {
     fn build_meta(&self) -> SessionMeta {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let tokens = self.tokens.lock().ok().and_then(|t| t.clone());
+        let llm_call_counter = self.llm_call_counter.lock().ok().and_then(|c| *c);
         // ADR-024: read the absolute byte offset of the most recent
         // compaction marker from the shared Arc. The writer updates this
         // synchronously via `WriterCommand::AppendCompactionEntry`, so the
@@ -680,6 +697,7 @@ impl ConversationSession {
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
             tokens,
+            llm_call_counter,
             last_compaction_offset,
             corrupted: false,
         }
@@ -932,6 +950,7 @@ impl ConversationSession {
             temperature: std::sync::Mutex::new(None),
             todos: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
+            llm_call_counter: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
             sender: tx,
@@ -1026,6 +1045,7 @@ impl ConversationSession {
                 temperature: std::sync::Mutex::new(meta.temperature),
                 todos: std::sync::Mutex::new(meta.todos),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
+                llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
                 message_count: AtomicU64::new(meta.message_count),
                 last_meta_write: std::sync::Mutex::new(Instant::now()),
                 sender: tx,
@@ -1520,6 +1540,37 @@ impl ConversationSession {
         self.tokens.lock().ok().and_then(|t| t.clone())
     }
 
+    /// Return the per-session lifetime LLM-call count, if any LLM call has
+    /// been recorded yet. Mirrors [`Self::tokens`]: `None` before the
+    /// first call, then monotonically increasing for the session's life.
+    pub fn llm_call_counter(&self) -> Option<u32> {
+        self.llm_call_counter.lock().ok().and_then(|c| *c)
+    }
+
+    /// Bump the per-session LLM-call counter and return the new 1-based
+    /// value. The single mutation owner, mirroring `accumulate_llm_usage`
+    /// for tokens: persists to meta.json and notifies the state relay so
+    /// the retained `session_state` snapshot carries the fresh count.
+    ///
+    /// Called once per real LLM response in
+    /// `AgentLoop::process_llm_response_usage` — compaction /
+    /// title-generation calls use different paths and must NOT bump.
+    pub fn bump_llm_call_counter(&self) -> u32 {
+        let next = self
+            .llm_call_counter
+            .lock()
+            .ok()
+            .map(|mut guard| {
+                let next = guard.unwrap_or(0).saturating_add(1);
+                *guard = Some(next);
+                next
+            })
+            .unwrap_or(0);
+        self.write_meta();
+        self.notify_state_change();
+        next
+    }
+
     /// Persist a single LLM call's raw `usage` into the session token
     /// accumulator (ADR-027).
     ///
@@ -1780,6 +1831,9 @@ impl Clone for ConversationSession {
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
             todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
+            llm_call_counter: std::sync::Mutex::new(
+                self.llm_call_counter.lock().ok().and_then(|c| *c),
+            ),
             message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
             last_meta_write: std::sync::Mutex::new(
                 self.last_meta_write
@@ -2878,6 +2932,7 @@ mod tests {
                 message_count: 0,
                 last_active_at: ts.clone(),
                 tokens: None,
+                llm_call_counter: None,
                 last_compaction_offset: None,
                 corrupted: false,
             };
@@ -3080,6 +3135,7 @@ mod tests {
             message_count: 0,
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             tokens: None,
+            llm_call_counter: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3165,6 +3221,46 @@ mod tests {
             assert_eq!(tokens.last_output, 450);
             assert_eq!(tokens.total_input, 4_500);
             assert_eq!(tokens.total_output, 650);
+        });
+    }
+
+    #[test]
+    fn test_bump_llm_call_counter_monotonic_and_persists() {
+        // Per-session lifetime LLM-call counter ("Iterations" display):
+        // 1-based, monotonic, persisted to meta.json, and a resumed
+        // session starts from the persisted value — so the count survives
+        // Continue-after-max_iterations and process restarts.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_acc_iter", cfg, 0, committed.clone()).unwrap();
+
+            // None before the first LLM call.
+            assert_eq!(session.llm_call_counter(), None);
+            // 1-based and monotonic — never reset by Continue.
+            assert_eq!(session.bump_llm_call_counter(), 1);
+            assert_eq!(session.bump_llm_call_counter(), 2);
+            assert_eq!(session.llm_call_counter(), Some(2));
+
+            // Persisted to meta.json on disk.
+            let meta = read_session_meta(&dir.join("conversations"), "tok_acc_iter").unwrap();
+            assert_eq!(meta.llm_call_counter, Some(2));
+
+            // Resumed session loads the persisted counter and keeps growing.
+            session.close().await.unwrap();
+            let (resumed, _config_rx, _state_rx) =
+                ConversationSession::resume(&dir, "tok_acc_iter", committed).unwrap();
+            assert_eq!(resumed.llm_call_counter(), Some(2));
+            assert_eq!(resumed.bump_llm_call_counter(), 3);
         });
     }
 
@@ -3553,11 +3649,13 @@ mod tests {
                 total_cache_read: 22_000,
                 total_cache_write: 4_000,
             }),
+            llm_call_counter: Some(7),
             last_compaction_offset: None,
             corrupted: false,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.llm_call_counter, Some(7));
         assert_eq!(
             parsed.tokens,
             Some(SessionTokens {

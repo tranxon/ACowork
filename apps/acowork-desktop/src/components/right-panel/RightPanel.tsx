@@ -272,8 +272,16 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
 
   // Selected agent info (already derived above)
 
-  // Count iterations (number of assistant messages)
-  const iterations = messages.filter((m) => m.type === "assistant").length;
+  // Iterations: 1-based per-session lifetime LLM-call count, sourced from
+  // the Runtime-pushed `context_usage` event's `iteration` field (see
+  // `ContextUsageInfo.iteration`), which is persisted in the session's
+  // meta.json and therefore survives `Continue` after `max_iterations` and
+  // Runtime restarts. Falls back to assistant-message count only when
+  // running against a pre-iteration Runtime or before the first event
+  // arrives.
+  const iterations =
+    contextUsage?.iteration ??
+    messages.filter((m) => m.type === "assistant").length;
 
   // ── Debug auto-connect effect ────────────────────────────────────
   useEffect(() => {

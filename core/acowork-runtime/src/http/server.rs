@@ -3769,6 +3769,7 @@ mod tests {
             message_count: 3,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
             tokens: None,
+            llm_call_counter: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3903,6 +3904,7 @@ mod tests {
                 // path).
                 ..Default::default()
             }),
+            llm_call_counter: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3933,6 +3935,7 @@ mod tests {
                 // path).
                 ..Default::default()
             }),
+            llm_call_counter: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -7297,6 +7300,7 @@ mod tests {
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,
+            llm_call_counter: None,
             last_compaction_offset: None,
             corrupted: false,
         };
