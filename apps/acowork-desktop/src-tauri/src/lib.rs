@@ -580,13 +580,15 @@ fn init_desktop_tracing() {
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_appender)
         .with_ansi(false)
-        .with_target(true);
+        .with_target(true)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
 
     #[cfg(debug_assertions)]
     let stderr_layer = Some(
         tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
-            .with_target(false),
+            .with_target(false)
+            .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339()),
     );
     #[cfg(not(debug_assertions))]
     let stderr_layer: Option<tracing_subscriber::fmt::Layer<_>> = None;
