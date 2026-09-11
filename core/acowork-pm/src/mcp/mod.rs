@@ -988,15 +988,15 @@ mod tests {
     }
 
     /// e2e：pm_create_task assignee 不在 Agent 目录 → 400 bad_request
-    /// （设计 §9.1；用白名单目录验证存在性校验）。
+    /// （设计 §9.1；用白名单目录验证存在性校验，ADR-073 按 instance_id）。
     #[tokio::test]
     async fn e2e_create_task_assignee_not_in_directory() {
         let router = test_router_with_dir(Arc::new(WhitelistAgentDirectory::new(&[
-            "agent-known",
+            "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d",
         ])))
         .await;
-        let agent = "agent-known";
-        let ghost = "agent-ghost";
+        let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // ADR-073 instance_id
+        let ghost = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d"; // 不存在的 instance
 
         let v = call_tool(
             &router,
@@ -1020,7 +1020,7 @@ mod tests {
         let (code, prefix, msg) = assert_rpc_error(&v);
         assert_eq!(code, INTERNAL_ERROR);
         assert_eq!(prefix, "bad_request", "unexpected: {msg}");
-        assert!(msg.contains("assignee agent not found"), "msg: {msg}");
+        assert!(msg.contains("assignee instance not found"), "msg: {msg}");
 
         // assignee 存在于目录 → 成功
         let v = call_tool(

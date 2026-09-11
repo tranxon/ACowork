@@ -49,8 +49,9 @@ async fn start_remote_server() -> (String, tempfile::TempDir) {
         ..Default::default()
     };
 
+    // ADR-073: whitelist contains agent_instance_id (UUID)
     let agent_dir: Arc<dyn AgentDirectory> =
-        Arc::new(WhitelistDir(vec!["agent-remote".to_string()]));
+        Arc::new(WhitelistDir(vec!["3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string()]));
     let svc = PmService::with_agent_directory(cfg, agent_dir)
         .await
         .expect("PmService should start");
@@ -131,7 +132,7 @@ fn assert_rpc_error(v: &Value, code: i32) {
 async fn remote_agent_claim_submit_full_chain() {
     let (base, _tmp) = start_remote_server().await;
     let client = reqwest::Client::new();
-    let actor = "agent-remote";
+    let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // ADR-073 instance_id
 
     // ── 1. 人类（REST，x-actor=human）建项目 ──────────────────────────
     let resp = client
@@ -229,10 +230,10 @@ async fn remote_agent_claim_submit_full_chain() {
 async fn non_assignee_mutation_rejected_over_http() {
     let (base, _tmp) = start_remote_server().await;
     let client = reqwest::Client::new();
-    let owner = "agent-remote";
-    let intruder = "agent-intruder";
+    let owner = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // ADR-073 instance_id (UUID)
+    let intruder = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d"; // 另一个 instance，校验非 assignee 拒绝
 
-    // 建项目 + 任务（assignee = agent-remote）
+    // 建项目 + 任务（assignee = owner instance_id，ADR-073）
     let resp = client
         .post(format!("{base}/projects"))
         .header("x-actor", "human")
@@ -313,4 +314,177 @@ async fn anonymous_readonly_allowed_mutation_rejected() {
     let v = mcp_call(&client, &base, None, 3, "pm_claim_task", json!({ "task_id": "t-x" }))
         .await;
     assert_rpc_error(&v, -32001);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-073：assignee 必须是 agent_instance_id（UUID 形状）。
+// pm_create_task 接受任意字符串，但 claim/submit 的身份校验按字符串比对
+// 是否与 task.assignee 一致；这里验证两个不同 instance 互不干扰。
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn different_instance_ids_isolated() {
+    let (base, _tmp) = start_remote_server().await;
+    let client = reqwest::Client::new();
+    let alice = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // 白名单内
+    let bob = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";   // 不在白名单（pm_create_task 用 alice 建任务指给 bob 时应被拒）
+
+    // ── Alice 建任务指派给自己 ─────────────────────────────────────
+    let resp = client
+        .post(format!("{base}/projects"))
+        .header("x-actor", "human")
+        .header("content-type", "application/json")
+        .body(json!({ "title": "P" }).to_string())
+        .send().await.unwrap();
+    let pid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!("{base}/projects/{pid}/tasks"))
+        .header("x-actor", "human")
+        .header("content-type", "application/json")
+        .body(json!({ "title": "T", "assignee": alice }).to_string())
+        .send().await.unwrap();
+    let tid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    // ── Bob（非白名单）试图创建任务指派给自己 → BadRequest（§9.1，映射 -32603）────
+    let v = mcp_call(
+        &client, &base, Some(bob), 1, "pm_create_task",
+        json!({ "project_id": pid, "title": "Bob task", "assignee": bob }),
+    ).await;
+    assert_rpc_error(&v, -32603 /* InternalError per PmError::mcp_error_code for non-{Unauth,Forbidden} */);
+
+    // ── Bob（非 assignee）试图 claim alice 的任务 → Forbidden ─────────
+    let v = mcp_call(
+        &client, &base, Some(bob), 2, "pm_claim_task",
+        json!({ "task_id": tid }),
+    ).await;
+    assert_rpc_error(&v, -32002);
+
+    // ── Alice（合法 assignee）claim → in_progress ────────────────────
+    let v = mcp_call(
+        &client, &base, Some(alice), 3, "pm_claim_task",
+        json!({ "task_id": tid }),
+    ).await;
+    let claimed = tool_result(&v);
+    assert_eq!(claimed["status"], "in_progress");
+    assert_eq!(claimed["assignee"], alice, "claim must persist actor as instance_id");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-073 invariant 1：同包多 instance 必须独立寻址、各自完成任务。
+//
+// 这是 ADR-073 的核心动机：把 agent_id（包身份）和 instance_id（实例身份）
+// 拆开，支持"同一 package 在两个 workspace 各跑一份"。如果还按 agent_id
+// 寻址，alice 和 bob claim 对方任务时 `ensure_assignee` 会通过（因为两侧
+// 都是 agent_id 字符串）→ 数据竞争。本测试验证 instance_id 隔离正确。
+// ═══════════════════════════════════════════════════════════════════════
+
+async fn start_remote_server_with(whitelist: Vec<String>) -> (String, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = PmConfig {
+        data_dir: tmp.path().to_path_buf(),
+        index_rebuild_on_start: false,
+        ..Default::default()
+    };
+    let agent_dir: Arc<dyn AgentDirectory> = Arc::new(WhitelistDir(whitelist));
+    let svc = PmService::with_agent_directory(cfg, agent_dir)
+        .await
+        .expect("PmService should start");
+    let app = Router::new().nest_service("/api/pm", svc.router());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/api/pm"), tmp)
+}
+
+#[tokio::test]
+async fn multi_instance_same_package_tasks_are_isolated() {
+    // 两个 instance 都是 "com.acowork.architect" 包，但 instance_id 不同。
+    let workspace_a = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+    let workspace_b = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
+    let (base, _tmp) = start_remote_server_with(vec![
+        workspace_a.to_string(),
+        workspace_b.to_string(),
+    ])
+    .await;
+    let client = reqwest::Client::new();
+
+    // 建项目
+    let resp = client
+        .post(format!("{base}/projects"))
+        .header("x-actor", "human")
+        .header("content-type", "application/json")
+        .body(json!({ "title": "P" }).to_string())
+        .send().await.unwrap();
+    let pid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    // 人类建两个任务，分别指给 workspace-a 和 workspace-b
+    let resp = client
+        .post(format!("{base}/projects/{pid}/tasks"))
+        .header("x-actor", "human")
+        .header("content-type", "application/json")
+        .body(json!({ "title": "Task A", "assignee": workspace_a }).to_string())
+        .send().await.unwrap();
+    let tid_a = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!("{base}/projects/{pid}/tasks"))
+        .header("x-actor", "human")
+        .header("content-type", "application/json")
+        .body(json!({ "title": "Task B", "assignee": workspace_b }).to_string())
+        .send().await.unwrap();
+    let tid_b = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    // ── workspace-a 自查：能看到 Task A，看不到 Task B ──────────────
+    let v = mcp_call(
+        &client, &base, Some(workspace_a), 1, "pm_list_my_tasks",
+        json!({ "project_id": pid }),
+    ).await;
+    let my_tasks_a: Vec<String> = tool_result(&v)
+        .as_array().unwrap().iter()
+        .filter_map(|t| t["id"].as_str().map(String::from))
+        .collect();
+    assert!(my_tasks_a.contains(&tid_a), "workspace-a must see its own task");
+    assert!(!my_tasks_a.contains(&tid_b), "workspace-a must NOT see workspace-b's task");
+
+    // ── workspace-b 自查：能看到 Task B，看不到 Task A ──────────────
+    let v = mcp_call(
+        &client, &base, Some(workspace_b), 2, "pm_list_my_tasks",
+        json!({ "project_id": pid }),
+    ).await;
+    let my_tasks_b: Vec<String> = tool_result(&v)
+        .as_array().unwrap().iter()
+        .filter_map(|t| t["id"].as_str().map(String::from))
+        .collect();
+    assert!(my_tasks_b.contains(&tid_b), "workspace-b must see its own task");
+    assert!(!my_tasks_b.contains(&tid_a), "workspace-b must NOT see workspace-a's task");
+
+    // ── workspace-a claim Task B → Forbidden（核心 ADR-073 不变量）──
+    let v = mcp_call(
+        &client, &base, Some(workspace_a), 3, "pm_claim_task",
+        json!({ "task_id": tid_b }),
+    ).await;
+    assert_rpc_error(&v, -32002);
+
+    // ── workspace-b claim Task A → Forbidden ─────────────────────────
+    let v = mcp_call(
+        &client, &base, Some(workspace_b), 4, "pm_claim_task",
+        json!({ "task_id": tid_a }),
+    ).await;
+    assert_rpc_error(&v, -32002);
+
+    // ── 各自 claim 自己的任务 → 互不干扰 ──────────────────────────
+    let v = mcp_call(
+        &client, &base, Some(workspace_a), 5, "pm_claim_task",
+        json!({ "task_id": tid_a }),
+    ).await;
+    assert_eq!(tool_result(&v)["status"], "in_progress");
+
+    let v = mcp_call(
+        &client, &base, Some(workspace_b), 6, "pm_claim_task",
+        json!({ "task_id": tid_b }),
+    ).await;
+    assert_eq!(tool_result(&v)["status"], "in_progress");
 }

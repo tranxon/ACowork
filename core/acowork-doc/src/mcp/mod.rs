@@ -16,7 +16,9 @@
 //!
 //! The server is **stateless** — every request authenticates on its own
 //! via the `X-MCP-Actor` header (populated by the Gateway catalog with the
-//! agent_id template, see Gateway `build_available_mcps`).
+//! `{instance_id}` template, see Gateway `build_available_mcps`). The
+//! header value is the runtime instance identity — a UUID (ADR-073),
+//! not the package id (reverse-DNS).
 //!
 //! ## Layering (ADR-040 style)
 //!
@@ -32,8 +34,11 @@
 //! - Anonymous (`X-MCP-Actor` absent): read-only tools only
 //!   (`doc_list` / `doc_read` / `doc_pull` / `doc_search` /
 //!   `doc_check_request`) — mutation tools return 403 `forbidden`.
-//! - Writes carry the authenticated `agent_id` and record it as
-//!   `submitted_by` / `ImportSource.agent_id`.
+//! - Writes carry the authenticated **runtime instance identity** (UUID,
+//!   ADR-073) and record it as `submitted_by` /
+//!   `ImportSource.instance_id`. The Gateway doc_proxy validates the
+//!   header value against `installed_agents` (which is keyed by
+//!   instance_id), so an attacker cannot forge it from the client side.
 //! - Version concurrency and the PR review flow are enforced by the
 //!   service layer (`base_version` checks, design §5.4).
 //!
@@ -94,8 +99,14 @@ pub fn mcp_router(state: DocState) -> Router {
         .with_state(state)
 }
 
-/// 从 header 读取可信调用方 `agent_id`（由 Gateway catalog 注入，
-/// 缺失 = 匿名）。
+/// 从 header 读取可信调用方 **runtime instance id**（UUID, ADR-073）。
+///
+/// 由 Gateway catalog 通过 `{instance_id}` 模板注入（仅在 agent 已安装且
+/// `is_installed(instance_id)` 通过时才会被 doc_proxy 转发）；缺失或
+/// 未通过校验 = 匿名（只读工具）。
+///
+/// 返回的字符串语义上是 *runtime instance*，不是 package id — 它必须能在
+/// `state.actors` 等缓存里被当作 HashMap key 直接查表。
 fn extract_actor(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-mcp-actor")

@@ -22,7 +22,12 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-const AGENT: &str = "com.example.agent";
+// ADR-073: this stands in for the runtime instance identity (UUID)
+// injected over the `X-MCP-Actor` header by the Gateway catalog. The
+// doc server itself doesn't enforce UUID format — the Gateway
+// `doc_proxy` is the trust boundary — but the test fixture uses a
+// UUID-shaped string so the wire JSON matches the production contract.
+const AGENT: &str = "inst-aaaa-bbbb-cccc-dddd-000000000001";
 
 struct TestServer {
     base: String,
@@ -142,8 +147,18 @@ async fn mcp_full_review_loop_agent_human() {
     let doc = srv.rest_get(&format!("/docs/{doc_id}")).await;
     assert_eq!(doc["meta"]["version"], 1);
     assert_eq!(doc["content"], "# v1 需求");
-    assert_eq!(doc["meta"]["import"]["agent_id"], AGENT);
+    assert_eq!(doc["meta"]["import"]["instance_id"], AGENT);
     assert_eq!(doc["meta"]["import"]["workspace_path"], "ws-main:docs/req.md");
+    // ADR-073 wire-contract guard: the legacy `agent_id` key must NOT
+    // appear in the JSON. A regression that re-introduces the old field
+    // name would break desktop display-name resolution (which keys by
+    // instance_id through agentStore) and would silently mask the
+    // semantic drift.
+    assert!(
+        doc["meta"]["import"].get("agent_id").is_none(),
+        "wire JSON must not contain legacy `agent_id` key: {}",
+        doc
+    );
 
     // ── Agent pull（拿 base_version + 建议缓存路径）→ 提交更新 ──────────
     let v = srv.ok(Some(AGENT), "doc_pull", json!({ "ref": doc_id })).await;
@@ -234,3 +249,116 @@ async fn mcp_submit_stale_base_reports_version_conflict() {
     assert!(msg.contains("version_conflict"), "{msg}");
 }
 
+
+// ── ADR-073 invariant: doc wire JSON keys by `instance_id`, not `agent_id`
+//
+// The runtime identity that the Gateway injects via the `X-MCP-Actor`
+// header is the **runtime instance id** (UUID), not the package id. We
+// therefore persist that value into `ImportSource.instance_id` and
+// `UpdateRequest.submitted_by`, and serialise the former as
+// `meta.import.instance_id` on the wire. A regression that re-introduces
+// the legacy `agent_id` field name would silently break the desktop
+// badge (which resolves the UUID to a display name via `agentStore`).
+
+/// `doc_add` 必须把 actor 写入 `instance_id`（包 id 是不允许的）。
+///
+/// Reuse [`mcp_full_review_loop_agent_human`] 风格的 server boot 但只测
+/// import 字段，避免对其它 review-loop 路径的耦合。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_doc_add_records_instance_id_under_instance_id_field() {
+    let srv = spawn().await;
+    // act
+    let v = srv
+        .ok(
+            Some(AGENT),
+            "doc_add",
+            json!({
+                "title": "ADR-073 回归文档",
+                "content": "记录 instance_id 语义",
+                "source_workspace": "ws-main",
+                "source_path": "notes/adr.md",
+            }),
+        )
+        .await;
+    let doc_id = v["doc_id"].as_str().unwrap().to_string();
+
+    // assert: REST GET 显示 import.instance_id 是 actor UUID，不是包 id
+    let doc = srv.rest_get(&format!("/docs/{doc_id}")).await;
+    assert_eq!(
+        doc["meta"]["import"]["instance_id"], AGENT,
+        "doc server must persist `X-MCP-Actor` (instance id) into \
+         `meta.import.instance_id` (ADR-073). Got: {}",
+        doc
+    );
+    // assert: 明确禁止 `agent_id` 字段残留 — 包 ID 不再上 wire
+    assert!(
+        doc["meta"]["import"].get("agent_id").is_none(),
+        "wire JSON must not contain legacy `agent_id` key (ADR-073): {}",
+        doc
+    );
+}
+
+/// `doc_add` 在 actor 是合法 UUID 的前提下必须成功；如果 actor 缺失则
+/// 403 forbidden（不与 `agent_id` 字段语义混淆）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_doc_add_rejects_anonymous_with_forbidden() {
+    let srv = spawn().await;
+    let (code, msg) = srv
+        .tool_err(
+            None,
+            "doc_add",
+            json!({ "title": "匿名尝试", "content": "x" }),
+        )
+        .await;
+    assert_eq!(code, -32002, "{msg}");
+    assert!(msg.contains("forbidden"), "{msg}");
+}
+
+/// 验证 doc 端不再有 `agent_id` 字段的接口契约：搜 `wire-keys-probe`
+/// 工具上的每个 metadata 节点都不应暴露 `agent_id` key。
+///
+/// 这是一个「panic if you regress」式的回归：如果有谁把
+/// `instance_id` 又改名回 `agent_id`，本测试会失败。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_wire_contract_no_legacy_agent_id_key() {
+    let srv = spawn().await;
+    let v = srv
+        .ok(
+            Some(AGENT),
+            "doc_add",
+            json!({
+                "title": "wire 契约锁定",
+                "content": "x",
+                "source_workspace": "ws-main",
+                "source_path": "notes/probe.md",
+            }),
+        )
+        .await;
+    let doc_id = v["doc_id"].as_str().unwrap().to_string();
+
+    // GET → `import.agent_id` 必须不存在；`import.instance_id` 必须存在
+    let doc = srv.rest_get(&format!("/docs/{doc_id}")).await;
+    let imp = &doc["meta"]["import"];
+    assert!(imp.is_object(), "{imp}");
+    assert!(
+        imp.get("agent_id").is_none(),
+        "ADR-073 regression: doc REST returned legacy `agent_id` field: {imp}"
+    );
+    assert!(
+        imp.get("instance_id").is_some(),
+        "ADR-073 contract: doc REST must expose `instance_id`: {imp}"
+    );
+    assert_eq!(imp["workspace_path"], "ws-main:notes/probe.md");
+
+    // JSON-RPC `doc_read` 返回的 `import` 节点同样契约
+    let via_mcp = srv.ok(None, "doc_read", json!({ "ref": doc_id })).await;
+    let imp_mcp = &via_mcp["import"];
+    assert!(
+        imp_mcp.get("agent_id").is_none(),
+        "ADR-073 regression: doc_read MCP returned legacy `agent_id` field: {imp_mcp}"
+    );
+    assert!(
+        imp_mcp.get("instance_id").is_some(),
+        "ADR-073 contract: doc_read MCP must expose `instance_id`: {imp_mcp}"
+    );
+}

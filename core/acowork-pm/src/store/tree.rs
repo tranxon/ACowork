@@ -87,13 +87,13 @@ pub trait PmStore: Send + Sync {
 
     // ── Lifecycle operations ────────────────────────────────────────
 
-    async fn claim_task(&self, id: &TaskId, agent_id: &str) -> Result<Task>;
+    async fn claim_task(&self, id: &TaskId, actor: &str) -> Result<Task>;
     async fn submit_task(
         &self,
         id: &TaskId,
         text: &str,
         attachment_ids: Vec<AttachmentId>,
-        agent_id: &str,
+        actor: &str,
     ) -> Result<Task>;
     async fn review_task(&self, id: &TaskId, approved: bool, reviewer: &str) -> Result<Task>;
 
@@ -950,7 +950,7 @@ impl PmStore for TreePmStore {
 
     // ── Lifecycle ──────────────────────────────────────────────────
 
-    async fn claim_task(&self, id: &TaskId, agent_id: &str) -> Result<Task> {
+    async fn claim_task(&self, id: &TaskId, actor: &str) -> Result<Task> {
         let entry = self
             .index
             .read()
@@ -975,8 +975,8 @@ impl PmStore for TreePmStore {
         task.status = TaskStatus::InProgress;
         task.claimed_at = Some(Utc::now());
         // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
-        // MCP 层已校验调用者 == assignee（设计 §9.2），这里落盘兜底一致。
-        task.assignee = Some(agent_id.to_string());
+        // MCP 层已校验调用者 instance_id == assignee instance_id（设计 §9.2 / ADR-073）。
+        task.assignee = Some(actor.to_string());
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
         self.refresh_entry(&entry, id, task.status, task.assignee.clone());
@@ -988,7 +988,7 @@ impl PmStore for TreePmStore {
         id: &TaskId,
         text: &str,
         attachment_ids: Vec<AttachmentId>,
-        agent_id: &str,
+        actor: &str,
     ) -> Result<Task> {
         let entry = self
             .index
@@ -1008,7 +1008,8 @@ impl PmStore for TreePmStore {
         task.result = Some(TaskResult {
             text: text.to_string(),
             attachment_ids,
-            submitted_by: agent_id.to_string(),
+            // ADR-073: submitted_by 是 agent_instance_id（X-MCP-Actor 注入）
+            submitted_by: actor.to_string(),
             submitted_at: now,
         });
         task.updated_at = now;
@@ -1443,17 +1444,19 @@ mod tests {
             )
             .await
             .unwrap();
+        // ADR-073: actor 是 agent_instance_id（UUID）
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
         let t = store
-            .create_task(&p.id, create_task_input("t"), "agent-x")
+            .create_task(&p.id, create_task_input("t"), instance)
             .await
             .unwrap();
         assert_eq!(t.review_status, ReviewStatus::Pending);
 
-        let claimed = store.claim_task(&t.id, "agent-x").await.unwrap();
+        let claimed = store.claim_task(&t.id, instance).await.unwrap();
         assert_eq!(claimed.status, TaskStatus::InProgress);
 
         let submitted = store
-            .submit_task(&t.id, "done", vec![], "agent-x")
+            .submit_task(&t.id, "done", vec![], instance)
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
@@ -1547,10 +1550,10 @@ mod tests {
         assert_eq!(blocked, vec![t0.id.clone()], "T1 must be blocked by T0 while T0 is open");
 
         // 完成 T0 → T1 不再被阻塞
-        let claimed = store.claim_task(&t0.id, "agent-x").await.unwrap();
+        let claimed = store.claim_task(&t0.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         assert_eq!(claimed.status, TaskStatus::InProgress);
         let submitted = store
-            .submit_task(&t0.id, "done", vec![], "agent-x")
+            .submit_task(&t0.id, "done", vec![], "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
@@ -1638,7 +1641,7 @@ mod tests {
             .await
             .unwrap();
         let t = store
-            .create_task(&p.id, create_task_input("t"), "agent-x")
+            .create_task(&p.id, create_task_input("t"), "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
         assert!(t.assignee.is_none(), "fresh task has no assignee");
@@ -1648,14 +1651,14 @@ mod tests {
             .update_task(
                 &t.id,
                 UpdateTask {
-                    assignee: Some(Some("agent-x".to_string())),
+                    assignee: Some(Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string())),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-        assert_eq!(set.assignee.as_deref(), Some("agent-x"));
-        assert_eq!(store.index_entry(&t.id).unwrap().assignee.as_deref(), Some("agent-x"));
+        assert_eq!(set.assignee.as_deref(), Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"));
+        assert_eq!(store.index_entry(&t.id).unwrap().assignee.as_deref(), Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"));
 
         // Some(None) → 清空
         let cleared = store
@@ -1790,16 +1793,16 @@ mod tests {
             .unwrap();
 
         let t_p1_inprog_x = store
-            .create_task(&p1.id, create_task_input("p1-inprog-x"), "agent-x")
+            .create_task(&p1.id, create_task_input("p1-inprog-x"), "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
         // claim_task 在 P1 不写 assignee,显式 update_task 设之(覆盖三态契约)
-        store.claim_task(&t_p1_inprog_x.id, "agent-x").await.unwrap();
+        store.claim_task(&t_p1_inprog_x.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         store
             .update_task(
                 &t_p1_inprog_x.id,
                 UpdateTask {
-                    assignee: Some(Some("agent-x".to_string())),
+                    assignee: Some(Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string())),
                     ..Default::default()
                 },
             )
@@ -1822,30 +1825,30 @@ mod tests {
             .unwrap();
 
         let t_p2_inprog_x = store
-            .create_task(&p2.id, create_task_input("p2-inprog-x"), "agent-x")
+            .create_task(&p2.id, create_task_input("p2-inprog-x"), "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
-        store.claim_task(&t_p2_inprog_x.id, "agent-x").await.unwrap();
+        store.claim_task(&t_p2_inprog_x.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         store
             .update_task(
                 &t_p2_inprog_x.id,
                 UpdateTask {
-                    assignee: Some(Some("agent-x".to_string())),
+                    assignee: Some(Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string())),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
 
-        // 同时过滤 P1 + InProgress + agent-x → 仅 t_p1_inprog_x
+        // 同时过滤 P1 + InProgress + instance → 仅 t_p1_inprog_x
         let filter = TaskFilter {
             project_id: Some(p1.id.clone()),
             status: Some(TaskStatus::InProgress),
-            assignee: Some("agent-x".to_string()),
+            assignee: Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string()),
             ..Default::default()
         };
         let results = store.find_tasks(&filter).await.unwrap();
-        assert_eq!(results.len(), 1, "only P1+InProgress+agent-x matches");
+        assert_eq!(results.len(), 1, "only P1+InProgress+instance matches");
         assert_eq!(results[0].id, t_p1_inprog_x.id);
 
         // 仅 project_id=P1 → 2 个

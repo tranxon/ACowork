@@ -79,7 +79,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "string",
             "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"]
           },
-          "assignee": { "type": "string", "description": "human or agent_id" },
+          "assignee": { "type": "string", "description": "human literal or agent_instance_id (UUID v4, ADR-073 §1.2)" },
           "only_blocked": { "type": "boolean", "default": false },
           "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
         }
@@ -115,7 +115,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "parent_task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
           "assignee": {
             "type": "string",
-            "description": "agent_id to assign. Must exist in the Gateway agent directory (design §9.1). Agent-created tasks enter review_status=pending regardless."
+            "description": "agent_instance_id (UUID v4, ADR-073 §1.2) to assign. Must exist in the Gateway agent directory (design §9.1, `GET /api/agents/{instance_id}`). Agent-created tasks enter review_status=pending regardless."
           },
           "due_at": {
             "type": "string",

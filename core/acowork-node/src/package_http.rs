@@ -69,8 +69,15 @@ pub struct AvatarAssetEntry {
 }
 
 /// Response for the asset listing.
+///
+/// ADR-073: the route's `{id}` is the runtime instance id; the
+/// package id is `agent_id` (for callers that still key by package,
+/// e.g. the Desktop PublishWizard). Returning both keeps the
+/// response self-describing without forcing the caller to issue a
+/// separate `agents list` query.
 #[derive(Debug, Serialize)]
 pub struct AvatarAssetsResponse {
+    pub instance_id: String,
     pub agent_id: String,
     pub assets: Vec<AvatarAssetEntry>,
 }
@@ -172,10 +179,13 @@ async fn list_avatar_assets(
     if let Some(denied) = crate::proxy::authorize(&state, &headers, &id).await {
         return denied;
     }
-    let dir = match install_dir(&state, &id).await {
-        Ok(dir) => dir,
+    // ADR-073: `id` is the instance id; `info.agent_id` is the package
+    // id. Returning both keeps the response self-describing.
+    let info = match installed_agent(&state, &id).await {
+        Ok(info) => info,
         Err(resp) => return resp,
     };
+    let dir = PathBuf::from(&info.install_path);
 
     let mut entries: Vec<(String, Option<u32>)> = Vec::new();
     if let Ok(read_dir) = std::fs::read_dir(dir.join("assets")) {
@@ -209,7 +219,8 @@ async fn list_avatar_assets(
     });
 
     Json(AvatarAssetsResponse {
-        agent_id: id,
+        instance_id: info.instance_id,
+        agent_id: info.agent_id,
         assets: entries
             .into_iter()
             .map(|(relative_path, _)| AvatarAssetEntry { relative_path })
@@ -238,10 +249,13 @@ async fn put_manifest_avatar(
     if let Some(denied) = crate::proxy::authorize(&state, &headers, &id).await {
         return denied;
     }
-    let dir = match install_dir(&state, &id).await {
-        Ok(dir) => dir,
+    // ADR-073: capture the package id so the response advertises the
+    // actual package this instance belongs to, not the URL instance id.
+    let info = match installed_agent(&state, &id).await {
+        Ok(info) => info,
         Err(resp) => return resp,
     };
+    let dir = PathBuf::from(&info.install_path);
 
     let manifest_path = dir.join("manifest.toml");
     let raw = match std::fs::read_to_string(&manifest_path) {
@@ -282,7 +296,8 @@ async fn put_manifest_avatar(
 
     Json(serde_json::json!({
         "message": "Manifest avatar updated",
-        "agent_id": id,
+        "instance_id": info.instance_id,
+        "agent_id": info.agent_id,
         "avatar": manifest.avatar,
         "builtin_avatar": manifest.builtin_avatar,
     }))
@@ -302,10 +317,11 @@ async fn upload_package_file(
     if let Some(denied) = crate::proxy::authorize(&state, &headers, &id).await {
         return denied;
     }
-    let dir = match install_dir(&state, &id).await {
-        Ok(dir) => dir,
+    let info = match installed_agent(&state, &id).await {
+        Ok(info) => info,
         Err(resp) => return resp,
     };
+    let dir = PathBuf::from(&info.install_path);
 
     let relative = query.path.trim().to_string();
     if relative.is_empty() {
@@ -359,7 +375,8 @@ async fn upload_package_file(
 
     Json(serde_json::json!({
         "message": "File uploaded",
-        "agent_id": id,
+        "instance_id": info.instance_id,
+        "agent_id": info.agent_id,
         "path": relative,
         "size": bytes.len(),
     }))
@@ -381,10 +398,11 @@ async fn delete_avatar_file(
     if let Some(denied) = crate::proxy::authorize(&state, &headers, &id).await {
         return denied;
     }
-    let dir = match install_dir(&state, &id).await {
-        Ok(dir) => dir,
+    let info = match installed_agent(&state, &id).await {
+        Ok(info) => info,
         Err(resp) => return resp,
     };
+    let dir = PathBuf::from(&info.install_path);
     if !has_avatar_extension(&query.path) {
         return bad_request(&format!(
             "Invalid file extension: only {} are allowed",
@@ -400,7 +418,8 @@ async fn delete_avatar_file(
     }
     Json(serde_json::json!({
         "message": "Avatar file deleted",
-        "agent_id": id,
+        "instance_id": info.instance_id,
+        "agent_id": info.agent_id,
         "path": query.path,
     }))
     .into_response()
@@ -408,12 +427,17 @@ async fn delete_avatar_file(
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-/// The instance's package directory, or the `404` to return when this
-/// node does not host the instance (ADR-073: keyed by instance id).
-async fn install_dir(state: &NodeHttpState, id: &str) -> Result<PathBuf, Response> {
+/// Look up the installed instance by its ADR-073 instance id.
+///
+/// Returns the full `InstalledAgent` clone (so handlers can release the
+/// node lock immediately) or a `404` JSON response when the node does
+/// not host the instance. The cloned `agent_id` field carries the
+/// PACKAGE identity — distinct from the URL's `id` path variable
+/// (which is the runtime instance identity).
+async fn installed_agent(state: &NodeHttpState, id: &str) -> Result<crate::state::InstalledAgent, Response> {
     let node = state.node.read().await;
     match node.installed_agents.get(id) {
-        Some(info) => Ok(PathBuf::from(&info.install_path)),
+        Some(info) => Ok(info.clone()),
         None => Err((
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "application/json")],
@@ -425,6 +449,12 @@ async fn install_dir(state: &NodeHttpState, id: &str) -> Result<PathBuf, Respons
         )
             .into_response()),
     }
+}
+
+/// The instance's package directory, or the `404` to return when this
+/// node does not host the instance (ADR-073: keyed by instance id).
+async fn install_dir(state: &NodeHttpState, id: &str) -> Result<PathBuf, Response> {
+    Ok(PathBuf::from(&installed_agent(state, id).await?.install_path))
 }
 
 /// Read `{package_dir}/{relative}` and answer with the image bytes.

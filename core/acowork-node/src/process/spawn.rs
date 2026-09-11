@@ -42,9 +42,14 @@ impl AgentChild {
 /// `match state.write().await ...` scrutinee (the guard lives for the
 /// whole match expression), freezing every state reader (run_loop
 /// heartbeat, proxy, supervisor) until the node was killed.
-async fn reap_agent(state: &SharedNodeState, agent_id: &str) -> Option<AgentSlot> {
+async fn reap_agent(state: &SharedNodeState, instance_id: &str) -> Option<AgentSlot> {
     let mut s = state.write().await;
-    let removed = s.remove_agent(agent_id);
+    // ADR-073: the process table is keyed by instance id, NOT package
+    // id. The pre-fix `remove_agent(agent_id)` call looked up by
+    // package id, missed every time, and left dead slots forever —
+    // the port allocator never released and `agents list` reported
+    // a stopped Runtime as "running".
+    let removed = s.remove_agent(instance_id);
     // The allocator is an Arc with its own internal lock, so
     // releasing under the state guard is safe and keeps removal +
     // release atomic; no await happens under the guard.
@@ -79,9 +84,11 @@ async fn reap_agent(state: &SharedNodeState, agent_id: &str) -> Option<AgentSlot
 /// Runtime falls back to the direct loopback endpoint.
 ///
 /// `node_token` (Phase 5a): when the node holds a Gateway-issued
-/// token it is injected as `--mqtt-username agent:{id}` /
+/// token it is injected as `--mqtt-username agent:{instance_id}` /
 /// `--mqtt-password {token}` so spawned Runtimes authenticate against
-/// the broker's `agent:{id}` CONNECT rule (§6.8).
+/// the broker's `agent:{instance_id}` CONNECT rule (§6.8). The
+/// username MUST match the client_id namespace (ADR-073: every
+/// `{id}` in MQTT is the instance id).
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_agent_process(
     instance_id: &str,
@@ -147,12 +154,16 @@ pub async fn spawn_agent_process(
     // and registers the `codebase` tool when the relay is ready.
     cmd.arg("--node-id").arg(node_id);
 
-    // ADR-055 Phase 5a §6.8: when the node holds a Gateway-issued
-    // token, Runtimes connect to the broker with it — `agent:{id}`
-    // CONNECT usernames are accepted with the spawning node's token.
+    // ADR-055 Phase 5a §6.8 + ADR-073: when the node holds a
+    // Gateway-issued token, Runtimes connect to the broker with it.
+    // The CONNECT username `agent:{instance_id}` mirrors the client_id
+    // convention (`agent:{instance_id}` on the runtime side, verified
+    // at `acowork-runtime/src/mqtt/client.rs:957`). Two instances of
+    // the same package MUST end up on distinct CONNECT usernames so
+    // the broker can attribute them.
     if let Some(token) = node_token {
         cmd.arg("--mqtt-username")
-            .arg(format!("agent:{agent_id}"))
+            .arg(format!("agent:{instance_id}"))
             .arg("--mqtt-password")
             .arg(token);
     }
@@ -201,27 +212,31 @@ pub async fn spawn_agent_process(
 
     let mut child = cmd.spawn().map_err(|e| {
         NodeError::Lifecycle(format!(
-            "Failed to spawn agent '{}' (binary: {:?}): {}",
-            agent_id, runtime_bin, e
+            "Failed to spawn agent instance '{}' (package '{}', binary: {:?}): {}",
+            instance_id, agent_id, runtime_bin, e
         ))
     })?;
 
     let pid = child.id().ok_or_else(|| {
         NodeError::Lifecycle(format!(
-            "Failed to get PID for agent '{}' (process may have exited immediately)",
-            agent_id
+            "Failed to get PID for agent instance '{}' (package '{}', process may have exited immediately)",
+            instance_id, agent_id
         ))
     })?;
 
     // Spawn a background reaper task: reap the child and remove the
     // agent from the node process table on exit.
+    // ADR-073: the reaper MUST look up the slot by instance id (the
+    // process-table key), not by package id.
+    let instance_id_owned = instance_id.to_string();
     let agent_id_owned = agent_id.to_string();
     tokio::spawn(async move {
         let exit_status = child.wait().await;
         if let Some(state) = shared_state {
-            match reap_agent(&state, &agent_id_owned).await {
+            match reap_agent(&state, &instance_id_owned).await {
                 Some(removed) => {
                     tracing::info!(
+                        instance_id = %instance_id_owned,
                         agent_id = %agent_id_owned,
                         pid = removed.pid,
                         exit_status = ?exit_status,
@@ -230,6 +245,7 @@ pub async fn spawn_agent_process(
                 }
                 None => {
                     tracing::debug!(
+                        instance_id = %instance_id_owned,
                         agent_id = %agent_id_owned,
                         exit_status = ?exit_status,
                         "Runtime process exited but was not tracked in node process table"
@@ -238,6 +254,7 @@ pub async fn spawn_agent_process(
             }
         } else {
             tracing::debug!(
+                instance_id = %instance_id_owned,
                 agent_id = %agent_id_owned,
                 exit_status = ?exit_status,
                 "Runtime process exited (no shared_state wired; reaper skipped cleanup)"
@@ -245,7 +262,14 @@ pub async fn spawn_agent_process(
         }
     });
 
-    tracing::info!("Spawned agent process: {} (PID: {})", agent_id, pid);
+    // ADR-073: include both instance id (runtime key) and package id
+    // (which package this instance belongs to) so an operator
+    // distinguishing two instances of the same package can do so from
+    // the spawn log line alone.
+    tracing::info!(
+        "Spawned agent Runtime: instance={} package={} (PID: {})",
+        instance_id, agent_id, pid
+    );
     Ok(AgentChild { pid })
 }
 
@@ -302,7 +326,7 @@ pub async fn kill_agent_process(pid: u32) -> Result<()> {
 ///
 /// ADR-055 §6.4: the Node allocates a concrete HTTP port per Runtime
 /// (rather than `--http-port 0`) so its reverse proxy has a stable
-/// `{agent_id} → port` mapping. The original probe-and-return helper
+/// `{instance_id} → port` mapping. The original probe-and-return helper
 /// released its probe listener immediately, which raced when two
 /// `start` commands ran concurrently (e.g. the Desktop booting the
 /// system agent and a user agent at once): both probes saw the same
@@ -429,8 +453,9 @@ mod tests {
         // over the shared loopback port namespace.
         let http_port = acowork_core::node::NODE_HTTP_PORT_BASE;
         let debug_port = http_port + 1;
+        let instance_id = "550e8400-e29b-41d4-a716-446655440000";
         state.write().await.add_agent(AgentSlot {
-            instance_id: "inst-com.test.reap".to_string(),
+            instance_id: instance_id.to_string(),
             agent_id: "com.test.reap".to_string(),
             pid: 424242,
             started_at: chrono::Utc::now(),
@@ -442,14 +467,14 @@ mod tests {
 
         // Regression guard for 261a8f77: re-acquiring a read lock
         // under the write guard would hang reap_agent forever.
-        let removed = timeout(Duration::from_secs(5), reap_agent(&state, "inst-com.test.reap"))
+        let removed = timeout(Duration::from_secs(5), reap_agent(&state, instance_id))
             .await
             .expect("reap_agent must not deadlock")
             .expect("agent slot must be removed");
 
         assert_eq!(removed.http_port, http_port);
         assert_eq!(removed.debug_port, Some(debug_port));
-        assert!(!state.read().await.is_running("inst-com.test.reap"));
+        assert!(!state.read().await.is_running(instance_id));
     }
 
     #[test]

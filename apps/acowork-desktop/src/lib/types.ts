@@ -2120,8 +2120,16 @@ export interface AvatarAssetEntry {
   relative_path: string;
 }
 
-/** Response from GET /api/agents/:id/manifest/avatar-assets */
+/** Response from GET /api/agents/:id/manifest/avatar-assets
+ *
+ * ADR-073: the route `:id` is the runtime instance id (UUIDv4);
+ * `agent_id` is the package id (still useful for the PublishWizard
+ * and other places that key by package). The Desktop consumer of this
+ * type currently only reads `assets` — `instance_id` / `agent_id`
+ * are kept on the interface for forward compatibility.
+ */
 export interface AvatarAssetsResponse {
+  instance_id: string;
   agent_id: string;
   assets: AvatarAssetEntry[];
 }

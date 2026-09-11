@@ -72,8 +72,17 @@ pub struct InstalledAgent {
 /// A running-agent summary persisted in [`NodeRuntimeSnapshot`] so the
 /// node-local `agents list` / `agents kill` CLI can report running
 /// state and PIDs without talking to the daemon (ADR-055 §6.13.2).
+///
+/// ADR-073: `instance_id` is the canonical runtime key — two instances
+/// of the same package share `agent_id` but MUST differ in
+/// `instance_id`. The persisted snapshot keeps both so the CLI can
+/// list (display package + short instance id) and kill (address by
+/// full instance id) without ambiguity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSnapshot {
+    /// Instance identity (UUID v4) — the runtime key per ADR-073.
+    pub instance_id: String,
+    /// Package identity — which agent package this instance runs.
     pub agent_id: String,
     pub pid: u32,
     pub http_port: u16,
@@ -221,6 +230,7 @@ impl NodeState {
             .agents
             .values()
             .map(|s| AgentSnapshot {
+                instance_id: s.instance_id.clone(),
                 agent_id: s.agent_id.clone(),
                 pid: s.pid,
                 http_port: s.http_port,
@@ -304,5 +314,51 @@ mod tests {
         state.set_connected(false, None);
         assert!(!state.snapshot().connected);
         assert_eq!(state.snapshot().last_connected_at, Some(first));
+    }
+
+    /// Regression guard (ADR-073): two instances of the same package
+    /// share `agent_id` but MUST differ in `instance_id`. The
+    /// persisted snapshot must keep both fields so the node-local
+    /// CLI can disambiguate them; collapsing to `agent_id` only would
+    /// make one of the two unreachable to `agents list` and `agents
+    /// kill {instance_id}`.
+    #[test]
+    fn snapshot_preserves_instance_id_for_same_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = NodeState::new(16);
+
+        let inst_a = "550e8400-e29b-41d4-a716-446655440000";
+        let inst_b = "660e8400-e29b-41d4-a716-446655440001";
+        for (pid, instance_id) in [(101u32, inst_a), (102u32, inst_b)] {
+            state.add_agent(AgentSlot {
+                instance_id: instance_id.to_string(),
+                agent_id: "com.example.shared".to_string(),
+                pid,
+                started_at: chrono::Utc::now(),
+                workspace: "/tmp".to_string(),
+                dev_mode: false,
+                debug_port: None,
+                http_port: 19900u16 + pid as u16,
+            });
+        }
+        state.save_snapshot(tmp.path());
+        let loaded = NodeState::load_snapshot(tmp.path()).unwrap();
+        assert_eq!(loaded.agents.len(), 2);
+
+        // Both records share agent_id but differ in instance_id.
+        for snap in &loaded.agents {
+            assert_eq!(snap.agent_id, "com.example.shared");
+        }
+        let mut ids: Vec<&str> = loaded.agents.iter().map(|s| s.instance_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec![inst_a, inst_b]);
+
+        // The CLI keying invariant: lookup by instance_id finds the
+        // right slot — pre-fix, the snapshot key was `agent_id` and
+        // `find(|a| a.agent_id == "com.example.shared")` returned the
+        // first hit arbitrarily.
+        let found = loaded.agents.iter().find(|s| s.instance_id == inst_b);
+        assert_eq!(found.unwrap().pid, 102);
+        assert_eq!(found.unwrap().http_port, 20002);
     }
 }

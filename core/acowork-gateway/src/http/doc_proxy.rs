@@ -412,10 +412,25 @@ mod tests {
     }
 
     /// Inject an installed Agent into GatewayState (`is_installed` check).
-    async fn add_installed_agent(state: &AppState, agent_id: &str) {
-        let manifest = acowork_core::AgentManifest::from_toml(
+    ///
+    /// ADR-073: `instance_id` (UUID) and `agent_id` (reverse-DNS package
+    /// id) are **different identities**. `installed_agents` is keyed by
+    /// `instance_id` — a package id never matches `is_installed`. The
+    /// defaults here mirror a real install: UUID instance + package id.
+    async fn add_installed_agent(state: &AppState, instance_id: &str) {
+        add_installed_agent_with_pkg(state, instance_id, "com.acowork.architect").await;
+    }
+
+    /// `add_installed_agent` with an explicit package id (for tests that
+    /// must prove a package id does NOT pass the trust boundary).
+    async fn add_installed_agent_with_pkg(
+        state: &AppState,
+        instance_id: &str,
+        package_id: &str,
+    ) {
+        let manifest = acowork_core::AgentManifest::from_toml(&format!(
             r#"
-            agent_id = "com.acowork.architect"
+            agent_id = "{package_id}"
             version = "1.0.0"
             name = "Architect"
             description = "test"
@@ -424,13 +439,13 @@ mod tests {
             [llm]
             provider = "openai"
             model = "gpt-4"
-            "#,
-        )
+            "#
+        ))
         .expect("manifest parses");
         let mut gw = state.gateway_state.write().await;
         gw.add_installed(crate::gateway::state::AgentInfo {
-            instance_id: agent_id.to_string(),
-            agent_id: agent_id.to_string(),
+            instance_id: instance_id.to_string(),
+            agent_id: package_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Architect".to_string(),
             install_path: "/tmp/architect".to_string(),
@@ -501,10 +516,47 @@ mod tests {
     }
 
     /// MCP path: trusted agent (installed) `X-MCP-Actor` passes through.
+    ///
+    /// ADR-073: the value must be the **instance UUID**, which is what the
+    /// Gateway catalog `{instance_id}` template substitutes into the doc
+    /// MCP headers for every runtime.
     #[tokio::test]
     async fn mcp_path_passes_trusted_actor() {
         let state = test_app_state();
-        add_installed_agent(&state, "com.acowork.architect").await;
+        add_installed_agent(&state, "inst-0001-0000-0000-0000-000000000001").await;
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let echoed = proxy_echo_headers(
+            state,
+            "/api/doc/mcp",
+            &[("X-MCP-Actor", "inst-0001-0000-0000-0000-000000000001")],
+        )
+        .await;
+
+        assert_eq!(
+            echoed["x-mcp-actor"],
+            serde_json::json!("inst-0001-0000-0000-0000-000000000001"),
+            "trusted X-MCP-Actor (instance UUID) must pass through, got: {echoed}"
+        );
+    }
+
+    /// ADR-073 trust-boundary invariant: the **package id** (reverse-DNS)
+    /// is NOT a valid `X-MCP-Actor`. Even though the package is installed,
+    /// `installed_agents` is keyed by instance_id, so the header must be
+    /// stripped — otherwise a package-id forgery would impersonate every
+    /// installed instance of that package.
+    #[tokio::test]
+    async fn mcp_path_strips_package_id_even_when_package_installed() {
+        let state = test_app_state();
+        // The package IS installed (instance UUID registered), but the
+        // attacker forges the header with the package id, not the UUID.
+        add_installed_agent_with_pkg(
+            &state,
+            "inst-0001-0000-0000-0000-000000000001",
+            "com.acowork.architect",
+        )
+        .await;
         let port = start_echo_doc_server().await;
         set_doc_process(&state, port).await;
 
@@ -515,10 +567,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            echoed["x-mcp-actor"],
-            serde_json::json!("com.acowork.architect"),
-            "trusted X-MCP-Actor must pass through, got: {echoed}"
+        assert!(
+            echoed.get("x-mcp-actor").is_none(),
+            "package id must NOT pass the X-MCP-Actor trust boundary (ADR-073), got: {echoed}"
         );
     }
 
@@ -526,14 +577,14 @@ mod tests {
     #[tokio::test]
     async fn mcp_path_strips_untrusted_actor() {
         let state = test_app_state();
-        add_installed_agent(&state, "com.acowork.architect").await;
+        add_installed_agent(&state, "inst-0001-0000-0000-0000-000000000001").await;
         let port = start_echo_doc_server().await;
         set_doc_process(&state, port).await;
 
         let echoed = proxy_echo_headers(
             state,
             "/api/doc/mcp",
-            &[("X-MCP-Actor", "com.evil.ghost")],
+            &[("X-MCP-Actor", "inst-9999-0000-0000-0000-000000000099")],
         )
         .await;
 

@@ -31,7 +31,12 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-const REMOTE_AGENT: &str = "agent-remote.example"; // 模拟 Gateway 已信任并注入
+// ADR-073: stands in for the runtime instance identity (UUID) injected
+// over `X-MCP-Actor` by the Gateway catalog. The doc server itself does
+// not enforce UUID format — doc_proxy is the trust boundary — but the
+// test fixture uses a UUID-shaped string so the wire JSON matches the
+// production contract.
+const REMOTE_AGENT: &str = "inst-eeee-ffff-0000-1111-222233334444"; // 模拟 Gateway 已信任并注入
 
 /// 真实启动：先 bind listener 拿地址，再 spawn serve；router nest 到 `/api/doc`。
 async fn spawn_public() -> (String, TempDir) {
@@ -178,6 +183,88 @@ async fn remote_agent_full_review_loop_over_public_mcp() {
     let v = ok(&base, Some(REMOTE_AGENT), "doc_read", json!({ "ref": doc_id })).await;
     assert_eq!(v["version"], 2);
     assert!(v["content"].as_str().unwrap().contains("远程 Agent 补充"));
+}
+
+/// D4-3 wire-contract 回归：远程 Agent 走全链路 `doc_add` 后，REST 与
+/// MCP 两条路径都必须返回 `import.instance_id == REMOTE_AGENT`（即
+/// `X-MCP-Actor` 注入的 runtime instance UUID, ADR-073），且 wire JSON
+/// 不能再含 legacy `agent_id` 字段。
+///
+/// 这条测试与 `mcp_wire_contract_no_legacy_agent_id_key` 的差别在于
+/// 这里用 **publicly-exposed 路由**（远程 Agent 的角度：直接对 doc
+/// server 的 `/api/doc/mcp` 发请求，模拟跨进程 Gateway 反代场景），
+/// 而不是进程内 `DocService`。覆盖了「header 真的跨进程传过来」这条
+/// 路径，是端到端最后一公里的契约。
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_doc_add_persists_actor_as_instance_id_through_public_mcp() {
+    let (base, _tmp) = spawn_public().await;
+
+    // 人类 REST 建目录（Agent 不可见 dir id 的设计是另一码事；这里
+    // 复用 `dir_id=root` 走 add-to-doc 的快照路径）。
+    let _ = ok(
+        &base,
+        Some(REMOTE_AGENT),
+        "doc_mkdir",
+        json!({ "path": "wire-contract" }),
+    )
+    .await;
+
+    // 远程 Agent：add-to-doc 走全链路 MCP HTTP
+    let v = ok(
+        &base,
+        Some(REMOTE_AGENT),
+        "doc_add",
+        json!({
+            "path": "wire-contract",
+            "title": "跨进程 instance_id 落盘验证",
+            "content": "由远程 Agent 写入",
+            "source_workspace": "ws-remote",
+            "source_path": "notes/contract.md",
+        }),
+    )
+    .await;
+    let doc_id = v["doc_id"].as_str().unwrap().to_string();
+
+    // (a) REST GET：import.instance_id 必须等于 REMOTE_AGENT（UUID 字面量）
+    let doc = rest_get(&base, &format!("/docs/{doc_id}")).await;
+    let imp = &doc["meta"]["import"];
+    assert!(
+        imp.is_object(),
+        "expected import object, got: {imp}"
+    );
+    assert_eq!(
+        imp["instance_id"], REMOTE_AGENT,
+        "doc server must persist `X-MCP-Actor` (instance UUID) into \
+         `meta.import.instance_id` (ADR-073). Got: {imp}"
+    );
+    assert_eq!(imp["workspace_path"], "ws-remote:notes/contract.md");
+
+    // (b) legacy `agent_id` 字段必须 NOT 出现在 wire JSON（panic if
+    // anyone regresses the schema).
+    assert!(
+        imp.get("agent_id").is_none(),
+        "ADR-073 regression: doc REST returned legacy `agent_id` field: {imp}"
+    );
+
+    // (c) JSON-RPC doc_read 返回同样的 wire shape（同一份持久化被两条
+    // 路径读到，所以 import 节点必须一致）。
+    let via_mcp = ok(&base, None, "doc_read", json!({ "ref": doc_id })).await;
+    let imp_mcp = &via_mcp["import"];
+    assert_eq!(imp_mcp["instance_id"], REMOTE_AGENT);
+    assert!(
+        imp_mcp.get("agent_id").is_none(),
+        "ADR-073 regression: doc_read MCP returned legacy `agent_id` field: {imp_mcp}"
+    );
+
+    // (d) 同包多 instance 隔离前提：REMOTE_AGENT 之外的另一个 actor
+    // 读同一文档不应能「冒充」原作者。验证 import 字段绑死在
+    // REMOTE_AGENT 上。
+    let other_actor = "inst-ffff-eeee-dddd-cccc-999988887777";
+    let v_other = ok(&base, Some(other_actor), "doc_read", json!({ "ref": doc_id })).await;
+    assert_eq!(
+        v_other["import"]["instance_id"], REMOTE_AGENT,
+        "import.instance_id is the original submitter, not the current reader (ADR-073)"
+    );
 }
 
 /// D4-2 身份：匿名经 advertise endpoint 只读允许；写 → -32002 forbidden。

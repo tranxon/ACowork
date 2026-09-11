@@ -155,7 +155,9 @@ pub async fn reparent(
 
 /// Agent 认领任务（pending → in_progress）。
 ///
-/// Header `X-Actor` 携带 agent_id。返回 409 若被依赖阻塞。
+/// Header `X-Actor` 携带身份（Gateway 反代覆盖为可信值；REST 路径默认
+/// `human`，MCP 路径经 `X-MCP-Actor` 注入 `agent_instance_id`，ADR-073）。
+/// 返回 409 若被依赖阻塞。
 #[tracing::instrument(skip(state))]
 pub async fn claim(
     State(state): State<ApiState>,
@@ -163,11 +165,11 @@ pub async fn claim(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Task>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
-    let agent_id = headers
+    let actor = headers
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
-    let task = state.store.claim_task(&tid, agent_id).await?;
+    let task = state.store.claim_task(&tid, actor).await?;
     Ok(Json(task))
 }
 
@@ -176,6 +178,8 @@ pub async fn claim(
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Agent 提交结果（in_progress → submitted）。
+///
+/// Header `X-Actor` 携带身份（见 `claim` 注释；MCP 路径下为 instance_id）。
 #[tracing::instrument(skip(state, input))]
 pub async fn submit(
     State(state): State<ApiState>,
@@ -184,13 +188,13 @@ pub async fn submit(
     Json(input): Json<SubmitTaskRequest>,
 ) -> Result<Json<Task>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
-    let agent_id = headers
+    let actor = headers
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
     let task = state
         .store
-        .submit_task(&tid, &input.text, input.attachment_ids, agent_id)
+        .submit_task(&tid, &input.text, input.attachment_ids, actor)
         .await?;
     Ok(Json(task))
 }
@@ -220,6 +224,7 @@ pub async fn review(
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
+    // review 可由 human 完成（REST 路径默认 X-Actor=human）或 instance 完成（MCP 路径）
     let task = state.store.review_task(&tid, input.approved, reviewer).await?;
     Ok(Json(task))
 }

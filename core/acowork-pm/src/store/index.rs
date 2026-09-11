@@ -162,7 +162,8 @@ mod tests {
             TaskEntry {
                 project_id: pid.clone(),
                 status: TaskStatus::Pending,
-                assignee: Some("agent-1".to_string()),
+                // ADR-073: assignee 是 instance_id（UUID）
+                assignee: Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string()),
                 depth: 0,
                 dir_path: "/tmp/pm/tasks/t-1".into(),
             },

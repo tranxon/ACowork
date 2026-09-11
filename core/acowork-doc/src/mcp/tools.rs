@@ -1,7 +1,8 @@
 //! MCP 工具分发（设计 §6 全量 8 工具）。
 //!
-//! 每个工具：解析参数 → 身份校验（写工具需可信 agent_id，匿名只读，
-//! 设计 §9）→ 经 [`crate::state::DocState`] 调 **service trait** →
+//! 每个工具：解析参数 → 身份校验（写工具需可信 runtime instance_id
+//! (UUID, ADR-073)，匿名只读，设计 §9）→ 经 [`crate::state::DocState`]
+//! 调 **service trait** →
 //! 返回精简 JSON（不向 LLM 暴露内部存储细节）。
 //!
 //! ## 寻址
@@ -225,7 +226,11 @@ fn doc_to_value(
         v["cache_path"] = Value::String(cp.to_string());
     }
     if let Some(imp) = meta.import {
-        v["import"] = json!({ "agent_id": imp.agent_id, "workspace_path": imp.workspace_path });
+        // ADR-073: wire key is `instance_id` (UUID carried over `X-MCP-Actor`
+        // by the Gateway catalog). The legacy `agent_id` key was removed
+        // because a runtime instance — not a package id — is what the
+        // import badge should correlate to.
+        v["import"] = json!({ "instance_id": imp.instance_id, "workspace_path": imp.workspace_path });
     }
     Ok(v)
 }
@@ -332,7 +337,12 @@ async fn doc_add(state: &DocState, actor: &str, args: Value) -> Result<Value> {
         (None, None) => String::new(),
     };
     let import = ImportSource {
-        agent_id: actor.to_string(),
+        // ADR-073: `actor` is the runtime instance identity (UUID) — the
+        // value substituted into the Gateway's `{instance_id}` MCP template
+        // for doc. Storing it as `instance_id` keeps the wire format
+        // consistent with `UpdateRequest::submitted_by` and the agentStore
+        // key on desktop.
+        instance_id: actor.to_string(),
         workspace_path,
     };
     let meta = state
@@ -464,7 +474,13 @@ mod tests {
     use crate::config::DocConfig;
     use tempfile::TempDir;
 
-    const AGENT: &str = "com.example.agent";
+    // ADR-073: `actor` strings here stand in for the runtime instance
+    // identity (UUID). The doc server doesn't enforce UUID format — the
+    // Gateway doc_proxy is the trust boundary — but using a UUID-shaped
+    // string in tests ensures any future `instance_id` format check in
+    // the doc crate (defense-in-depth) won't have to be loosened just
+    // for tests.
+    const AGENT: &str = "inst-0000-0000-0000-0000-000000000001";
 
     async fn setup() -> (TempDir, DocState) {
         let tmp = TempDir::new().unwrap();
@@ -524,8 +540,19 @@ mod tests {
         // read by doc_id
         let by_id = ok(&state, None, "doc_read", json!({ "ref": doc_id })).await;
         assert_eq!(by_id["content"], "# v1 设计纪要");
-        assert_eq!(by_id["import"]["agent_id"], AGENT);
+        // ADR-073: the wire field is `instance_id` (UUID), populated from
+        // the `X-MCP-Actor` header — which here is `AGENT` itself, used as
+        // the actor token. The badge downstream resolves this UUID via the
+        // agentStore to the human display name.
+        assert_eq!(by_id["import"]["instance_id"], AGENT);
         assert_eq!(by_id["import"]["workspace_path"], "ws-main:notes/design.md");
+        // Regression guard: the legacy `agent_id` field name must not
+        // reappear in the wire JSON. A regression that re-introduces it
+        // would silently break desktop display-name resolution.
+        assert!(
+            by_id["import"].get("agent_id").is_none(),
+            "wire JSON must not contain legacy `agent_id` key: {by_id}"
+        );
 
         // read by path —— 寻址一致
         let by_path = ok(

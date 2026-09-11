@@ -4,7 +4,9 @@
  * - 编辑/预览双模式：编辑 = 等宽 textarea；预览 = DocMarkdownView（同渲染栈）。
  * - 保存：PUT 携带 `base_version`（乐观并发）；409 `version_conflict` →
  *   amber banner「文档已被他人更新」+ 刷新按钮（不静默覆盖）。
- * - 来源标记：Agent add-to-doc 导入的文档展示 agent_id + workspace_path badge。
+ * - 来源标记：Agent add-to-doc 导入的文档展示 instance_id 的 display_name
+ *   + workspace_path badge（ADR-073：通过 agentStore 把 instance_id
+ *   解析为人类可读名，而不是直接显示原始 UUID）。
  * - 快捷键 Ctrl/Cmd+S 保存（textarea 聚焦时）。
  * - 切换文档且本地有未保存修改 → ConfirmDialog 确认丢弃。
  */
@@ -14,9 +16,23 @@ import { Check, Eye, FileText, Loader2, Pencil, RefreshCw, Save, Sparkles } from
 import { useTranslation } from "../../i18n/useTranslation";
 import { useDocEditorStore } from "../../stores/doc/editorStore";
 import { useDocHealthStore } from "../../stores/doc/healthStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { cn } from "../../lib/utils";
 import { DocMarkdownView } from "./DocMarkdownView";
+
+/** 解析 agent instance_id → 显示名（meta.display_name ?? meta.name ?? id）。
+ *  agentStore 是按 instance_id 索引的（ADR-073），与 `import.instance_id`
+ *  的语义一致 —— 这里「键即查表 key」。 */
+function resolveAgentName(
+  agents: Record<string, { meta?: { display_name?: string; name?: string } }>,
+  id: string | null,
+): string | null {
+  if (!id) return null;
+  const a = agents[id];
+  if (!a?.meta) return id;
+  return a.meta.display_name || a.meta.name || id;
+}
 
 export function DocEditor() {
   const { t } = useTranslation();
@@ -36,6 +52,11 @@ export function DocEditor() {
   const reload = useDocEditorStore((s) => s.reload);
   const confirmPendingOpen = useDocEditorStore((s) => s.confirmPendingOpen);
   const cancelPendingOpen = useDocEditorStore((s) => s.cancelPendingOpen);
+  // ADR-073: agentStore.agents 是按 **instance_id** 索引的（UUID）；
+  // `doc.meta.import.instance_id` 正好是同一 key，可直接查表解析为
+  // 人类可读的 display name（> name > 原始 UUID）。Store 未加载时
+  // fallback 到 instance_id 本身（badge 不至于显示空字符串）。
+  const agents = useAgentStore((s) => s.agents);
 
   const [savedTick, setSavedTick] = useState(0);
 
@@ -77,15 +98,23 @@ export function DocEditor() {
             <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-100">
               {doc.meta.name}
             </span>
-            {doc.meta.import && (
-              <span
-                className="inline-flex max-w-[45%] shrink items-center gap-1 truncate rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
-                title={`${doc.meta.import.agent_id} · ${doc.meta.import.workspace_path}`}
-              >
-                <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden />
-                <span className="truncate">{t("doc.importedBy", { agent: doc.meta.import.agent_id })}</span>
-              </span>
-            )}
+            {doc.meta.import && (() => {
+              // ADR-073: resolve the runtime instance_id to its human
+              // display name. Tooltip keeps the raw UUID for forensic
+              // debuggability (so the actual instance can be grepped
+              // against the Gateway installed_agents log).
+              const importer = resolveAgentName(agents, doc.meta.import.instance_id);
+              const instanceId = doc.meta.import.instance_id;
+              return (
+                <span
+                  className="inline-flex max-w-[45%] shrink items-center gap-1 truncate rounded-full bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
+                  title={`${instanceId} · ${doc.meta.import.workspace_path}`}
+                >
+                  <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden />
+                  <span className="truncate">{t("doc.importedBy", { agent: importer ?? instanceId })}</span>
+                </span>
+              );
+            })()}
           </div>
           <div className="flex items-center gap-2 text-[10px] text-zinc-400">
             <span className="truncate">{doc.path}</span>

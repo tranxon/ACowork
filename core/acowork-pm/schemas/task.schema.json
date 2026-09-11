@@ -50,7 +50,7 @@
     },
     "assignee": {
       "type": ["string", "null"],
-      "description": "经办人：human 或 agent_id。未分配为 null。"
+      "description": "经办人：human 字面量或 agent_instance_id（UUID v4，ADR-073 §1.2）。按 instance_id 解析显示名。未分配为 null。"
     },
     "due_at": {
       "type": ["string", "null"],
@@ -83,7 +83,7 @@
     },
     "created_by": {
       "type": "string",
-      "description": "创建者标识：human 或 agent_id。"
+      "description": "创建者标识：human 字面量或 agent_instance_id（UUID v4，ADR-073 §1.2）。"
     },
     "created_at": {
       "$ref": "#/$defs/dateTime"
@@ -224,7 +224,7 @@
         },
         "uploaded_by": {
           "type": "string",
-          "description": "上传者标识：human 或 agent_id。"
+          "description": "上传者标识：human 字面量或 agent_instance_id（UUID v4，ADR-073 §1.2）。"
         },
         "uploaded_at": {
           "$ref": "#/$defs/dateTime"
@@ -255,7 +255,7 @@
         },
         "submitted_by": {
           "type": "string",
-          "description": "提交者标识：human 或 agent_id。"
+          "description": "提交者标识：human 字面量或 agent_instance_id（UUID v4，ADR-073 §1.2）。来自 X-MCP-Actor header。"
         },
         "submitted_at": {
           "$ref": "#/$defs/dateTime"

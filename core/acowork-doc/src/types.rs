@@ -105,9 +105,16 @@ pub struct DirMeta {
 
 // ── Import source ─────────────────────────────────────────────────────────
 
+/// Records the provenance of an add-to-doc snapshot.
+///
+/// `instance_id` is the **runtime instance identity** (UUID, ADR-073) carried
+/// over the `X-MCP-Actor` header by the Gateway catalog template
+/// (`{instance_id}` substitution). It is the unique identifier for the
+/// calling agent *instance* — not the package id (reverse-DNS), which can
+/// legitimately appear in multiple installed instances.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportSource {
-    pub agent_id: String,
+    pub instance_id: String,
     pub workspace_path: String,
 }
 
@@ -267,7 +274,7 @@ mod tests {
                 "doc-1001".into(),
                 "产品方案".into(),
                 Some(ImportSource {
-                    agent_id: "com.example.agent".into(),
+                    instance_id: "inst-2001-0000-0000-0000-aaaa".into(),
                     workspace_path: "notes/方案.md".into(),
                 }),
                 now,
@@ -287,9 +294,17 @@ mod tests {
         assert!(json.contains("\"name\":\"产品方案\""), "{}", json);
         assert!(json.contains("\"version\":1"), "{}", json);
         assert!(
-            json.contains("\"agent_id\":\"com.example.agent\""),
+            json.contains("\"instance_id\":\"inst-2001-0000-0000-0000-aaaa\""),
             "{}",
             json
+        );
+        // ADR-073: `agent_id` field name is gone — the wire format now keys
+        // on `instance_id` (UUID). A regression that re-introduces the old
+        // field name must fail this assertion so the wire contract stays
+        // consistent across doc server + desktop + any future consumer.
+        assert!(
+            !json.contains("\"agent_id\":"),
+            "wire JSON must not contain legacy `agent_id` key: {json}"
         );
         assert!(
             json.contains("\"workspace_path\":\"notes/方案.md\""),

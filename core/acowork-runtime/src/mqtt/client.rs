@@ -641,16 +641,20 @@ impl MqttClientHandler for RuntimeHandler {
                     .map(|m| m.servers.clone())
                     .unwrap_or_default();
                 drop(cache_write);
-                // T3-4: 替换 `{agent_id}` 模板占位符。
+                // T3-4 + ADR-073: 替换 MCP header 模板占位符。
                 //
-                // Gateway 注入的 pm MCP 通过
-                // `X-MCP-Actor: {agent_id}` 识别调用者
-                // （设计 §9.2）。这里是 Runtime 收到
-                // `acowork/global/mcps` 的唯一持久化点，
-                // `self.agent_id` 即本 agent 的真实身份；
-                // 在此替换后，连接路径（startup / config
-                // change）读到的是已解析的 header，无需
-                // 感知模板。env 同样替换以支持未来扩展。
+                // Gateway 注入的 pm/doc MCP 通过
+                // `X-MCP-Actor: {instance_id}` 识别调用者
+                // （设计 §9.2；ADR-073 §1.3 不变量 1：身份 key 必须是
+                // agent_instance_id，不是 agent_id）。Runtime 把 `{instance_id}`
+                // 替换为 `self.bootstrap_data.instance_id`，连接路径
+                // （startup / config change）读到的是已解析的 header，无需
+                // 感知模板。`{agent_id}` 模板为旧兼容保留，env 同样替换以
+                // 支持扩展。
+                let bootstrap_instance_id = self.bootstrap_data.instance_id.clone();
+                let resolve_instance_id = |value: &str| {
+                    value.replace("{instance_id}", &bootstrap_instance_id)
+                };
                 let resolve_agent_id = |value: &str| {
                     value.replace("{agent_id}", &self.agent_id)
                 };
@@ -665,12 +669,18 @@ impl MqttClientHandler for RuntimeHandler {
                         env: s
                             .env
                             .into_iter()
-                            .map(|(k, v)| (k, resolve_agent_id(&v)))
+                            .map(|(k, v)| {
+                                // ADR-073: `{instance_id}` 是身份 key；保留
+                                // `{agent_id}` 兼容老 Gateway 模板（env 非身份字段）。
+                                let v = resolve_instance_id(&v);
+                                let v = resolve_agent_id(&v);
+                                (k, v)
+                            })
                             .collect(),
                         headers: s
                             .headers
                             .into_iter()
-                            .map(|(k, v)| (k, resolve_agent_id(&v)))
+                            .map(|(k, v)| (k, resolve_instance_id(&v)))
                             .collect(),
                         install: None,
                         tool_timeout_secs: if s.tool_timeout_secs == 0 {

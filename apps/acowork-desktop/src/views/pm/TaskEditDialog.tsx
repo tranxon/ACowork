@@ -105,12 +105,10 @@ export function TaskEditDialog({
     return boardTasks;
   }, [boardTasks, mode, initial]);
 
+  // ADR-073: dropdown value 是 agent_instance_id（UUID）— 与 task.assignee 语义一致。
+  // label 用 display_name 解析（meta.display_name ?? meta.name ?? agent_id）。
   const agentOptions = useMemo(
-    () =>
-      Object.values(agents).map((a) => ({
-        value: a.meta.agent_id,
-        label: a.meta.display_name || a.meta.name || a.meta.agent_id,
-      })),
+    () => buildAgentOptions(Object.values(agents)),
     [agents],
   );
 
@@ -352,4 +350,25 @@ function Field({
       {children}
     </label>
   );
+}
+
+// ── Pure helpers (exported for testing) ──────────────────────────────
+// ADR-073: assignee dropdown uses instance_id as value (matches
+// task.assignee semantics); label is human-readable display name.
+// Extracted as a pure function so it's directly testable without
+// needing to mount the React component.
+export interface AgentMeta {
+  instance_id: string;
+  agent_id: string;
+  display_name?: string;
+  name?: string;
+}
+
+export function buildAgentOptions(
+  agentList: ReadonlyArray<{ meta: AgentMeta }>,
+): Array<{ value: string; label: string }> {
+  return agentList.map((a) => ({
+    value: a.meta.instance_id,
+    label: a.meta.display_name || a.meta.name || a.meta.agent_id,
+  }));
 }

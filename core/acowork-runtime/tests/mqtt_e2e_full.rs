@@ -958,3 +958,163 @@ fn integration_searches_retained_persists_to_agent_search_json() {
     });
     drop(broker);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-073 回归：Gateway 下发 `{instance_id}` 模板 → Runtime 收到
+// `acowork/global/mcps` 后把 headers/env 中的占位符替换为
+// `self.bootstrap_data.instance_id`，然后持久化到 `agent_mcp.json`。
+//
+// 验证：
+//   1. 模板 `{instance_id}` 出现在 Gateway publish 的 payload 里
+//   2. Runtime 落盘后 header 必须是真实 UUID（**不是**字面量 `{instance_id}`）
+//   3. 落盘的 header UUID == bootstrap_data.instance_id
+//   4. 包 ID (`com.test.x`) 不出现在 header 中（旧行为回归捕获）
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn integration_mcp_template_instance_id_substituted_at_runtime() {
+    use std::collections::HashMap;
+
+    let port = fresh_broker_port();
+    let broker = start_broker("127.0.0.1", port).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let work_dir = std::env::temp_dir().join(format!(
+            "acowork-template-e2e-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
+
+        let cache = new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.template", // 包 ID（不应出现在 X-MCP-Actor 中）
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Template Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir: work_dir.clone(),
+            username: None,
+            password: None,
+        })
+        .await
+        .unwrap();
+
+        // ── 1. Gateway publishes MCP catalog with `{instance_id}` template ─
+        // 模拟 Gateway build_available_mcps（Diff K 后用 instance_id 模板）
+        let mut headers = HashMap::new();
+        headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
+
+        let mut env = HashMap::new();
+        env.insert("AGENT_IDENTITY".to_string(), "{instance_id}".to_string());
+
+        let payload = AvailableMcps {
+            version: 1,
+            servers: vec![McpRef {
+                id: "pm".into(),
+                name: "pm".into(),
+                transport: ProtoMcpTransport::Http.into(),
+                url: "http://gateway:19876/api/pm/mcp".into(),
+                command: String::new(),
+                args: vec![],
+                env,
+                headers,
+                tool_timeout_secs: 60,
+                auth_token: String::new(),
+            }],
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AvailableMcps(payload)),
+        };
+
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port).await.unwrap();
+        gw.publish_envelope(
+            "acowork/global/mcps",
+            &envelope,
+            acowork_gateway::mqtt::MqttQoS::AtLeastOnce,
+            true, // retained
+        )
+        .await
+        .expect("gateway publish should succeed");
+
+        // ── 2. Wait for Runtime poll loop to persist ─────────────────
+        let agent_mcp_path = work_dir.join("config").join("agent_mcp.json");
+        let mut written = false;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if agent_mcp_path.exists() {
+                let raw = std::fs::read_to_string(&agent_mcp_path).unwrap();
+                if raw.contains(TEST_INSTANCE_ID) {
+                    written = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            written,
+            "Runtime must substitute {{instance_id}} and persist the actual UUID to \
+             agent_mcp.json. file={} exists={}",
+            agent_mcp_path.display(),
+            agent_mcp_path.exists(),
+        );
+
+        // ── 3. Verify header is the actual UUID, NOT the literal template ─
+        let cfg = acowork_runtime::agent_config::load_agent_mcp_config(&work_dir)
+            .expect("load should succeed")
+            .expect("file should now exist");
+        let pm = cfg
+            .catalog
+            .iter()
+            .find(|s| s.name == "pm")
+            .expect("pm should be in catalog");
+
+        // ADR-073 §1.3 不变量 1：header 必须是 UUID，不是包 ID，也不是字面量模板
+        let actor_header = pm
+            .headers
+            .get("X-MCP-Actor")
+            .expect("X-MCP-Actor header must be present after substitution")
+            .clone();
+        assert_eq!(
+            actor_header, TEST_INSTANCE_ID,
+            "X-MCP-Actor must be the substituted instance_id UUID; got: {actor_header}"
+        );
+        assert!(
+            !actor_header.contains("com.test.template"),
+            "X-MCP-Actor must NOT contain package id (regression: old code substituted agent_id); got: {actor_header}"
+        );
+        assert_ne!(
+            actor_header, "{instance_id}",
+            "X-MCP-Actor must NOT be the literal template; got: {actor_header}"
+        );
+
+        // env 也应被替换
+        let identity_env = pm
+            .env
+            .get("AGENT_IDENTITY")
+            .expect("AGENT_IDENTITY env must be present")
+            .clone();
+        assert_eq!(
+            identity_env, TEST_INSTANCE_ID,
+            "env AGENT_IDENTITY must be the substituted instance_id"
+        );
+
+        // ── 4. Cleanup ───────────────────────────────────────────────
+        drop(_rt);
+        drop(gw);
+        std::fs::remove_dir_all(&work_dir).ok();
+    });
+    drop(broker);
+}

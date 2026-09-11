@@ -225,9 +225,13 @@ impl ProcessManager {
     /// Check health of all running agents.
     pub async fn health_check_all(&self, state: &crate::state::NodeState) -> Vec<(String, bool)> {
         let mut results = Vec::new();
-        for (agent_id, slot) in &state.agents {
+        // ADR-073: the process table is keyed by instance id, NOT
+        // agent id. The loop variable name reflects that — previously
+        // called `agent_id` it shadowed the slot field and made
+        // multi-instance of the same package indistinguishable.
+        for (instance_id, slot) in &state.agents {
             let healthy = check_health(slot.pid).await;
-            results.push((agent_id.clone(), healthy));
+            results.push((instance_id.clone(), healthy));
         }
         results
     }

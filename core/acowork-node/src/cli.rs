@@ -155,8 +155,9 @@ pub enum AgentsCommands {
     },
     /// Tail a Runtime's log file (troubleshooting tool).
     Logs {
-        /// Agent ID whose logs to tail.
-        agent_id: String,
+        /// Instance ID whose logs to tail (ADR-073). Find via
+        /// `acowork-node agents list` — `INSTANCE` column.
+        instance_id: String,
         /// Follow the log (reserved for Phase 3; currently no-op).
         #[arg(short = 'f', long)]
         follow: bool,
@@ -171,8 +172,8 @@ pub enum AgentsCommands {
     /// Emergency stop (SIGKILL process group). Escape hatch for when
     /// the Gateway is unreachable; state converges via Runtime LWT.
     Kill {
-        /// Agent ID to kill.
-        agent_id: String,
+        /// Instance ID to kill (ADR-073).
+        instance_id: String,
         #[arg(long, env = "ACOWORK_NODE_HOME")]
         home: Option<PathBuf>,
     },
@@ -325,7 +326,7 @@ impl Cli {
                     Ok(())
                 }
                 AgentsCommands::Logs {
-                    agent_id,
+                    instance_id,
                     follow,
                     lines,
                     home,
@@ -334,11 +335,11 @@ impl Cli {
                     let home = resolve_home(home.as_deref());
                     let packages = packages_dir
                         .unwrap_or_else(|| home.join("packages"));
-                    tail_logs(&agent_id, &packages, lines, follow)
+                    tail_logs(&packages, &instance_id, lines, follow)
                 }
-                AgentsCommands::Kill { agent_id, home } => {
+                AgentsCommands::Kill { instance_id, home } => {
                     let home = resolve_home(home.as_deref());
-                    kill_agent(&home, &agent_id)
+                    kill_agent(&home, &instance_id)
                 }
             },
             Some(Command::Rename {
@@ -447,6 +448,9 @@ fn print_status(identity: &Option<NodeIdentity>, snapshot: Option<&crate::state:
 /// authority, §6.5); running state comes from the persisted
 /// `state.json` (PID + loopback HTTP port, written by the daemon on
 /// start/stop/shutdown).
+///
+/// ADR-073: shows the instance id (short prefix) alongside the package
+/// id so multiple instances of the same package are distinguishable.
 fn print_agents(home: &Path, packages_dir: &Path) {
     // Rebuild the install table from disk (same logic the daemon uses).
     let mut state = NodeState::new(16);
@@ -459,16 +463,36 @@ fn print_agents(home: &Path, packages_dir: &Path) {
         return;
     }
 
-    println!("{:<40} {:<12} {:<8} {:<8} HTTP_PORT", "AGENT", "VERSION", "STATE", "PID");
+    println!(
+        "{:<16} {:<40} {:<12} {:<8} {:<8} HTTP_PORT",
+        "INSTANCE", "AGENT", "VERSION", "STATE", "PID"
+    );
     for info in state.installed_agents.values() {
         let running = snapshot
             .as_ref()
-            .and_then(|s| s.agents.iter().find(|a| a.agent_id == info.agent_id));
+            .and_then(|s| s.agents.iter().find(|a| a.instance_id == info.instance_id));
         let (st, pid, port) = match running {
             Some(a) => ("running", a.pid.to_string(), a.http_port.to_string()),
             None => ("stopped", "-".to_string(), "-".to_string()),
         };
-        println!("{:<40} {:<12} {:<8} {:<8} {}", info.agent_id, info.version, st, pid, port);
+        // Short instance id (first 16 hex chars of the UUID is enough
+        // to disambiguate in practice; full UUID remains in state.json).
+        let instance_short = short_instance_id(&info.instance_id);
+        println!(
+            "{:<16} {:<40} {:<12} {:<8} {:<8} {}",
+            instance_short, info.agent_id, info.version, st, pid, port
+        );
+    }
+}
+
+/// Short display form of an instance id: first 16 hex chars (or the
+/// full string if shorter — malformed input passes through verbatim
+/// so the operator can spot it).
+fn short_instance_id(instance_id: &str) -> &str {
+    if instance_id.len() >= 16 {
+        &instance_id[..16]
+    } else {
+        instance_id
     }
 }
 
@@ -478,17 +502,36 @@ fn print_agents(home: &Path, packages_dir: &Path) {
 /// `--work-dir`), named `YYYYMMDD_HHMMSS.log` by
 /// `SizeRollingFileAppender`.
 ///
+/// ADR-073: `instance_id` resolves to the install path via the
+/// install table; the package id is no longer a path component.
+///
 /// With `follow` this keeps polling the file for appended lines and
 /// switches to the newest file on log rotation (ADR-055 §6.13.2).
 fn tail_logs(
-    agent_id: &str,
     packages_dir: &Path,
+    instance_id: &str,
     lines: usize,
     follow: bool,
 ) -> Result<(), NodeError> {
     use std::io::Write as _;
 
-    let log_dir = packages_dir.join(agent_id).join("workspace").join("logs");
+    // Resolve install path from the install table. The daemon rebuilds
+    // this on every start; the CLI does the same on demand rather than
+    // relying on a stale state.json (which only persists running-agent
+    // PIDs, not the install inventory).
+    let mut state = NodeState::new(16);
+    crate::package::restore_installed_agents(&mut state, packages_dir);
+    let info = state
+        .installed_agents
+        .get(instance_id)
+        .ok_or_else(|| {
+            NodeError::AgentNotFound(format!(
+                "instance '{instance_id}' not installed (run `agents list` to see installed instances)"
+            ))
+        })?;
+    let log_dir = PathBuf::from(&info.install_path)
+        .join("workspace")
+        .join("logs");
 
     /// List the `.log` files sorted by name (timestamped, newest last).
     fn latest_log(log_dir: &Path) -> Option<PathBuf> {
@@ -557,15 +600,19 @@ fn tail_logs(
     }
 }
 
-/// Emergency-kill a Runtime by PID (from the persisted snapshot).
-fn kill_agent(home: &Path, agent_id: &str) -> Result<(), NodeError> {
+/// Emergency-kill a Runtime by instance id (from the persisted snapshot).
+///
+/// ADR-073: keyed by instance id, not package id — two instances of
+/// the same package share the package id but MUST differ in
+/// instance id.
+fn kill_agent(home: &Path, instance_id: &str) -> Result<(), NodeError> {
     let snapshot = NodeState::load_snapshot(home)
         .ok_or_else(|| NodeError::Config("No state.json — is the node daemon running?".to_string()))?;
     let slot = snapshot
         .agents
         .iter()
-        .find(|a| a.agent_id == agent_id)
-        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?;
+        .find(|a| a.instance_id == instance_id)
+        .ok_or_else(|| NodeError::AgentNotFound(instance_id.to_string()))?;
 
     // Use the same kill path as the daemon (SIGTERM on Unix via `kill`,
     // taskkill on Windows). SIGKILL semantics are the daemon's reaper
@@ -575,7 +622,10 @@ fn kill_agent(home: &Path, agent_id: &str) -> Result<(), NodeError> {
         .build()
         .map_err(|e| NodeError::Config(format!("tokio runtime: {e}")))?;
     rt.block_on(crate::process::spawn::kill_agent_process(slot.pid))?;
-    println!("Sent termination signal to '{}' (PID {})", agent_id, slot.pid);
+    println!(
+        "Sent termination signal to instance '{}' ({} PID {})",
+        instance_id, slot.agent_id, slot.pid
+    );
     Ok(())
 }
 
@@ -714,12 +764,19 @@ mod tests {
 
     #[test]
     fn cli_parse_agents_logs() {
-        let cli = Cli::parse_from(["acowork-node", "agents", "logs", "com.example", "--lines", "20"]);
+        let cli = Cli::parse_from([
+            "acowork-node",
+            "agents",
+            "logs",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--lines",
+            "20",
+        ]);
         match cli.command {
             Some(Command::Agents {
-                cmd: AgentsCommands::Logs { agent_id, lines, .. },
+                cmd: AgentsCommands::Logs { instance_id, lines, .. },
             }) => {
-                assert_eq!(agent_id, "com.example");
+                assert_eq!(instance_id, "550e8400-e29b-41d4-a716-446655440000");
                 assert_eq!(lines, 20);
             }
             _ => panic!("Expected Agents Logs"),
@@ -728,11 +785,16 @@ mod tests {
 
     #[test]
     fn cli_parse_agents_kill() {
-        let cli = Cli::parse_from(["acowork-node", "agents", "kill", "com.example"]);
+        let cli = Cli::parse_from([
+            "acowork-node",
+            "agents",
+            "kill",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]);
         match cli.command {
             Some(Command::Agents {
-                cmd: AgentsCommands::Kill { agent_id, .. },
-            }) => assert_eq!(agent_id, "com.example"),
+                cmd: AgentsCommands::Kill { instance_id, .. },
+            }) => assert_eq!(instance_id, "550e8400-e29b-41d4-a716-446655440000"),
             _ => panic!("Expected Agents Kill"),
         }
     }

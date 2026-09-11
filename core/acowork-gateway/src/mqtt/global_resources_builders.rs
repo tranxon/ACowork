@@ -156,13 +156,15 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
     // `pm.auto_inject_mcp = true`）。注入后，每个 Agent 的 catalog 都会出现
     // `name = "pm"` 的 HTTP MCP server，Agent 启动即可调用 `pm_*` 工具。
     //
-    // 身份：pm MCP 通过 `X-MCP-Actor` header 识别调用者（= agent_id，设计
-    // §9.2）。这里下发 `{agent_id}` 模板占位符，Runtime 连接时替换为实际
-    // agent_id（见 Runtime `template_mcp_identity`）。
+    // 身份：pm MCP 通过 `X-MCP-Actor` header 识别调用者。
+    // **ADR-073**：header 携带 `agent_instance_id`（UUID），不是 `agent_id`
+    // （包 ID）。设计 §9.2 / ADR-073 §1.3 不变量 1 — 所有身份 key 必须是
+    // instance_id。这里下发 `{instance_id}` 模板占位符，Runtime 收到
+    // `acowork/global/mcps` 时替换为 `self.instance_id`。
     let mut servers = servers;
     if let Some(pm_url) = &gw.pm_mcp_url {
         let mut headers = std::collections::HashMap::new();
-        headers.insert("X-MCP-Actor".to_string(), "{agent_id}".to_string());
+        headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
         servers.push(McpRef {
             id: "pm".to_string(),
             name: "pm".to_string(),
@@ -181,9 +183,10 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
     // 启动时设置（`Some` ⇔ doc 服务已启动且 `doc.auto_inject_mcp = true`）。
     // 注入后 Agent catalog 出现 `name = "doc"` 的 HTTP MCP server，Agent
     // 启动即可调用 `doc_*` 工具（读写文档 + PR 式审核提交）。
+    // **ADR-073**：`X-MCP-Actor` 携带 `agent_instance_id`（UUID）。
     if let Some(doc_url) = &gw.doc_mcp_url {
         let mut headers = std::collections::HashMap::new();
-        headers.insert("X-MCP-Actor".to_string(), "{agent_id}".to_string());
+        headers.insert("X-MCP-Actor".to_string(), "{instance_id}".to_string());
         servers.push(McpRef {
             id: "doc".to_string(),
             name: "doc".to_string(),
@@ -406,11 +409,11 @@ mod tests {
             map_mcp_transport(&McpTransportDef::Http) as i32,
             "pm MCP must use HTTP transport"
         );
-        // 身份模板：Runtime 侧替换为实际 agent_id（X-MCP-Actor header）。
+        // 身份模板：Runtime 侧替换为实际 instance_id（X-MCP-Actor header，ADR-073）。
         assert_eq!(
             pm.headers.get("X-MCP-Actor").map(|s| s.as_str()),
-            Some("{agent_id}"),
-            "pm MCP must carry X-MCP-Actor identity template"
+            Some("{instance_id}"),
+            "pm MCP must carry X-MCP-Actor identity template (ADR-073 instance_id)"
         );
         assert_eq!(pm.tool_timeout_secs, 60);
     }
@@ -452,8 +455,8 @@ mod tests {
         );
         assert_eq!(
             doc.headers.get("X-MCP-Actor").map(|s| s.as_str()),
-            Some("{agent_id}"),
-            "doc MCP must carry X-MCP-Actor identity template"
+            Some("{instance_id}"),
+            "doc MCP must carry X-MCP-Actor identity template (ADR-073 instance_id)"
         );
         assert_eq!(doc.tool_timeout_secs, 60);
     }

@@ -7,8 +7,10 @@
 //!    - 匿名（无 `X-MCP-Actor`）仅允许只读工具：`pm_list_*` / `pm_get_*`
 //!    - 状态变更工具要求身份
 //!    - `pm_claim_task` / `pm_submit_task` / `pm_update_task` 要求
-//!      调用者 `agent_id` == 任务 `assignee`，否则 403
-//!    - `pm_create_task` 的 `assignee` 必须存在于 Agent 目录（§9.1）
+//!      调用者 `instance_id` == 任务 `assignee`（**ADR-073**：`agent_instance_id`
+//!      是唯一身份 key；`agent_id` 仅显示用），否则 403
+//!    - `pm_create_task` 的 `assignee` 必须存在于 Agent 目录（§9.1，
+//!      按 instance_id 校验 `GET /api/agents/{instance_id}`）
 //! 3. 调用 [`PmStore`] trait 业务方法
 //! 4. 返回精简 JSON（复用 REST `TaskResponse` 形状，仅 LLM 关心的字段）
 //!
@@ -97,15 +99,20 @@ fn require_actor(actor: Option<&str>) -> Result<&str> {
 
 /// 要求调用方 == 任务 assignee（设计 §9.2）。`pm_claim_task` /
 /// `pm_submit_task` / `pm_update_task` 使用。
+///
+/// **ADR-073**：两侧比较的都是 `agent_instance_id`（UUID）——
+/// `actor` 来自 `X-MCP-Actor` header（Gateway 注入 `{instance_id}` 模板，
+/// Runtime 替换为 `self.instance_id`），`task.assignee` 在创建时已按
+/// instance 维度校验存在性（§9.1）。
 fn ensure_assignee(task: &Task, actor: &str) -> Result<()> {
     match &task.assignee {
         Some(a) if a == actor => Ok(()),
         Some(a) => Err(PmError::Forbidden(format!(
-            "task {} is assigned to `{}`, not `{}`; only the assignee can perform this action",
+            "task {} is assigned to instance `{}`, not `{}`; only the assignee instance can perform this action",
             task.id, a, actor
         ))),
         None => Err(PmError::Forbidden(format!(
-            "task {} has no assignee; it must be assigned to `{}` before it can be acted on",
+            "task {} has no assignee; it must be assigned to instance `{}` before it can be acted on",
             task.id, actor
         ))),
     }
@@ -349,12 +356,12 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
     }
     let a: Args = parse_args("pm_create_task", args)?;
 
-    // 设计 §9.1：assignee 必须存在
+    // 设计 §9.1：assignee 必须存在（按 instance_id 校验，ADR-073）
     if let Some(assignee) = &a.assignee
         && !state.agent_dir.agent_exists(assignee).await
     {
         return Err(PmError::BadRequest(format!(
-            "assignee agent not found in agent directory: {assignee}"
+            "assignee instance not found in agent directory: {assignee}"
         )));
     }
 

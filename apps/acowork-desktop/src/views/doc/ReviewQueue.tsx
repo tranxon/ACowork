@@ -14,9 +14,23 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { useDocRequestStore } from "../../stores/doc/requestStore";
 import { useDocEditorStore } from "../../stores/doc/editorStore";
 import { useDocHealthStore } from "../../stores/doc/healthStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../../components/common/ToastProvider";
 import { cn } from "../../lib/utils";
 import type { UpdateRequest } from "../../lib/doc-types";
+
+/** 解析 instance_id → 显示名（meta.display_name ?? meta.name ?? id）。
+ *  agentStore 按 instance_id（UUID, ADR-073）索引，而 `submitted_by`
+ *  服务端就存的是 instance_id —— 键即查表 key。 */
+function resolveAgentName(
+  agents: Record<string, { meta?: { display_name?: string; name?: string } }>,
+  id: string | null,
+): string | null {
+  if (!id) return null;
+  const a = agents[id];
+  if (!a?.meta) return id;
+  return a.meta.display_name || a.meta.name || id;
+}
 
 export function ReviewQueue() {
   const { t } = useTranslation();
@@ -28,6 +42,10 @@ export function ReviewQueue() {
   const loadPending = useDocRequestStore((s) => s.loadPending);
   const approve = useDocRequestStore((s) => s.approve);
   const reject = useDocRequestStore((s) => s.reject);
+  // ADR-073: `submitted_by` 在服务端存的是 instance_id（不是包 id），
+  // UI 用 agentStore 解析为人类可读名。Store 未加载时 fallback 到原始
+  // instance_id —— 至少保留可追溯性，不会显示空字符串。
+  const agents = useAgentStore((s) => s.agents);
   const [open, setOpen] = useState(false);
   const [noteTarget, setNoteTarget] = useState<UpdateRequest | null>(null);
   const [note, setNote] = useState("");
@@ -139,7 +157,8 @@ export function ReviewQueue() {
                     </span>
                   </div>
                   <div className="truncate text-[10px] text-zinc-400">
-                    {req.submitted_by} · {new Date(req.created_at).toLocaleString()}
+                    {resolveAgentName(agents, req.submitted_by) ?? req.submitted_by} ·{" "}
+                    {new Date(req.created_at).toLocaleString()}
                   </div>
                 </button>
                 <div className="flex shrink-0 items-center gap-1">

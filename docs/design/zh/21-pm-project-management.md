@@ -149,7 +149,7 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
   "status": "in_progress",             // pending | in_progress | submitted | done | rejected | cancelled（六态，无 todo）
   "review_status": "approved",         // not_required | pending | approved | rejected（human 创建为 not_required；Agent 创建为 pending）
   "priority": "high",                  // low | normal | high | urgent
-  "assignee": "com.example.agent",     // 必须存在（§9 校验）
+  "assignee": "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d", // agent_instance_id（UUID，ADR-073），必须存在（§9 校验）
   "due_at": "2026-09-05T00:00:00Z",
   "created_by": "human",               // human | agent:xxx
   "created_at": "2026-08-30T10:00:00Z",
@@ -281,7 +281,7 @@ stateDiagram-v2
 
 - MCP Server 端点：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`（Q3 = HTTP，P4 定稿 advertise endpoint）。远程 Runtime 用 §8 的 advertise endpoint 直接 HTTP 调用。
 - Gateway 将 pm MCP 配置注入每个 Agent 的 `catalog` 列表（`auto_inject_mcp=true` 时），Agent 默认获得 `pm_*` 工具。
-- 身份：调用方经 **`X-MCP-Actor` header** 携带 `agent_id`（Gateway 下发 `{agent_id}` 模板，Runtime 连接时替换为实际 agent_id）；服务端校验（§9），**所有状态变更工具都校验调用者与任务 assignee 一致**。
+- 身份：调用方经 **`X-MCP-Actor` header** 携带 `agent_instance_id`（UUID，ADR-073 §1.3 不变量 1）— Gateway 下发 `{instance_id}` 模板，Runtime 收到 `acowork/global/mcps` 时替换为 `self.bootstrap_data.instance_id`；服务端校验（§9），**所有状态变更工具都校验调用者 instance_id 与任务 assignee 一致**。
 - 错误码：`-32001` Unauthenticated（无可信身份调变更工具）、`-32002` Forbidden（非 assignee）；业务错误（409 依赖未满足等）映射为对应 `PmError` code。
 
 | 工具 | 参数 | 返回 | 说明 |
@@ -321,8 +321,8 @@ stateDiagram-v2
 
 - pm 作为 **global scope** 服务以**独立进程**运行（ADR-064），REST 面只经 Desktop → Gateway 反代访问 `127.0.0.1`，不暴露公网。
 - **MCP 端点（advertise endpoint）**：`http://{advertise_host}:{gw_http_port}/api/pm/mcp`。用 Gateway `advertise_host` + `gw_http_port`（经 Gateway 反代，非 pm 独立端口）+ `mcp_http_path` 构造。
-- **下发链路（T4-1）**：`Gateway::run` PM 启动成功后把该 URL 写入 `GatewayState.pm_mcp_url` → `build_available_mcps` 注入全局 `acowork/global/mcps` 资源（`id=pm`，transport=HTTP，`X-MCP-Actor: {agent_id}` 模板 header，timeout=60s）→ 远程 Runtime 经 MQTT 全局资源 / AgentHello 拿到后，将 `{agent_id}` 替换为实际 agent_id，直接 HTTP 调用 pm MCP。
-- 安全：MCP 端点网络可达，必须做 agent_id 身份校验（§9.2，`X-MCP-Actor` → `-32001/-32002`）；匿名仅允许只读工具（§9.3）。`X-MCP-Actor` 由 Gateway 反代时校验（agent_id ∈ `installed_agents` 才透传，否则剥离为匿名），杜绝客户端伪造。
+- **下发链路（T4-1）**：`Gateway::run` PM 启动成功后把该 URL 写入 `GatewayState.pm_mcp_url` → `build_available_mcps` 注入全局 `acowork/global/mcps` 资源（`id=pm`，transport=HTTP，`X-MCP-Actor: {instance_id}` 模板 header，timeout=60s）→ 远程 Runtime 经 MQTT 全局资源 / AgentHello 拿到后，将 `{instance_id}` 替换为 `self.bootstrap_data.instance_id`（**ADR-073**：身份 key 是 instance_id UUID，不是 agent_id 包 ID），直接 HTTP 调用 pm MCP。
+- 安全：MCP 端点网络可达，必须做 instance_id 身份校验（§9.2，`X-MCP-Actor` → `-32001/-32002`）；匿名仅允许只读工具（§9.3）。`X-MCP-Actor` 由 Gateway 反代时校验（instance_id ∈ `installed_agents` 才透传，否则剥离为匿名），杜绝客户端伪造。
 
 ---
 
@@ -337,7 +337,7 @@ stateDiagram-v2
 
 | 场景 | 规则 |
 |------|------|
-| `pm_claim_task` / `pm_submit_task` / `pm_update_task`（MCP） | 调用者 `agent_id` 必须 == 任务 `assignee`；否则 JSON-RPC `-32002` Forbidden（实现：[`mcp/mod.rs`](../../../core/acowork-pm/src/mcp/mod.rs) `CODE_FORBIDDEN`） |
+| `pm_claim_task` / `pm_submit_task` / `pm_update_task`（MCP） | 调用者 `instance_id` 必须 == 任务 `assignee`（两者均为 UUID，ADR-073）；否则 JSON-RPC `-32002` Forbidden（实现：[`mcp/mod.rs`](../../../core/acowork-pm/src/mcp/mod.rs) `CODE_FORBIDDEN`） |
 | 匿名调变更工具（无 `X-MCP-Actor`） | JSON-RPC `-32001` Unauthenticated |
 | `pm_create_task` | 不要求 assignee 是调用者（Agent 可为他人/项目建任务，但要审核）；assignee 必须存在（§9.1） |
 | REST claim/submit/review | 经 Gateway 反代 + `X-Actor` header；review 仅人类（Desktop 会话鉴权面） |
@@ -434,7 +434,7 @@ async fn rebuild_index(projects_dir: &Path) -> Result<TaskIndex> {
 | D-6 | `checkpoint`/`milestone` 与 review 语义 | `checkpoint` submit 后仍需 review（与普通任务一致走 submitted）；`milestone` 语义保留为 `type`，状态机统一 | §4 / manifest |
 | D-7 | `depends_on` 是否允许跨项目依赖 | **允许**；claim 时计算 `blocked_by`，未满足返回 `DependencyNotSatisfied` | §3.5 / §9.2 |
 | D-8 | 子任务排序方式 | API 层按 `created_at` 升序（默认），`fs::read_dir` 后排序 | §3.4 |
-| D-9 | MCP 身份传递 | **`X-MCP-Actor` header**（Gateway 下发 `{agent_id}` 模板，Runtime 替换为实际 agent_id） | §6 / §8 / ADR-055 |
+| D-9 | MCP 身份传递 | **`X-MCP-Actor` header**（Gateway 下发 `{instance_id}` 模板，Runtime 替换为 `self.bootstrap_data.instance_id`，ADR-073） | §6 / §8 / ADR-073 |
 | D-10 | 部署形态 | ~~**内嵌于 Gateway 进程**，`nest_service("/api/pm")` 挂载，无独立端口~~ ⚠️ **已被 [ADR-064](../adr/zh/ADR-064-pm-standalone-process.md) 推翻**：PM 独立进程，Gateway 仅 supervisor + 反代 | §2.1 |
 
 > **v0.1 → v0.2 已固化**：存储结构改为目录树（§2.2、§3.1、§10.1）、子任务用 `children/` 物理嵌套、附件独立目录、依赖显式存 `depends_on`（详见 ADR-061）。

@@ -27,14 +27,17 @@ use crate::state::InstalledAgent;
 pub struct RuntimeCandidate {
     /// PID on this machine.
     pub pid: u32,
-    /// Agent id (`--agent-id`).
+    /// Package id (`--agent-id`, ADR-073). Identifies which agent
+    /// package this candidate runs — NOT the runtime instance.
     pub agent_id: String,
-    /// Instance identity (`--agent-instance-id`, ADR-073). Must be a
-    /// valid UUIDv4; any candidate with a missing or non-UUID instance
-    /// id is rejected by [`parse_runtime_args`].
+    /// Instance identity (`--agent-instance-id`, ADR-073). MUST be a
+    /// valid UUIDv4; [`parse_runtime_args`] rejects any candidate
+    /// missing one or carrying a non-UUID value (an empty string would
+    /// collide on the process-table empty-string slot).
     pub instance_id: String,
     /// Loopback HTTP port the Runtime listens on (`--http-port`). This
-    /// is required for the reverse proxy's `{id} → port` mapping.
+    /// is required for the reverse proxy's `{instance_id} → port`
+    /// mapping.
     pub http_port: u16,
     /// Whether the Runtime runs the Debug Protocol (`--dev-mode`).
     pub dev_mode: bool,
@@ -49,9 +52,11 @@ pub struct RuntimeCandidate {
 /// the binary path, as produced by `spawn_agent_process`).
 ///
 /// Returns `None` when the tokens are not a recognizable Runtime
-/// invocation — specifically when `--agent-id` or `--http-port` is
-/// missing, since both are required to reconstruct a routable process
-/// table slot.
+/// invocation. ADR-073: `--agent-instance-id` (UUIDv4) is REQUIRED —
+/// without it the process cannot be re-inserted into the instance-keyed
+/// process table and a stray empty-string key would collide with any
+/// other unkeyed orphan. `--agent-id` and `--http-port` are likewise
+/// required for package attribution and reverse-proxy routing.
 pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate> {
     let mut agent_id: Option<String> = None;
     let mut instance_id: Option<String> = None;
@@ -88,10 +93,18 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
 
     let agent_id = agent_id?;
     let http_port = http_port?;
+    // ADR-073: instance_id must be a valid UUIDv4. Reject anything
+    // else — including the empty string — so orphan Runtime processes
+    // started by an older node (without `--agent-instance-id`) cannot
+    // collide on the empty-string slot.
+    let instance_id = instance_id?;
+    if acowork_core::AgentInstanceId::from_string(instance_id.clone()).is_err() {
+        return None;
+    }
     Some(RuntimeCandidate {
         pid,
         agent_id,
-        instance_id: instance_id.unwrap_or_default(),
+        instance_id,
         http_port,
         dev_mode,
         mqtt_port,
@@ -263,12 +276,14 @@ mod tests {
             &args(&[
                 "--agent-id",
                 "com.example.weather",
+                "--agent-instance-id",
+                "550e8400-e29b-41d4-a716-446655440000",
                 "--package-path",
-                "/home/u/.acowork/acowork-node/packages/com.example.weather",
+                "/home/u/.acowork/acowork-node/packages/com.example.weather/550e8400-e29b-41d4-a716-446655440000",
                 "--manifest-path",
-                "/home/u/.acowork/acowork-node/packages/com.example.weather/manifest.toml",
+                "/home/u/.acowork/acowork-node/packages/com.example.weather/550e8400-e29b-41d4-a716-446655440000/manifest.toml",
                 "--work-dir",
-                "/home/u/.acowork/acowork-node/packages/com.example.weather/workspace",
+                "/home/u/.acowork/acowork-node/packages/com.example.weather/550e8400-e29b-41d4-a716-446655440000/workspace",
                 "--gateway-host",
                 "192.168.1.10",
                 "--node-id",
@@ -290,9 +305,44 @@ mod tests {
         .unwrap();
         assert_eq!(c.pid, 4242);
         assert_eq!(c.agent_id, "com.example.weather");
+        assert_eq!(c.instance_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(c.http_port, 19905);
         assert_eq!(c.mqtt_port, Some(19875));
         assert!(!c.dev_mode);
+    }
+
+    #[test]
+    fn parse_rejects_non_uuid_instance_id() {
+        // ADR-073: instance_id MUST be a UUIDv4 — legacy "inst-foo"
+        // style identifiers are not acceptable. Such candidates cannot
+        // be re-inserted into the process table.
+        assert!(
+            parse_runtime_args(
+                1,
+                &args(&[
+                    "--agent-id",
+                    "com.example.legacy",
+                    "--agent-instance-id",
+                    "inst-not-a-uuid",
+                    "--http-port",
+                    "19901",
+                ]),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_rejects_missing_instance_id() {
+        // Same rationale: an empty / missing instance id would collide
+        // on the empty-string slot.
+        assert!(
+            parse_runtime_args(
+                1,
+                &args(&["--agent-id", "com.example", "--http-port", "19901"])
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -302,6 +352,8 @@ mod tests {
             &args(&[
                 "--agent-id",
                 "com.example.dev",
+                "--agent-instance-id",
+                "550e8400-e29b-41d4-a716-446655440000",
                 "--http-port",
                 "19901",
                 "--dev-mode",
@@ -312,6 +364,7 @@ mod tests {
         .unwrap();
         assert!(c.dev_mode);
         assert_eq!(c.agent_id, "com.example.dev");
+        assert_eq!(c.instance_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(c.mqtt_port, None);
     }
 
@@ -319,7 +372,18 @@ mod tests {
     fn parse_missing_http_port_is_none() {
         // Without --http-port the reverse proxy cannot route the
         // orphan, so it is not adoptable.
-        assert!(parse_runtime_args(1, &args(&["--agent-id", "com.example.x"])).is_none());
+        assert!(
+            parse_runtime_args(
+                1,
+                &args(&[
+                    "--agent-id",
+                    "com.example.x",
+                    "--agent-instance-id",
+                    "550e8400-e29b-41d4-a716-446655440000",
+                ])
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -342,10 +406,11 @@ mod tests {
     #[test]
     fn classify_adopts_installed_and_skips_unknown() {
         let mut installed: HashMap<String, InstalledAgent> = HashMap::new();
+        let keep_id = "550e8400-e29b-41d4-a716-446655440000";
         installed.insert(
-            "inst-keep".to_string(),
+            keep_id.to_string(),
             InstalledAgent {
-                instance_id: "inst-keep".to_string(),
+                instance_id: keep_id.to_string(),
                 agent_id: "com.example.keep".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Keep".to_string(),
@@ -358,7 +423,7 @@ mod tests {
             RuntimeCandidate {
                 pid: 10,
                 agent_id: "com.example.keep".to_string(),
-                instance_id: "inst-keep".to_string(),
+                instance_id: keep_id.to_string(),
                 http_port: 19901,
                 dev_mode: false,
                 mqtt_port: None,
@@ -366,7 +431,11 @@ mod tests {
             RuntimeCandidate {
                 pid: 11,
                 agent_id: "com.example.stale".to_string(),
-                instance_id: String::new(),
+                // An orphan without a usable instance id (e.g.
+                // pre-ADR-073 node started it): even if a real install
+                // table held the same package, this candidate would
+                // not match by instance key.
+                instance_id: "660e8400-e29b-41d4-a716-446655440001".to_string(),
                 http_port: 19902,
                 dev_mode: false,
                 mqtt_port: None,
@@ -385,12 +454,13 @@ mod tests {
     fn parse_ps_line_extracts_pid_and_args() {
         // Real `ps -axo pid=,args=` shape: right-aligned PID + args.
         let c = parse_ps_line(
-            " 4242 /usr/local/bin/acowork-runtime --agent-id com.example.weather --mqtt-port 19875 --http-port 19905 --log-level info",
+            " 4242 /usr/local/bin/acowork-runtime --agent-id com.example.weather --agent-instance-id 550e8400-e29b-41d4-a716-446655440000 --mqtt-port 19875 --http-port 19905 --log-level info",
             "acowork-runtime",
         )
         .unwrap();
         assert_eq!(c.pid, 4242);
         assert_eq!(c.agent_id, "com.example.weather");
+        assert_eq!(c.instance_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(c.http_port, 19905);
         assert_eq!(c.mqtt_port, Some(19875));
         assert!(!c.dev_mode);

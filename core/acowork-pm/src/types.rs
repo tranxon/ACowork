@@ -209,7 +209,8 @@ pub struct Project {
     #[serde(default)]
     pub description: String,
     pub status: ProjectStatus,
-    pub created_by: String, // human / agent_id
+    /// 创建者：`human` 或 `agent_instance_id`（UUID，ADR-073）。
+    pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// 额外键值对（颜色、图标、标签等 UI 偏好）
@@ -260,7 +261,9 @@ pub struct Task {
     pub review_status: ReviewStatus,
     #[serde(default = "default_priority")]
     pub priority: Priority,
-    /// 责任人（human 或 agent_id）。
+    /// 责任人：`human` 或 `agent_instance_id`（UUID，ADR-073 §1.3 不变量 1）。
+    ///
+    /// 解析为显示名时，由调用方按 `instance_id` 查 agent directory（`meta.display_name ?? meta.name`）。
     #[serde(default)]
     pub assignee: Option<String>,
     #[serde(default)]
@@ -317,6 +320,7 @@ pub struct TaskResult {
     pub text: String,
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
+    /// 提交者：`agent_instance_id`（UUID，ADR-073），由 `X-MCP-Actor` 注入。
     pub submitted_by: String,
     pub submitted_at: DateTime<Utc>,
 }
@@ -342,9 +346,9 @@ pub struct CreateTask {
     pub attachment_ids: Vec<AttachmentId>,
     /// 指派 Agent / human（设计 PM-04 / §6 `pm_create_task` 的 `assignee` 参数）。
     ///
-    /// **P3 新增**：`CreateTask` 补齐 `assignee` + `due_at`（P1 遗留缺口——
-    /// 创建时无法指派/设定截止时间，只能事后 PATCH）。不存在的 agent 由上层
-    /// （MCP `AgentDirectory` / Gateway）校验，本结构仅承载字段。
+    /// **ADR-073**：`assignee` 存 `agent_instance_id`（UUID），不是 `agent_id`（包 ID）。
+    /// 不存在的 instance 由上层（MCP `AgentDirectory` / Gateway）按
+    /// `GET /api/agents/{instance_id}` 校验，本结构仅承载字段。
     #[serde(default)]
     pub assignee: Option<String>,
     /// 截止时间（可选；`pm_create_task` 的 `due` 参数）。

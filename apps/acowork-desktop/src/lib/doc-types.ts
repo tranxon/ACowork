@@ -11,9 +11,17 @@ export const DOC_ROOT_DIR_ID = "root";
 
 // ── 目录 / 文档元数据 ────────────────────────────────────────────────
 
-/** Add-to-doc 来源（Agent 快照导入时记录，展示「来源标记」） */
+/**
+ * Add-to-doc 来源（Agent 快照导入时记录，展示「来源标记」）。
+ *
+ * ADR-073: `instance_id` 是 **runtime instance identity**（UUID），由
+ * `X-MCP-Actor` header（Gateway catalog 注入 `{instance_id}` 模板）
+ * 透传而来。它是运行时的唯一标识 — 不是包 id（reverse-DNS），同一个包
+ * 可以装多个实例。UI 通过 agentStore（按 instance_id 索引）解析为人类
+ * 可读的 display name，而不是直接显示原始 UUID。
+ */
 export interface DocImportSource {
-  agent_id: string;
+  instance_id: string;
   workspace_path: string;
 }
 
@@ -66,7 +74,8 @@ export interface UpdateRequest {
   /** Agent 编辑所基于的版本（乐观并发基准） */
   base_version: number;
   content: string;
-  /** 提交者标识，如 `agent:com.example.agent` */
+  /** 提交者标识（runtime instance UUID, ADR-073），如
+   *  `inst-aaaa-bbbb-...`。UI 通过 agentStore 解析为 display name。 */
   submitted_by: string;
   status: RequestStatus;
   /** RFC 3339 */

@@ -29,9 +29,11 @@
 //!   difference between a closed and an open LAN port on `/fs/browse`
 //!   and the package write routes.
 //!
-//! **Node keeps the `{agent_id} → loopback port` mapping private**
+//! **Node keeps the `{instance_id} → loopback port` mapping private**
 //! (§6.4): the port comes from [`crate::state::AgentSlot::http_port`],
-//! allocated by the Node at spawn time.
+//! allocated by the Node at spawn time. ADR-073: the `{id}` in
+//! `/agents/{id}/*` is the runtime instance id (UUIDv4), NOT the
+//! package id.
 
 use std::time::Duration;
 
@@ -50,7 +52,7 @@ use crate::state::NodeHttpState;
 /// Build the node reverse-proxy router.
 ///
 /// `state` is the node process table (read-only here) providing the
-/// `{agent_id} → http_port` mapping.
+/// `{instance_id} → http_port` mapping.
 pub fn router(state: NodeHttpState) -> Router {
     Router::new()
         // ADR-055 §6.7: node liveness endpoint — the LSP relay's
@@ -140,7 +142,7 @@ async fn proxy_agent(
         format!("http://127.0.0.1:{}/{}", http_port, rest)
     };
 
-    tracing::debug!(agent_id = %id, http_port, target_url = %target_url, "Node reverse-proxying to Runtime loopback");
+    tracing::debug!(instance_id = %id, http_port, target_url = %target_url, "Node reverse-proxying to Runtime loopback");
 
     let client = runtime_http_client();
     let mut request = client.request(method.clone(), &target_url);
@@ -178,7 +180,7 @@ async fn proxy_agent(
             })
         }
         Err(e) => {
-            tracing::warn!(agent_id = %id, url = %target_url, error = %e, "Failed to proxy to Runtime loopback");
+            tracing::warn!(instance_id = %id, url = %target_url, error = %e, "Failed to proxy to Runtime loopback");
             (
                 StatusCode::BAD_GATEWAY,
                 [(
@@ -220,7 +222,7 @@ pub(crate) async fn authorize(
 ) -> Option<Response> {
     let Some(expected) = state.identity.read().await.node_token.clone() else {
         tracing::warn!(
-            agent_id = %id,
+            instance_id = %id,
             "Node rejected request: this node has not enrolled yet (no token)"
         );
         return Some(forbidden(id, "node has no enrollment token yet"));
@@ -232,7 +234,7 @@ pub(crate) async fn authorize(
         return None;
     }
     tracing::warn!(
-        agent_id = %id,
+        instance_id = %id,
         "Node rejected request: missing/invalid X-ACowork-Node-Token"
     );
     Some(forbidden(id, "invalid node token"))
