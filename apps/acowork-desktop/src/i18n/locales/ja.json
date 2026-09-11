@@ -709,6 +709,8 @@
     "contextMenu": {
       "addToChat": "チャットに追加",
       "preview": "プレビュー",
+      "injectContext": "コンテキストを注入",
+      "cancelInjectContext": "コンテキスト注入を解除",
       "newFile": "新規ファイル",
       "newFolder": "新規フォルダ",
       "copy": "コピー",

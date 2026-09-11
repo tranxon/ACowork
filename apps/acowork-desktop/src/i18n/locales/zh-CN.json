@@ -724,6 +724,8 @@
     "contextMenu": {
       "addToChat": "添加到对话",
       "preview": "预览",
+      "injectContext": "注入上下文",
+      "cancelInjectContext": "取消注入上下文",
       "newFile": "新建文件",
       "newFolder": "新建文件夹",
       "copy": "复制",

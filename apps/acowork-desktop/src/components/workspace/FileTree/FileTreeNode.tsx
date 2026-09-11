@@ -361,7 +361,7 @@ export const FileTreeNode = memo(function FileTreeNode({
         ) : (
           <Code size={14} />
         ),
-        label: isActivePromptFile ? "取消注入上下文" : "注入上下文",
+        label: isActivePromptFile ? t("workspace.contextMenu.cancelInjectContext") : t("workspace.contextMenu.injectContext"),
         onClick: handleTogglePromptFile,
       });
     }

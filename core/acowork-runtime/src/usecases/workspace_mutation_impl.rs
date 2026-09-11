@@ -390,6 +390,22 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
             new_entry["prompt_file"] = serde_json::json!(pf);
         }
 
+        // Auto-inject a root-level `AGENTS.md` as the workspace prompt
+        // file when the caller didn't specify one. AGENTS.md is the
+        // de-facto project-prompt standard, so this is the sensible
+        // default; users can still toggle it off from the file-tree
+        // "取消注入上下文" menu (PUT /workspaces/{id}/prompt-file with a
+        // null value). Defaults on create only — never on update/list —
+        // so re-adding an edited path honors an explicit choice.
+        //
+        // `.is_file()` (not `.exists()`) guards against a directory that
+        // happens to be named AGENTS.md. Case-insensitive filesystems
+        // (Windows/macOS) match `agents.md` for free.
+        let has_explicit_prompt = new_entry.get("prompt_file").is_some();
+        if !has_explicit_prompt && path_buf.join("AGENTS.md").is_file() {
+            new_entry["prompt_file"] = serde_json::json!("AGENTS.md");
+        }
+
         cfg.additional_dirs.push(new_entry.clone());
         self.save_config(&cfg)?;
         Ok(WorkspaceMutationResponse {
@@ -877,6 +893,100 @@ mod tests {
         // minimal and avoids serde round-trip ambiguity.
         assert!(entry.get("alias").is_none(), "alias should be absent when not supplied");
         assert!(entry.get("prompt_file").is_none(), "prompt_file should be absent when not supplied");
+    }
+
+    /// Creating a workspace whose root contains `AGENTS.md` (with no
+    /// explicit `prompt_file`) must auto-inject it as the prompt file.
+    #[tokio::test]
+    async fn create_workspace_auto_injects_root_agents_md() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        // A real workspace subdir holding a root-level AGENTS.md.
+        let ws_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&ws_dir).expect("create ws dir");
+        std::fs::write(ws_dir.join("AGENTS.md"), "# agents\nbe terse").expect("write AGENTS.md");
+
+        let resp = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(ws_dir.to_string_lossy().to_string()),
+                access: Some("read-write".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect("create_workspace succeeds");
+
+        let entry = resp.entry.expect("entry returned on create");
+        assert_eq!(
+            entry.get("prompt_file").and_then(|v| v.as_str()),
+            Some("AGENTS.md"),
+            "root AGENTS.md must be auto-injected as prompt_file",
+        );
+    }
+
+    /// An explicit `prompt_file` from the caller must win over the
+    /// AGENTS.md default (including an explicit choice of a different
+    /// file, e.g. CLAUDE.md).
+    #[tokio::test]
+    async fn create_workspace_explicit_prompt_file_wins_over_agents_md() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let ws_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&ws_dir).expect("create ws dir");
+        std::fs::write(ws_dir.join("AGENTS.md"), "# agents").expect("write AGENTS.md");
+        std::fs::write(ws_dir.join("CLAUDE.md"), "# claude").expect("write CLAUDE.md");
+
+        let resp = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(ws_dir.to_string_lossy().to_string()),
+                access: Some("read-write".to_string()),
+                alias: None,
+                prompt_file: Some("CLAUDE.md".to_string()),
+                last_active: None,
+            })
+            .await
+            .expect("create_workspace succeeds");
+
+        let entry = resp.entry.expect("entry returned on create");
+        assert_eq!(
+            entry.get("prompt_file").and_then(|v| v.as_str()),
+            Some("CLAUDE.md"),
+            "explicit prompt_file must not be clobbered by the AGENTS.md default",
+        );
+    }
+
+    /// A directory named `AGENTS.md` must NOT trigger auto-injection
+    /// (`.is_file()` guard).
+    #[tokio::test]
+    async fn create_workspace_ignores_agents_md_directory() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let ws_dir = dir.path().join("repo");
+        std::fs::create_dir_all(ws_dir.join("AGENTS.md")).expect("create AGENTS.md dir");
+
+        let resp = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(ws_dir.to_string_lossy().to_string()),
+                access: Some("read-write".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect("create_workspace succeeds");
+
+        let entry = resp.entry.expect("entry returned on create");
+        assert!(
+            entry.get("prompt_file").is_none(),
+            "a directory named AGENTS.md must not be injected",
+        );
     }
 
     /// The frontend's `WorkspaceManager` ships `{path, alias, access}`
