@@ -94,15 +94,15 @@ function OutlineProjectsIcon({ className }: { className?: string; isDark?: boole
     >
       {/* Board frame */}
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      {/* Row 1: short bar */}
-      <circle cx="6.5" cy="8.5" r="0.9" />
-      <line x1="8.5" y1="8.5" x2="14" y2="8.5" />
+      {/* Row 1: medium bar */}
+      <circle cx="6.5" cy="8.5" r="0.6" />
+      <line x1="10.5" y1="8.5" x2="15" y2="8.5" />
       {/* Row 2: longest bar (offset right) */}
-      <circle cx="6.5" cy="12" r="0.9" />
-      <line x1="8.5" y1="12" x2="17" y2="12" />
-      {/* Row 3: medium bar */}
-      <circle cx="6.5" cy="15.5" r="0.9" />
-      <line x1="8.5" y1="15.5" x2="12" y2="15.5" />
+      <circle cx="6.5" cy="12" r="0.6" />
+      <line x1="10.5" y1="12" x2="18" y2="12" />
+      {/* Row 3: shortest bar */}
+      <circle cx="6.5" cy="15.5" r="0.6" />
+      <line x1="10.5" y1="15.5" x2="13" y2="15.5" />
     </svg>
   );
 }
@@ -125,15 +125,15 @@ function FilledProjectsIcon({ className }: { className?: string }) {
       {/* Solid board frame — same stroke width as outline version, so the outer
           visual bounds match exactly (the 0.875 stroke half-extends the fill). */}
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      {/* Row 1: short bar carved in white */}
-      <circle cx="6.5" cy="8.5" r="0.9" fill="white" stroke="white" />
-      <line x1="8.5" y1="8.5" x2="14" y2="8.5" stroke="white" />
+      {/* Row 1: medium bar carved in white */}
+      <circle cx="6.5" cy="8.5" r="0.6" fill="white" stroke="white" />
+      <line x1="10.5" y1="8.5" x2="15" y2="8.5" stroke="white" />
       {/* Row 2: longest bar carved in white (offset right) */}
-      <circle cx="6.5" cy="12" r="0.9" fill="white" stroke="white" />
-      <line x1="8.5" y1="12" x2="17" y2="12" stroke="white" />
-      {/* Row 3: medium bar carved in white */}
-      <circle cx="6.5" cy="15.5" r="0.9" fill="white" stroke="white" />
-      <line x1="8.5" y1="15.5" x2="12" y2="15.5" stroke="white" />
+      <circle cx="6.5" cy="12" r="0.6" fill="white" stroke="white" />
+      <line x1="10.5" y1="12" x2="18" y2="12" stroke="white" />
+      {/* Row 3: shortest bar carved in white */}
+      <circle cx="6.5" cy="15.5" r="0.6" fill="white" stroke="white" />
+      <line x1="10.5" y1="15.5" x2="13" y2="15.5" stroke="white" />
     </svg>
   );
 }
