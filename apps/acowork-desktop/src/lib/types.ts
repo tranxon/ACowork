@@ -1090,6 +1090,32 @@ export interface ApprovalApiResponse {
   status: string;
 }
 
+/**
+ * Retained blocking-event cleared (synthetic).
+ *
+ * The Runtime clears the MQTT retained slot for `ask_question` /
+ * `tool_approval_needed` by publishing a zero-byte payload with
+ * `retain=true`. The Tauri MQTT bridge decodes this into an
+ * `agent-event` of `type: "event_cleared"` so the chatStore can drop
+ * the corresponding pending card (timeout OR user-answered path).
+ *
+ * The MQTT retained slot holds at most ONE in-flight blocking event per
+ * session, so receiving `event_cleared` means "the currently-displayed
+ * card of this type is no longer pending" — we filter by `event_type`,
+ * not by `request_id`.
+ */
+export interface EventClearedEvent {
+  type: "event_cleared";
+  /** Session ID that owned the now-cleared blocking event. */
+  session_id: string;
+  /**
+   * The retained slot that was cleared.
+   * Today: `"ask_question"` or `"tool_approval_needed"`.
+   * Forward-compatible: unknown values are ignored by the chatStore.
+   */
+  event_type: string;
+}
+
 // ── Session types ─────────────────────────────────────────────────────
 
 /** Session summary from Gateway */
