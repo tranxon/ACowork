@@ -2121,7 +2121,7 @@ export function ChatPanel() {
         {/* Todo list box — above the message queue, same collapsible style.
           Shows current task list from todo_write tool calls. */}
         {todos.length > 0 && (
-          <div className="mx-7 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
               className="flex items-center w-full px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
@@ -2201,7 +2201,7 @@ export function ChatPanel() {
           flush against input, slightly narrower for layered depth */}
         {queuedMessages.length > 0 && (
           <div className={cn(
-            "mx-7 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            "mx-12 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
@@ -2244,7 +2244,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-xl border border-chat-input-border bg-right-panel shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
+        <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-right-panel shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
