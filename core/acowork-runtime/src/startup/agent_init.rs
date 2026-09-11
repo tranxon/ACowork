@@ -1135,7 +1135,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ── Step 6: Build context builder ───────────────────────────────
     // ADR-042: User identity is delivered via the `acowork/global/user_profile`
     // retained MQTT topic (subscribed as part of `acowork/global/#` in the
-    // bootstrap). Wait up to 5s for the first snapshot to arrive so the
+    // bootstrap). Wait briefly for the first snapshot to arrive so the
     // compact model's language hint is populated from the start; on
     // timeout (Gateway not running yet, no user created, etc.), fall
     // back to None — the compaction prompt's detection-based fallback
@@ -1144,22 +1144,32 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Some(cache) => {
             // ADR-039 bootstrap has already received the ConnAck; the
             // cached retained snapshot should be there. If not (race
-            // with broker publish), poll up to 5s.
+            // with broker publish), poll briefly.
+            //
+            // Break as soon as the retained envelope has landed —
+            // `active_user` being absent (no user created yet) is a
+            // definitive answer, not a race. Waiting on it cost ~5s
+            // per agent boot when the gateway had no active user.
+            // ponytail: 200ms ceiling covers broker-subscribe race; for
+            // late-arriving users, runtime.rs handles via
+            // `identity_update_tx` (mqtt/client.rs).
             let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_secs(5);
+            let timeout = std::time::Duration::from_millis(200);
             let identity = loop {
                 {
                     let cache_read = cache.read().await;
-                    if let Some(profile) = cache_read.active_user_profile() {
-                        break Some(crate::agent::session::session_manager::format_user_profile_context(
-                            &profile,
-                        ));
+                    if cache_read.user_profile.is_some() {
+                        break cache_read.active_user_profile().map(|profile| {
+                            crate::agent::session::session_manager::format_user_profile_context(
+                                &profile,
+                            )
+                        });
                     }
                 }
                 if start.elapsed() >= timeout {
                     break None;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             };
             tracing::info!(
                 has_identity = identity.is_some(),
