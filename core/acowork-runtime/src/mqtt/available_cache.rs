@@ -668,6 +668,37 @@ mod tests {
         assert!(cache.active_user_profile().is_none());
     }
 
+    /// Boot-time contract for `agent_init` identity wait (ADR-042).
+    /// After a retained `acowork/global/user_profile` with no active user
+    /// is received, `user_profile` is `Some` (envelope landed) while
+    /// `active_user_profile()` is `None` (no user). `agent_init` MUST
+    /// treat this as a definitive answer and not poll until timeout.
+    /// Regression test for the 5-second stall on first agent boot when
+    /// the gateway had no active user yet.
+    #[test]
+    fn test_boot_contract_empty_user_is_definitive() {
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/user_profile",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 3,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                    AvailableUsers {
+                        version: 3,
+                        active_user: None,
+                    },
+                )),
+            }),
+        );
+        // envelope has landed:
+        assert!(cache.user_profile.is_some(), "envelope should be cached");
+        // but there is no active user to format:
+        assert!(
+            cache.active_user_profile().is_none(),
+            "no active user means identity_context is None"
+        );
+    }
+
     #[test]
     fn test_active_user_profile_invalid_custom_json() {
         // Bad JSON in custom_json should not crash — fall back to empty map.
