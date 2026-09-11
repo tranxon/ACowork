@@ -8,13 +8,10 @@
 //! - Session metadata updates (title, workspace_id)
 //! - Think block utilities (extract, strip, build metadata)
 
-use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole, Provider};
+use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use crate::agent::context::build_context_usage_from_persisted;
-use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
-use crate::agent::loop_context::DistillTier;
 use crate::agent::session_state::SessionStatus;
 use crate::error::Result;
 
@@ -278,157 +275,28 @@ impl super::loop_::AgentLoop {
             let messages = self.session.history.messages();
             let tail_messages: Vec<ChatMessage> = messages[tail_start..].to_vec();
 
-            if tail_messages.is_empty() {
-                tracing::info!(
+            // Tail distillation removed (post-2026-09-10): the spawned
+            // LLM-call task existed solely to write a session-close
+            // distillation summary to Grafeo via
+            // `EpisodeDistiller::write_summary_to_provider`. Memory
+            // persistence is now delegated to the agent itself — see
+            // `prompts/system.md` for the prompt guidance asking the LLM
+            // to call `memory_store` when a task is complete.
+            //
+            // We keep the `tail_start`/`tail_messages` computation above
+            // for two reasons: (1) it documents the historical context
+            // window boundary (after the last compaction), (2) future
+            // agent-driven summarization may want to read this same
+            // boundary through history accessors. The LLM call, fallback
+            // chain, Grafeo write, and `DistillationFailed` user error
+            // path are all gone with the distillation task.
+            if !tail_messages.is_empty() {
+                tracing::debug!(
                     session_id = %session_id,
-                    is_compacted = self.session.is_compacted,
-                    "No tail messages to distill — skipping"
-                );
-            } else {
-                let memory_provider = self.core.memory_provider().cloned();
-                let emb_provider = self.core.embedding_provider.clone();
-                // ADR-027: clone ConversationSession so the spawned task can
-                // record raw Provider usage from the tail-distillation call
-                // into the session token accumulator — independent of the
-                // parent's `.close()` call below.
-                let conversation_clone = self.session.conversation.clone();
-                // ADR-028: clone the AgentCore so the spawned task can also
-                // feed the agent-scoped token counters for this distillation
-                // LLM call.
-                let core_clone = self.core.clone();
-                let distill_max_tokens = self.core.config.distill_max_tokens;
-                // Snapshot user identity (small text block) so the spawned
-                // task is independent of `self` and so the summary is written
-                // in the user's preferred language.
-                let identity_context = self.session.identity_context().map(String::from);
-                // Clone the chunk sender so the spawned task can surface an
-                // all-tiers-failed error to the frontend even though the
-                // session is closing (best-effort; the channel may already be
-                // gone by then, in which case the error stays in the logs).
-                let chunk_tx = self.session_core.chunk_tx.clone();
-
-                // ADR-056 call-phase fallback: resolve the FULL ordered list of
-                // distillation targets (GlobalDefault → ProviderCompact →
-                // CurrentChat) and pre-resolve each (provider, model) pair so
-                // the spawned task only owns Arc handles. Mirrors
-                // `compact_history_if_needed` — the previous single-target
-                // attempt silently dropped the tail memory when the provider
-                // was down.
-                let resolved_targets: Vec<(Arc<dyn Provider>, String, DistillTier)> = self
-                    .resolve_distill_targets()
-                    .into_iter()
-                    .map(|t| self.distill_provider(&t))
-                    .collect();
-
-                tracing::info!(
-                    session_id = %session_id,
-                    tail_start,
                     tail_message_count = tail_messages.len(),
                     is_compacted = self.session.is_compacted,
-                    fallback_targets = resolved_targets.len().saturating_sub(1),
-                    "Spawning tail distillation for session close (with call-phase fallback chain)"
+                    "Session close: tail range computed but no LLM distillation spawned (memory persistence delegated to agent via memory_store)"
                 );
-
-                // Spawn tail distillation (best-effort, non-blocking)
-                tokio::spawn(async move {
-                    let mut last_err: Option<crate::error::RuntimeError> = None;
-                    for (compact_provider, model_name, tier) in &resolved_targets {
-                        match crate::episode_distill::EpisodeDistiller::compact_messages(
-                            &tail_messages,
-                            compact_provider.as_ref(),
-                            model_name,
-                            distill_max_tokens,
-                            identity_context.as_deref(),
-                            // ADR-063 §3.7.5: read through the Arc<RwLock>
-                            // accessor so a Debug panel L2 reload on the
-                            // canonical AgentCore is visible to every clone
-                            // held by a running session (this `core_clone`
-                            // shares the inner Arc with the canonical one in
-                            // SessionManager — see `AgentCore::compaction_prompt`
-                            // doc and the `Clone for AgentCore` impl).
-                            core_clone.compaction_prompt().as_deref(),
-                        )
-                        .await
-                        {
-                            Ok((summary, usage)) => {
-                                // ADR-027: record raw Provider usage from tail
-                                // distillation into session token accumulator.
-                                if let Some(ref conv) = conversation_clone {
-                                    conv.accumulate_llm_usage(&usage);
-                                }
-                                // ADR-028: also feed the agent-scoped counters
-                                // so the agent-total line in Results Panel
-                                // accounts for this distillation call.
-                                core_clone.accumulate_llm_usage(&usage);
-                                if let Err(e) = crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
-                                    &summary,
-                                    &session_id,
-                                    &memory_provider,
-                                    emb_provider.as_deref(),
-                                )
-                                .await
-                                {
-                                    // Write failure is infrastructure-level:
-                                    // log it — the summary itself passed the
-                                    // quality gate, so no user-facing error.
-                                    tracing::error!(
-                                        session_id = %session_id,
-                                        error = %e,
-                                        "Tail distillation: failed to write summary to provider"
-                                    );
-                                }
-                                tracing::info!(
-                                    session_id = %session_id,
-                                    summary_len = summary.len(),
-                                    tier = ?tier,
-                                    "Tail distillation completed for session close"
-                                );
-                                last_err = None;
-                                break;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    tier = ?tier,
-                                    error = %e,
-                                    "Tail distillation LLM call failed, trying next tier"
-                                );
-                                // LowQuality is a model-capability problem —
-                                // stepping down the chain only gets
-                                // cheaper/weaker, so discard instead of retry.
-                                let non_retryable = matches!(
-                                    &e,
-                                    crate::error::RuntimeError::Summary(se) if !se.is_retryable()
-                                );
-                                last_err = Some(e);
-                                if non_retryable {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // P3: all fallback tiers failed → notify the user.
-                    if let Some(err) = last_err {
-                        tracing::error!(
-                            session_id = %session_id,
-                            error = %err,
-                            "Tail distillation failed for session close (all tiers)"
-                        );
-                        if let Some(tx) = chunk_tx.as_ref() {
-                            let _ = tx.try_send(SessionChunkEvent {
-                                session_id: session_id.clone(),
-                                event: ChunkEvent::Error {
-                                    user_message: "Session memory distillation failed. The conversation is saved, but its summary memory was not written."
-                                        .to_string(),
-                                    detail: err.to_string(),
-                                    error_type: "DistillationFailed".to_string(),
-                                    message_id: format!("tail-distill-{session_id}"),
-                                },
-                            });
-                        }
-                    }
-                });
             }
 
             // Close the conversation writer

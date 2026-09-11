@@ -76,8 +76,8 @@ function FilledDocsIcon({ className }: { className?: string }) {
 }
 
 /**
- * Outline Kanban-board icon — the classic project-management visual:
- * an outer frame containing three columns of varying heights (Todo / Doing / Done).
+ * Outline Gantt-style icon — a board frame with three rows of a leading dot
+ * plus a horizontal bar of varying length, evoking a task timeline.
  * `isDark` is accepted for API compatibility with the call site but the outline
  * variant looks identical in both themes (stroke uses currentColor).
  */
@@ -94,16 +94,21 @@ function OutlineProjectsIcon({ className }: { className?: string; isDark?: boole
     >
       {/* Board frame */}
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      {/* Three column cards of different heights */}
-      <line x1="8"  y1="8"  x2="8"  y2="14" />
-      <line x1="12" y1="8"  x2="12" y2="17" />
-      <line x1="16" y1="8"  x2="16" y2="12" />
+      {/* Row 1: short bar */}
+      <circle cx="6.5" cy="8.5" r="0.9" />
+      <line x1="8.5" y1="8.5" x2="14" y2="8.5" />
+      {/* Row 2: longest bar (offset right) */}
+      <circle cx="6.5" cy="12" r="0.9" />
+      <line x1="8.5" y1="12" x2="17" y2="12" />
+      {/* Row 3: medium bar */}
+      <circle cx="6.5" cy="15.5" r="0.9" />
+      <line x1="8.5" y1="15.5" x2="12" y2="15.5" />
     </svg>
   );
 }
 
 /**
- * Filled Kanban-board icon — solid filled board with white columns "carved" out,
+ * Filled Gantt-style icon — solid filled board with white dots + bars "carved" out,
  * matching the FilledDocsIcon style (solid currentColor shape + white inner strokes).
  */
 function FilledProjectsIcon({ className }: { className?: string }) {
@@ -120,10 +125,15 @@ function FilledProjectsIcon({ className }: { className?: string }) {
       {/* Solid board frame — same stroke width as outline version, so the outer
           visual bounds match exactly (the 0.875 stroke half-extends the fill). */}
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      {/* Three column cards carved out in white, varying heights (Todo / Doing / Done) */}
-      <line x1="8"  y1="8"  x2="8"  y2="14" stroke="white" />
-      <line x1="12" y1="8"  x2="12" y2="17" stroke="white" />
-      <line x1="16" y1="8"  x2="16" y2="12" stroke="white" />
+      {/* Row 1: short bar carved in white */}
+      <circle cx="6.5" cy="8.5" r="0.9" fill="white" stroke="white" />
+      <line x1="8.5" y1="8.5" x2="14" y2="8.5" stroke="white" />
+      {/* Row 2: longest bar carved in white (offset right) */}
+      <circle cx="6.5" cy="12" r="0.9" fill="white" stroke="white" />
+      <line x1="8.5" y1="12" x2="17" y2="12" stroke="white" />
+      {/* Row 3: medium bar carved in white */}
+      <circle cx="6.5" cy="15.5" r="0.9" fill="white" stroke="white" />
+      <line x1="8.5" y1="15.5" x2="12" y2="15.5" stroke="white" />
     </svg>
   );
 }
