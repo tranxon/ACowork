@@ -710,6 +710,8 @@
     "contextMenu": {
       "addToChat": "채팅에 추가",
       "preview": "미리보기",
+      "injectContext": "컨텍스트 주입",
+      "cancelInjectContext": "컨텍스트 주입 해제",
       "newFile": "새 파일",
       "newFolder": "새 폴더",
       "copy": "복사",

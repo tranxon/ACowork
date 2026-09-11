@@ -356,6 +356,8 @@
     "contextMenu": {
       "addToChat": "Add to Chat",
       "preview": "Preview",
+      "injectContext": "Inject Context",
+      "cancelInjectContext": "Cancel Context Injection",
       "newFile": "New File",
       "newFolder": "New Folder",
       "copy": "Copy",

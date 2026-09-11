@@ -708,6 +708,8 @@
     "contextMenu": {
       "addToChat": "加入對話",
       "preview": "預覽",
+      "injectContext": "注入上下文",
+      "cancelInjectContext": "取消注入上下文",
       "newFile": "新增檔案",
       "newFolder": "新增資料夾",
       "copy": "複製",
