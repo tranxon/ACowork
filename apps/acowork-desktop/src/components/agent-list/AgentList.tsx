@@ -64,16 +64,6 @@ export function AgentList({ width }: AgentListProps) {
   }, [sessionStatesByAgent]);
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
-  // ADR-073: group instances by package. A package installed more than
-  // once (same or different nodes) shows an instance/node badge on each
-  // row so the user can tell the instances apart; singletons render the
-  // pre-multi-instance layout unchanged.
-  const packageCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const a of agentsList) counts.set(a.agent_id, (counts.get(a.agent_id) ?? 0) + 1);
-    return counts;
-  }, [agentsList]);
-
   // ADR-073 §4: view mode is decided automatically by `gatewayMode`. In
   // remote mode (multi-node Gateway) the sidebar groups agents by node and
   // shows a collapsible 1/3-height header per node; in local mode the
@@ -466,7 +456,6 @@ export function AgentList({ width }: AgentListProps) {
     // agent_id fallback); `agent.agent_id` is display-only.
     const id = instanceIdOf(agent);
     const sessionTitle = agentsMap[id]?.sessionTitle;
-    const multiInstance = (packageCounts.get(agent.agent_id) ?? 1) > 1;
 
     return (
       <div
@@ -537,23 +526,6 @@ export function AgentList({ width }: AgentListProps) {
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex items-center gap-1.5">
                 <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
-                {/* ADR-073: multi-instance badge — distinguishes this
-                    row's instance/location from sibling instances. Only
-                    shown in local mode; in remote mode the node
-                    grouping header already disambiguates by node. */}
-                {multiInstance && !isRemoteMode && (
-                  <span
-                    className={cn(
-                      "shrink-0 rounded px-1 py-px text-[10px] leading-none font-medium",
-                      selectedAgentId === id
-                        ? "bg-white/20 text-white"
-                        : "bg-nav-item-hover text-zinc-500 dark:text-zinc-400",
-                    )}
-                    title={`${t("agentList.node")}: ${agent.node_id ?? "?"}`}
-                  >
-                    {(agent.node_id ?? "?").slice(0, 10)}
-                  </span>
-                )}
               </div>
             </div>
             {/* Bottom row: current session title.
