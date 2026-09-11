@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  App icon source. Derived from assets/brand-mark.svg's icon tile
+  (yellow rounded square + "A" + C-notch dot), but the icon now fills
+  the entire 512x512 canvas so the rendered icon takes the maximum
+  possible area on every platform. Regenerate platform icons with:
+  (cd apps/acowork-desktop && npm run tauri icon ../../assets/app-icon.svg)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="ACowork">
+  <title>ACowork</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F7C948"/>
+      <stop offset="100%" stop-color="#F0A92E"/>
+    </linearGradient>
+    <!-- Bite-mask: white rect reveals the dot; small black circle carves the C-notch. -->
+    <mask id="bite" maskUnits="userSpaceOnUse" x="158" y="232" width="244" height="244">
+      <rect x="158" y="232" width="244" height="244" fill="white"/>
+      <circle cx="293" cy="329" r="18" fill="black"/>
+    </mask>
+  </defs>
+  <!-- Yellow rounded square: x=0,y=0,w=512,h=512 so the icon fills the canvas edge-to-edge.
+       rx=122 keeps the same rounded-square proportion (20/84 in the brand-mark). -->
+  <rect x="0" y="0" width="512" height="512" rx="122" ry="122" fill="url(#bg)"/>
+  <!-- "A": two strokes that span ~58% of the icon height, vertically centered. -->
+  <path d="M110 402 L256 110 L402 402"
+        fill="none"
+        stroke="#282828"
+        stroke-width="70"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <!-- Dot with C-notch from the bite mask, sitting below the A's apex. -->
+  <circle cx="256" cy="329" r="52" fill="#282828" mask="url(#bite)"/>
+</svg>
