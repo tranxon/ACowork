@@ -157,7 +157,36 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         // Try to decode as DataEnvelope protobuf
         let envelope = match DataEnvelope::decode(&msg.payload[..]) {
             Ok(e) => e,
-            Err(_) => return, // Not protobuf — ignore
+            Err(_) => {
+                // Empty payload on a `…/sessions/{sid}/messages/{event_type}`
+                // topic = the Runtime cleared a retained blocking event
+                // (ask_question / tool_approval_needed) by publishing a
+                // zero-byte message with `retain=true`. The broker
+                // re-delivers it to subscribers, but DataEnvelope decoding
+                // fails on empty bytes — so the chatStore would never learn
+                // the card should disappear. Translate into a synthetic
+                // `event_cleared` agent-event so the UI can drop it.
+                // Reference: ChunkEvent::ClearRetainedEvent in
+                // core/acowork-runtime/src/agent/loop_.rs and
+                // MqttChunkPublisher::clear_retained_event in
+                // core/acowork-runtime/src/mqtt/client.rs.
+                if msg.payload.is_empty()
+                    && let Some((sid, event_type)) = parse_retained_event_topic(&msg.topic)
+                {
+                    let instance_id =
+                        extract_instance_id_from_topic(&msg.topic).unwrap_or_default();
+                    let _ = app_handle.emit(
+                        "agent-event",
+                        serde_json::json!({
+                            "type": "event_cleared",
+                            "instance_id": instance_id,
+                            "session_id": sid,
+                            "event_type": event_type,
+                        }),
+                    );
+                }
+                return; // Not protobuf — ignore
+            }
         };
 
         // ADR-073: the topic path variable under `acowork/agents/` is the
@@ -1295,6 +1324,32 @@ fn base64_encode(data: &[u8]) -> String {
         result.push(if chunk.len() > 2 { CHARS[(triple & 0x3f) as usize] } else { b'=' } as char);
     }
     result
+}
+
+/// Parse a session-scoped blocking-event topic.
+///
+/// Recognised shape:
+///   `acowork/agents/{instance_id}/sessions/{sid}/messages/{event_type}`
+///
+/// Returns `(session_id, event_type)` for topics matching this shape, or
+/// `None` otherwise. The Runtime only uses this slot for retained
+/// blocking events (`ask_question`, `tool_approval_needed`); a zero-byte
+/// payload on this topic means "clear the previously retained event".
+fn parse_retained_event_topic(topic: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = topic.split('/').collect();
+    if parts.len() >= 7
+        && parts[0] == "acowork"
+        && parts[1] == "agents"
+        && parts[3] == "sessions"
+        && parts[5] == "messages"
+    {
+        let sid = parts[4];
+        let event_type = parts[6];
+        if !sid.is_empty() && !event_type.is_empty() {
+            return Some((sid.to_string(), event_type.to_string()));
+        }
+    }
+    None
 }
 
 /// Extract the INSTANCE identity segment from a session-scoped MQTT topic.

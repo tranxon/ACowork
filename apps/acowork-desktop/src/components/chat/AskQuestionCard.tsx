@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { MessageCircleQuestion } from "lucide-react";
 import type { AskQuestionEvent } from "../../lib/types";
 import { StyledTextarea } from "../common/StyledInput";
 import { useTranslation } from "../../i18n/useTranslation";
+import { useChatStore } from "../../stores/chatStore";
 
 interface AskQuestionCardProps {
   event: AskQuestionEvent;
@@ -20,36 +21,35 @@ interface AskQuestionCardProps {
  * - Last option is always "Other" which reveals a textarea for free-text input
  * - Submit button uses accent color, inline with the card (no modal/dialog)
  * - Disabled after submission
- * - Shows live countdown badge sourced from `event.timeout_seconds` (server-derived
- *   from `approval_timeout_secs`). Mirrors the approval flow in ExploreBlock.
+ * - Countdown badge is driven by the runtime's 5s heartbeat (re-uses the
+ *   tool-progress channel keyed by `request_id`) so it cannot drift out
+ *   of sync with the backend's 5-minute wall-clock timeout.
  */
-export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
+export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQuestionCardProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<string | null>(null);
   const [otherText, setOtherText] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
   // Countdown timer for question wait timeout.
-  // Mirrors the implementation in ExploreBlock.tsx for tool approvals.
-  const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
-  useEffect(() => {
-    const total = event.timeout_seconds;
-    if (!total || total <= 0) {
-      setRemainingSecs(null);
-      return;
-    }
-    setRemainingSecs(total);
-    const interval = setInterval(() => {
-      setRemainingSecs((prev) => {
-        if (prev === null || prev <= 1) {
-          clearInterval(interval);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [event.timeout_seconds]);
+  // Source of truth = backend wall-clock. The runtime emits
+  // ChunkEvent::ToolProgress (reused per ADR-045) every 5s while waiting
+  // for an answer, keyed by `request_id`. We read the same
+  // `toolProgress[request_id]` map ExploreBlock uses for tool execution
+  // progress, so the on-screen countdown stays in lock-step with the
+  // backend's 5-minute timeout even when the renderer throttles timers.
+  // Falls back to `event.timeout_seconds` for the first 5s (before the
+  // first heartbeat lands) and to "expired" once elapsed >= timeout.
+  const progress = useChatStore((s) =>
+    agentId && sessionId
+      ? s.agentStates[agentId]?.sessionStates[sessionId]?.toolProgress?.[event.request_id]
+      : undefined,
+  );
+  const fallbackMs = (event.timeout_seconds ?? 0) * 1000;
+  const elapsedMs = progress?.elapsedMs ?? 0;
+  const timeoutMs = progress?.timeoutMs ?? fallbackMs;
+  const remainingSecs: number | null =
+    !timeoutMs ? null : Math.max(0, Math.ceil((timeoutMs - elapsedMs) / 1000));
 
   const isOtherSelected = selected === "__other__";
   const canSubmit = !submitted && (selected !== null) && (!isOtherSelected || otherText.trim().length > 0);

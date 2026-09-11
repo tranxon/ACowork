@@ -796,6 +796,11 @@ export function AgentSetupTab() {
               <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
                 {agentName}
               </p>
+              {selectedAgent.role && (
+                <p className="mt-1.5 truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                  {selectedAgent.role}
+                </p>
+              )}
               <p className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
                 {selectedAgentId}
               </p>

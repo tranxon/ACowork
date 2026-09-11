@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, AttachedItem } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -2428,6 +2428,7 @@ const CONTENT_EVENT_TYPES = new Set([
   "session_config", "session_state",
   "stream_delta", "record_complete",
   "tool_progress",
+  "event_cleared",
 ]);
 
 
@@ -2772,6 +2773,34 @@ export function handleMessageEvent(
           pendingQuestions: [...current, data as unknown as AskQuestionEvent],
           });
         });
+      }
+      break;
+
+    // Synthetic event from the Tauri MQTT bridge: the Runtime cleared a
+    // retained blocking-event slot (ask_question / tool_approval_needed)
+    // by publishing a zero-byte payload with retain=true. The MQTT broker
+    // re-delivers the empty payload to subscribers, the bridge cannot
+    // decode it as DataEnvelope, so it forwards it as `event_cleared`.
+    // We drop every card of the cleared event_type because the retained
+    // slot holds at most one in-flight blocking event per session —
+    // the timeout path AND the user-answered path both arrive here, so
+    // a stale card always disappears on its own.
+    // ponytail: clears ALL cards of the event_type, not a specific
+    // request_id — the ClearRetainedEvent carries no correlation id.
+    // Correct while the loop is strictly sequential (one in-flight
+    // blocking event per session); upgrade path: carry request_id in the
+    // clear event when parallel blocking events are ever supported.
+    case "event_cleared":
+      if (sid) {
+        const clearedType = (data as unknown as EventClearedEvent).event_type;
+        if (clearedType === "ask_question") {
+          set((state) => updateSessionState(state, agentId, sid, { pendingQuestions: [] }));
+        } else if (clearedType === "tool_approval_needed") {
+          set((state) => updateSessionState(state, agentId, sid, { pendingApproval: {} }));
+        } else {
+          // Unknown event_type — forward-compatible no-op.
+          log.debug("[ChatStore] event_cleared with unknown event_type:", clearedType);
+        }
       }
       break;
 

@@ -1231,3 +1231,120 @@ describe("ADR-009 §V-Q: agent_meta must not clobber the server-resolved avatar"
     useAgentStore.setState({ agents: {} } as never);
   });
 });
+
+// Regression: when ask_user_question times out (or any path clears the
+// retained MQTT slot), the Runtime publishes a zero-byte payload with
+// retain=true. The Tauri MQTT bridge forwards that as a synthetic
+// `event_cleared` agent-event. Without this handler the pending card
+// stays on screen until the entire turn finishes (idle transition).
+describe("event_cleared drops pending blocking cards", () => {
+  beforeEach(() => clearTestState());
+  afterEach(() => clearTestState());
+
+  it("clears pendingQuestions when an ask_question retained slot is cleared", () => {
+    // Seed: a session with one pending ask_question card.
+    seedSessionState([]);
+    useChatStore.setState((s) => ({
+      ...s,
+      agentStates: {
+        ...s.agentStates,
+        [AGENT]: {
+          ...s.agentStates[AGENT]!,
+          sessionStates: {
+            ...s.agentStates[AGENT]!.sessionStates,
+            [SESSION]: {
+              ...s.agentStates[AGENT]!.sessionStates[SESSION]!,
+              pendingQuestions: [
+                {
+                  type: "ask_question",
+                  request_id: "q-1",
+                  agent_id: AGENT,
+                  question: "Pick one",
+                  options: [{ label: "A" }, { label: "B" }],
+                  session_id: SESSION,
+                } as never,
+              ],
+            },
+          },
+        },
+      },
+    }));
+
+    handleMessageEvent(
+      {
+        type: "event_cleared",
+        session_id: SESSION,
+        event_type: "ask_question",
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.pendingQuestions).toEqual([]);
+  });
+
+  it("clears pendingApproval when a tool_approval_needed retained slot is cleared", () => {
+    seedSessionState([]);
+    useChatStore.setState((s) => ({
+      ...s,
+      agentStates: {
+        ...s.agentStates,
+        [AGENT]: {
+          ...s.agentStates[AGENT]!,
+          sessionStates: {
+            ...s.agentStates[AGENT]!.sessionStates,
+            [SESSION]: {
+              ...s.agentStates[AGENT]!.sessionStates[SESSION]!,
+              pendingApproval: {
+                "tc-1": {
+                  type: "tool_approval_needed",
+                  request_id: "r-1",
+                  tool_name: "shell",
+                  risk_level: "High",
+                  params: {},
+                  params_summary: "",
+                } as never,
+              },
+            },
+          },
+        },
+      },
+    }));
+
+    handleMessageEvent(
+      {
+        type: "event_cleared",
+        session_id: SESSION,
+        event_type: "tool_approval_needed",
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.pendingApproval).toEqual({});
+  });
+
+  it("ignores unknown event_type values (forward-compatible)", () => {
+    seedSessionState([], { total: 1 });
+    const before = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!.messages;
+
+    handleMessageEvent(
+      {
+        type: "event_cleared",
+        session_id: SESSION,
+        event_type: "future_event_type",
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    // No panic, no spurious state change to messages.
+    const after = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!.messages;
+    expect(after).toBe(before);
+  });
+});

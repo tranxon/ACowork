@@ -79,8 +79,68 @@ impl AgentLoop {
             request_id: request_id.clone(),
         });
 
+        // Heartbeat: mirror ADR-045's tool progress pattern so the
+        // frontend's countdown is driven by the backend's wall-clock,
+        // not by a local setInterval (which can drift under throttling
+        // and let the UI show 1-3 minutes while the backend has already
+        // fired the 5-minute timeout). We reuse `ChunkEvent::ToolProgress`
+        // — ask_user_question is a tool that asks the user to do work,
+        // and the data shape (correlation id + elapsed + timeout) is
+        // identical. The frontend reads the entry via
+        // `toolProgress[event.request_id]`.
+        let hb_session_id = self.session_core.session_id.clone();
+        let hb_chunk_tx = self.session_core.chunk_tx.clone();
+        let hb_request_id = request_id.clone();
+        let hb_timeout_ms = (effective_timeout_secs as u64) * 1000;
+        let heartbeat_task = if let (Some(sid), Some(ct)) = (hb_session_id, hb_chunk_tx) {
+            let heartbeat_interval =
+                acowork_core::timeout_config::constants::TOOL_HEARTBEAT;
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(heartbeat_interval);
+                // Skip the first (immediate) tick so the first heartbeat
+                // lands at 5s, not 0s — matches loop_tools.rs.
+                interval.tick().await;
+                let q_start = std::time::Instant::now();
+                loop {
+                    interval.tick().await;
+                    let elapsed = q_start.elapsed();
+                    let event = crate::agent::loop_::ChunkEvent::ToolProgress {
+                        session_id: sid.clone(),
+                        // Wire-compatible with ToolProgressPayload. The
+                        // semantic key here is the ask_user_question
+                        // request_id; the field name reflects the
+                        // generic "correlation id" intent.
+                        tool_call_id: hb_request_id.clone(),
+                        elapsed_ms: elapsed.as_millis() as u64,
+                        timeout_ms: hb_timeout_ms,
+                    };
+                    if ct
+                        .try_send(crate::agent::loop_::SessionChunkEvent {
+                            session_id: sid.clone(),
+                            event,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if elapsed.as_millis() as u64 >= hb_timeout_ms {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         // Wait for the user's answer (timeout driven by agent config)
         let answer = self.await_question_answer(&request_id).await;
+
+        // Abort the heartbeat — answer received (or timeout/cancel).
+        // Non-blocking; the task will be dropped at the next await point
+        // (which is the interval.tick().await). Matches loop_tools.rs.
+        if let Some(ht) = heartbeat_task {
+            ht.abort();
+        }
 
         // Clear the retained `ask_question` message so a Desktop
         // reconnecting later does not see a stale question card.

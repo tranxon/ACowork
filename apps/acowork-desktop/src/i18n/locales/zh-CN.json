@@ -403,7 +403,7 @@
     "resetConfirm": "确定要重置 Agent 设置为默认值吗？包括名称、描述、提示词角色、头像图标、Shell 审批阈值和工具配置。",
     "noAgentSelected": "未选择 Agent",
     "chooseIcon": "选择图标",
-    "agentName": "Agent 名称",
+    "agentName": "Agent 名字",
     "maxOutputTokens": "最大输出 Token 数",
     "defaultModelLimit": "（默认模型限制）",
     "leaveEmptyDefault": "留空使用运行时默认值",
