@@ -114,6 +114,12 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     const [statusText, setStatusText] = useState("Starting Gateway...");
     const [timedOut, setTimedOut] = useState(false);
     const [retrying, setRetrying] = useState(false);
+    // Pre-filled with the persisted address so the user can edit a stale
+    // remote-gateway URL straight from the timeout view (the Settings
+    // page is unreachable until the Gateway connects).
+    const [gatewayUrlInput, setGatewayUrlInput] = useState(
+        () => useSettingsStore.getState().gatewayUrl,
+    );
     const [fadeIn, setFadeIn] = useState(false);
     const mountedRef = useRef(true);
     const startTimeRef = useRef(Date.now());
@@ -264,6 +270,14 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         setRetrying(true);
         setTimedOut(false);
         startTimeRef.current = Date.now();
+        // Remote mode: the timeout view lets the user edit the Gateway
+        // address. Persist + push to Rust before probing so this retry
+        // (and every later command) targets the new URL.
+        const currentUrl = useSettingsStore.getState().gatewayUrl;
+        const nextUrl = gatewayUrlInput.trim();
+        if (nextUrl && nextUrl !== currentUrl) {
+            useSettingsStore.getState().setGatewayUrl(nextUrl);
+        }
         if (gatewayMode === "local") {
             setStatusText("Retrying local Gateway...");
             await startLocalGateway();
@@ -291,10 +305,17 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                     const v = await checkBootstrapReady();
                     if (v && (v.phase === "READY" || v.phase === "DEGRADED")) { finish(); break; }
                 }
-                if (mountedRef.current && !useGatewayStore.getState().status) setTimedOut(true);
             }
         }
         setRetrying(false);
+        // A failed retry must return to the timeout view (with the
+        // editable address field) — otherwise the UI is stuck on the
+        // "Retrying..." spinner forever and the user can't correct the
+        // URL a second time.
+        if (!mountedRef.current) return;
+        if (useGatewayStore.getState().status !== "connected") {
+            setTimedOut(true);
+        }
     };
 
     return (
@@ -326,6 +347,26 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                             <p className="text-xs text-zinc-400 dark:text-zinc-500">
                                 Make sure the Gateway is running on port 19876
                             </p>
+                            {gatewayMode === "remote" && (
+                                <div className="mt-1 flex flex-col items-center gap-1.5">
+                                    <label
+                                        htmlFor="splash-gateway-url"
+                                        className="text-xs text-zinc-400 dark:text-zinc-500"
+                                    >
+                                        {t("splashScreen.gatewayAddress")}
+                                    </label>
+                                    <input
+                                        id="splash-gateway-url"
+                                        type="text"
+                                        value={gatewayUrlInput}
+                                        onChange={(e) => setGatewayUrlInput(e.target.value)}
+                                        spellCheck={false}
+                                        autoCapitalize="off"
+                                        autoCorrect="off"
+                                        className="w-80 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
+                                    />
+                                </div>
+                            )}
                             <button
                                 onClick={handleRetry}
                                 disabled={retrying}

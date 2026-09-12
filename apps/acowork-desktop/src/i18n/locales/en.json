@@ -325,6 +325,7 @@
     "ready": "Ready",
     "retrying": "Retrying...",
     "retryConnection": "Retry Connection",
+    "gatewayAddress": "Gateway Address",
     "altLogo": "ACowork"
   },
   "appLayout": {

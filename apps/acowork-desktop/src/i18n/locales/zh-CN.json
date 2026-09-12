@@ -1161,6 +1161,7 @@
     "ready": "就绪",
     "retrying": "重试中...",
     "retryConnection": "重试连接",
+    "gatewayAddress": "网关地址",
     "altLogo": "ACowork"
   },
   "appLayout": {

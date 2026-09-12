@@ -1141,6 +1141,7 @@
     "ready": "준비됨",
     "retrying": "재시도 중...",
     "retryConnection": "연결 재시도",
+    "gatewayAddress": "게이트웨이 주소",
     "altLogo": "ACowork"
   },
   "appLayout": {

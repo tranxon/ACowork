@@ -1140,6 +1140,7 @@
     "ready": "準備完了",
     "retrying": "再試行中...",
     "retryConnection": "接続を再試行",
+    "gatewayAddress": "ゲートウェイアドレス",
     "altLogo": "ACowork"
   },
   "appLayout": {
