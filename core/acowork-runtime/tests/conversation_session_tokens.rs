@@ -429,6 +429,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         message_count: 7,
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None, // missing in legacy format
+        model_ratio: None,
         llm_call_counter: None,
         last_compaction_offset: None,
         corrupted: false,
@@ -590,6 +591,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None,
         llm_call_counter: None,
+        model_ratio: None,
         last_compaction_offset: Some(1234),
         corrupted: false,
     };
@@ -656,4 +658,40 @@ async fn clone_shares_last_compaction_offset_arc() {
         on_disk.last_compaction_offset.is_some(),
         "clone that outlives parent must persist the compaction offset"
     );
+}
+
+// ─── model_ratio → meta → resume round-trip ─────────────────────────────
+
+/// Validates the resume scene for the session token ratio: after a reliable
+/// LLM usage report the loop writes both the API-counted `last_input` (via
+/// `accumulate_llm_usage`) and the calibrated chars/token ratio (via
+/// `set_model_ratio`) into the meta file. On resume,
+/// `SessionManager::restore_anchor` reads exactly these two fields, so this
+/// test pins the disk round-trip for both.
+#[tokio::test]
+async fn model_ratio_round_trips_through_meta_and_resume() {
+    let dir = TempDir::new().unwrap();
+    let session_id = "ratio_roundtrip";
+
+    let session = make_session(&dir, session_id);
+    session.accumulate_llm_usage(&usage(1000, 200));
+    session.set_model_ratio(2.5);
+
+    session.close().await.expect("close");
+
+    let resumed = ConversationSession::resume(
+        dir.path(),
+        session_id,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .expect("resume must succeed");
+
+    // Both fields SessionManager::restore_anchor consumes at resume time.
+    assert_eq!(resumed.0.model_ratio(), Some(2.5));
+    assert_eq!(resumed.0.tokens().map(|t| t.last_input), Some(1000));
+
+    // Raw JSON on disk carries the field (serde round-trip honesty).
+    let meta_on_disk: SessionMeta =
+        read_session_meta(&dir.path().join("conversations"), session_id).expect("read meta");
+    assert_eq!(meta_on_disk.model_ratio, Some(2.5));
 }

@@ -1,8 +1,10 @@
 //! Token counting module
 //!
-//! Uses a unified model→ratio lookup table for token estimation:
-//! `tokens ≈ chars / ratio`. The ratio is calibrated from LLM API feedback
-//! after each request and persisted to disk for reuse across sessions.
+//! Session-scoped chars/token ratio for token estimation:
+//! `tokens ≈ chars / ratio`. The ratio is the last value calibrated from
+//! LLM API feedback (`ratio = input_chars / prompt_tokens`, same source)
+//! and is persisted in the session meta — not a per-model table, because
+//! multi-language input has no stable per-model constant.
 //!
 //! # Unified API
 //!
@@ -10,17 +12,15 @@
 //! Do NOT use `content.len() / 4` or any other ad-hoc heuristic —
 //! they cause the debug panel and status panel to show contradictory numbers.
 pub mod counter;
-pub mod ratio_store;
 
 pub use counter::{TokenCounter, estimate_image_tokens};
-pub use ratio_store::ModelRatioStore;
 
 /// The single unified entry point for token counting in ACowork.
 ///
-/// Uses model-aware ratio-based counting:
-/// - `tokens = ceil(chars / ratio)` where ratio is calibrated from API feedback
-/// - Uncalibrated models fall back to default ratio 3.5
-/// - Ratio is shared via ModelRatioStore for consistency across all counting paths
+/// Uses the default chars/token ratio 3.5 (no session context is available
+/// in this free function; session-scoped counting goes through
+/// `HistoryManager` / `TokenCounter`):
+/// - `tokens = ceil(chars / ratio)`
 ///
 /// # Why a unified API matters
 ///
@@ -31,6 +31,6 @@ pub use ratio_store::ModelRatioStore;
 ///
 /// Two different numbers displayed to the user for the same session is a UX bug.
 /// This function ensures **one source of truth** for all token estimates.
-pub fn count_text(text: &str, model: &str) -> usize {
-    TokenCounter::new().count_text(text, model) as usize
+pub fn count_text(text: &str) -> usize {
+    TokenCounter::new().count_text(text) as usize
 }

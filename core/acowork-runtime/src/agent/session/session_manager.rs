@@ -1099,6 +1099,19 @@ impl SessionManager {
                 outcome.last_injected_todo_call_id,
             );
 
+            // Restore the token-counting scene from meta: the last
+            // API-counted input (authoritative anchor for the resumed
+            // history) and the last calibrated chars/token ratio. Without
+            // this the JSONL replay re-estimates with the default ratio,
+            // which for CJK-heavy sessions is ~2x off the provider count
+            // (and previously got patched with the now-removed overhead
+            // compensation).
+            if let Some(conv) = session_state.conversation() {
+                let last_input = conv.tokens().map(|t| t.last_input);
+                let model_ratio = conv.model_ratio();
+                session_state.history_mut().restore_anchor(last_input, model_ratio);
+            }
+
             // NOTE: restore does not perform placeholder compression.
             //
             // History is loaded from JSONL as-is. Tool-result compression
@@ -4559,6 +4572,7 @@ mod tests {
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),
                 tokens: None,
                 llm_call_counter: None,
+                model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
             },

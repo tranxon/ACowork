@@ -556,7 +556,7 @@ impl ContextBuilder {
 
         // Estimate system prompt tokens for observability
         let system_msg = messages.last().unwrap();
-        let system_tokens = self.counter.count_message(system_msg, "", None);
+        let system_tokens = self.counter.count_message(system_msg, None);
         tracing::debug!(system_tokens, "System prompt token estimation");
 
         // 7. Conversation history — Block B (ADR-060 §5.3)
@@ -722,7 +722,7 @@ impl ContextBuilder {
                 });
                 // Safety margin: +10% overhead for role labels, formatting, and special tokens.
                 let approx_msg_tokens =
-                    (crate::token::count_text(&combined, &model) as f64 * 1.1).ceil() as u64;
+                    (crate::token::count_text(&combined) as f64 * 1.1).ceil() as u64;
                 if (approx_msg_tokens + mt as u64) > context_window {
                     let safe_max =
                         (context_window.saturating_sub(approx_msg_tokens)).max(256) as u32;

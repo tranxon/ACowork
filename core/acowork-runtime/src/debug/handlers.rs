@@ -456,34 +456,25 @@ pub async fn handle_patch_context(
         })
         .collect::<Result<_, _>>()?;
 
-    // Use the model stored by capture_context_snapshot for
-    // model-aware token counting via the unified API.
-    // Clone before get_mut() to avoid borrow conflict.
-    let model_owned = ctrl.current_model.clone().unwrap_or_default();
-    let model: &str = &model_owned;
     if let Some(snap) = ctrl.context_snapshots.get_mut(&current_iter) {
         for (key, patch) in &resolved {
             let sections = &mut snap.sections.sections;
             match patch {
                 crate::agent::context::ResolvedPatch::Text(content) => {
                     if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
-                        named.content = super::controller::SectionContent::new(
-                            content.clone(),
-                            model,
-                        );
+                        named.content = super::controller::SectionContent::new(content.clone());
                     }
                 }
                 crate::agent::context::ResolvedPatch::Json(v) => {
                     if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
-                        named.content =
-                            super::controller::SectionContent::new(v.to_string(), model);
+                        named.content = super::controller::SectionContent::new(v.to_string());
                     }
                 }
                 crate::agent::context::ResolvedPatch::ToolDefinitions(defs) => {
                     if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
                         let content = serde_json::to_string_pretty(defs)
                             .unwrap_or_else(|_| serde_json::to_string(defs).unwrap_or_default());
-                        named.content = super::controller::SectionContent::new(content, model);
+                        named.content = super::controller::SectionContent::new(content);
                     }
                 }
                 crate::agent::context::ResolvedPatch::Clear => match key.as_str() {
@@ -493,7 +484,6 @@ pub async fn handle_patch_context(
                         if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
                             named.content = super::controller::SectionContent::new(
                                 crate::agent::context::detect_environment_text().to_string(),
-                                model,
                             );
                         }
                     }
@@ -892,7 +882,6 @@ mod tests {
         use std::sync::Arc;
 
         let mut ctrl = fresh_controller();
-        ctrl.current_model = Some("test-model".to_string());
 
         let msgs: Arc<Vec<ChatMessage>> = Arc::new(vec![
             ChatMessage::user("hello debugger".to_string()),
@@ -1067,7 +1056,6 @@ mod tests {
     #[tokio::test]
     async fn patch_context_merges_into_pending_and_updates_snapshot() {
         let mut ctrl = fresh_controller();
-        ctrl.current_model = Some("test-model".to_string());
         ctrl.iteration = 4;
         // Pre-existing snapshot so we can verify the update path.
         ctrl.context_snapshots.insert(
@@ -1225,7 +1213,6 @@ mod tests {
         // semantic, still recognized by `resolve_patch`).
         let mut ctrl = fresh_controller();
         ctrl.iteration = 4;
-        ctrl.current_model = Some("test-model".to_string());
         let mut sections = seven_sections(("sys", 1));
         sections.sections.push(super::super::controller::NamedSection {
             key: "ambiguous_confirmation_hint".to_string(),

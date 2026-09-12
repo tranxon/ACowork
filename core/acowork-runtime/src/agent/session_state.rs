@@ -518,7 +518,6 @@ impl SessionState {
 
     /// Set the per-session model (ADR-012).
     pub fn set_model(&mut self, model: String) {
-        self.history.set_model_name(model.clone());
         self.model = Some(model);
     }
 
