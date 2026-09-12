@@ -612,6 +612,12 @@ pub(crate) async fn phase_b_init_session(
             // ADR-061: compression ratio threshold — None = built-in default
             // (0.90), no manifest/fallback chain, so no dirty-write here.
             c.compression_ratio_threshold = updated.compression_ratio_threshold;
+            // Per-agent session language override — None = fall through to
+            // the global `UserProfile.language` (no fallback chain, the
+            // empty setting IS the default behaviour). Live reload fires
+            // via `apply_runtime_config_override` + the next
+            // `update_user_identity` push.
+            c.session_language_override = updated.session_language.clone();
 
             // ── temperature: manifest.llm.temperature → 0.3 ─────────
             if updated.temperature.is_none() {
@@ -978,31 +984,38 @@ pub(crate) async fn phase_b_init_session(
     // mode): the watcher publishes `acowork/agents/{id}/status =
     // sleeping` before exiting, and in standalone mode there is no
     // Gateway to receive that payload.
-    let idle_watcher = if let Some(ref mqtt_client) = ctx.mqtt_client {
-        let effective = crate::agent::idle_watcher::resolve_idle_timeout_secs(
-            agent_cfg.idle_timeout_secs,
-            ctx.loaded.manifest.resources.idle_timeout_secs,
-        );
-        let session_activity: Arc<dyn crate::agent::idle_watcher::SessionActivityChecker> =
-            Arc::new(SessionActivityFromManager {
-                session_manager: Arc::clone(&session_manager_arc),
-            });
-        crate::agent::idle_watcher::spawn_idle_watcher(
-            crate::agent::idle_watcher::IdleWatcherConfig {
-                effective_timeout_secs: effective,
-                agent_id: ctx.loaded.manifest.agent_id.clone(),
-                instance_id: mqtt_client.instance_id().to_string(),
-                mqtt_client: mqtt_client.clone(),
-                session_activity,
-            },
-        )
-    } else {
-        tracing::info!(
-            agent_id = %ctx.loaded.manifest.agent_id,
-            "Idle watcher: no MQTT client (standalone mode), not spawned",
-        );
-        None
-    };
+    // ponytail: idle watcher disabled per user request — agent auto-sleep is turned off.
+    // The whole spawn block is commented out; `idle_watcher` stays None so no
+    // background task runs and the process can never self-terminate from idle.
+    // To re-enable: restore the original `if let Some(ref mqtt_client) = ...`
+    // block below (search `// ponytail: idle watcher disabled` to find this spot).
+    #[allow(unused_variables)]
+    let idle_watcher: Option<crate::agent::idle_watcher::IdleWatcherHandle> = None;
+    // let idle_watcher = if let Some(ref mqtt_client) = ctx.mqtt_client {
+    //     let effective = crate::agent::idle_watcher::resolve_idle_timeout_secs(
+    //         agent_cfg.idle_timeout_secs,
+    //         ctx.loaded.manifest.resources.idle_timeout_secs,
+    //     );
+    //     let session_activity: Arc<dyn crate::agent::idle_watcher::SessionActivityChecker> =
+    //         Arc::new(SessionActivityFromManager {
+    //             session_manager: Arc::clone(&session_manager_arc),
+    //         });
+    //     crate::agent::idle_watcher::spawn_idle_watcher(
+    //         crate::agent::idle_watcher::IdleWatcherConfig {
+    //             effective_timeout_secs: effective,
+    //             agent_id: ctx.loaded.manifest.agent_id.clone(),
+    //             instance_id: mqtt_client.instance_id().to_string(),
+    //             mqtt_client: mqtt_client.clone(),
+    //             session_activity,
+    //         },
+    //     )
+    // } else {
+    //     tracing::info!(
+    //         agent_id = %ctx.loaded.manifest.agent_id,
+    //         "Idle watcher: no MQTT client (standalone mode), not spawned",
+    //     );
+    //     None
+    // };
 
     Ok(SessionBootContext {
         session_manager: session_manager_arc,
@@ -1014,6 +1027,11 @@ pub(crate) async fn phase_b_init_session(
 /// Adapter: implements [`SessionActivityChecker`] over a shared
 /// `tokio::sync::Mutex<SessionManager>`. The lock is held only for
 /// the duration of the `any_session_active` call.
+///
+/// ponytail: marked `#[allow(dead_code)]` while the idle watcher is
+/// disabled — the only call site (spawn block above) is commented out.
+/// Remove this attribute when re-enabling the watcher.
+#[allow(dead_code)]
 pub struct SessionActivityFromManager {
     pub session_manager: Arc<tokio::sync::Mutex<SessionManager>>,
 }

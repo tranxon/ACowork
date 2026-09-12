@@ -446,7 +446,10 @@
     "compressionRatioThresholdDesc": "上下文壓縮後保留的比例。90% 表示壓縮到剩餘 10%。範圍 50%–95%，預設 90%。",
     "sectionAgentInfo": "Agent 資訊",
     "sectionSessionParams": "會話參數",
-    "sectionModelParams": "模型參數"
+    "sectionModelParams": "模型參數",
+    "sessionLanguage": "會話語言",
+    "sessionLanguageDesc": "覆寫全域使用者語言，鎖定此 Agent 的 LLM 會話語言偏好。僅影響 LLM 上下文，不改變桌面 UI 語言。",
+    "sessionLanguageFollow": "跟隨使用者設定"
   },
   "harness": {
     "tabProviders": "模型服務提供者",

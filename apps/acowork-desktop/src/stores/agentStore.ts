@@ -46,6 +46,12 @@ export interface AgentProfileSettings {
    *  (0.05–0.95, expressed as the SAVED share). 0.90 = compress until at
    *  most 10% remains (e.g. 200K → 20K). Undefined = use built-in default (0.90). */
   compressionRatioThreshold?: number;
+  /** Per-agent LLM session language override (BCP 47, e.g. `"zh-CN"`,
+   *  `"en"`). Undefined = follow the global `UserProfile.language`
+   *  (the existing default — Agent Setup panel dropdown default).
+   *  Empty string from the dropdown also means "no opinion" and is
+   *  cleared on save. */
+  sessionLanguage?: string | null;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {

@@ -179,6 +179,12 @@ pub struct RuntimeConfigOverrides {
     pub memory_forgetting_dormant_threshold: Option<f32>,
     /// Days a Dormant node is retained before archiving to the PurgeLog.
     pub memory_forgetting_archive_days: Option<u64>,
+    /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
+    /// When `Some(_)`, replaces `UserProfile.language` in the
+    /// identity-context text block sent to the LLM (see
+    /// `format_user_profile_context`). `None` = follow the global
+    /// `UserProfile.language` (the existing default behaviour).
+    pub session_language: Option<String>,
 }
 
 impl RuntimeConfigOverrides {
@@ -201,6 +207,7 @@ impl RuntimeConfigOverrides {
             && self.memory_forgetting_half_life_days.is_none()
             && self.memory_forgetting_dormant_threshold.is_none()
             && self.memory_forgetting_archive_days.is_none()
+            && self.session_language.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -256,6 +263,9 @@ impl RuntimeConfigOverrides {
         }
         if other.memory_forgetting_archive_days.is_some() {
             self.memory_forgetting_archive_days = other.memory_forgetting_archive_days;
+        }
+        if other.session_language.is_some() {
+            self.session_language = other.session_language.clone();
         }
     }
 
@@ -321,6 +331,9 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.memory_forgetting_archive_days {
             cfg.memory_forgetting_archive_days = Some(v);
         }
+        if let Some(ref v) = self.session_language {
+            cfg.session_language = Some(v.clone());
+        }
     }
 }
 
@@ -349,6 +362,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             memory_forgetting_half_life_days: cfg.memory_forgetting_half_life_days,
             memory_forgetting_dormant_threshold: cfg.memory_forgetting_dormant_threshold,
             memory_forgetting_archive_days: cfg.memory_forgetting_archive_days,
+            session_language: cfg.session_language.clone(),
         }
     }
 }
@@ -376,6 +390,13 @@ pub struct SessionManager {
     /// Runtime config overrides (accumulated from Gateway pushes) that
     /// must be re-applied to every newly created session.
     pub runtime_overrides: RuntimeConfigOverrides,
+    /// Last `UserProfile` received via `update_user_identity`. Cached
+    /// so that live-edits to `AgentConfig.session_language` can
+    /// re-format the identity-context block for in-flight sessions
+    /// (the formatted text is the only thing cached on every
+    /// `ContextBuilder`; without this we couldn't re-render it).
+    /// `None` until the first Gateway `UserProfileUpdate` push lands.
+    last_user_profile: Option<acowork_core::protocol::UserProfile>,
     /// MCP tool wrappers, built when MCP servers are connected.
     /// Merged into each new session's tools at creation time.
     mcp_tools: Option<Vec<Arc<dyn Tool>>>,
@@ -504,6 +525,7 @@ impl SessionManager {
             sessions: HashMap::new(),
             config,
             runtime_overrides: RuntimeConfigOverrides::default(),
+            last_user_profile: None,
             mcp_tools: None,
             dynamic_builtin_tools: Vec::new(),
             mcp_manager: McpManager::new(),
@@ -1599,6 +1621,11 @@ impl SessionManager {
         &mut self,
         overrides: &RuntimeConfigOverrides,
     ) -> Vec<String> {
+        // Capture pre-merge cached `session_language` so Step 0.5 can
+        // detect whether THIS push actually changed it (vs. touching
+        // unrelated fields like temperature). After `merge` the cache
+        // is already the new value, so we'd lose the diff signal.
+        let prev_session_language = self.runtime_overrides.session_language.clone();
         self.runtime_overrides.merge(overrides);
 
         // ── Step 0: rewrite the shared AgentCore template ─────────
@@ -1613,6 +1640,41 @@ impl SessionManager {
         // updates apply through the standard `apply_runtime_config`
         // hook.
         Arc::make_mut(&mut self.core).apply_runtime_config(overrides);
+
+        // ── Step 0.5: re-format identity_context for in-flight sessions ──
+        // `apply_runtime_config` above just stamped the new
+        // `session_language_override` onto AgentCore, but the cached
+        // `identity_context` string on `self.config` and on every
+        // running session's `ContextBuilder` is still formatted with
+        // the OLD language. Without this, an Agent Setup panel change
+        // to `session_language` would only affect future sessions.
+        // We only re-render when the override actually changed (skip
+        // the no-op path so we don't spam broadcasts on every other
+        // field PUT).
+        if overrides.session_language.is_some()
+            && overrides.session_language.as_ref() != prev_session_language.as_ref()
+        {
+            if let Some(profile) = self.last_user_profile.clone() {
+                let lang_override = self.core.session_language_override.as_deref();
+                let identity_context = format_user_profile_context(&profile, lang_override);
+                self.config.identity_context = Some(identity_context.clone());
+                for handle in self.sessions.values() {
+                    let _ = handle.send(SessionMessage::UpdateIdentityContext {
+                        identity_context: Some(identity_context.clone()),
+                    });
+                }
+                tracing::info!(
+                    new_lang = ?lang_override,
+                    session_count = self.sessions.len(),
+                    "Re-formatted identity_context after session_language override change"
+                );
+            } else {
+                tracing::debug!(
+                    "session_language override changed but no cached UserProfile yet; \
+                     next UserProfileUpdate push will pick it up via update_user_identity"
+                );
+            }
+        }
 
         // ── Step 1: broadcast to SessionTask inboxes (for tool definitions etc.) ──
         // The handler rebuilds `ContextBuilder.tool_definitions` so the
@@ -2331,7 +2393,21 @@ After installation, ask the user to re-enable the MCP server.",
     /// Formats the `UserProfile` into an `identity_context` text block
     /// and broadcasts it to all active sessions via their ContextBuilder.
     pub fn update_user_identity(&mut self, profile: Option<acowork_core::protocol::UserProfile>) {
-        let identity_context = profile.as_ref().map(format_user_profile_context);
+        // Cache the profile so a later `apply_runtime_config_override`
+        // (e.g. Agent Setup panel changed `session_language`) can
+        // re-format the identity_context for in-flight sessions
+        // without waiting for the next Gateway `UserProfileUpdate`
+        // push (which might never come).
+        self.last_user_profile = profile.clone();
+
+        // Per-agent session language override (AgentConfig.session_language);
+        // wins over `profile.language` so a user can pin one agent's
+        // session language independently from the global UI/identity
+        // language. `None` = fall through to `profile.language`.
+        let lang_override = self.core.session_language_override.as_deref();
+        let identity_context = profile
+            .as_ref()
+            .map(|p| format_user_profile_context(p, lang_override));
         tracing::info!(
             has_profile = profile.is_some(),
             ctx_len = identity_context.as_ref().map(|s| s.len()).unwrap_or(0),
@@ -3524,10 +3600,22 @@ fn handle_session_task_panic(
 ///   - Country: CN
 ///   - Occupation: Software Engineer
 ///   - Communication Style: concise
-pub(crate) fn format_user_profile_context(profile: &acowork_core::protocol::UserProfile) -> String {
+///
+/// `session_language_override` (per-agent `AgentConfig.session_language`)
+/// wins over `profile.language` when set — this is how the Agent Setup
+/// panel lets a user pin one agent's session language independently
+/// from the global `UserProfile.language`. `None` = fall through to the
+/// global setting (existing behaviour).
+pub(crate) fn format_user_profile_context(
+    profile: &acowork_core::protocol::UserProfile,
+    session_language_override: Option<&str>,
+) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("- Display Name: {}", profile.display_name));
-    lines.push(format!("- Language: {}", profile.language));
+    lines.push(format!(
+        "- Language: {}",
+        session_language_override.unwrap_or(&profile.language)
+    ));
     lines.push(format!("- Timezone: {}", profile.timezone));
     if let Some(ref city) = profile.city {
         lines.push(format!("- City: {}", city));
@@ -3596,6 +3684,122 @@ mod tests {
         // None preserves
         ov.merge(&RuntimeConfigOverrides::default());
         assert_eq!(ov.max_output_tokens, Some(200));
+    }
+
+    /// Verifies the diff-signal used by `apply_runtime_config_override`
+    /// Step 0.5 to detect an actual `session_language` change (vs. an
+    /// unrelated field push that happens to carry the same value).
+    /// Step 0.5 captures `self.runtime_overrides.session_language` BEFORE
+    /// `merge` runs, because `merge` already overwrites it with the new
+    /// value and the diff would be lost.
+    #[test]
+    fn test_session_language_diff_signal_pre_merge() {
+        // Initial push: None → Some("en")
+        let mut ov = RuntimeConfigOverrides::default();
+        let prev = ov.session_language.clone();
+        ov.merge(&RuntimeConfigOverrides {
+            session_language: Some("en".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(prev, None, "pre-merge cache should see None");
+        assert_eq!(ov.session_language.as_deref(), Some("en"));
+
+        // No-op push: Some("en") → Some("en") — diff signal says
+        // "no change", so Step 0.5 must skip re-formatting.
+        let prev = ov.session_language.clone();
+        ov.merge(&RuntimeConfigOverrides {
+            session_language: Some("en".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            prev.as_deref(),
+            Some("en"),
+            "pre-merge cache must preserve previous value for diff"
+        );
+        assert_eq!(prev, ov.session_language);
+
+        // Real change: Some("en") → Some("ja") — diff signal fires.
+        let prev = ov.session_language.clone();
+        ov.merge(&RuntimeConfigOverrides {
+            session_language: Some("ja".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(prev.as_deref(), Some("en"));
+        assert_eq!(ov.session_language.as_deref(), Some("ja"));
+        assert_ne!(prev, ov.session_language);
+    }
+
+    #[test]
+    fn test_overrides_session_language_round_trip() {
+        // Round-trip: AgentConfig.session_language -> RuntimeConfigOverrides
+        // -> AgentConfig (via the override → config mapper) preserves
+        // the value end to end. This is the boot-time + live-edit
+        // pipeline that the Agent Setup panel feeds.
+        let cfg = crate::agent_config::AgentConfig {
+            session_language: Some("zh-CN".to_string()),
+            ..Default::default()
+        };
+        let ov = RuntimeConfigOverrides::from(&cfg);
+        assert_eq!(ov.session_language.as_deref(), Some("zh-CN"));
+
+        let mut back = crate::agent_config::AgentConfig::default();
+        ov.apply_to(&mut back);
+        assert_eq!(back.session_language.as_deref(), Some("zh-CN"));
+
+        // Merge: Some replaces, None preserves.
+        let mut ov2 = RuntimeConfigOverrides {
+            session_language: Some("en".to_string()),
+            ..Default::default()
+        };
+        ov2.merge(&ov); // ov.session_language = Some("zh-CN") wins
+        assert_eq!(ov2.session_language.as_deref(), Some("zh-CN"));
+
+        let mut ov3 = RuntimeConfigOverrides {
+            session_language: Some("en".to_string()),
+            ..Default::default()
+        };
+        ov3.merge(&RuntimeConfigOverrides::default()); // None preserves
+        assert_eq!(ov3.session_language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn test_format_user_profile_session_language_override() {
+        // The per-agent `session_language` override (AgentConfig.session_language)
+        // must replace the global `UserProfile.language` line in the
+        // identity context sent to the LLM. With `None` the existing
+        // behaviour (use `profile.language`) is preserved.
+        let profile = acowork_core::protocol::UserProfile {
+            user_id: "test-user".to_string(),
+            display_name: "Alice".to_string(),
+            language: "zh-CN".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+            city: None,
+            country: None,
+            occupation: None,
+            avatar: None,
+            builtin_avatar: None,
+            communication_style: None,
+            custom: Default::default(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            is_active: true,
+        };
+
+        let ctx_no_override = format_user_profile_context(&profile, None);
+        assert!(
+            ctx_no_override.contains("- Language: zh-CN"),
+            "expected fallback to profile.language, got: {ctx_no_override}"
+        );
+
+        let ctx_with_override = format_user_profile_context(&profile, Some("en"));
+        assert!(
+            ctx_with_override.contains("- Language: en"),
+            "expected override to win, got: {ctx_with_override}"
+        );
+        assert!(
+            !ctx_with_override.contains("- Language: zh-CN"),
+            "override should fully replace the global language line, got: {ctx_with_override}"
+        );
     }
 
     // ── require_session_id ─────────────────────────────────────────────

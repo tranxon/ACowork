@@ -259,6 +259,22 @@ pub struct AgentConfig {
     /// PurgeLog (30-day recovery window). `None` = default (90).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_forgetting_archive_days: Option<u64>,
+
+    /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
+    ///
+    /// When `Some(_)`, this value replaces `UserProfile.language` in the
+    /// identity-context text block handed to the LLM (see
+    /// `SessionManager::format_user_profile_context`), so the agent
+    /// answers in the user's chosen language *for this agent only* —
+    /// independent of the global UI language set in
+    /// `Settings → Profile`. `None` = fall through to
+    /// `UserProfile.language` (the existing default behaviour).
+    ///
+    /// This only affects the language hint baked into the system prompt;
+    /// it does NOT change the desktop UI language (i18n stays bound to
+    /// `UserProfile.language`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_language: Option<String>,
 }
 
 /// Filename for per-agent config in the workspace config directory.

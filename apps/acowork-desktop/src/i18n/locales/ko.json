@@ -448,7 +448,10 @@
     "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
     "sectionAgentInfo": "Agent 정보",
     "sectionSessionParams": "세션 파라미터",
-    "sectionModelParams": "모델 파라미터"
+    "sectionModelParams": "모델 파라미터",
+    "sessionLanguage": "세션 언어",
+    "sessionLanguageDesc": "전역 사용자 언어를 덮어쓰고 이 Agent의 LLM 세션 언어를 고정합니다. LLM 컨텍스트에만 영향을 주며 데스크톱 UI 언어는 변경되지 않습니다.",
+    "sessionLanguageFollow": "사용자 설정 따르기"
   },
   "harness": {
     "tabProviders": "제공자",

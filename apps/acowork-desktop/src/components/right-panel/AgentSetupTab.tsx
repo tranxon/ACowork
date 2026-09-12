@@ -75,7 +75,8 @@ type WiredField =
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
   | "idleTimeoutSecs"
-  | "compressionRatioThreshold";
+  | "compressionRatioThreshold"
+  | "sessionLanguage";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -87,6 +88,7 @@ const WIRE_FIELD: Record<WiredField, string> = {
   approvalTimeoutSecs: "approval_timeout_secs",
   idleTimeoutSecs: "idle_timeout_secs",
   compressionRatioThreshold: "compression_ratio_threshold",
+  sessionLanguage: "session_language",
 };
 
 const FIELD_DEBOUNCE_MS = 500;
@@ -101,6 +103,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   maxIterations: FIELD_DEBOUNCE_MS,
   maxSessions: FIELD_DEBOUNCE_MS,
   compressionRatioThreshold: FIELD_DEBOUNCE_MS,
+  sessionLanguage: FIELD_DEBOUNCE_MS,
 };
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -235,6 +238,7 @@ export function AgentSetupTab() {
           approval_timeout_secs?: number | null;
           idle_timeout_secs?: number | null;
           compression_ratio_threshold?: number | null;
+          session_language?: string | null;
         };
         // Race-safe merge (ADR-052 follow-up): only overwrite each
         // local profile field when the server returned a concrete
@@ -283,6 +287,12 @@ export function AgentSetupTab() {
         if (typeof cfg.compression_ratio_threshold === "number") {
           patch.compressionRatioThreshold = cfg.compression_ratio_threshold;
         }
+        // session_language is a string-or-absent field — preserve
+        // explicit `null` (clear) AND concrete value, leave absent
+        // alone (preserves optimistic local edit while in-flight).
+        if (cfg.session_language !== undefined) {
+          patch.sessionLanguage = cfg.session_language;
+        }
         setProfile(selectedAgentId, patch);
       })
       .catch((err) => {
@@ -315,6 +325,7 @@ export function AgentSetupTab() {
               shell_approval_threshold?: string | null;
               approval_timeout_secs?: number | null;
               idle_timeout_secs?: number | null;
+              session_language?: string | null;
             };
             // Same race-safe merge as the mount effect above. The
             // retained-MQTT snapshot fires this refresh *after* every
@@ -353,6 +364,9 @@ export function AgentSetupTab() {
             }
             if (typeof cfg.idle_timeout_secs === "number") {
               patch.idleTimeoutSecs = cfg.idle_timeout_secs;
+            }
+            if (cfg.session_language !== undefined) {
+              patch.sessionLanguage = cfg.session_language;
             }
             setProfile(selectedAgentId, patch);
           })
@@ -402,7 +416,15 @@ export function AgentSetupTab() {
           {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
+            // `undefined` -> `null` so the runtime's partial-PUT DTO
+            // sees an explicit clear (`FieldPatch::Clear`) instead of
+            // an absent field (`skip`). Without this, picking the
+            // "follow user setting" option in a Dropdown would
+            // silently no-op and the on-disk value would stick.
+            body: JSON.stringify({
+              ...body,
+              [WIRE_FIELD[field]]: value ?? null,
+            }),
           },
         );
         if (!res.ok) {
@@ -847,6 +869,32 @@ export function AgentSetupTab() {
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
         >
           <div className="space-y-3">
+    {/* Session Language (per-agent LLM language override).
+        Empty value = "follow global UserProfile.language" (the
+        existing default behaviour). The empty option triggers a
+        `null` PUT body thanks to the `value ?? null` shim in
+        `putField`, which the runtime maps to `FieldPatch::Clear`. */}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+              {t("agentSetup.sessionLanguage")}
+            </label>
+            <Dropdown
+              value={profile.sessionLanguage ?? ""}
+              onChange={(v) => saveField("sessionLanguage", v === "" ? undefined : v)}
+              options={[
+                { value: "", label: t("agentSetup.sessionLanguageFollow") },
+                { value: "zh-CN", label: t("language.zhCN") },
+                { value: "zh-TW", label: t("language.zhTW") },
+                { value: "en", label: t("language.en") },
+                { value: "ja", label: t("language.ja") },
+                { value: "ko", label: t("language.ko") },
+              ]}
+            />
+            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.sessionLanguageDesc")}
+            </p>
+          </div>
+
     {/* Max Iterations */}
           <div className="space-y-1">
             <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -920,31 +968,33 @@ export function AgentSetupTab() {
             </p>
           </div>
 
-    {/* Idle (auto-sleep) Timeout */}
-          <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-              {t("agentSetup.idleTimeout")}
-            </label>
-            <Dropdown
-              value={idleTimeoutDisplayValue(profile.idleTimeoutSecs)}
-              onChange={(v) => {
-                if (v === "") {
-                  saveField("idleTimeoutSecs", undefined);
-                  return;
-                }
-                const n = parseInt(v, 10);
-                saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
-              }}
-              placeholder={{ value: "", label: t("agentSetup.idleTimeoutPlaceholder") }}
-              options={IDLE_TIMEOUT_OPTIONS.map((opt) => ({
-                value: String(opt.value),
-                label: t(opt.labelKey),
-              }))}
-            />
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-              {t("agentSetup.idleTimeoutDesc")}
-            </p>
-          </div>
+    {/* Idle (auto-sleep) Timeout — ponytail: hidden per user request, auto-sleep disabled. Remove `false && (` / `)` to restore. */}
+    {false && (
+      <div className="space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.idleTimeout")}
+        </label>
+        <Dropdown
+          value={idleTimeoutDisplayValue(profile!.idleTimeoutSecs)}
+          onChange={(v) => {
+            if (v === "") {
+              saveField("idleTimeoutSecs", undefined);
+              return;
+            }
+            const n = parseInt(v, 10);
+            saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
+          }}
+          placeholder={{ value: "", label: t("agentSetup.idleTimeoutPlaceholder") }}
+          options={IDLE_TIMEOUT_OPTIONS.map((opt) => ({
+            value: String(opt.value),
+            label: t(opt.labelKey),
+          }))}
+        />
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.idleTimeoutDesc")}
+        </p>
+      </div>
+    )}
 
     {/* Shell Command Approval Threshold */}
           <div className="space-y-1">
@@ -1213,6 +1263,7 @@ export function AgentSetupTab() {
                   shell_approval_threshold: null,
                   approval_timeout_secs: null,
                   idle_timeout_secs: null,
+                  session_language: null,
                 }),
               },
             );
