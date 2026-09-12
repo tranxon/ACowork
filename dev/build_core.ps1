@@ -4,10 +4,14 @@
 #   .\dev\build_core.ps1                  Build release (default)
 #   .\dev\build_core.ps1 -Debug           Build debug
 #   .\dev\build_core.ps1 -Release         Build release (explicit)
-#   .\dev\build_core.ps1 -Start           Build release + stop old + start Gateway
-#   .\dev\build_core.ps1 -Debug -Start    Build debug + stop old + start Gateway
-#   .\dev\build_core.ps1 -Stop            Build release + stop old Gateway
-#   .\dev\build_core.ps1 -Debug -Stop     Build debug + stop old Gateway
+#   .\dev\build_core.ps1 -Start                 Build release + stop old + start Gateway (loopback)
+#   .\dev\build_core.ps1 -Debug -Start          Build debug + stop old + start Gateway (loopback)
+#   .\dev\build_core.ps1 -Stop                  Build release + stop old Gateway
+#   .\dev\build_core.ps1 -Debug -Stop           Build debug + stop old Gateway
+#   .\dev\build_core.ps1 -Start -Local          Build + start Gateway bound to 127.0.0.1 only (default)
+#   .\dev\build_core.ps1 -Start -Remote         Build + start Gateway bound to 0.0.0.0 (LAN-reachable)
+#                                               and advertise the detected LAN IP. Implies -Start.
+#   .\dev\build_core.ps1 -Debug -Start -Remote  Build debug + start Gateway in remote (LAN) mode
 #
 # Profile selection: -Debug / -Release switch > $env:ACOWORK_BUILD_PROFILE > release
 # In debug profile, $env:ACOWORK_GATEWAY_LOG_LEVEL is auto-set to "debug" so any
@@ -19,7 +23,9 @@ param(
     [switch] $Start,
     [switch] $Stop,
     [switch] $Debug,
-    [switch] $Release
+    [switch] $Release,
+    [switch] $Local,
+    [switch] $Remote
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,10 +49,83 @@ elseif ($env:ACOWORK_BUILD_PROFILE) {
     }
 }
 
+# Resolve network mode: -Local/-Remote only meaningful with -Start. -Remote
+# implicitly turns -Start on (matches the macOS/Linux scripts' convention).
+if ($Local -and $Remote) {
+    Write-Host "ERROR: -Local and -Remote are mutually exclusive." -ForegroundColor Red
+    exit 1
+}
+if ($Remote -and -not $Start) {
+    Write-Host "INFO: -Remote implies -Start (Gateway needs to be started for bind mode to take effect)." -ForegroundColor Cyan
+    $Start = $true
+}
+if (($Local -or $Remote) -and $Stop) {
+    Write-Host "ERROR: -Local/-Remote cannot be combined with -Stop (no Gateway is started)." -ForegroundColor Red
+    exit 1
+}
+$NetworkMode = if ($Remote) { "remote" } elseif ($Local) { "local" } else { "default" }
+
 # Runtime env linkage: debug profile auto-enables gateway verbose logging for
 # any child process spawned from this script.
 if ($Profile -eq "debug") {
     $env:ACOWORK_GATEWAY_LOG_LEVEL = "debug"
+}
+
+# Build the gateway bind/advertise args from $NetworkMode. The Gateway CLI
+# (core/acowork-gateway/src/cli.rs) accepts:
+#   --addr HOST:PORT          HTTP bind   (default 127.0.0.1:19876)
+#   --mqtt-addr HOST:PORT     MQTT bind   (default 127.0.0.1:19875)
+#   --advertise-host HOST     IP distributed to Node Agents / Desktop
+# For -Local we bind loopback and pin --advertise-host to 127.0.0.1 (same
+# as the Desktop app) so published endpoints (embed /v1, package download
+# URLs) stay loopback-reachable instead of leaking a LAN IP that a
+# loopback-bound Gateway cannot serve; for -Remote we bind 0.0.0.0 and
+# pin the detected LAN IP so Node Agents on other machines reach a stable
+# host instead of relying on the gateway's auto-detect fallback (which
+# warns).
+$GatewayArgs = @()
+if ($NetworkMode -eq "local") {
+    $GatewayArgs = @("--addr", "127.0.0.1:19876", "--mqtt-addr", "127.0.0.1:19875", "--advertise-host", "127.0.0.1")
+} elseif ($NetworkMode -eq "remote") {
+    # Pick the address LAN peers will actually use to reach this host.
+    # Preference order:
+    #   1. $env:ACOWORK_ADVERTISE_HOST — explicit operator override.
+    #   2. The IPv4 of the interface that owns the default route. Virtual
+    #      adapters (VMware VMnet, WSL vEthernet, Hyper-V) and APIPA
+    #      (169.254.x) never own the default route, so this cannot pick a
+    #      non-LAN-reachable address by accident — the old
+    #      "first non-loopback IPv4" heuristic did (VMnet8 sorts first).
+    #   3. First non-loopback, non-APIPA IPv4 (fully offline lab fallback).
+    # When all probes fail the Gateway auto-detects and logs a WARN at
+    # startup. Upgrade path: honor [advertise_host] from gateway.toml when
+    # present (single source of truth for the operator).
+    $lanIp = $env:ACOWORK_ADVERTISE_HOST
+    if (-not $lanIp) {
+        try {
+            $defaultRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1
+            if ($defaultRoute) {
+                $lanIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $defaultRoute.InterfaceIndex -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -ne '127.0.0.1' } |
+                    Select-Object -First 1 -ExpandProperty IPAddress
+            }
+            if (-not $lanIp) {
+                $lanIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notmatch '^169\.254\.' } |
+                    Select-Object -First 1 -ExpandProperty IPAddress
+            }
+        } catch { $lanIp = $null }
+    }
+    # Bind 0.0.0.0 unconditionally — that is the whole point of -Remote; the
+    # advertise host is best-effort and only appended when detected (the
+    # Gateway auto-detects a good value itself, via its UDP route probe).
+    $GatewayArgs = @("--addr", "0.0.0.0:19876", "--mqtt-addr", "0.0.0.0:19875")
+    if (-not $lanIp) {
+        Write-Host "WARN: could not detect a LAN-reachable IPv4 address for -Remote; binding 0.0.0.0 and letting the Gateway auto-detect the advertise host. Set [advertise_host] in gateway.toml (or `$env:ACOWORK_ADVERTISE_HOST) for a deterministic value." -ForegroundColor Yellow
+    } else {
+        $GatewayArgs += @("--advertise-host", $lanIp)
+        Write-Host "Remote mode: Gateway will bind 0.0.0.0 and advertise $lanIp" -ForegroundColor Cyan
+    }
 }
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
@@ -62,6 +141,10 @@ Write-Host "Profile: $Profile" -ForegroundColor Cyan
 if ($Start) { Write-Host "Mode: Build + Restart" -ForegroundColor Cyan }
 elseif ($Stop) { Write-Host "Mode: Build + Stop" -ForegroundColor Cyan }
 else       { Write-Host "Mode: Build Only" -ForegroundColor Cyan }
+if ($Start -and $NetworkMode -ne "default") {
+    $bindDesc = if ($Remote) { '0.0.0.0 + LAN advertise' } else { '127.0.0.1' }
+    Write-Host "Network: $NetworkMode (Gateway $bindDesc)" -ForegroundColor Cyan
+}
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -536,7 +619,10 @@ if ($Start) {
     # Start Gateway in background
     $gatewayExe = Join-Path $WorkspaceRoot "target\$Profile\acowork-gateway.exe"
     if (Test-Path $gatewayExe) {
-        Start-Process -FilePath $gatewayExe -WorkingDirectory $WorkspaceRoot -NoNewWindow
+        if ($GatewayArgs.Count -gt 0) {
+            Write-Host "  Gateway args: $($GatewayArgs -join ' ')" -ForegroundColor Gray
+        }
+        Start-Process -FilePath $gatewayExe -ArgumentList $GatewayArgs -WorkingDirectory $WorkspaceRoot -NoNewWindow
         Write-Host "  Gateway started." -ForegroundColor Green
     } else {
         Write-Host "  Gateway executable not found at: $gatewayExe" -ForegroundColor Red
@@ -546,7 +632,11 @@ if ($Start) {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "Done! Gateway is running." -ForegroundColor Cyan
-    Write-Host "HTTP API: http://127.0.0.1:19876" -ForegroundColor Cyan
+    if ($NetworkMode -eq "remote" -and $lanIp) {
+        Write-Host "HTTP API: http://${lanIp}:19876  (also reachable on the LAN)" -ForegroundColor Cyan
+    } else {
+        Write-Host "HTTP API: http://127.0.0.1:19876" -ForegroundColor Cyan
+    }
     Write-Host "========================================" -ForegroundColor Cyan
 } else {
     Write-Host ""
