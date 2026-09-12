@@ -1543,6 +1543,8 @@ mod tests {
                 agent_id: "com.acowork.x".to_string(),
                 online: true,
                 sleeping: false,
+                instance_id: "test-instance".to_string(),
+                node_id: "test-node".to_string(),
             })),
         };
         let bytes = prost::Message::encode_to_vec(&env);
