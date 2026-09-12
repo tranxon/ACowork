@@ -1160,8 +1160,19 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     let cache_read = cache.read().await;
                     if cache_read.user_profile.is_some() {
                         break cache_read.active_user_profile().map(|profile| {
+                            // Boot-time identity build runs before
+                            // `apply_runtime_config_override` seeds the
+                            // per-agent `session_language_override` into
+                            // AgentCore, so the override is unknown here.
+                            // The post-boot `update_user_identity` push
+                            // (triggered by the next Gateway
+                            // `UserProfileUpdate`) will re-format with
+                            // the override if set. See
+                            // `SessionManager::apply_runtime_config_override`
+                            // + `update_user_identity`.
                             crate::agent::session::session_manager::format_user_profile_context(
                                 &profile,
+                                None,
                             )
                         });
                     }

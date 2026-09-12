@@ -136,6 +136,12 @@ pub enum ConfigField {
     MemoryForgettingDormantThreshold,
     /// `AgentConfig::memory_forgetting_archive_days` — `Option<u64>`.
     MemoryForgettingArchiveDays,
+    /// `AgentConfig::session_language` — `Option<String>`.
+    /// Per-agent override for the LLM session language hint baked into
+    /// the identity-context system prompt (replaces
+    /// `UserProfile.language`). `None` = follow the user's global
+    /// language from `UserProfile`.
+    SessionLanguage,
 }
 
 impl ConfigField {
@@ -166,6 +172,7 @@ impl ConfigField {
                 "memory_forgetting_dormant_threshold"
             }
             ConfigField::MemoryForgettingArchiveDays => "memory_forgetting_archive_days",
+            ConfigField::SessionLanguage => "session_language",
         }
     }
 }
@@ -240,6 +247,7 @@ impl PutAgentConfigBody {
         memory_forgetting_half_life_days: Option<serde_json::Value>,
         memory_forgetting_dormant_threshold: Option<serde_json::Value>,
         memory_forgetting_archive_days: Option<serde_json::Value>,
+        session_language: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -347,6 +355,12 @@ impl PutAgentConfigBody {
         if let Some(v) = memory_forgetting_archive_days {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::MemoryForgettingArchiveDays,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = session_language {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::SessionLanguage,
                 op: value_to_patch(&v),
             });
         }

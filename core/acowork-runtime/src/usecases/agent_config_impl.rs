@@ -180,6 +180,9 @@ fn apply_field_patch(cfg: &mut AgentConfig, field: ConfigField, op: &FieldPatch<
         ConfigField::MemoryForgettingArchiveDays => {
             cfg.memory_forgetting_archive_days = patch_typed::<u64>(field, op);
         }
+        ConfigField::SessionLanguage => {
+            cfg.session_language = patch_typed::<String>(field, op);
+        }
     }
 }
 
@@ -390,6 +393,7 @@ mod tests {
             None,
             None,
             None,
+            None,                          // session_language absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
@@ -425,6 +429,7 @@ mod tests {
             Some(serde_json::json!(180)), // memory_forgetting_half_life_days
             Some(serde_json::json!(null)), // memory_forgetting_dormant_threshold -> Clear
             None,                          // memory_forgetting_archive_days absent -> skip
+            None,                          // session_language absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =

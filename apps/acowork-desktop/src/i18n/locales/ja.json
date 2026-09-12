@@ -447,7 +447,10 @@
     "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。",
     "sectionAgentInfo": "Agent情報",
     "sectionSessionParams": "セッションパラメータ",
-    "sectionModelParams": "モデルパラメータ"
+    "sectionModelParams": "モデルパラメータ",
+    "sessionLanguage": "セッション言語",
+    "sessionLanguageDesc": "グローバルユーザー言語を上書きし、この Agent の LLM セッション言語を固定します。LLM コンテキストのみに影響し、デスクトップ UI 言語は変わりません。",
+    "sessionLanguageFollow": "ユーザー設定に従う"
   },
   "harness": {
     "tabProviders": "プロバイダー",

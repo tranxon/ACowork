@@ -168,6 +168,13 @@ pub struct AgentCore {
     /// ADR-032: number of recent tool results preserved raw at every trigger
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
+    /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
+    /// When `Some(_)`, replaces `UserProfile.language` in the
+    /// identity-context text block formatted for the LLM (see
+    /// `SessionManager::format_user_profile_context`). `None` = follow
+    /// the global `UserProfile.language`. Decoupled from the desktop
+    /// UI language (i18n stays bound to `UserProfile.language`).
+    pub(crate) session_language_override: Option<String>,
     /// Per-agent skill registry (`skills/*/SKILL.md`), loaded once in
     /// Phase A and injected into AgentCore in Phase B. The authoritative
     /// source for resolving a per-turn chat `command` (skill name) into
@@ -519,6 +526,7 @@ impl AgentCore {
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
+            session_language_override: None,
             skill_registry: Arc::new(crate::skills::parser::SkillRegistry::new()),
             // ADR-053: populated in Phase B of session_init from
             // prompts/summary.md (see `load_compaction_prompt`).
@@ -926,6 +934,14 @@ impl AgentCore {
                 "runtime config: system_prompt_override updated"
             );
             self.system_prompt_override = overrides.system_prompt_override.clone();
+        }
+        if overrides.session_language.is_some() {
+            tracing::info!(
+                old = ?self.session_language_override,
+                new = ?overrides.session_language,
+                "runtime config: session_language updated"
+            );
+            self.session_language_override = overrides.session_language.clone();
         }
         if let Some(ref threshold) = overrides.shell_approval_threshold {
             let new_threshold = ShellApprovalThreshold::from_str_loose(threshold).unwrap_or_default();
@@ -1718,6 +1734,7 @@ impl Clone for AgentCore {
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
+            session_language_override: self.session_language_override.clone(),
             skill_registry: Arc::clone(&self.skill_registry),
             // ADR-063 §3.7.5: these 9 fields share the inner `Arc` across
             // clones (reference +1), so a write through one clone is

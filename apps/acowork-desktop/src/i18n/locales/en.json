@@ -570,7 +570,10 @@
     "noBuiltinTools": "No builtin tools available.",
     "sectionAgentInfo": "Agent Info",
     "sectionSessionParams": "Session Parameters",
-    "sectionModelParams": "Model Parameters"
+    "sectionModelParams": "Model Parameters",
+    "sessionLanguage": "Session Language",
+    "sessionLanguageDesc": "Override the global user language to pin this agent's LLM session language. Affects only the LLM context, not the desktop UI language.",
+    "sessionLanguageFollow": "Follow user setting"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",

@@ -2234,6 +2234,7 @@ async fn put_agent_config(
         req.memory_forgetting_half_life_days,
         req.memory_forgetting_dormant_threshold,
         req.memory_forgetting_archive_days,
+        req.session_language,
     );
     let svc = state
         .agent_config
@@ -2398,6 +2399,14 @@ struct UpdateAgentConfigRequest {
     /// Days a Dormant node is retained before archiving to PurgeLog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_forgetting_archive_days: Option<serde_json::Value>,
+    /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
+    /// Replaces `UserProfile.language` in the identity-context text
+    /// block when formatted for the LLM (see
+    /// `SessionManager::format_user_profile_context`). Absent = leave
+    /// the on-disk value alone (partial PUT); `null` = clear (fall
+    /// back to `UserProfile.language`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_language: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {
