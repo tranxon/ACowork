@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
@@ -7,9 +7,15 @@ import { AgentList } from "../agent-list/AgentList";
 import { ChatPanel } from "../chat/ChatPanel";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
-import { FileEditorPanel } from "../editor/FileEditorPanel";
-import { GatewayBanner } from "./GatewayBanner";
-import { useGatewayStore } from "../../stores/gatewayStore";
+// FileEditorPanel is lazy-loaded: its module graph pulls in monaco-editor
+// (~170 kB) plus monaco-languageclient's vscode-api stack (~1 MB) via
+// useLspClientPool. Keeping it out of the entry chunk is what actually
+// moves monaco off the first-paint path — a top-level import here would
+// defeat initMonaco() in lib/monacoBootstrap.ts.
+const FileEditorPanel = lazy(() =>
+    import("../editor/FileEditorPanel").then((m) => ({ default: m.FileEditorPanel })),
+);
+import { GatewayBanner } from "./GatewayBanner";import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
@@ -870,7 +876,9 @@ export function AppLayout() {
                 >
                   <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
                 </div>
-                <FileEditorPanel width={fileWidth} />
+                <Suspense fallback={<div className="h-full w-full" />}>
+                    <FileEditorPanel width={fileWidth} />
+                </Suspense>
               </>
             )}
 

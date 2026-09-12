@@ -14,6 +14,7 @@ import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
+import { initMonaco } from "../../lib/monacoBootstrap";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { SetiIcon } from "../common/SetiIcon";
@@ -103,6 +104,18 @@ export function FileEditorPanel({ width }: { width: number }) {
     const theme = useSettingsStore((s) => s.theme);
     const fontSize = useSettingsStore((s) => s.fontSize);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
+    // Monaco is loaded in the background (lib/monacoBootstrap.ts) so first
+    // paint does not wait for it; gate <Editor> on it being ready.
+    const [monacoReady, setMonacoReady] = useState(false);
+    useEffect(() => {
+        let cancelled = false;
+        initMonaco().then(() => {
+            if (!cancelled) setMonacoReady(true);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
     // Tab right-click context menu. Payload is the fileId of the tab that
     // was right-clicked — items read it from `useContextMenu().payload` to
     // decide which file to act on.
@@ -1449,7 +1462,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     />
                 ) : activeFile.mode === "preview" ? (
                     <MarkdownPreviewView file={activeFile} />
-                ) : (
+                ) : monacoReady ? (
                     <>
                         <Editor
                             path={activeReadyRelPath}
@@ -1499,6 +1512,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </div>
                         )}
                     </>
+                ) : (
+                    <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Loading editor...
+                    </div>
                 )}
             </div>
 

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./i18n"; // i18n initialization (must run before any useTranslation call)
 import "./styles/globals.css";
+import { initMonaco } from "./lib/monacoBootstrap";
 
 // ═══ Bundled fonts (macOS uses -apple-system → SF Pro natively;
 // Win/Linux fall through to Inter / Noto Sans SC below) ═══
@@ -43,8 +44,9 @@ import "@fontsource/noto-sans-sc/chinese-simplified-700.css";
 //    console.error (clipboardService.js:118, 157).  Swallowing the error is safe:
 //    Monaco's writeText falls back to execCommand("copy") on failure (line 121),
 //    and readText falls back to returning '' (line 159).
-import { loader } from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
+// (Monaco itself is no longer imported here — see lib/monacoBootstrap.ts.
+//  initMonaco() runs in the background below so the ~170 kB monaco-editor
+//  bundle does not block first paint.)
 
 // Patch navigator.clipboard *before* Monaco creates its BrowserClipboardService
 if (typeof navigator !== "undefined" && navigator.clipboard) {
@@ -77,47 +79,7 @@ if (typeof navigator !== "undefined" && navigator.clipboard) {
   };
 }
 
-loader.config({ monaco });
-
-// Vite-compatible worker resolution: each language label maps to a
-// monaco-editor worker entry that Vite bundles as a separate chunk.
-(window as any).MonacoEnvironment = {
-  getWorker(_workerId: string, label: string) {
-    switch (label) {
-      case "json":
-        return new Worker(
-          new URL("monaco-editor/esm/vs/language/json/json.worker.js", import.meta.url),
-          { type: "module" },
-        );
-      case "css":
-      case "scss":
-      case "less":
-        return new Worker(
-          new URL("monaco-editor/esm/vs/language/css/css.worker.js", import.meta.url),
-          { type: "module" },
-        );
-      case "html":
-      case "handlebars":
-      case "razor":
-        return new Worker(
-          new URL("monaco-editor/esm/vs/language/html/html.worker.js", import.meta.url),
-          { type: "module" },
-        );
-      case "typescript":
-      case "javascript":
-        return new Worker(
-          new URL("monaco-editor/esm/vs/language/typescript/ts.worker.js", import.meta.url),
-          { type: "module" },
-        );
-      default:
-        return new Worker(
-          new URL("monaco-editor/esm/vs/editor/editor.worker.js", import.meta.url),
-          { type: "module" },
-        );
-    }
-  },
-};
-// ═══ End Monaco bootstrap ═══
+// ═══ End Monaco bootstrap (moved to lib/monacoBootstrap.ts) ═══
 
 // Import settingsStore early so theme is applied to DOM before first paint.
 // The store initializer calls applyTheme() which toggles the .dark class
@@ -225,3 +187,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <App />
   </React.StrictMode>,
 );
+
+// Kick off monaco-editor loading in the background — first paint no longer
+// waits for the ~170 kB module graph. FileEditorPanel awaits initMonaco()
+// before rendering <Editor>, so an early file-open still works.
+void initMonaco();
