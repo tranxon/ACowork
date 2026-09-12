@@ -4,6 +4,7 @@
 // mounting). `initMonaco()` kicks the import off in the background;
 // FileEditorPanel awaits it before rendering <Editor>.
 import { loader } from "@monaco-editor/react";
+import { log } from "./logger";
 
 let initPromise: Promise<void> | null = null;
 
@@ -18,7 +19,12 @@ export function initMonaco(): Promise<void> {
 
         // Vite-compatible worker resolution: each language label maps to
         // a monaco-editor worker entry that Vite bundles separately.
-        (window as any).MonacoEnvironment = {
+        // AUGMENT, never replace: lspUtils (`vscodeApiGlobalInit*`) and
+        // monaco-languageclient's useWorkerFactory (`getWorkerUrl` /
+        // `getWorkerOptions`) keep their own state on this same global, and
+        // this write is asynchronous (it lands after a dynamic import), so a
+        // wholesale replacement could wipe state written by a racing LSP start.
+        Object.assign(((window as any).MonacoEnvironment ??= {}), {
           getWorker(_workerId: string, label: string) {
             switch (label) {
               case "json":
@@ -53,7 +59,16 @@ export function initMonaco(): Promise<void> {
                 );
             }
           },
-        };
+        });
+      })
+      .catch((err) => {
+        // Chunk fetch failures are transient — e.g. the vite dep-hash
+        // rotation documented in vite.config.ts ("Failed to fetch
+        // dynamically imported module"). Drop the cached rejection so the
+        // next initMonaco() call retries instead of re-throwing forever.
+        initPromise = null;
+        log.error("[Monaco] bootstrap failed:", err);
+        throw err;
       });
   }
   return initPromise;

@@ -190,5 +190,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 
 // Kick off monaco-editor loading in the background — first paint no longer
 // waits for the ~170 kB module graph. FileEditorPanel awaits initMonaco()
-// before rendering <Editor>, so an early file-open still works.
-void initMonaco();
+// before rendering <Editor>, so an early file-open still works. A failed load
+// is logged in monacoBootstrap and retried when the editor panel next mounts,
+// so swallow it here rather than raising an unhandled rejection at boot.
+initMonaco().catch(() => {});

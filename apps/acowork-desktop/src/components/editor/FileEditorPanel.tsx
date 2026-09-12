@@ -105,13 +105,22 @@ export function FileEditorPanel({ width }: { width: number }) {
     const fontSize = useSettingsStore((s) => s.fontSize);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
     // Monaco is loaded in the background (lib/monacoBootstrap.ts) so first
-    // paint does not wait for it; gate <Editor> on it being ready.
+    // paint does not wait for it; gate <Editor> on it being ready. A failed
+    // load must not leave an eternal spinner with no trace — monacoBootstrap
+    // logs the error and drops its cached rejection, so remounting this panel
+    // (close the last tab, reopen a file) performs the retry.
     const [monacoReady, setMonacoReady] = useState(false);
+    const [monacoFailed, setMonacoFailed] = useState(false);
     useEffect(() => {
         let cancelled = false;
-        initMonaco().then(() => {
-            if (!cancelled) setMonacoReady(true);
-        });
+        initMonaco().then(
+            () => {
+                if (!cancelled) setMonacoReady(true);
+            },
+            () => {
+                if (!cancelled) setMonacoFailed(true);
+            },
+        );
         return () => {
             cancelled = true;
         };
@@ -1512,6 +1521,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </div>
                         )}
                     </>
+                ) : monacoFailed ? (
+                    <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                        <AlertCircle className="h-4 w-4" />
+                        Editor failed to load. Close and reopen the panel to retry.
+                    </div>
                 ) : (
                     <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
                         <Loader2 className="h-4 w-4 animate-spin" />
