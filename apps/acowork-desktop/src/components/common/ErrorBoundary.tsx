@@ -118,3 +118,38 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     return this.props.children;
   }
 }
+
+// ── ChunkLoadBoundary ─────────────────────────────────────────────────────
+
+/**
+ * Scoped boundary for lazily loaded subtrees.
+ *
+ * A failed dynamic import (dev server restarted, transient fetch error) makes
+ * `React.lazy` throw while rendering, not just suspend. The only boundary
+ * above the editor panel is the app-level `ErrorBoundary` in App.tsx, whose
+ * fallback covers the whole window — so a leaf panel that fails to load used
+ * to blank the entire UI. This keeps the failure (and its retry) inside the
+ * panel area.
+ *
+ * `React.lazy` caches the rejected promise, so re-rendering the SAME lazy
+ * component can never recover. Callers must hand over a fresh lazy component
+ * and remount this boundary with a new `key` when retrying.
+ */
+export class ChunkLoadBoundary extends React.Component<
+  { fallback: React.ReactNode; children: React.ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown, info: React.ErrorInfo) {
+    log.error("[ChunkLoadBoundary] lazy chunk failed to load:", error, info);
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}

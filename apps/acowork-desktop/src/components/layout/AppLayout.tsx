@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
@@ -12,9 +12,12 @@ import { RightNavBar } from "./RightNavBar";
 // useLspClientPool. Keeping it out of the entry chunk is what actually
 // moves monaco off the first-paint path — a top-level import here would
 // defeat initMonaco() in lib/monacoBootstrap.ts.
-const FileEditorPanel = lazy(() =>
-    import("../editor/FileEditorPanel").then((m) => ({ default: m.FileEditorPanel })),
-);
+//
+// Kept as a factory rather than a module-level `lazy()`: React remembers a
+// rejected import for the lifetime of the lazy component, so retrying after
+// a failed load requires building a new one (see editorLoadAttempt below).
+const loadFileEditorPanel = () =>
+    import("../editor/FileEditorPanel").then((m) => ({ default: m.FileEditorPanel }));
 import { GatewayBanner } from "./GatewayBanner";import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -39,7 +42,8 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useActiveHeartbeatForSelection } from "../../hooks/useActiveHeartbeat";
-import { Bot, Check, Cpu } from "lucide-react";
+import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
+import { ChunkLoadBoundary } from "../common/ErrorBoundary";
 import { log } from "../../lib/logger";
 
 /** Settings tab type — keep in sync with SettingsPage */
@@ -62,6 +66,29 @@ const FILE_WIDTH_KEY = "acowork-file-width";
 const MIN_CHAT_WIDTH = 288;
 
 export function AppLayout() {
+  // Editor panel load failures stay local: a failed dynamic import used to
+  // reject through the app-level ErrorBoundary (App.tsx) and blank the whole
+  // window. Bumping the attempt builds a fresh lazy component and remounts
+  // the boundary via `key` — the only way to actually re-run the import.
+  const [editorLoadAttempt, setEditorLoadAttempt] = useState(0);
+  const FileEditorPanel = useMemo(() => lazy(loadFileEditorPanel), [editorLoadAttempt]);
+
+  // Dev only: warm the chunk once the window goes idle, so the first markdown
+  // click no longer pays an on-demand fetch + transform of the whole monaco
+  // graph (seconds against a cold dev server). In production the chunk is read
+  // from the app bundle — no stall measured — so keep it off the boot path.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const warm = () => void loadFileEditorPanel().catch(() => {});
+    const idle = typeof window.requestIdleCallback === "function"
+      ? window.requestIdleCallback(warm, { timeout: 3000 })
+      : window.setTimeout(warm, 1500);
+    return () => {
+      if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idle);
+      else window.clearTimeout(idle);
+    };
+  }, []);
+
   const [currentView, setCurrentView] = useState<NavView>("chat");
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>("gateway");
   const activeTab = useLayoutStore((s) => s.activePanelTab);
@@ -876,9 +903,29 @@ export function AppLayout() {
                 >
                   <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
                 </div>
-                <Suspense fallback={<div className="h-full w-full" />}>
+                <ChunkLoadBoundary
+                  key={editorLoadAttempt}
+                  fallback={
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-4 text-center">
+                      <AlertTriangle className="h-6 w-6 text-amber-500" />
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                        {t("errorBoundary.title")}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setEditorLoadAttempt((n) => n + 1)}
+                        className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                        {t("errorBoundary.retry")}
+                      </button>
+                    </div>
+                  }
+                >
+                  <Suspense fallback={<div className="h-full w-full" />}>
                     <FileEditorPanel width={fileWidth} />
-                </Suspense>
+                  </Suspense>
+                </ChunkLoadBoundary>
               </>
             )}
 
