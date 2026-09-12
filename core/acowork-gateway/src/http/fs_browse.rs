@@ -18,6 +18,7 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::http::routes::{ApiError, AppState};
 
@@ -63,6 +64,26 @@ pub struct FsBrowseResponse {
     pub entries: Vec<FsBrowseEntry>,
 }
 
+/// Count non-hidden direct children of a directory; 0 on any error.
+///
+/// ponytail: reads the directory at request time, so slow / network drives
+/// block the handler. Acceptable here because the sibling listing path does
+/// the same enumeration per entry. If this becomes a hotspot, switch to a
+/// cached dirent handle or an async stream.
+fn count_visible_children(path: &Path) -> usize {
+    std::fs::read_dir(path)
+        .ok()
+        .map(|rd| {
+            rd.filter(|e| {
+                e.as_ref()
+                    .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .unwrap_or(false)
+            })
+            .count()
+        })
+        .unwrap_or(0)
+}
+
 /// Common root directories to show when browsing "" or empty path
 fn root_entries() -> Vec<FsBrowseEntry> {
     let mut entries = Vec::new();
@@ -82,23 +103,12 @@ fn root_entries() -> Vec<FsBrowseEntry> {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Home".to_string());
-        let children_count = std::fs::read_dir(home_path)
-            .ok()
-            .map(|rd| {
-                rd.filter(|e| {
-                    e.as_ref()
-                        .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                        .unwrap_or(false)
-                })
-                .count()
-            })
-            .unwrap_or(0);
         entries.push(FsBrowseEntry {
             name,
             entry_type: "directory".to_string(),
             path: home_str.replace('\\', "/"),
             size: None,
-            children_count: Some(children_count),
+            children_count: Some(count_visible_children(home_path)),
         });
     }
 
@@ -106,13 +116,14 @@ fn root_entries() -> Vec<FsBrowseEntry> {
     #[cfg(unix)]
     {
         let tmp = "/tmp";
-        if std::path::Path::new(tmp).is_dir() {
+        let tmp_path = Path::new(tmp);
+        if tmp_path.is_dir() {
             entries.push(FsBrowseEntry {
                 name: "tmp".to_string(),
                 entry_type: "directory".to_string(),
                 path: tmp.to_string(),
                 size: None,
-                children_count: None,
+                children_count: Some(count_visible_children(tmp_path)),
             });
         }
     }
@@ -125,16 +136,17 @@ fn root_entries() -> Vec<FsBrowseEntry> {
             entry_type: "directory".to_string(),
             path: "/".to_string(),
             size: None,
-            children_count: None,
+            children_count: Some(count_visible_children(Path::new("/"))),
         });
         for (label, path) in [("/var", "/var"), ("/tmp", "/tmp"), ("/opt", "/opt")] {
-            if std::path::Path::new(path).is_dir() {
+            let p = Path::new(path);
+            if p.is_dir() {
                 entries.push(FsBrowseEntry {
                     name: label.to_string(),
                     entry_type: "directory".to_string(),
                     path: path.to_string(),
                     size: None,
-                    children_count: None,
+                    children_count: Some(count_visible_children(p)),
                 });
             }
         }
@@ -146,13 +158,15 @@ fn root_entries() -> Vec<FsBrowseEntry> {
         // List available drive letters
         for letter in 'A'..='Z' {
             let drive = format!("{}:/", letter);
-            if std::path::Path::new(&drive).is_dir() {
+            let drive_path = std::path::Path::new(&drive);
+            if drive_path.is_dir() {
+                let children_count = count_visible_children(drive_path);
                 entries.push(FsBrowseEntry {
                     name: format!("{}:", letter),
                     entry_type: "directory".to_string(),
                     path: drive,
                     size: None,
-                    children_count: None,
+                    children_count: Some(children_count),
                 });
             }
         }
@@ -255,24 +269,12 @@ pub async fn browse_fs(
         let abs_path = entry.path().to_string_lossy().replace('\\', "/");
 
         if is_dir {
-            let children_count = std::fs::read_dir(entry.path())
-                .ok()
-                .map(|rd| {
-                    rd.filter(|e| {
-                        e.as_ref()
-                            .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                            .unwrap_or(false)
-                    })
-                    .count()
-                })
-                .unwrap_or(0);
-
             dirs.push(FsBrowseEntry {
                 name,
                 entry_type: "directory".to_string(),
                 path: abs_path,
                 size: None,
-                children_count: Some(children_count),
+                children_count: Some(count_visible_children(&entry.path())),
             });
         } else {
             files.push(FsBrowseEntry {
@@ -344,4 +346,54 @@ async fn proxy_fs_browse_to_node(
 /// Create filesystem browsing routes
 pub fn fs_routes() -> Router<AppState> {
     Router::new().route("/api/fs/browse", get(browse_fs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Tiny per-process counter so parallel tests don't collide on the
+    // shared process temp dir.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn fresh_dir(label: &str) -> std::path::PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "acowork-fsbrowse-{}-{}-{}-{}",
+            label,
+            std::process::id(),
+            n,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn count_visible_children_excludes_hidden() {
+        let dir = fresh_dir("hidden");
+        fs::write(dir.join("a.txt"), "x").unwrap();
+        fs::write(dir.join("b.txt"), "x").unwrap();
+        fs::write(dir.join(".hidden"), "x").unwrap();
+        fs::create_dir(dir.join("subdir")).unwrap();
+
+        assert_eq!(count_visible_children(&dir), 3, "expected 3 visible entries");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn count_visible_children_missing_dir_is_zero() {
+        let p = fresh_dir("missing");
+        // Don't create it — count should silently return 0.
+        let _ = fs::remove_dir_all(&p);
+        assert_eq!(count_visible_children(&p), 0);
+    }
 }
