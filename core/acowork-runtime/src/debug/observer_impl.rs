@@ -419,7 +419,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             hasher.update(messages_json.as_bytes());
             format!("{:x}", hasher.finalize())
         };
-        let messages_token_estimate = crate::token::count_text(&messages_json, req.model);
+        let messages_token_estimate = crate::token::count_text(&messages_json);
 
         let mut named: Vec<NamedSection> = Vec::with_capacity(base_sections.len());
         for sec in base_sections {
@@ -440,7 +440,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
                     // Reuse the JSON we already serialized above.
                     named.push(NamedSection {
                         key: sec.key,
-                        content: SectionContent::new(tool_defs_str.clone(), req.model),
+                        content: SectionContent::new(tool_defs_str.clone()),
                     });
                 }
                 _ => {
@@ -453,7 +453,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
                     if let Some(text) = content {
                         named.push(NamedSection {
                             key: sec.key,
-                            content: SectionContent::new(text, req.model),
+                            content: SectionContent::new(text),
                         });
                     }
                 }
@@ -489,7 +489,6 @@ impl super::observer::DebugObserver for DebugObserverImpl {
 
         // Store in controller — snapshot metadata + lazy message content.
         let mut ctrl_guard = self.ctrl.lock().await;
-        ctrl_guard.current_model = Some(req.model.to_string());
         ctrl_guard.store_messages(iter, messages_snapshot);
         ctrl_guard.store_context_snapshot(snapshot.clone());
 
@@ -519,8 +518,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         if iteration == 0 {
             return;
         }
-        let model = ctrl.current_model.clone().unwrap_or_default();
-        ctrl.store_messages_with_meta(iteration, history.messages_arc(), &model);
+        ctrl.store_messages_with_meta(iteration, history.messages_arc());
         tracing::info!(
             iteration,
             message_count = history.len(),

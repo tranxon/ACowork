@@ -291,6 +291,14 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_call_counter: Option<u32>,
 
+    // ── Token counting scene ──
+    /// Last calibrated session chars/token ratio (`input_chars / prompt_tokens`).
+    /// Persisted so a resumed session restores the token-estimation scene
+    /// instead of falling back to the default 3.5. `None` until the first
+    /// reliable LLM usage report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ratio: Option<f64>,
+
     // ── Compaction ──
     /// Absolute byte offset of the most recent compaction marker.
     /// `None` if no compaction has occurred.
@@ -569,6 +577,10 @@ pub struct ConversationSession {
     /// [`Self::bump_llm_call_counter`] (mirroring `accumulate_llm_usage`
     /// for tokens); `None` means no LLM call has been recorded yet.
     llm_call_counter: std::sync::Mutex<Option<u32>>,
+    /// Last calibrated session chars/token ratio, mirrored from
+    /// `SessionMeta.model_ratio`. Written by [`Self::set_model_ratio`]
+    /// after each reliable usage calibration.
+    model_ratio: std::sync::Mutex<Option<f64>>,
     /// Running message count, incremented on every `append_message`.
     message_count: AtomicU64,
     /// Last time the meta file was written from `append_message`.
@@ -698,6 +710,7 @@ impl ConversationSession {
             last_active_at: now,
             tokens,
             llm_call_counter,
+            model_ratio: self.model_ratio.lock().ok().and_then(|r| *r),
             last_compaction_offset,
             corrupted: false,
         }
@@ -951,6 +964,7 @@ impl ConversationSession {
             todos: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
+            model_ratio: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
             sender: tx,
@@ -1046,6 +1060,7 @@ impl ConversationSession {
                 todos: std::sync::Mutex::new(meta.todos),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
+                model_ratio: std::sync::Mutex::new(meta.model_ratio),
                 message_count: AtomicU64::new(meta.message_count),
                 last_meta_write: std::sync::Mutex::new(Instant::now()),
                 sender: tx,
@@ -1410,6 +1425,27 @@ impl ConversationSession {
     /// Return the persisted todo list, if any (ADR-060 §6.1).
     pub fn todos(&self) -> Option<Vec<TodoItem>> {
         self.todos.lock().ok().and_then(|t| t.clone())
+    }
+
+    /// Last calibrated session chars/token ratio, if any.
+    pub fn model_ratio(&self) -> Option<f64> {
+        self.model_ratio.lock().ok().and_then(|r| *r)
+    }
+
+    /// Persist the calibrated session chars/token ratio to the meta file.
+    ///
+    /// Written after each reliable LLM usage calibration so a resumed
+    /// session restores the token-estimation scene (instead of default 3.5).
+    /// Content-equal updates skip the write.
+    pub fn set_model_ratio(&self, ratio: f64) {
+        {
+            let mut slot = self.model_ratio.lock().unwrap_or_else(|e| e.into_inner());
+            if *slot == Some(ratio) {
+                return;
+            }
+            *slot = Some(ratio);
+        }
+        self.write_meta();
     }
 
     /// Persist the todo snapshot to the meta file (ADR-060 §6.1).
@@ -1833,6 +1869,9 @@ impl Clone for ConversationSession {
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             llm_call_counter: std::sync::Mutex::new(
                 self.llm_call_counter.lock().ok().and_then(|c| *c),
+            ),
+            model_ratio: std::sync::Mutex::new(
+                self.model_ratio.lock().ok().and_then(|r| *r),
             ),
             message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
             last_meta_write: std::sync::Mutex::new(
@@ -2933,6 +2972,7 @@ mod tests {
                 last_active_at: ts.clone(),
                 tokens: None,
                 llm_call_counter: None,
+                model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
             };
@@ -3136,6 +3176,7 @@ mod tests {
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             tokens: None,
             llm_call_counter: None,
+            model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3650,6 +3691,7 @@ mod tests {
                 total_cache_write: 4_000,
             }),
             llm_call_counter: Some(7),
+             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };

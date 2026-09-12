@@ -86,14 +86,6 @@ pub struct NamedSection {
 }
 
 impl NamedSection {
-    /// Create a named section with model-aware token estimation.
-    pub fn new(key: impl Into<String>, content: String, model: &str) -> Self {
-        Self {
-            key: key.into(),
-            content: SectionContent::new(content, model),
-        }
-    }
-
     /// Convert to serializable metadata (without content).
     pub fn to_meta(&self) -> SectionMeta {
         SectionMeta {
@@ -144,14 +136,12 @@ pub struct SectionContent {
 }
 
 impl SectionContent {
-    /// Create a SectionContent with a model-aware token estimate.
+    /// Create a SectionContent with a token estimate.
     ///
     /// Uses [`crate::token::count_text`] — the single unified entry point
-    /// for all token counting in ACowork. For GPT models this uses tiktoken
-    /// (< 1% error); for Claude/Qwen it uses sampling ratios (< 5% error);
-    /// for unknown models it falls back to word/CJK heuristic (< 15% error).
-    pub fn new(content: String, model: &str) -> Self {
-        let token_estimate = crate::token::count_text(&content, model);
+    /// for all token counting in ACowork.
+    pub fn new(content: String) -> Self {
+        let token_estimate = crate::token::count_text(&content);
         Self::build(content, token_estimate)
     }
 
@@ -260,10 +250,6 @@ pub struct DebugController {
     /// so that both the debug server and the chat-panel path fire the
     /// same edge-triggered Notify.
     pub control_notify: Arc<Notify>,
-    /// The model name used for the current session's token counting.
-    /// Set by [`AgentLoop::capture_context_snapshot`] so that context
-    /// patches (via `patchContext`) can use model-aware token estimates.
-    pub current_model: Option<String>,
 }
 
 impl DebugController {
@@ -282,7 +268,6 @@ impl DebugController {
             rewind_notify: Arc::new(Notify::const_new()),
             resume_notify: Arc::new(Notify::const_new()),
             control_notify: Arc::new(Notify::const_new()),
-            current_model: None,
         }
     }
 
@@ -331,7 +316,6 @@ impl DebugController {
         &mut self,
         iteration: u32,
         messages: Arc<Vec<ChatMessage>>,
-        model: &str,
     ) {
         self.messages_by_iteration.insert(iteration, messages.clone());
 
@@ -344,7 +328,7 @@ impl DebugController {
             hasher.update(json.as_bytes());
             section.content = SectionContent::metadata_only(
                 json.len(),
-                crate::token::count_text(&json, model),
+                crate::token::count_text(&json),
                 format!("{:x}", hasher.finalize()),
             );
             snap.total_token_estimate = snap.sections.total_token_estimate();
@@ -492,7 +476,7 @@ mod tests {
             chat_message(MessageRole::User, "hello"),
             chat_message(MessageRole::Assistant, "hi there"),
         ]);
-        ctrl.store_messages_with_meta(1, messages, "gpt-4o");
+        ctrl.store_messages_with_meta(1, messages);
 
         // messages_by_iteration updated.
         assert_eq!(ctrl.get_messages(1).unwrap().len(), 2);
@@ -510,7 +494,7 @@ mod tests {
     fn store_messages_with_meta_without_snapshot_is_meta_noop() {
         let mut ctrl = DebugController::new();
         let messages = Arc::new(vec![chat_message(MessageRole::User, "hello")]);
-        ctrl.store_messages_with_meta(2, messages, "gpt-4o");
+        ctrl.store_messages_with_meta(2, messages);
 
         // Messages are stored regardless.
         assert_eq!(ctrl.get_messages(2).unwrap().len(), 1);

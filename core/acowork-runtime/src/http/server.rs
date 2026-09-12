@@ -3779,6 +3779,7 @@ mod tests {
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
             tokens: None,
             llm_call_counter: None,
+            model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3914,6 +3915,7 @@ mod tests {
                 ..Default::default()
             }),
             llm_call_counter: None,
+            model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3945,6 +3947,7 @@ mod tests {
                 ..Default::default()
             }),
             llm_call_counter: None,
+            model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -7310,6 +7313,7 @@ mod tests {
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,
             llm_call_counter: None,
+            model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };

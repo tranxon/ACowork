@@ -199,9 +199,6 @@ pub struct HistoryManager {
     protocol_type: ProtocolType,
     /// Tiered token counter for unified token estimation.
     counter: TokenCounter,
-    /// Model name for Tier1/Tier2 token counting precision.
-    /// When `None` (not yet set), falls back to Tier3 heuristic.
-    model_name: Option<String>,
     /// ADR-060 v2 §5.4: tool_call `id` of the most recent todo_write round
     /// spliced by `inject_todo_write_round_after_marker`. Used to enforce
     /// JSONL-side idempotency on consecutive compressions — if the next
@@ -278,7 +275,6 @@ impl HistoryManager {
             current_tokens: 0,
             protocol_type: ProtocolType::default(),
             counter: TokenCounter::new(),
-            model_name: None,
             last_injected_todo_call_id: None,
             messages_json_bytes: Self::EMPTY_JSON_ARRAY_BYTES,
         }
@@ -313,32 +309,30 @@ impl HistoryManager {
         self.protocol_type = pt;
     }
 
-    /// Get the current model chars/token ratio from the calibrated ratio store.
-    /// Returns `None` if no model is set or no calibration has occurred yet.
+    /// Get the current session chars/token ratio.
+    /// Returns `None` if no calibration has occurred yet (callers fall back
+    /// to [`crate::token::counter::DEFAULT_RATIO`]).
     pub fn model_ratio(&self) -> Option<f64> {
-        let model = self.model_name.as_deref()?;
-        if model.is_empty() {
-            return None;
+        self.counter.is_calibrated().then(|| self.counter.ratio())
+    }
+
+    /// Restore the token-counting "scene" from persisted session meta:
+    /// the last API-counted input tokens (the authoritative anchor for the
+    /// resumed history) and the last calibrated ratio. Missing values fall
+    /// back to the default ratio / recomputed estimate — the JSONL replay
+    /// in [`Self::load_restored`] already produced a sane estimate.
+    pub fn restore_anchor(&mut self, last_input_tokens: Option<u64>, ratio: Option<f64>) {
+        if let Some(ratio) = ratio {
+            self.counter.set_ratio(ratio);
         }
-        Some(self.counter.model_ratios().get(model))
-    }
-
-    /// Set the model name for token counting precision.
-    /// Called when session model is determined (ADR-012).
-    pub fn set_model_name(&mut self, model: String) {
-        self.model_name = Some(model);
-    }
-
-    /// Initialize the token counter with a persistent ratio store.
-    ///
-    /// Called once during AgentLoop startup with the agent's config directory
-    /// path. Loads previously calibrated ratios from `{config_dir}/model_ratios.json`
-    /// and auto-saves after each calibration.
-    pub fn init_model_ratios(&mut self, config_dir: &std::path::Path) {
-        let path = config_dir.join("model_ratios.json");
-        self.counter = TokenCounter::new_with_ratios(
-            crate::token::ratio_store::ModelRatioStore::with_persistence(path),
-        );
+        if let Some(tokens) = last_input_tokens {
+            self.current_tokens = tokens;
+            tracing::info!(
+                tokens,
+                ratio = self.counter.ratio(),
+                "HistoryManager: anchored restored history to last API-counted input"
+            );
+        }
     }
 
     /// Dynamically update the max token budget for FIFO trimming.
@@ -362,11 +356,6 @@ impl HistoryManager {
     /// with the trim/compaction thresholds.
     pub fn max_tokens(&self) -> u64 {
         self.max_tokens
-    }
-
-    /// Get the model name for token counting, falling back to empty string (Tier3).
-    fn model_for_counting(&self) -> &str {
-        self.model_name.as_deref().unwrap_or("")
     }
 
     /// Get the current protocol type.
@@ -427,7 +416,7 @@ impl HistoryManager {
     /// When `prompt_tokens` is 0, the API response is considered unreliable
     /// (observed with some Anthropic-protocol providers like MiniMax that
     /// occasionally omit `message_start` usage fields). Calibration is skipped
-    /// entirely to prevent corrupting the ratio store with a bogus value.
+    /// entirely to prevent corrupting the ratio with a bogus value.
     pub fn calibrate_from_usage(&mut self, prompt_tokens: u64, total_input_chars: usize) {
         if prompt_tokens == 0 {
             tracing::warn!(
@@ -437,18 +426,27 @@ impl HistoryManager {
             return;
         }
 
-        // Store API ground truth for budget tracking.
+        // Store API ground truth for budget tracking: `prompt_tokens` covers
+        // the WHOLE request (history + system prompt + tool schemas) as the
+        // provider counts it — this is the real anchor for the next turn's
+        // projection. New messages appended afterwards are estimated as
+        // `chars / ratio` on top of it.
         let prior = self.current_tokens;
         self.current_tokens = prompt_tokens;
 
-        // Calibrate the chars/token ratio from same-source data.
-        // Both total_input_chars and prompt_tokens represent the same LLM request,
-        // so the computed ratio is a precise measurement of the model's chars/token.
+        // Calibrate the session chars/token ratio from same-source data.
+        // Both total_input_chars and prompt_tokens represent the same LLM
+        // request, so the computed ratio is a precise measurement of the
+        // model's chars/token. Direct replace (no EMA) — the live value has
+        // bounded local error that only propagates to the next turn's new
+        // input, never to already-counted history.
         if total_input_chars > 500 && prompt_tokens > 500 {
             let ratio = total_input_chars as f64 / prompt_tokens as f64;
-            if let Some(ref model) = self.model_name {
-                self.counter.model_ratios_mut().update(model, ratio);
-            }
+            self.counter.set_ratio(ratio);
+            tracing::info!(
+                ratio,
+                "Session token ratio calibrated from API usage"
+            );
         }
 
         tracing::debug!(
@@ -462,11 +460,7 @@ impl HistoryManager {
 
     /// Append a message to history
     pub fn append(&mut self, message: ChatMessage) {
-        let tokens = self.counter.count_message(
-            &message,
-            self.model_for_counting(),
-            Some(&self.protocol_type),
-        );
+        let tokens = self.counter.count_message(&message, Some(&self.protocol_type));
         self.current_tokens += tokens;
         let was_empty = self.messages.is_empty();
         let msg_bytes = Self::single_json_bytes(&message);
@@ -482,11 +476,7 @@ impl HistoryManager {
     /// Append multiple messages
     pub fn extend(&mut self, messages: Vec<ChatMessage>) {
         for msg in &messages {
-            self.current_tokens += self.counter.count_message(
-                msg,
-                self.model_for_counting(),
-                Some(&self.protocol_type),
-            );
+            self.current_tokens += self.counter.count_message(msg, Some(&self.protocol_type));
         }
         let prev_len = self.messages.len();
         let extra_bytes: usize = messages.iter().map(Self::single_json_bytes).sum();
@@ -529,7 +519,7 @@ impl HistoryManager {
             .iter()
             .map(|m| {
                 self.counter
-                    .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
+                    .count_message(m, Some(&self.protocol_type))
             })
             .sum();
         self.recompute_messages_json_bytes();
@@ -613,7 +603,7 @@ impl HistoryManager {
                 .iter()
                 .map(|m| {
                     self.counter
-                        .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
+                        .count_message(m, Some(&self.protocol_type))
                 })
                 .sum();
             self.messages_mut().drain(first_removable..round_end);
@@ -667,7 +657,7 @@ impl HistoryManager {
             .iter()
             .map(|m| {
                 self.counter
-                    .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
+                    .count_message(m, Some(&self.protocol_type))
             })
             .sum();
         self.recompute_messages_json_bytes();
@@ -690,11 +680,10 @@ impl HistoryManager {
     /// update `current_tokens` under borrow rules. O(N) over messages
     /// with constant-time token estimation each.
     pub fn recalibrate_tokens(&mut self) {
-        let model = self.model_for_counting().to_string();
         let pt = self.protocol_type.clone();
         let mut total = 0u64;
         for msg in self.messages.iter() {
-            total = total.saturating_add(self.counter.count_message(msg, &model, Some(&pt)));
+            total = total.saturating_add(self.counter.count_message(msg, Some(&pt)));
         }
         self.current_tokens = total;
     }
@@ -1206,11 +1195,7 @@ impl HistoryManager {
 
         // Subtract tokens of removed messages
         for msg in &self.messages[system_count..tail_start] {
-            let tokens = self.counter.count_message(
-                msg,
-                self.model_for_counting(),
-                Some(&self.protocol_type),
-            );
+            let tokens = self.counter.count_message(msg, Some(&self.protocol_type));
             self.current_tokens = self.current_tokens.saturating_sub(tokens);
         }
 
@@ -1235,11 +1220,7 @@ impl HistoryManager {
             name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
         };
-        let summary_tokens = self.counter.count_message(
-            &summary_msg,
-            self.model_for_counting(),
-            Some(&self.protocol_type),
-        );
+        let summary_tokens = self.counter.count_message(&summary_msg, Some(&self.protocol_type));
         self.messages_mut().insert(system_count, summary_msg);
         self.current_tokens += summary_tokens;
         self.recompute_messages_json_bytes();
@@ -1929,7 +1910,7 @@ impl HistoryManager {
         msgs.iter()
             .map(|m| {
                 self.counter
-                    .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
+                    .count_message(m, Some(&self.protocol_type))
             })
             .sum()
     }
@@ -1937,7 +1918,7 @@ impl HistoryManager {
     /// Estimate the to-be-inserted summary marker's tokens: precise summary
     /// text count plus a fixed overhead for the level metadata block (§9).
     fn estimate_marker_tokens(&self, summary: &str) -> u64 {
-        crate::token::count_text(summary, "") as u64 + 64
+        crate::token::count_text(summary) as u64 + 64
     }
 }
 
@@ -1960,6 +1941,32 @@ mod tests {
         hm.append(make_message(MessageRole::User, "Hello world"));
         assert_eq!(hm.len(), 1);
         assert!(hm.token_count() > 0);
+    }
+
+    #[test]
+    fn restore_anchor_restores_last_api_count_and_ratio() {
+        // Regression: resumed sessions must re-anchor the token count to the
+        // last API-counted prompt (which already includes system+tools) and
+        // restore the calibrated ratio — otherwise the JSONL replay's
+        // default-ratio estimate drifts (and previously triggered spurious
+        // compaction via the removed overhead compensation).
+        let mut hm = HistoryManager::new(1000);
+        hm.append(make_message(MessageRole::User, "你好世界，这是一段比较长的中文历史内容"));
+        let replayed_estimate = hm.token_count();
+
+        // The persisted meta says the last API count was much larger
+        // (API tokenizer vs local default ratio).
+        let api_last_input = replayed_estimate * 2;
+        hm.restore_anchor(Some(api_last_input), Some(2.0));
+
+        assert_eq!(hm.token_count(), api_last_input, "anchored to API ground truth");
+        assert_eq!(hm.model_ratio(), Some(2.0), "restored calibrated ratio");
+
+        // A missing ratio falls back to the default (still anchored).
+        let mut hm2 = HistoryManager::new(1000);
+        hm2.restore_anchor(Some(42), None);
+        assert_eq!(hm2.token_count(), 42);
+        assert_eq!(hm2.model_ratio(), None);
     }
 
     #[test]

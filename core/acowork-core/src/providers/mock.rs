@@ -43,6 +43,8 @@ pub struct MockProvider {
     last_request: Mutex<Option<ChatRequest>>,
     /// Default model name
     model: String,
+    /// Optional usage override; when set, returned in every `chat()` response.
+    usage: Option<UsageInfo>,
 }
 
 impl MockProvider {
@@ -53,7 +55,22 @@ impl MockProvider {
             call_count: AtomicU64::new(0),
             last_request: Mutex::new(None),
             model: "mock-model".to_string(),
+            usage: None,
         }
+    }
+
+    /// Create a mock provider that returns a single text response with a
+    /// custom usage report. Needed by token-accounting e2e tests that must
+    /// cross the ratio-calibration threshold (`prompt_tokens > 500`).
+    pub fn with_usage(content: &str, prompt_tokens: u64, completion_tokens: u64) -> Self {
+        let mut provider = Self::single_text(content);
+        provider.usage = Some(UsageInfo {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+            ..Default::default()
+        });
+        provider
     }
 
     /// Create a mock provider that returns a single text response
@@ -132,11 +149,13 @@ impl Provider for MockProvider {
         match response {
             MockResponse::Text { content } => Ok(ChatResponse {
                 content,
-                usage: Some(UsageInfo {
-                    prompt_tokens: 100,
-                    completion_tokens: 50,
-                    total_tokens: 150,
-                    ..Default::default()
+                usage: self.usage.clone().or_else(|| {
+                    Some(UsageInfo {
+                        prompt_tokens: 100,
+                        completion_tokens: 50,
+                        total_tokens: 150,
+                        ..Default::default()
+                    })
                 }),
                 ..Default::default()
             }),
@@ -146,11 +165,13 @@ impl Provider for MockProvider {
             } => Ok(ChatResponse {
                 content,
                 tool_calls: Some(tool_calls),
-                usage: Some(UsageInfo {
-                    prompt_tokens: 200,
-                    completion_tokens: 100,
-                    total_tokens: 300,
-                    ..Default::default()
+                usage: self.usage.clone().or_else(|| {
+                    Some(UsageInfo {
+                        prompt_tokens: 200,
+                        completion_tokens: 100,
+                        total_tokens: 300,
+                        ..Default::default()
+                    })
                 }),
                 ..Default::default()
             }),

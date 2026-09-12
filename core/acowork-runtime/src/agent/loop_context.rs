@@ -234,18 +234,14 @@ impl AgentLoop {
 
     /// Projected size of the NEXT chat-request input, in API-counted tokens.
     ///
-    /// `history.token_count()` only covers conversation messages; the real
-    /// prompt also carries the system prompt + tool schemas (~15K on the
-    /// 2026-09-06 deepseek incident). We anchor that constant overhead to the
-    /// most recent reliable API `prompt_tokens` (see
-    /// [`Self::process_llm_response_usage`]) and add it back — so thresholds
-    /// compare against what the provider actually counts instead of the
-    /// under-counted history-only figure.
+    /// `history.token_count()` is anchored to the last reliable API
+    /// `prompt_tokens` (the whole request — history + system prompt + tool
+    /// schemas — as the provider counts it, see
+    /// [`Self::process_llm_response_usage`]), so it already is what the
+    /// provider will count; newly appended messages are estimated on top
+    /// as `chars / ratio`. No separate "overhead" term exists.
     pub(crate) fn projected_input_tokens(&self) -> u64 {
-        self.session
-            .history
-            .token_count()
-            .saturating_add(self.context_overhead_tokens)
+        self.session.history.token_count()
     }
 
     /// Projected input INCLUDING not-yet-appended tool results (measured
@@ -323,20 +319,7 @@ impl AgentLoop {
             .map(str::to_string)
             .unwrap_or_default();
 
-        // Choose the probe model for token estimation (best effort — see doc).
-        let probe_model = self
-            .core
-            .default_compact_model
-            .as_ref()
-            .map(|(_, m)| m.clone())
-            .or_else(|| {
-                self.core
-                    .provider_compact_models
-                    .get(&session_pid)
-                    .and_then(|cm| cm.clone())
-            })
-            .unwrap_or_else(|| current_model.clone());
-        let estimated_tokens = crate::token::count_text(content_text, &probe_model) as u64;
+        let estimated_tokens = crate::token::count_text(content_text) as u64;
 
         // ── Level 1: global default compact model ──────────────────────
         if let Some((pid, mid)) = self.core.default_compact_model.clone() {
@@ -654,8 +637,8 @@ impl AgentLoop {
         let projected = self.projected_input_tokens();
 
         // The single automatic compaction line: 90% of the input budget,
-        // measured on the PROJECTED next-request input (history + anchored
-        // system/tools overhead) — not the under-counted history-only figure.
+        // measured on the PROJECTED next-request input (history anchored to
+        // the last API-counted prompt + estimated new messages).
         // `force=true` bypasses the threshold for manual compression and the
         // absolute-budget floor.
         if force || self.projected_exceeds_compact_threshold(model_name, 0) {
@@ -663,7 +646,6 @@ impl AgentLoop {
                 usage_percent = ?usage_percent,
                 current_tokens,
                 projected,
-                overhead_tokens = self.context_overhead_tokens,
                 threshold = self.compact_threshold_tokens(model_name),
                 budget,
                 force,
@@ -1413,11 +1395,6 @@ impl AgentLoop {
 
         // Compute total input chars for next round's token ratio calibration.
         self.last_input_chars = count_chat_request_chars(&chat_request);
-        // Snapshot the history token count this request is built on. When the
-        // usage report returns, `api_prompt_tokens − this snapshot` = the
-        // constant non-history overhead (system prompt + tools), which the
-        // compaction thresholds add back to form the PROJECTED next input.
-        self.last_request_history_tokens = self.session.history.token_count();
 
         // Inject transient tool results from the previous iteration
         // (ADR-032 C3a — preserved for future tools that need one-shot
@@ -1436,9 +1413,10 @@ impl AgentLoop {
 
     /// ②.6 Pre-request circuit-breaking — the single automatic compaction
     /// trigger. Runs the ADR-061 v3 5-level plan when the PROJECTED
-    /// next-request input tokens (history + system/tools overhead measured
-    /// against the last API `prompt_tokens`) reach `CONTEXT_COMPACT_PERCENT`
-    /// (90%) of the input budget. WARN (70%) remains informational only.
+    /// next-request input tokens (history anchored to the last API
+    /// `prompt_tokens` + estimated new messages) reach
+    /// `CONTEXT_COMPACT_PERCENT` (90%) of the input budget.
+    /// WARN (70%) remains informational only.
     ///
     /// ADR-061 §11.2: this routes through [`Self::compact_history_if_needed`]
     /// (force) — `emergency_trim` is deleted, and failure is returned so the
@@ -1516,26 +1494,14 @@ impl AgentLoop {
                     .history
                     .calibrate_from_usage(usage.prompt_tokens, self.last_input_chars);
 
-                // Anchor the constant non-history overhead (system prompt +
-                // tool schemas) to this response's API count. The next
-                // compaction threshold compares PROJECTED input =
-                // history.token_count() + this overhead — i.e. what the
-                // provider will actually count — instead of the under-counted
-                // history-only figure.
-                self.context_overhead_tokens = usage
-                    .prompt_tokens
-                    .saturating_sub(self.last_request_history_tokens);
-                tracing::debug!(
-                    api_prompt_tokens = usage.prompt_tokens,
-                    history_tokens_at_request = self.last_request_history_tokens,
-                    context_overhead_tokens = self.context_overhead_tokens,
-                    "Anchored context overhead for projected-input compaction checks"
-                );
-
-                // Persist the calibrated ratio into SessionState so the
-                // next emit_session_state checkpoint will pick it up.
+                // Persist the calibrated ratio into SessionState (UI) and
+                // session meta (resume scene) so the next emit_session_state
+                // checkpoint picks it up.
                 if let Some(ratio) = self.session.history.model_ratio() {
                     self.session.set_model_ratio(ratio);
+                    if let Some(conv) = self.session.conversation() {
+                        conv.set_model_ratio(ratio);
+                    }
                 }
             } else {
                 tracing::warn!(
@@ -1764,7 +1730,7 @@ impl AgentLoop {
     ) -> crate::error::Result<()> {
         let result_tokens_estimate: u64 = tool_results
             .iter()
-            .map(|r| crate::token::count_text(r, current_model) as u64)
+            .map(|r| crate::token::count_text(r) as u64)
             .sum();
         if result_tokens_estimate > 0
             && self.projected_exceeds_compact_threshold(current_model, result_tokens_estimate)
@@ -1815,7 +1781,7 @@ impl AgentLoop {
         // Count tokens per result
         let result_tokens: Vec<u64> = tool_results
             .iter()
-            .map(|r| crate::token::count_text(r, current_model) as u64)
+            .map(|r| crate::token::count_text(r) as u64)
             .collect();
         let total_result_tokens: u64 = result_tokens.iter().sum();
 
@@ -2241,8 +2207,8 @@ mod tests {
         set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
         set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
 
-        // Pick the tiny 8K model as global default; the probe_model-derived
-        // estimate for a long input will exceed 8K → fall back.
+        // Pick the tiny 8K model as global default; the estimated tokens for
+        // a long input will exceed 8K → fall back.
         loop_.core.default_compact_model =
             Some(("ollama-local".to_string(), "llama3:8b".to_string()));
 
@@ -2362,14 +2328,13 @@ mod tests {
         assert!(!loop_.core.is_default_compact_provider_available());
     }
 
-    // ── Token estimation uses compact model, not chat model ──────────
+    // ── Distill resolver prefers compact model over chat model ───────
     //
-    // Regression check for the bug fix in ADR-056 §5.2: `count_text` must
-    // be called with the probe model derived from the three-tier chain
-    // (compact model preferred), not the chat model. We can't observe
-    // count_text directly, but we can prove the resolver picks the
-    // compact model when one is available -- which means the chat model's
-    // own context_window never demotes the resolver.
+    // Regression check for the bug fix in ADR-056 §5.2: the three-tier
+    // chain must prefer the compact model over the chat model. We can
+    // prove the resolver picks the compact model when one is available —
+    // which means the chat model's own context_window never demotes the
+    // resolver.
 
     #[test]
     fn resolved_distill_uses_compact_model_when_global_default_available() {

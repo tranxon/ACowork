@@ -7,7 +7,6 @@
 //! S1.6: InboundQueue for external message injection
 //! S1.7: Parallel tool execution with per-tool timeout
 
-use std::path::Path;
 use std::sync::Arc;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
@@ -331,27 +330,6 @@ pub struct AgentLoop {
     /// Total input chars of the most recent ChatRequest, used for token
     /// ratio calibration together with the API-reported prompt_tokens.
     pub(crate) last_input_chars: usize,
-    /// History token count **as of the last ChatRequest build**, i.e. the
-    /// denominator for [`Self::context_overhead_tokens`].
-    ///
-    /// Calibrating `history.token_count()` against the API's `prompt_tokens`
-    /// is meaningless unless both sides measure the same history snapshot —
-    /// this field is captured in [`build_chat_request`] (loop_context.rs)
-    /// right where `last_input_chars` is set, so the request whose usage
-    /// arrives later is always the request these two anchors describe.
-    pub(crate) last_request_history_tokens: u64,
-    /// Constant non-history overhead of the next prompt, in API-counted
-    /// tokens: system prompt + tool schemas + serialisation padding.
-    ///
-    /// `history.token_count()` only covers conversation messages; the real
-    /// provider prompt also carries this overhead (≈15K on the 2026-09-06
-    /// deepseek incident). We anchor it after each reliable usage report:
-    /// `overhead = api_prompt_tokens − history_tokens_at_that_request`.
-    /// Compaction thresholds then compare PROJECTED input
-    /// (`history.token_count() + overhead`) instead of the under-counted
-    /// history-only figure. `0` until the first usage report is handled
-    /// (projection degrades gracefully to history-only).
-    pub(crate) context_overhead_tokens: u64,
     /// The reasoning_effort from the most recent build_chat_request() call.
     /// Preserved for emergency trim retry in call_llm_streaming_inner()
     /// where the context_builder is immutable.
@@ -499,12 +477,7 @@ impl AgentLoop {
             pending_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
-            context_overhead_tokens: 0,
-            last_request_history_tokens: 0,
         };
-        // Initialize persistent model ratio store from agent config dir.
-        let ratio_config_dir = Path::new(&loop_.core.config.work_dir).join("config");
-        loop_.session.history.init_model_ratios(&ratio_config_dir);
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         loop_.session_core.approval_handle = Some(approval_handle.clone());
         (loop_, inbound_tx)
@@ -572,8 +545,6 @@ impl AgentLoop {
             pending_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
-            context_overhead_tokens: 0,
-            last_request_history_tokens: 0,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -2082,6 +2053,96 @@ mod tests {
         assert_eq!(result.unwrap(), "Final response");
         // Verify usage was tracked (budget guard should have been updated)
         assert!(agent_loop.history().estimate_total_tokens() > 0);
+    }
+
+    // ── Token ratio calibration end-to-end ────────────────────────────
+    //
+    // One real `AgentLoop::run` with a usage-carrying provider must:
+    //   1. calibrate the session chars/token ratio from the API usage,
+    //   2. anchor `history.token_count()` to the API prompt_tokens,
+    //   3. mirror the ratio into SessionState (UI) and the ConversationSession
+    //      meta file (resume scene) — the two writers in
+    //      `process_llm_response_usage`.
+    #[tokio::test]
+    async fn test_run_calibrates_ratio_and_persists_to_conversation_meta() {
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let session_id = "ratio-calib-e2e";
+        let committed = Arc::new(AtomicUsize::new(0));
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: Some("mock-model".to_string()),
+            provider: Some("mock".to_string()),
+        };
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            session_id,
+            config,
+            0, // max_sessions
+            committed,
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+
+        let manifest = test_manifest();
+        // prompt_tokens=600 crosses the calibration threshold (>500).
+        let provider = Arc::new(MockProvider::with_usage("ok", 600, 50));
+        let tools = entries(vec![]);
+        let budget = test_budget();
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            manifest,
+            provider,
+            tools,
+            budget,
+            None,
+            Some(conversation.clone()),
+        );
+
+        // Long input so the request also crosses `total_input_chars > 500`.
+        let long_msg = format!("请分析以下代码并给出优化建议：\n{}", "x".repeat(800));
+        let mut context_builder = ContextBuilder::new("System".to_string());
+        let result = agent_loop
+            .run(&long_msg, &mut context_builder, None, None, None, None)
+            .await;
+        assert!(result.is_ok(), "run() should succeed: {result:?}");
+
+        // 1. Ratio calibrated from the API usage, clamped to the valid range
+        //    and no longer the default.
+        let ratio = agent_loop
+            .history()
+            .model_ratio()
+            .expect("ratio calibrated after a reliable usage report");
+        assert!(
+            (1.0..=10.0).contains(&ratio),
+            "ratio must be clamped into [1,10], got {ratio}"
+        );
+        assert!(
+            (ratio - crate::token::counter::DEFAULT_RATIO).abs() > 0.01,
+            "ratio must have moved off the default, got {ratio}"
+        );
+
+        // 2. History anchored to the API-counted prompt (plus the small
+        //    assistant turn appended after calibration).
+        assert!(
+            agent_loop.history().estimate_total_tokens() >= 600,
+            "history anchored to API prompt_tokens, got {}",
+            agent_loop.history().estimate_total_tokens()
+        );
+
+        // 3. SessionState (UI) mirror.
+        assert_eq!(agent_loop.session.model_ratio(), Some(ratio));
+
+        // 4. Conversation meta persisted for the resume scene.
+        assert_eq!(conversation.model_ratio(), Some(ratio));
+        conversation.flush_pending().await.expect("flush");
+        let meta_on_disk =
+            crate::conversation::read_session_meta(&dir.path().join("conversations"), session_id)
+                .expect("meta on disk");
+        assert_eq!(meta_on_disk.model_ratio, Some(ratio));
     }
 
     #[tokio::test]
