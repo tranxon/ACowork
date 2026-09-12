@@ -1139,6 +1139,7 @@
     "ready": "就緒",
     "retrying": "重試中...",
     "retryConnection": "重試連線",
+    "gatewayAddress": "閘道位址",
     "altLogo": "ACowork"
   },
   "appLayout": {
