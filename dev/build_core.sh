@@ -8,6 +8,9 @@
 #   --stop                   Build release + stop Gateway
 #   --start --debug          Build debug + start Gateway
 #   --stop --debug           Build debug + stop Gateway
+#   --local                  With --start: bind Gateway to 127.0.0.1 only (default)
+#   --remote                 With --start: bind Gateway to 0.0.0.0 and advertise
+#                            the detected LAN IP. Implies --start.
 #   --skip-embed             Skip building the embedding runtime
 #   -h, --help               Show this help
 #
@@ -47,12 +50,19 @@ PROFILE="release"
 START_GATEWAY=true
 STOP_GATEWAY=false
 SKIP_EMBED=false
+NETWORK_MODE="default"   # default|local|remote
 for arg in "$@"; do
     case "$arg" in
         --debug)      PROFILE="debug" ;;
         --release)    PROFILE="release" ;;
         --start)      START_GATEWAY=true ;;
         --stop)       STOP_GATEWAY=true ;;
+        --local)
+            [ "$NETWORK_MODE" = "remote" ] && { echo -e "${RED}ERROR: --local and --remote are mutually exclusive.${NC}"; exit 1; }
+            NETWORK_MODE="local" ;;
+        --remote)
+            [ "$NETWORK_MODE" = "local" ] && { echo -e "${RED}ERROR: --local and --remote are mutually exclusive.${NC}"; exit 1; }
+            NETWORK_MODE="remote"; START_GATEWAY=true ;;
         --skip-embed) SKIP_EMBED=true ;;
         -h|--help)
             cat <<'EOF'
@@ -65,6 +75,9 @@ Options:
   --stop            Build release + stop Gateway
   --start --debug   Build debug + start Gateway
   --stop --debug    Build debug + stop Gateway
+  --local           With --start: bind Gateway to 127.0.0.1 only (default)
+  --remote          With --start: bind Gateway to 0.0.0.0 (LAN-reachable) and
+                    advertise the detected LAN IP. Implies --start.
   --skip-embed      Skip the embedding runtime build
   -h, --help        Show this help
 
@@ -78,6 +91,16 @@ EOF
         *) echo -e "${RED}Unknown option: $arg${NC}"; exit 1 ;;
     esac
 done
+
+# --local / --remote are mutually exclusive and require --start (or no --stop).
+if [ "$NETWORK_MODE" != "default" ] && [ "$STOP_GATEWAY" = "true" ]; then
+    echo -e "${RED}ERROR: --local/--remote cannot be combined with --stop (no Gateway is started).${NC}"
+    exit 1
+fi
+if [ "$NETWORK_MODE" = "local" ] && [ "$START_GATEWAY" = "false" ]; then
+    echo -e "${YELLOW}WARN: --local has no effect without --start; ignoring.${NC}"
+    NETWORK_MODE="default"
+fi
 
 # Env var fallback for profile (CLI flag wins).
 if [ -n "$ACOWORK_BUILD_PROFILE" ]; then
@@ -94,11 +117,77 @@ if [ "$PROFILE" = "debug" ]; then
     export ACOWORK_GATEWAY_LOG_LEVEL="debug"
 fi
 
+# ponytail: best-effort LAN IP detection. The Gateway CLI's --advertise-host
+# wins over the auto-detect fallback (which only WARNs on miss). Ceiling:
+# VPN-only / containerized / multi-NIC setups — operator should set
+# [advertise_host] in gateway.toml for a deterministic value.
+detect_lan_ip() {
+    case "$OS" in
+        macos)
+            # en0 = default Wi-Fi on Apple hardware; fall back to en1.
+            ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true
+            ;;
+        linux)
+            # UDP-connect trick: ask the kernel what source it would use for
+            # 1.1.1.1 — no packets sent, just route lookup.
+            ip -4 route get 1.1.1.1 2>/dev/null \
+                | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+            ;;
+        windows)
+            # Git Bash / MSYS2 — defer to PowerShell. Mirrors build_core.ps1:
+            # prefer the IPv4 of the interface that owns the default route
+            # (virtual adapters such as VMware VMnet / WSL never own it, so
+            # this cannot pick a non-LAN-reachable address), then fall back
+            # to the first non-loopback, non-APIPA address.
+            powershell -NoProfile -Command "
+                \$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                      Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1
+                \$ip = if (\$r) {
+                    Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex \$r.InterfaceIndex -ErrorAction SilentlyContinue |
+                        Where-Object { \$_.IPAddress -ne '127.0.0.1' } | Select-Object -First 1 -ExpandProperty IPAddress
+                }
+                if (-not \$ip) {
+                    \$ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        Where-Object { \$_.IPAddress -ne '127.0.0.1' -and \$_.IPAddress -notmatch '^169\.254\.' } |
+                        Select-Object -First 1 -ExpandProperty IPAddress
+                }
+                \$ip
+            " 2>/dev/null | tr -d '\r\n ' || true
+            ;;
+        *) echo "" ;;
+    esac
+}
+
+# Build the gateway bind/advertise args from $NETWORK_MODE. The Gateway CLI
+# (core/acowork-gateway/src/cli.rs) accepts:
+#   --addr HOST:PORT          HTTP bind   (default 127.0.0.1:19876)
+#   --mqtt-addr HOST:PORT     MQTT bind   (default 127.0.0.1:19875)
+#   --advertise-host HOST     IP distributed to Node Agents / Desktop
+GATEWAY_ARGS=()
+if [ "$NETWORK_MODE" = "local" ]; then
+    # Pin the loopback advertise host (same as the Desktop app) so
+    # published endpoints stay loopback-reachable on a loopback-bound
+    # Gateway instead of leaking a LAN IP it cannot serve.
+    GATEWAY_ARGS=(--addr 127.0.0.1:19876 --mqtt-addr 127.0.0.1:19875 --advertise-host 127.0.0.1)
+elif [ "$NETWORK_MODE" = "remote" ]; then
+    # Bind 0.0.0.0 unconditionally — that is the whole point of --remote;
+    # the advertise host is best-effort and only appended when detected
+    # (the Gateway auto-detects a good value itself, via its UDP route probe).
+    GATEWAY_ARGS=(--addr 0.0.0.0:19876 --mqtt-addr 0.0.0.0:19875)
+    LAN_IP="$(detect_lan_ip || true)"
+    if [ -z "$LAN_IP" ]; then
+        echo -e "${YELLOW}WARN: could not detect a non-loopback IPv4 address for --remote; binding 0.0.0.0 and letting the Gateway auto-detect the advertise host. Set [advertise_host] in gateway.toml for a deterministic value.${NC}"
+    else
+        GATEWAY_ARGS+=(--advertise-host "$LAN_IP")
+        echo -e "${CYAN}Remote mode: Gateway will bind 0.0.0.0 and advertise $LAN_IP${NC}"
+    fi
+fi
+
 TARGET_DIR="$WORKSPACE_ROOT/target/$PROFILE"
 
 echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}ACowork Core Rebuild & Restart Script${NC}"
-echo -e "${CYAN}OS: $OS   Profile: $PROFILE${NC}"
+echo -e "${CYAN}OS: $OS   Profile: $PROFILE   Network: $NETWORK_MODE${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
 
@@ -531,12 +620,15 @@ if [ "$START_GATEWAY" = "true" ]; then
     fi
 
     if [ -f "$GATEWAY_EXE" ]; then
+        if [ "${#GATEWAY_ARGS[@]}" -gt 0 ]; then
+            echo -e "${GRAY}  Gateway args: ${GATEWAY_ARGS[*]}${NC}"
+        fi
         if [ "$OS" = "windows" ]; then
             # Windows: start in background
-            start //b //min "$GATEWAY_EXE" 2>/dev/null || "$GATEWAY_EXE" &
+            start //b //min "$GATEWAY_EXE" "${GATEWAY_ARGS[@]}" 2>/dev/null || "$GATEWAY_EXE" "${GATEWAY_ARGS[@]}" &
         else
             # Linux/macOS: start in background, suppress output
-            "$GATEWAY_EXE" > /dev/null 2>&1 &
+            "$GATEWAY_EXE" "${GATEWAY_ARGS[@]}" > /dev/null 2>&1 &
         fi
         echo -e "${GREEN}  Gateway started (PID: $!).${NC}"
     else
@@ -547,7 +639,11 @@ if [ "$START_GATEWAY" = "true" ]; then
     echo ""
     echo -e "${CYAN}========================================${NC}"
     echo -e "${CYAN}Done! Gateway is running.${NC}"
-    echo -e "${CYAN}HTTP API: http://127.0.0.1:19876${NC}"
+    if [ "$NETWORK_MODE" = "remote" ] && [ -n "$LAN_IP" ]; then
+        echo -e "${CYAN}HTTP API: http://${LAN_IP}:19876  (also reachable on the LAN)${NC}"
+    else
+        echo -e "${CYAN}HTTP API: http://127.0.0.1:19876${NC}"
+    fi
     echo -e "${CYAN}========================================${NC}"
 else
     echo ""

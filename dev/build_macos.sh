@@ -13,6 +13,9 @@
 #   ./dev/build_macos.sh --cpu         # CPU only (best compatibility)
 #   ./dev/build_macos.sh --start       # Build + start Gateway in daemon mode after build
 #   ./dev/build_macos.sh --stop        # Explicit stop of existing processes before build
+#   ./dev/build_macos.sh --local       # With --start: bind Gateway to 127.0.0.1 only (default)
+#   ./dev/build_macos.sh --remote      # With --start: bind Gateway to 0.0.0.0 and advertise
+#                                      # the detected LAN IP. Implies --start.
 #   ./dev/build_macos.sh --skip-embed  # Skip embed
 #   ./dev/build_macos.sh --help
 #
@@ -42,6 +45,7 @@ STOP_GATEWAY=false      # --stop: explicit intent to stop existing processes
                         # before build (mirrors build_core.sh semantics;
                         # the actual stop step is also run by default when
                         # --start is given)
+NETWORK_MODE="default"  # default|local|remote
 SHOW_HELP=false
 PROFILE="release"
 
@@ -53,6 +57,12 @@ for arg in "$@"; do
         --cpu)        USE_GPU=false ;;
         --start)      START_GATEWAY=true ;;
         --stop)       STOP_GATEWAY=true ;;
+        --local)
+            [ "$NETWORK_MODE" = "remote" ] && { echo -e "${RED}ERROR: --local and --remote are mutually exclusive.${NC}"; exit 1; }
+            NETWORK_MODE="local" ;;
+        --remote)
+            [ "$NETWORK_MODE" = "local" ] && { echo -e "${RED}ERROR: --local and --remote are mutually exclusive.${NC}"; exit 1; }
+            NETWORK_MODE="remote"; START_GATEWAY=true ;;
         --skip-embed) SKIP_EMBED=true ;;
         -h|--help)
             cat << 'EOF'
@@ -65,6 +75,9 @@ Options:
   --start           Build + start Gateway in daemon mode after build
   --stop            Explicit stop of existing Gateway/Runtime/Embed/LSP Relay
                     before build (mirrors build_core.sh semantics)
+  --local           With --start: bind Gateway to 127.0.0.1 only (default)
+  --remote          With --start: bind Gateway to 0.0.0.0 (LAN-reachable) and
+                    advertise the detected LAN IP. Implies --start.
   --skip-embed      Skip building the embedding runtime entirely
   --help, -h        Show this help
 
@@ -76,6 +89,7 @@ Examples:
   ./dev/build_macos.sh --debug       # Debug build
   ./dev/build_macos.sh --start       # Build + start Gateway in daemon mode
   ./dev/build_macos.sh --stop        # Build with explicit stop of existing processes
+  ./dev/build_macos.sh --remote      # Start in LAN-reachable mode (advertise IP)
   ./dev/build_macos.sh --cpu         # CPU only (Intel Mac or compatibility)
   ./dev/build_macos.sh --skip-embed  # Skip embed, build only Gateway + Runtime
 EOF
@@ -84,6 +98,50 @@ EOF
         *) echo -e "${RED}Unknown option: $arg${NC}"; exit 1 ;;
     esac
 done
+
+# ── Validate network-mode flags (MUST run after parsing) ────────────────────
+if [ "$NETWORK_MODE" != "default" ] && [ "$STOP_GATEWAY" = "true" ]; then
+    echo -e "${RED}ERROR: --local/--remote cannot be combined with --stop (no Gateway is started).${NC}"
+    exit 1
+fi
+if [ "$NETWORK_MODE" = "local" ] && [ "$START_GATEWAY" = "false" ]; then
+    echo -e "${YELLOW}WARN: --local has no effect without --start; ignoring.${NC}"
+    NETWORK_MODE="default"
+fi
+
+# ponytail: best-effort LAN IP detection. The Gateway CLI's --advertise-host
+# wins over the auto-detect fallback (which only WARNs on miss). Ceiling:
+# VPN-only / multi-NIC / corporate-proxied setups — operator should set
+# [advertise_host] in gateway.toml for a deterministic value.
+detect_lan_ip() {
+    # en0 = default Wi-Fi on Apple hardware; fall back to en1.
+    ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true
+}
+
+# Build the gateway bind/advertise args from $NETWORK_MODE (MUST run after
+# parsing). The Gateway CLI (core/acowork-gateway/src/cli.rs) accepts:
+#   --addr HOST:PORT          HTTP bind   (default 127.0.0.1:19876)
+#   --mqtt-addr HOST:PORT     MQTT bind   (default 127.0.0.1:19875)
+#   --advertise-host HOST     IP distributed to Node Agents / Desktop
+GATEWAY_ARGS=()
+if [ "$NETWORK_MODE" = "local" ]; then
+    # Pin the loopback advertise host (same as the Desktop app) so
+    # published endpoints stay loopback-reachable on a loopback-bound
+    # Gateway instead of leaking a LAN IP it cannot serve.
+    GATEWAY_ARGS=(--addr 127.0.0.1:19876 --mqtt-addr 127.0.0.1:19875 --advertise-host 127.0.0.1)
+elif [ "$NETWORK_MODE" = "remote" ]; then
+    # Bind 0.0.0.0 unconditionally — that is the whole point of --remote;
+    # the advertise host is best-effort and only appended when detected
+    # (the Gateway auto-detects a good value itself, via its UDP route probe).
+    GATEWAY_ARGS=(--addr 0.0.0.0:19876 --mqtt-addr 0.0.0.0:19875)
+    LAN_IP="$(detect_lan_ip || true)"
+    if [ -z "$LAN_IP" ]; then
+        echo -e "${YELLOW}WARN: could not detect a non-loopback IPv4 address for --remote; binding 0.0.0.0 and letting the Gateway auto-detect the advertise host. Set [advertise_host] in gateway.toml for a deterministic value.${NC}"
+    else
+        GATEWAY_ARGS+=(--advertise-host "$LAN_IP")
+        echo -e "${CYAN}Remote mode: Gateway will bind 0.0.0.0 and advertise $LAN_IP${NC}"
+    fi
+fi
 
 # Env var fallback for profile (CLI flag wins).
 if [ -n "$ACOWORK_BUILD_PROFILE" ]; then
@@ -448,12 +506,15 @@ echo ""
 if [ "$START_GATEWAY" = "true" ]; then
     echo -e "${YELLOW}[6/$TOTAL_STEPS] Starting Gateway in daemon mode...${NC}"
     log_level="${ACOWORK_GATEWAY_LOG_LEVEL:-info}"
-    echo -e "${GRAY}  Log level: $log_level${NC}"
+    echo -e "${GRAY}  Log level: $log_level   Network: $NETWORK_MODE${NC}"
     export ACOWORK_GATEWAY_DAEMON="true"
 
     GATEWAY_EXE="$TARGET_DIR/acowork-gateway"
     if [ -f "$GATEWAY_EXE" ]; then
-        "$GATEWAY_EXE" > /dev/null 2>&1 &
+        if [ "${#GATEWAY_ARGS[@]}" -gt 0 ]; then
+            echo -e "${GRAY}  Gateway args: ${GATEWAY_ARGS[*]}${NC}"
+        fi
+        "$GATEWAY_EXE" "${GATEWAY_ARGS[@]}" > /dev/null 2>&1 &
         gateway_pid=$!
         echo -e "${GREEN}  Gateway started (PID: $gateway_pid).${NC}"
     else
@@ -472,7 +533,11 @@ echo ""
 
 if [ "$START_GATEWAY" = "true" ]; then
     echo -e "${CYAN}Gateway is running in daemon mode.${NC}"
-    echo -e "${CYAN}HTTP API: http://127.0.0.1:19876${NC}"
+    if [ "$NETWORK_MODE" = "remote" ] && [ -n "$LAN_IP" ]; then
+        echo -e "${CYAN}HTTP API: http://${LAN_IP}:19876  (also reachable on the LAN)${NC}"
+    else
+        echo -e "${CYAN}HTTP API: http://127.0.0.1:19876${NC}"
+    fi
     echo ""
 fi
 
