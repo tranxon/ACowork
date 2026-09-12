@@ -99,11 +99,7 @@ async fn dispatch_bundled_agent_install(
     // A wildcard bind must be dialed via loopback; the local node shares
     // our host, so `advertise_host` (for remote nodes) is the wrong answer
     // here — see `http::agents::publish_to_registry`.
-    let url_host = if config.http.host == "0.0.0.0" || config.http.host == "::" {
-        "127.0.0.1"
-    } else {
-        config.http.host.as_str()
-    };
+    let url_host = acowork_core::addr::connect_host(&config.http.host);
     let package_url = format!(
         "http://{}:{}/api/packages/{}/download",
         url_host, config.http.port, agent_id
@@ -386,6 +382,12 @@ impl Gateway {
         // System Agent auto-start now happens AFTER the local node is up
         // and its installed inventory has been aggregated (see below).
 
+        // ADR-055 D3: resolve the advertise host once, before the embed
+        // sidecar is spawned — the embed bind decision (below) and the
+        // GatewayState cache (further down) both consume this single
+        // value (config > auto-detected non-loopback IP > 127.0.0.1).
+        let resolved_advertise_host = crate::config::resolve_advertise_host(&self.config);
+
         // Try to spawn the local embedding service (acowork-embed).
         // This is optional — if the binary is not found, embedding will
         // fall back to remote providers (Ollama / OpenAI-compatible API).
@@ -401,7 +403,18 @@ impl Gateway {
             let embed_port = 18080; // Default port for embedding service
             let hf_mirrors = self.config.hf_mirrors.clone();
             let embedding_model = self.config.embedding_model.clone();
-            let onnx_variant = "onnx";
+            // "fp32" must be a key present in BOTH `onnx_variants` and
+            // `external_data_files` of the model registry: the variant
+            // drives the ONNX file path AND the external-data lookup
+            // (`onnx/model.onnx` + `onnx/model.onnx_data`). The previous
+            // value "onnx" matched neither map, so downloads silently
+            // skipped `model.onnx_data` and every model load failed.
+            let onnx_variant = "fp32";
+            // ADR-055 D3: bind the embed listener at the advertised address
+            // so Runtimes (local or remote) can dial the published endpoint
+            // — see `bind_host_for_advertise` for the loopback rule.
+            let embed_bind_host =
+                crate::lifecycle::embed::bind_host_for_advertise(&resolved_advertise_host);
             let existing_health = crate::lifecycle::embed::check_embed_health(embed_port).await;
             if existing_health.is_some() {
                 let embed_state = crate::lifecycle::embed::attach_existing_embed_process(
@@ -424,6 +437,7 @@ impl Gateway {
                         data_dir,
                         models_dir,
                         port: embed_port,
+                        bind_host: embed_bind_host.to_string(),
                         hf_mirrors,
                         onnx_variant: onnx_variant.to_string(),
                         model_id: embedding_model.clone(),
@@ -433,6 +447,7 @@ impl Gateway {
                     &data_dir,
                     &models_dir,
                     embed_port,
+                    embed_bind_host,
                     &hf_mirrors,
                     onnx_variant,
                     embedding_model.as_deref(),
@@ -458,6 +473,7 @@ impl Gateway {
                                 data_dir,
                                 models_dir,
                                 port: embed_port,
+                                bind_host: embed_bind_host.to_string(),
                                 hf_mirrors,
                                 onnx_variant: onnx_variant.to_string(),
                                 model_id: embedding_model.clone(),
@@ -558,11 +574,10 @@ impl Gateway {
         {
             let mut gw = shared_state.write().await;
             gw.config = Some(self.config.clone());
-            // ADR-055 D3: resolve the advertise host once at startup
-            // (config > auto-detected non-loopback IP > 127.0.0.1) and
-            // cache it on GatewayState so every endpoint constructor
-            // (embed / LSP / AgentHello) reads a single source of truth.
-            let advertise = crate::config::resolve_advertise_host(&self.config);
+            // ADR-055 D3: cache the advertise host resolved at startup
+            // (above) so every endpoint constructor (embed / LSP /
+            // AgentHello) reads a single source of truth.
+            let advertise = resolved_advertise_host;
             tracing::info!(advertise_host = %advertise, "Resolved advertise host (ADR-055 D3)");
             gw.advertise_host = advertise;
         }

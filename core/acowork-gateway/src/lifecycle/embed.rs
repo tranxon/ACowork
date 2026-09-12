@@ -65,10 +65,37 @@ pub fn attach_existing_embed_process(
     }
 }
 
+/// Choose the listener bind host for the embed sidecar from the
+/// Gateway's advertised host (ADR-055 D3).
+///
+/// The Gateway publishes `http://{advertise_host}:{embed_port}/v1` on
+/// the `acowork/global/embedding_models` topic and Runtimes on every
+/// machine — including remote Node machines — dial that URL verbatim.
+/// The embed listener must therefore accept connections arriving at
+/// the advertised address:
+///
+/// - loopback advertise (desktop / local mode) → bind `127.0.0.1`
+///   (keeps the model service private to this machine);
+/// - any other value (remote-mode LAN IP, or a hostname, which by
+///   advertise semantics implies cross-host reachability) → bind the
+///   wildcard address so LAN peers can reach it.
+pub fn bind_host_for_advertise(advertise_host: &str) -> &'static str {
+    let host = advertise_host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return "127.0.0.1";
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_loopback() => "127.0.0.1",
+        _ => "0.0.0.0",
+    }
+}
+
 /// Spawn the acowork-embed process.
 ///
 /// The embedding service runs as a sibling process to the Gateway,
-/// listening on `127.0.0.1:{port}`. It downloads and loads the
+/// listening on `{bind_host}:{port}` — `bind_host` must be chosen with
+/// [`bind_host_for_advertise`] so the listener matches the advertise
+/// host published to Runtimes (ADR-055 D3). It downloads and loads the
 /// recommended model on first startup.
 ///
 /// Returns `(EmbedProcessState, Child)` — the caller is responsible for
@@ -78,6 +105,7 @@ pub async fn spawn_embed_process(
     data_dir: &Path,
     models_dir: &Path,
     port: u16,
+    bind_host: &str,
     hf_mirrors: &[String],
     onnx_variant: &str,
     model_id: Option<&str>,
@@ -137,7 +165,7 @@ pub async fn spawn_embed_process(
 
     let mut cmd = tokio::process::Command::new(&embed_bin);
     cmd.arg("--host")
-        .arg("127.0.0.1")
+        .arg(bind_host)
         .arg("--port")
         .arg(port.to_string())
         .arg("--models-dir")
@@ -503,4 +531,23 @@ fn locate_ort_lib_dir() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_host_for_advertise;
+
+    #[test]
+    fn embed_bind_follows_advertise_reachability() {
+        // Loopback advertise (desktop / local modes) → private to host.
+        assert_eq!(bind_host_for_advertise("127.0.0.1"), "127.0.0.1");
+        assert_eq!(bind_host_for_advertise("::1"), "127.0.0.1");
+        assert_eq!(bind_host_for_advertise("localhost"), "127.0.0.1");
+        assert_eq!(bind_host_for_advertise("LOCALHOST"), "127.0.0.1");
+        // Non-loopback advertise (remote mode) → LAN-reachable wildcard.
+        assert_eq!(bind_host_for_advertise("192.168.3.61"), "0.0.0.0");
+        assert_eq!(bind_host_for_advertise(" 192.168.3.61 "), "0.0.0.0");
+        // Hostname advertise implies cross-host reachability.
+        assert_eq!(bind_host_for_advertise("gw-host.lan"), "0.0.0.0");
+    }
 }

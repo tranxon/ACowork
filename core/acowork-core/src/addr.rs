@@ -112,6 +112,30 @@ fn parse_port(s: &str, input: &str) -> Result<u16, String> {
     Ok(port)
 }
 
+/// Normalize a configured *bind* host into a valid *connect* target.
+///
+/// `0.0.0.0` and `::` are "unspecified" addresses: legal for a
+/// listener, but NOT legal as a TCP connect target (Windows rejects
+/// the connect outright; elsewhere the semantics are ambiguous).
+/// Callers that connect to a service they themselves bound (e.g. the
+/// Gateway's internal MQTT client → its embedded broker, or a package
+/// download URL derived from the HTTP bind host) must pass the bind
+/// host through this helper first: IPv4 unspecified → `127.0.0.1`,
+/// IPv6 unspecified → `::1`. Every other input (hostname, concrete
+/// IP) is returned unchanged.
+pub fn connect_host(host: &str) -> &str {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => {
+            if ip.is_ipv4() {
+                "127.0.0.1"
+            } else {
+                "::1"
+            }
+        }
+        _ => host,
+    }
+}
+
 /// Detect the first non-loopback IPv4 address of this host (best effort).
 ///
 /// Uses the UDP "connect" trick: `connect` on a datagram socket does not
@@ -189,6 +213,22 @@ mod tests {
         let hp = parse_host_port("fe80::1%eth0", 19876).unwrap();
         assert_eq!(hp.host, "fe80::1%eth0");
         assert_eq!(hp.port, 19876);
+    }
+
+    #[test]
+    fn connect_host_normalizes_unspecified_addresses() {
+        // IPv4 wildcard bind → loopback connect target.
+        assert_eq!(connect_host("0.0.0.0"), "127.0.0.1");
+        // IPv6 wildcard (canonical and expanded spellings).
+        assert_eq!(connect_host("::"), "::1");
+        assert_eq!(connect_host("::0"), "::1");
+        assert_eq!(connect_host("0:0:0:0:0:0:0:0"), "::1");
+        // Concrete addresses and hostnames pass through unchanged.
+        assert_eq!(connect_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(connect_host("192.168.1.20"), "192.168.1.20");
+        assert_eq!(connect_host("::1"), "::1");
+        assert_eq!(connect_host("localhost"), "localhost");
+        assert_eq!(connect_host("gw-host"), "gw-host");
     }
 
     #[test]

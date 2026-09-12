@@ -1135,16 +1135,11 @@ async fn publish_to_registry(
         )));
     }
     let registry_path = registry_dir.join(format!("{}.agent", agent_id));
-    let url_host = if node_id == acowork_core::node::local_node_id() {
-        // A wildcard bind must still be dialed via loopback.
-        if config.http.host == "0.0.0.0" || config.http.host == "::" {
-            "127.0.0.1"
-        } else {
-            config.http.host.as_str()
-        }
-    } else {
-        gw.advertise_host.as_str()
-    };
+    let url_host = crate::gateway::node_manager::dispatch_url_host(
+        node_id,
+        &config.http.host,
+        gw.advertise_host.as_str(),
+    );
     let url = format!(
         "http://{}:{}/api/packages/{}/download",
         url_host, config.http.port, agent_id

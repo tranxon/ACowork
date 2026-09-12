@@ -211,6 +211,14 @@ impl GatewayMqttClient {
         credentials: Option<(&str, &str)>,
         message_callback: Option<MqttMessageCallback>,
     ) -> Result<Self, GatewayMqttClientError> {
+        // The caller usually passes the *configured* host, which doubles
+        // as the broker bind address (`--mqtt-addr 0.0.0.0:19875` in
+        // remote mode). A wildcard bind address is NOT a valid TCP
+        // connect target (Windows rejects connects to `0.0.0.0`), so
+        // normalize it to loopback before dialing — otherwise the
+        // client never reaches the embedded broker and every
+        // subscription (node enroll, status, …) is silently lost.
+        let host = acowork_core::addr::connect_host(host);
         let config = MqttClientConfig {
             client_id: client_id.to_string(),
             host: host.to_string(),

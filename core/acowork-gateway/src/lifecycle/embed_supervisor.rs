@@ -88,6 +88,11 @@ pub struct EmbedSupervisorConfig {
     pub data_dir: std::path::PathBuf,
     pub models_dir: std::path::PathBuf,
     pub port: u16,
+    /// Listener bind host for respawns, chosen from the advertise host
+    /// via [`super::embed::bind_host_for_advertise`] — mirrors the
+    /// initial spawn so a restarted embed keeps the same reachability
+    /// (ADR-055 D3: remote mode → LAN-reachable wildcard).
+    pub bind_host: String,
     pub hf_mirrors: Vec<String>,
     pub onnx_variant: String,
     pub model_id: Option<String>,
@@ -296,6 +301,7 @@ async fn run_supervisor(
             &cfg.data_dir,
             &cfg.models_dir,
             port,
+            &cfg.bind_host,
             &cfg.hf_mirrors,
             &cfg.onnx_variant,
             cfg.model_id.as_deref(),
