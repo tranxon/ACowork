@@ -56,6 +56,22 @@ fn local_node_id() -> String {
     acowork_core::node::local_node_id()
 }
 
+/// URL host a package-dispatch download must target: the local node dials
+/// the (normalized) HTTP bind host — a wildcard bind must still be reached
+/// via loopback — while remote nodes dial the advertise host they can route
+/// to (ADR-055 D3).
+pub fn dispatch_url_host<'a>(
+    node_id: &str,
+    http_host: &'a str,
+    advertise_host: &'a str,
+) -> &'a str {
+    if node_id == local_node_id() {
+        acowork_core::addr::connect_host(http_host)
+    } else {
+        advertise_host
+    }
+}
+
 /// How long to wait for a retained `online` from an already-running
 /// local node before spawning our own. The Gateway client re-subscribes
 /// to `acowork/nodes/+/status` immediately before this runs, so a
@@ -738,15 +754,7 @@ pub async fn install_agent_via_mqtt(
     // The download URL must be reachable from the target node: the
     // loopback-bound local node dials the HTTP bind host, remote nodes
     // the advertise host (ADR-055 D3).
-    let url_host = if dispatch.node_id == local_node_id() {
-        if dispatch.http_host == "0.0.0.0" || dispatch.http_host == "::" {
-            "127.0.0.1"
-        } else {
-            dispatch.http_host
-        }
-    } else {
-        dispatch.advertise_host
-    };
+    let url_host = dispatch_url_host(dispatch.node_id, dispatch.http_host, dispatch.advertise_host);
     let url = format!(
         "http://{url_host}:{}/api/packages/{agent_id}/download",
         dispatch.http_port
@@ -800,15 +808,7 @@ pub async fn upgrade_agent_via_mqtt(
 
     // Same host selection as install: the local node dials the bind
     // host, remote nodes the advertise host (ADR-055 D3).
-    let url_host = if dispatch.node_id == local_node_id() {
-        if dispatch.http_host == "0.0.0.0" || dispatch.http_host == "::" {
-            "127.0.0.1"
-        } else {
-            dispatch.http_host
-        }
-    } else {
-        dispatch.advertise_host
-    };
+    let url_host = dispatch_url_host(dispatch.node_id, dispatch.http_host, dispatch.advertise_host);
     let url = format!(
         "http://{url_host}:{}/api/packages/{agent_id}/download",
         dispatch.http_port
