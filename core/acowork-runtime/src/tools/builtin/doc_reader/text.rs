@@ -20,7 +20,7 @@
 //!   [`super::ExtractOptions`], no whole-file size cap is enforced (the
 //!   whole point of paging is to read a subset of a larger file). The
 //!   line range is validated against
-//!   [`crate::tools::builtin::MAX_LINES_PER_CALL`] (400), matching
+//!   [`crate::tools::builtin::MAX_LINES_PER_CALL`] (100), matching
 //!   `file_read`'s contract.
 //! - **NUL-byte sniff** — binary files (PNG, ZIP, EXE, ...) frequently
 //!   happen to be valid UTF-8; a NUL byte is a reliable cheap signal
@@ -157,7 +157,7 @@ fn extract_paged(text: &str, start: usize, end: usize) -> Result<String, String>
 
     // No truncate_output here: the OutputBoundedTool wrapper enforces
     // the 32 KB hard cap as the last safety net. The paged path
-    // (400-line max via MAX_LINES_PER_CALL) plus that wrapper is two
+    // (100-line max via MAX_LINES_PER_CALL) plus that wrapper is two
     // independent bounds; either one alone would still be safe.
     Ok(selected.to_string())
 
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn paging_rejects_range_larger_than_max() {
-        // 请求 500 行（> MAX_LINES_PER_CALL=400）必须报错
+        // 请求 500 行（> MAX_LINES_PER_CALL=100）必须报错
         let mut lines: Vec<String> = (0..500).map(|i| format!("L{i}")).collect();
         lines.push(String::new()); // sentinel
         let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -349,7 +349,7 @@ mod tests {
         };
         let err = extract_text(&p, &opts).expect_err("range > MAX_LINES_PER_CALL must error");
         assert!(err.contains("Range too large"), "got: {err}");
-        assert!(err.contains("400"), "got: {err}");
+        assert!(err.contains("100"), "got: {err}");
     }
 
     #[test]

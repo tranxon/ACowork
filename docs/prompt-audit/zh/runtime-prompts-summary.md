@@ -68,7 +68,7 @@ graph LR
 | 工具 | 文件 | description 要点 |
 | --- | --- | --- |
 | `shell` | `shell.rs` | "Execute a shell command..." |
-| `file_read` | `file_read.rs` | 强调先 `content_search` 定位行号、≤400 行/次 |
+| `file_read` | `file_read.rs` | 强调先 `content_search` 定位行号、≤100 行/次 |
 | `file_write` | `file_write.rs` | `overwrite` / `append` 模式说明 |
 | `file_edit` | `file_edit.rs` | 强调"exact match / CRLF / byte-by-byte" |
 | `content_search` | `content_search.rs` | 强调 "use `include` glob + focused regex"，限制 1000 条 |
