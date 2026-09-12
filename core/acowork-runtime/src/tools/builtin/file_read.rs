@@ -23,13 +23,13 @@ impl FileReadTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "file_read".to_string(),
-            description: "Read a specific range of lines from a file, with line numbers. This is a fragment reader — both start_line (1-based) and end_line (inclusive) are required. Read at most 400 lines per call; for longer ranges, paginate across multiple calls. Always use content_search first to locate the relevant line numbers before calling this tool.".to_string(),
+            description: "Read a specific range of lines from a file, with line numbers. This is a fragment reader — both start_line (1-based) and end_line (inclusive) are required. Read at most 100 lines per call; for longer ranges, paginate across multiple calls. Always use content_search first to locate the relevant line numbers before calling this tool.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path to the file" },
                     "start_line": { "type": "integer", "description": "Starting line number (1-based). Required. Must be > 0." },
-                    "end_line": { "type": "integer", "description": "Ending line number (inclusive). Required. Must be >= start_line. At most 400 lines per call — paginate if you need more." }
+                    "end_line": { "type": "integer", "description": "Ending line number (inclusive). Required. Must be >= start_line. At most 100 lines per call — paginate if you need more." }
                 },
                 "required": ["path", "start_line", "end_line"]
             }),
@@ -414,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_range_over_max_lines_per_call_errors_with_paginate_template() {
-        // MAX_LINES_PER_CALL is 400. Request 500 → must error AND
+        // MAX_LINES_PER_CALL is 100. Request 500 → must error AND
         // include the explicit paginate template so the LLM can fix
         // its call without trial-and-error.
         let (_dir, p) = build_lines_file(1000);
@@ -433,7 +433,7 @@ mod tests {
         let err = result.error.as_deref().unwrap();
         assert!(err.contains("Range too large"), "got: {err}");
         assert!(
-            err.contains("400"),
+            err.contains("100"),
             "must mention MAX_LINES_PER_CALL: {err}"
         );
         assert!(
@@ -519,7 +519,7 @@ mod tests {
         // file_read clamps `end` to total silently. The LLM gets
         // back everything from start_line to EOF.
         //
-        // Important: end must stay under MAX_LINES_PER_CALL (400),
+        // Important: end must stay under MAX_LINES_PER_CALL (100),
         // otherwise the range-size check rejects before the clamp can
         // happen. We pick end=15 so the range size (15-8+1 = 8 lines)
         // is well under the cap, while end (15) is still beyond
@@ -639,12 +639,12 @@ mod tests {
     #[test]
     fn e2e_spec_description_advertises_max_lines_per_call() {
         // The spec description is the only place the LLM learns about
-        // the 400-line cap. If this drifts, models will request huge
+        // the 100-line cap. If this drifts, models will request huge
         // ranges and waste a round-trip on the error.
         let desc = FileReadTool::spec_value().description;
         assert!(
-            desc.contains("400"),
-            "must mention the 400-line cap: {desc}"
+            desc.contains("100"),
+            "must mention the 100-line cap: {desc}"
         );
         assert!(desc.contains("paginate"), "must teach pagination: {desc}");
     }

@@ -78,11 +78,14 @@ pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] =
 /// across multiple calls (the file_read error message gives the LLM an
 /// explicit paginate template).
 ///
-/// Set high enough (400 lines ≈ 8-16 KB of typical source) to keep most
+/// Set high enough (100 lines ≈ 2-4 KB of typical source) to keep most
 /// real-world reads in one round-trip, low enough that two concurrent
 /// near-cap results still fit well under [`crate::tools::output::MAX_OUTPUT_BYTES`]
 /// (32 KB).
-pub const MAX_LINES_PER_CALL: usize = 400;
+///
+/// History: was 400, lowered to 100 to cut per-call token cost (most reads
+/// never approached 400 lines; truncation by the 32 KB wrapper rarely fired).
+pub const MAX_LINES_PER_CALL: usize = 100;
 
 use acowork_core::tools::traits::Tool;
 use std::sync::Arc;
@@ -370,7 +373,7 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn max_lines_per_call_leaves_headroom_for_other_context() {
-        // 400 lines × ~80 bytes (typical source) ≈ 32 KB. Two concurrent
+        // 100 lines × ~80 bytes (typical source) ≈ 8 KB. Two concurrent
         // fragment-reader results at the upper bound would saturate
         // the per-tool cap, leaving no room for history / system prompt.
         // The realistic guarantee is enforced by `output::truncate_output`

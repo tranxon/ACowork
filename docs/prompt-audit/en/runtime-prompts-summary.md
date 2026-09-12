@@ -68,7 +68,7 @@ Every LLM call carries tool schemas, whose `description` field is read by the mo
 | Tool | File | description gist |
 | --- | --- | --- |
 | `shell` | `shell.rs` | "Execute a shell command..." |
-| `file_read` | `file_read.rs` | Insists on pre-locating line ranges via `content_search`, ≤400 lines/call |
+| `file_read` | `file_read.rs` | Insists on pre-locating line ranges via `content_search`, ≤100 lines/call |
 | `file_write` | `file_write.rs` | `overwrite` / `append` mode notes |
 | `file_edit` | `file_edit.rs` | "exact match / CRLF / byte-by-byte" |
 | `content_search` | `content_search.rs` | "use `include` glob + focused regex", capped at 1000 hits |

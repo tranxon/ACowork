@@ -1455,12 +1455,14 @@ mod tests {
 
     #[tokio::test]
     async fn integration_real_file_read_capped_by_wrapper() {
-        // file_read's truncate_output was removed — 400 lines × ~205
-        // bytes ≈ 82 KB must be caught by the wrapper, not returned
-        // raw to the LLM.
+        // file_read's truncate_output was removed — 100 lines × ~410
+        // bytes ≈ 41 KB must be caught by the wrapper, not returned
+        // raw to the LLM. (When MAX_LINES_PER_CALL was 400 the scenario
+        // used 400×200; we kept the spirit of the test by widening the
+        // line payload so 100 lines still exceed the 32 KB cap.)
         let dir = tempfile::TempDir::new().expect("tempdir");
         let file_path = dir.path().join("big.txt");
-        write_big_text_file(&file_path, 400, 200);
+        write_big_text_file(&file_path, 100, 400);
         assert!(std::fs::metadata(&file_path).unwrap().len() > output::MAX_OUTPUT_BYTES as u64);
 
         let stack = full_stack(
@@ -1473,7 +1475,7 @@ mod tests {
                 serde_json::json!({
                     "path": file_path.to_string_lossy(),
                     "start_line": 1,
-                    "end_line": 400,
+                    "end_line": 100,
                 }),
                 None,
             )
@@ -1482,7 +1484,7 @@ mod tests {
         assert!(r.ok, "file_read should succeed: {:?}", r.error);
         assert!(
             r.content.contains("OUTPUT TRUNCATED"),
-            "file_read 82 KB output must be capped by wrapper"
+            "file_read ~41 KB output must be capped by wrapper"
         );
         assert!(
             r.content.len() <= output::MAX_OUTPUT_BYTES + 400,
@@ -1494,10 +1496,10 @@ mod tests {
     #[tokio::test]
     async fn integration_real_doc_reader_paged_capped_by_wrapper() {
         // doc_reader's paged path had truncate_output removed. A paged
-        // read of 400 wide lines ≈ 82 KB must be capped by the wrapper.
+        // read of 100 wide lines ≈ 41 KB must be capped by the wrapper.
         let dir = tempfile::TempDir::new().expect("tempdir");
         let file_path = dir.path().join("big.md");
-        write_big_text_file(&file_path, 400, 200);
+        write_big_text_file(&file_path, 100, 400);
 
         let stack = full_stack(
             Arc::new(crate::tools::builtin::doc_reader::DocReaderTool::new()),
@@ -1509,7 +1511,7 @@ mod tests {
                 serde_json::json!({
                     "path": file_path.to_string_lossy(),
                     "start_line": 1,
-                    "end_line": 400,
+                    "end_line": 100,
                 }),
                 None,
             )
@@ -1518,7 +1520,7 @@ mod tests {
         assert!(r.ok, "doc_reader paged read should succeed: {:?}", r.error);
         assert!(
             r.content.contains("OUTPUT TRUNCATED"),
-            "doc_reader paged 82 KB output must be capped by wrapper"
+            "doc_reader paged ~41 KB output must be capped by wrapper"
         );
     }
 

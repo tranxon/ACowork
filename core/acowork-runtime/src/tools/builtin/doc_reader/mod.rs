@@ -116,7 +116,7 @@ impl DocReaderTool {
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "Optional 1-based start line for plain-text files (Markdown, source, logs, ...). Ignored by PDF/DOCX/PPTX/XLSX. When set with end_line, reads only that line range (max 400 lines per call)."
+                        "description": "Optional 1-based start line for plain-text files (Markdown, source, logs, ...). Ignored by PDF/DOCX/PPTX/XLSX. When set with end_line, reads only that line range (max 100 lines per call)."
                     },
                     "end_line": {
                         "type": "integer",
@@ -577,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_paged_read_rejects_range_over_max() {
-        // MAX_LINES_PER_CALL is 400; doc_reader's paging contract must
+        // MAX_LINES_PER_CALL is 100; doc_reader's paging contract must
         // mirror file_read's cap (the constants are shared for a reason).
         let mut buf = Vec::new();
         for i in 1..=500 {
@@ -599,7 +599,7 @@ mod tests {
         let err = result.error.as_deref().unwrap();
         assert!(err.contains("Range too large"), "got: {err}");
         assert!(
-            err.contains("400"),
+            err.contains("100"),
             "must mention MAX_LINES_PER_CALL: {err}"
         );
         assert!(
