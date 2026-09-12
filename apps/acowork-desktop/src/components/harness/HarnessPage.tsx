@@ -39,7 +39,7 @@ export function HarnessPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-page-bg">
+    <div className="flex flex-1 flex-col bg-nav-surface">
       {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
         {tabs.map((tab) => (
@@ -333,9 +333,9 @@ function ProvidersTab() {
                     </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       {keyEntry.models?.length ? (
-                        <span className="text-[11px] text-zinc-600 dark:text-zinc-400">{keyEntry.models.join(", ")}</span>
+                        <span className="text-[11px] text-zinc-400">{keyEntry.models.join(", ")}</span>
                       ) : keyEntry.default_model ? (
-                        <span className="text-[11px] text-zinc-600 dark:text-zinc-400">{keyEntry.default_model}</span>
+                        <span className="text-[11px] text-zinc-400">{keyEntry.default_model}</span>
                       ) : (
                         <span className="text-[11px] text-zinc-400">—</span>
                       )}
