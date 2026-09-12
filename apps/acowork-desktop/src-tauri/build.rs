@@ -11,18 +11,21 @@
 //! responsible for building the core workspace first, so the binaries
 //! already exist in `target/{profile}/` by the time this script runs.
 //!
-//! **Why node / lsp-relay / doc MUST be in [`BINARIES`]:**
-//! `tauri_build::build()` copies every entry of `bundle.resources`
-//! (`"bin/*": "./"`) from `src-tauri/bin/` into the dev resource dir
-//! (`target/{profile}/`, the same directory the Desktop-spawned Gateway
-//! runs from). If those three binaries were NOT refreshed here, a stale
-//! copy dropped into `bin/` by an earlier release packaging run would
-//! be copied BACK over the freshly built workspace binaries on every
-//! `tauri dev` — the Gateway then spawns an outdated `acowork-node` /
-//! `acowork-lsp-relay` / `acowork-doc` sibling and breaks on CLI arg
-//! incompatibilities.
+//! **Dev builds never stage binaries in `bin/` (anti file-lock):**
+//! `tauri_build::build()` reverse-copies every entry of `bundle.resources`
+//! (`"bin/*": "./"`) into the dev resource dir (`target/{profile}/`, the
+//! same directory the running Gateway / Node / ... processes were launched
+//! from). When the core workspace is rebuilt, this script re-runs (see
+//! step 6) and that reverse copy would try to overwrite the executables of
+//! the live processes — Windows fails with `os error 32` (file in use).
+//! The workspace binaries already exist in `target/{profile}/` (built by
+//! `beforeDevCommand`), so staging them is redundant for `tauri dev`: dev
+//! builds clear stale copies instead and keep only lock-free resources
+//! (lsp_servers.json, lsp_install/) in `bin/`. Release packaging
+//! (`tauri build`) keeps staging the full set so the installer still
+//! bundles the workspace binaries.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Binaries to copy from the workspace target directory.
 ///
@@ -41,6 +44,23 @@ const BINARIES: &[&str] = &[
     "acowork-doc",
 ];
 
+/// Stage one workspace artifact into `bin/` for release packaging, or clear
+/// a stale copy in dev builds (see module docs). Both behaviours live in one
+/// place so a dev build can never overwrite a locked running binary by
+/// accident. Returns `true` when a real file was copied.
+fn stage_or_clear(is_dev: bool, src: &Path, dst: &Path) -> bool {
+    if is_dev {
+        let _ = std::fs::remove_file(dst);
+        false
+    } else if src.exists() {
+        std::fs::copy(src, dst)
+            .unwrap_or_else(|e| panic!("Failed to copy {}: {}", src.display(), e));
+        true
+    } else {
+        false
+    }
+}
+
 fn main() {
     // 1. Determine build profile and locate workspace target directory.
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
@@ -56,54 +76,45 @@ fn main() {
     let target_dir = workspace_root.join("target").join(&profile);
     let bin_dir = manifest_dir.join("bin");
 
+    // Dev builds must never stage workspace binaries into `bin/` — the
+    // reverse copy of `tauri_build::build()` would collide with the live
+    // Gateway / Node / ... executables (see module docs for details).
+    let is_dev = tauri_build::is_dev();
+
     // 2. Create the staging directory.
     std::fs::create_dir_all(&bin_dir).expect("Failed to create bin/ staging directory");
 
     let exe_ext = if cfg!(windows) { ".exe" } else { "" };
 
-    // 3. Copy each binary.
+    // 3. Stage each workspace binary (release) or clear stale copies (dev).
+    //
+    // Dev builds skip staging entirely: the binaries already exist in
+    // target/{profile}/ and the reverse copy of `tauri_build::build()` must
+    // not touch them while the dev-run processes hold file locks.
     for &name in BINARIES {
-        let src = target_dir.join(format!("{name}{exe_ext}"));
-        let dst = bin_dir.join(format!("{name}{exe_ext}"));
-        if src.exists() {
-            std::fs::copy(&src, &dst).unwrap_or_else(|e| {
-                panic!("Failed to copy {}: {}", src.display(), e);
-            });
-        } else {
+        let file_name = format!("{name}{exe_ext}");
+        let src = target_dir.join(&file_name);
+        if !is_dev && !src.exists() {
             println!(
                 "cargo:warning=Binary not found: {} (run `cd core && cargo build -p {name}` first)",
                 src.display()
             );
+        } else {
+            stage_or_clear(is_dev, &src, &bin_dir.join(&file_name));
         }
     }
 
-    // 4. Copy ONNX runtime shared library (platform-specific).
-    if cfg!(windows) {
-        let dll_src = target_dir.join("onnxruntime.dll");
-        let dll_dst = bin_dir.join("onnxruntime.dll");
-        if dll_src.exists() {
-            std::fs::copy(&dll_src, &dll_dst).unwrap_or_else(|e| {
-                panic!("Failed to copy onnxruntime.dll: {}", e);
-            });
-            println!("cargo:warning=Copied onnxruntime.dll to bin/");
-        }
+    // 4. Stage the ONNX runtime shared library (release) or clear stale
+    //    copies (dev) — same file-lock rationale as step 3.
+    let ort_lib = if cfg!(windows) {
+        "onnxruntime.dll"
     } else if cfg!(target_os = "macos") {
-        // Single-element array keeps the copy step symmetric with the
-        // Windows ONNX branch above without an extra loop construct.
-        let lib_name = "libonnxruntime.dylib";
-        let src = target_dir.join(lib_name);
-        let dst = bin_dir.join(lib_name);
-        if src.exists() {
-            let _ = std::fs::copy(&src, &dst);
-        }
+        "libonnxruntime.dylib"
     } else {
-        // Linux
-        let lib_name = "libonnxruntime.so";
-        let src = target_dir.join(lib_name);
-        let dst = bin_dir.join(lib_name);
-        if src.exists() {
-            let _ = std::fs::copy(&src, &dst);
-        }
+        "libonnxruntime.so"
+    };
+    if stage_or_clear(is_dev, &target_dir.join(ort_lib), &bin_dir.join(ort_lib)) {
+        println!("cargo:warning=Copied {ort_lib} to bin/");
     }
 
     // 5. Copy LSP config and install scripts to bin/ for Gateway LSP support.
