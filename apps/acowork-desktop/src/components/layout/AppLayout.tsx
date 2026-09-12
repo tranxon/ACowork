@@ -73,19 +73,26 @@ export function AppLayout() {
   const [editorLoadAttempt, setEditorLoadAttempt] = useState(0);
   const FileEditorPanel = useMemo(() => lazy(loadFileEditorPanel), [editorLoadAttempt]);
 
-  // Dev only: warm the chunk once the window goes idle, so the first markdown
-  // click no longer pays an on-demand fetch + transform of the whole monaco
-  // graph (seconds against a cold dev server). In production the chunk is read
-  // from the app bundle — no stall measured — so keep it off the boot path.
+  // Pull the editor chunk into memory once the first frame is on screen, so
+  // opening a file never has to fetch it later. In dev that fetch is an HTTP
+  // round trip to the dev server — which is what made "click a markdown file"
+  // fail whenever the server was gone (a stale tray window outliving the dev
+  // stack). In production it is a 7.7 MB parse paid at click time. rAF +
+  // setTimeout lands this after the first paint, so first paint is unaffected.
+  //
+  // Safe to do in both modes: the panel's module graph has no top-level side
+  // effects (no LSP client, no worker, nothing spawned at import time), and a
+  // failed prefetch is swallowed — the lazy import below stays the real load
+  // path, so this can only make loading earlier, never differently.
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
+    let timer = 0;
     const warm = () => void loadFileEditorPanel().catch(() => {});
-    const idle = typeof window.requestIdleCallback === "function"
-      ? window.requestIdleCallback(warm, { timeout: 3000 })
-      : window.setTimeout(warm, 1500);
+    const raf = requestAnimationFrame(() => {
+      timer = window.setTimeout(warm, 0);
+    });
     return () => {
-      if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idle);
-      else window.clearTimeout(idle);
+      cancelAnimationFrame(raf);
+      if (timer) window.clearTimeout(timer);
     };
   }, []);
 
@@ -911,14 +918,32 @@ export function AppLayout() {
                       <p className="text-sm text-zinc-500 dark:text-zinc-400">
                         {t("errorBoundary.title")}
                       </p>
-                      <button
-                        type="button"
-                        onClick={() => setEditorLoadAttempt((n) => n + 1)}
-                        className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
-                      >
-                        <RefreshCw className="h-4 w-4" />
-                        {t("errorBoundary.retry")}
-                      </button>
+                      {/* Retry re-imports the chunk (works when the fetch failed
+                          once, e.g. a blip). Reload is the only way out when the
+                          page itself is stale — e.g. a tray window that outlived
+                          its dev server, whose module URLs will never resolve
+                          again. The full-screen ErrorBoundary offers the same
+                          pair. */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditorLoadAttempt((n) => n + 1)}
+                          className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                        >
+                          <RefreshCw className="h-4 w-4" />
+                          {t("errorBoundary.retry")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => window.location.reload()}
+                          className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-white"
+                          style={{ backgroundColor: "var(--color-accent)" }}
+                          onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.85)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
+                        >
+                          {t("errorBoundary.refreshPage")}
+                        </button>
+                      </div>
                     </div>
                   }
                 >
