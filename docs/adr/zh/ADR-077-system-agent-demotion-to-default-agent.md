@@ -42,7 +42,7 @@ System Agent 的功能（identity / preference）**保留**；被移除的是它
 | D6 | `SYSTEM_AGENT_ID` 常量 | **保留**。它仍是该 agent 包的 `agent_id` 字符串（`com.acowork.system`），Intent 路由 / 包标识仍需要。删除的是"Gateway 对 `SYSTEM_AGENT_ID` 的特权处理"，不是常量本身 |
 | D7 | Identity / preference 数据存储 | **不在本次范围**。身份 / 偏好数据由 Gateway 在 open / create session 时通过 HTTP / MQTT 提供给 agent，该设计与 **ADR-076（multi-user）** 合并进行。本 ADR 仅完成"降级"；System Agent 仍保留 `memory_recall` / `memory_store` tool 与 `identity:query` / `identity:observe` Intent 协议，数据源切换在 ADR-076 落地 |
 | D8 | `bundled` 分发 | **保留**。System Agent 仍随 Gateway 二进制分发（`examples/system-agent`）；仅"首次是否自动安装"从"Gateway 强制"改为"onboarding / 用户决定" |
-| D9 | Gateway 直管 Runtime 语义 | **收敛**。[ADR-075 D6](./ADR-075-node-identity-uuid-and-node-name.md) 描述的"`"local"` = Gateway 直管 agent 占位"收窄为"`"local"` = Gateway 进程内服务占位（doc_proxy / embedding / pm_proxy / reverse proxy 等非 .agent Runtime 的进程内调用链）"。不再存在"Gateway 直管的 .agent Runtime"这一类别 |
+| D9 | Gateway 直管 Runtime 语义 | **收敛**。[ADR-075 D6](./ADR-075-node-identity-uuid-and-node-name.md) 描述的"`"local"` = Gateway 直管 agent 占位"随"Gateway 直管的 .agent Runtime"这一类别消失而失效。生产代码中剩余的 `"local"` 收窄为**「宿主 Node 尚未知 / 本机」的簿记哨兵**（`RunningAgentInfo.node_id` 兜底、`fs_browse` 入参哨兵）。**不是**"Gateway 进程内服务占位"——生产代码中不存在以 `"local"` 标识的进程内服务调用链。精确位置与语义见 §3.4 |
 | D10 | 兼容性 | **不保留**。项目未上线。[gateway_data_dir] 中 `installed_agents` / `running_agents` 里 `node_id == "local"` 且 `agent_id == com.acowork.system` 的旧记录，启动时检测到即删除；由 onboarding 重新安装到本机 Node UUID |
 
 ---
@@ -117,9 +117,23 @@ System Agent 从 **Required 子系统**中移除。它可作为 **Optional 子�
 
 ### 3.4 `"local"` 占位边界收紧（修订 ADR-075 D6）
 
-ADR-075 D6 原文把 `"local"` 定义为"Gateway 直管 agent 占位"。System Agent 迁出后不再有"Gateway 直管的 .agent Runtime"。剩余 `node_id: "local"`（生产代码）语义收窄为：**Gateway 进程内服务占位**（doc_proxy / embedding / pm_proxy / reverse proxy / intent router 等非 .agent Runtime 的进程内调用链的占位键），不代表任何 Runtime 的宿主。
+ADR-075 D6 原文把 `"local"` 定义为"Gateway 直管 agent 占位"。System Agent 迁出后"Gateway 直管的 .agent Runtime"这一类别不再存在（D9），该定义随之失效。
 
-ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/state.rs) `AgentInfo.node_id` 注释同步更新。
+**生产代码中实际剩余的 `node_id: "local"`**（逐文件核查；`#[cfg(test)]` fixture 不计）：
+
+| 位置 | 语义 |
+|---|---|
+| [http/agents.rs](../../../core/acowork-gateway/src/http/agents.rs) `track_running_agent` | `RunningAgentInfo.node_id` 兜底 —— install 记录尚未聚合，宿主 Node **未知** |
+| [mqtt/dispatch.rs](../../../core/acowork-gateway/src/mqtt/dispatch.rs) `handle_plaintext_message` / `track_running_agent_for_status` / `reconcile_running_agents` | 同上，三个 `RunningAgentInfo` 兜底点 |
+| [http/fs_browse.rs](../../../core/acowork-gateway/src/http/fs_browse.rs) `browse_fs` | `?target=` 入参哨兵：空 / `local` = 浏览 Gateway 本机。仅用于**比较**，从不作为 MQTT topic 发布 |
+
+收窄后的语义是**「宿主 Node 尚未知 / 本机」的簿记哨兵**，不代表任何 Runtime 的宿主。
+
+**不是**"Gateway 进程内服务占位"：生产代码中不存在以 `"local"` 标识的进程内服务调用链。[http/doc_proxy.rs](../../../core/acowork-gateway/src/http/doc_proxy.rs) / [http/embedding_api.rs](../../../core/acowork-gateway/src/http/embedding_api.rs) / [http/pm_proxy.rs](../../../core/acowork-gateway/src/http/pm_proxy.rs) / [http/proxy.rs](../../../core/acowork-gateway/src/http/proxy.rs) / [intent/router.rs](../../../core/acowork-gateway/src/intent/router.rs) 中出现的 `node_id: "local"` **全部位于测试 fixture**。本 ADR 定稿前的早期版本曾把这批 fixture 误列为生产代码，据此实施会找不到对应位置。
+
+非 node_id 的同名字符串需另行区分：[http/provider_api.rs](../../../core/acowork-gateway/src/http/provider_api.rs) 的 `"local"` 是 API key 占位值，[http/models_api.rs](../../../core/acowork-gateway/src/http/models_api.rs) 的 `"local"` 是 JSON 字段名，均与此处无关。
+
+ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/state.rs) `AgentInfo.node_id` 注释同步更新（后者已于 ADR-075 实施时改为"记录宿主 Node 的 UUID"）。
 
 ### 3.5 数据兼容
 
@@ -142,8 +156,8 @@ ADR-075 D6 与 [gateway/state.rs](../../../core/acowork-gateway/src/gateway/stat
 |---|---|
 | `gateway/mod.rs` | 删除 System Agent auto-start task（~200 行）；删除 `use SYSTEM_AGENT_ID`（若不再使用）；capability 注释更新 |
 | `mqtt/dispatch.rs` | 删除 `SYSTEM_AGENT_ID` 的 `registry.register("system_agent", Required)` 特判分支；测试段更新 |
-| `http/agents.rs` | list 排序 `sort_pins_system_agent_first` 取舍：保留为 UX 偏好（注释说明）或删除（不特判）；`resolve_agent_node_id` 中 `LOCAL_NODE_ID` 兜底语义按 D9 收紧注释 |
-| `gateway/state.rs` | `AgentInfo.node_id` 注释按 D9 更新；`pub const SYSTEM_AGENT_ID` 保留 |
+| `http/agents.rs` | list 排序 `sort_pins_system_agent_first` 取舍：保留为 UX 偏好（注释说明）或删除（不特判）；`resolve_agent_node_id` 中 `LOCAL_NODE_ID` 兜底语义按 §3.4 收紧注释 |
+| `gateway/state.rs` | `AgentInfo.node_id` 注释按 §3.4 更新；`pub const SYSTEM_AGENT_ID` 保留 |
 | `http/bootstrap_api.rs` | 测试 fixture 中 `system_agent` 从 Required 集合移除 |
 
 ### 4.2 前端（apps/acowork-desktop/src）
