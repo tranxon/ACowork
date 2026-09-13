@@ -490,6 +490,29 @@ mod tests {
     }
 
     #[test]
+    fn optional_booting_does_not_block_ready() {
+        // Regression for the "killed remote node blocks Desktop
+        // startup" bug: a node subsystem demoted to Booting is
+        // Optional and must not drag the aggregated phase out of
+        // READY (a starting Desktop waits for READY/DEGRADED).
+        let (orch, registry) = build();
+        registry.register("vault", ReadinessKind::Required).mark_ready(None);
+        registry.register("publisher", ReadinessKind::Required).mark_ready(None);
+        let node = registry.register("node.remote", ReadinessKind::Optional);
+        node.mark_ready(None);
+        orch.recompute();
+        assert_eq!(orch.snapshot().phase, BootstrapPhase::Ready);
+
+        node.mark_booting(Some("node 'remote' reported offline".into()));
+        orch.recompute();
+        assert_eq!(
+            orch.snapshot().phase,
+            BootstrapPhase::Ready,
+            "an optional subsystem going Booting must leave READY untouched"
+        );
+    }
+
+    #[test]
     fn required_failure_yields_failed() {
         let (orch, registry) = build();
         registry.register("vault", ReadinessKind::Required).mark_ready(None);
