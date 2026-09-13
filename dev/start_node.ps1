@@ -63,7 +63,14 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $CoreDir = Join-Path $ProjectRoot "core"
-$Bin = Join-Path $CoreDir "target\$Profile\acowork-node.exe"
+$Bin = Join-Path $ProjectRoot "target\$Profile\acowork-node.exe"
+
+# Node spawns its agent Runtimes and LSP sidecars from sibling binaries
+# (current_exe().parent()), so all three must live in the same target dir:
+#   acowork-runtime.exe   — spawn_agent_process (ADR-055)
+#   acowork-lsp-relay.exe — spawn_lsp_relay (sidecar)
+$SiblingBins = @("acowork-runtime.exe", "acowork-lsp-relay.exe")
+$missingSiblings = @($SiblingBins | Where-Object { -not (Test-Path (Join-Path (Split-Path $Bin) $_)) })
 
 function Write-Step   { param([string]$msg) Write-Host "[node] $msg" -ForegroundColor Cyan }
 function Write-Ok     { param([string]$msg) Write-Host "[node] $msg" -ForegroundColor Green }
@@ -71,14 +78,14 @@ function Write-Err    { param([string]$msg) Write-Host "[node] $msg" -Foreground
 
 # ── Build if needed ────────────────────────────────────────────────
 
-$needsBuild = $ForceBuild -or -not (Test-Path $Bin)
+$needsBuild = $ForceBuild -or -not (Test-Path $Bin) -or ($missingSiblings.Count -gt 0)
 if ($needsBuild -and $NoBuild) {
-    Write-Err "Binary not found at $Bin and -NoBuild was given. Run dev/build_core.ps1 first."
+    Write-Err "Binary not found at $Bin or siblings ($($missingSiblings -join ', ')) and -NoBuild was given. Run dev/build_core.ps1 first."
     exit 1
 }
 if ($needsBuild) {
-    Write-Step "Building acowork-node ($Profile) — first run, this takes a few minutes..."
-    cargo build --manifest-path (Join-Path $CoreDir "Cargo.toml") -p acowork-node --profile $Profile
+    Write-Step "Building acowork-node + runtime + lsp-relay ($Profile) — first run, this takes a few minutes..."
+    cargo build --manifest-path (Join-Path $CoreDir "Cargo.toml") -p acowork-node -p acowork-runtime -p acowork-lsp-relay --profile $Profile
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

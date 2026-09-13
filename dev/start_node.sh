@@ -119,22 +119,34 @@ esac
 # ── Resolve binary path ──────────────���──────────────────────────────
 
 EXE_NAME="acowork-node"
-if [ "$OS" = "windows" ]; then EXE_NAME="acowork-node.exe"; fi
-TARGET_DIR="$CORE_DIR/target/$PROFILE"
+SUFFIX=""
+if [ "$OS" = "windows" ]; then EXE_NAME="acowork-node.exe"; SUFFIX=".exe"; fi
+TARGET_DIR="$PROJECT_ROOT/target/$PROFILE"
 BIN="$TARGET_DIR/$EXE_NAME"
 
 # ── Build if needed ─────────────────────────────────────────────────
 
-if [ ! -f "$BIN" ]; then
-    if [ "$NO_BUILD" = "1" ]; then
-        die "binary not found at $BIN and --no-build was given; run dev/build_core.sh first"
+# Node spawns its agent Runtimes and LSP sidecars from sibling binaries
+# (current_exe().parent()), so all three must live in the same target dir:
+#   acowork-runtime   — spawn_agent_process (ADR-055)
+#   acowork-lsp-relay — spawn_lsp_relay (sidecar)
+missing_siblings=""
+for s in acowork-runtime acowork-lsp-relay; do
+    if [ ! -f "$TARGET_DIR/$s$SUFFIX" ]; then
+        missing_siblings="$missing_siblings $s"
     fi
-    warn "binary not found, building acowork-node ($PROFILE) — first run takes a few minutes"
-    cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node --profile "$PROFILE"
+done
+
+if [ ! -f "$BIN" ] || [ -n "$missing_siblings" ]; then
+    if [ "$NO_BUILD" = "1" ]; then
+        die "binary not found at $BIN (missing siblings:$missing_siblings) and --no-build was given; run dev/build_core.sh first"
+    fi
+    warn "binary not found (node + siblings), building acowork-node + runtime + lsp-relay ($PROFILE) — first run takes a few minutes"
+    cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node -p acowork-runtime -p acowork-lsp-relay --profile "$PROFILE"
 fi
 
 if [ "$FORCE_BUILD" = "1" ] && [ "$NO_BUILD" != "1" ]; then
-    cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node --profile "$PROFILE"
+    cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node -p acowork-runtime -p acowork-lsp-relay --profile "$PROFILE"
 fi
 
 [ -f "$BIN" ] || die "binary still not found at $BIN after build"
