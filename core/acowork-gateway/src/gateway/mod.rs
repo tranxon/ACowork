@@ -339,11 +339,17 @@ impl Gateway {
         //   * publisher - marked ready when the global-resources
         //               publisher task is started (below)
         // Required subsystems registered dynamically by mqtt/dispatch.rs:
-        //   * node.NODE_ID - one Required entry per connected node,
-        //               raised by the NodeReady topic handler (covers
-        //               both the local node and any remote nodes)
         //   * system_agent - raised when the local node's retained
         //               installed inventory aggregates com.acowork.system
+        // Optional subsystems registered dynamically by mqtt/dispatch.rs:
+        //   * node.NODE_ID - one Optional entry per connected node,
+        //               raised by the NodeReady topic handler (covers
+        //               both the local node and any remote nodes). A
+        //               node (local or remote) going offline demotes the
+        //               entry but must NOT block the aggregated READY
+        //               phase — remote nodes are pluggable resources,
+        //               not platform-readiness blockers (see dispatch.rs
+        //               and the per-node `is_ready` control gate).
         // Optional:
         //   * embedding - fall back to a remote embedder if missing
         let vault_handle = bootstrap_registry.register(

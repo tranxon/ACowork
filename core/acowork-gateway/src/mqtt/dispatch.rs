@@ -45,8 +45,9 @@ use crate::operation_store::SharedOperationStore;
 /// pre-reconnect offline snapshot AFTER the node's live re-announcement
 /// (`status=online` + `NodeReady`) already marked it ready. Without the
 /// guard such a stale snapshot demotes a healthy node back to BOOTING
-/// with no recovery path (bootstrap stuck in BOOTING; the Runtime's LLM
-/// availability stuck in LOADING). Retained replay of the small node
+/// with no recovery path (its control gate keeps rejecting the node's
+/// work; the Runtime's LLM availability can get stuck in LOADING).
+/// Retained replay of the small node
 /// topic set completes in well under this bound, so any offline signal
 /// arriving within it of a gateway (re)connect + node re-announcement
 /// is a replay.
@@ -55,8 +56,10 @@ const REPLAY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 /// Grace period a node's records survive after its last offline signal
 /// (ADR-055 §6.13.3). A node killed hard (no graceful shutdown) stops
 /// publishing forever; without removal its records — the `node.{id}`
-/// bootstrap subsystem above all — linger, pinning the aggregated
-/// phase in BOOTING and leaving the Desktop showing a ghost entry.
+/// bootstrap subsystem above all — linger and leave the Desktop (and
+/// every `/api/nodes` consumer) showing a ghost entry. Since the
+/// `node.{id}` entry is Optional this no longer pins the aggregated
+/// phase in BOOTING; the removal keeps the fleet view truthful.
 /// The timer arms on offline and fires only if the node is still
 /// offline at expiry; a reconnect inside the window re-announces every
 /// retained record, so nothing is lost by waiting.
@@ -590,10 +593,15 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         });
         // ADR-059 §7.2: an offline status (LWT or graceful shutdown)
         // means the node's control channel is gone — demote its
-        // readiness so the aggregated phase drops out of READY. The
-        // node re-announces `NodeReady` on its next (re)connect, which
-        // re-marks it ready; `mark_booting` (not `mark_failed`) keeps
-        // that path open.
+        // readiness so dependent work stops hitting the dead channel.
+        // The node re-announces `NodeReady` on its next (re)connect,
+        // which re-marks it ready; `mark_booting` (not `mark_failed`)
+        // keeps that path open. `node.{id}` is Optional — the demotion
+        // must NOT drag the aggregated phase out of READY (a killed
+        // remote node used to block every starting Desktop for the
+        // whole offline-removal grace); the snapshot still re-publishes
+        // with a fresh `version` so clients can refresh their node
+        // topology in real time.
         if let Some(node_id) = extract_node_id_from_status_topic(topic) {
             let payload_text = String::from_utf8_lossy(payload);
             let trimmed = payload_text.trim();
@@ -622,17 +630,21 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                 ctx.node_replay_guard.mark_online(&node_id);
             }
             if is_offline && !ctx.node_replay_guard.is_replay(&node_id) {
-                // ADR-059 §7.2: demote the node's readiness so the
-                // aggregated phase drops out of READY. The node
-                // re-announces `NodeReady` on its next (re)connect,
-                // which re-marks it ready; `mark_booting` (not
-                // `mark_failed`) keeps that path open.
+                // ADR-059 §7.2: demote the node's readiness so
+                // dependent work stops hitting the dead channel. The
+                // node re-announces `NodeReady` on its next
+                // (re)connect, which re-marks it ready;
+                // `mark_booting` (not `mark_failed`) keeps that path
+                // open. The registration below uses Optional — it
+                // must match the first-registration kind in the
+                // NodeReady handler (re-registering keeps the
+                // recorded kind anyway; this is self-documentation).
                 if let Some(registry) = ctx.bootstrap_registry.as_ref() {
                     let subsystem = SubsystemId(format!("node.{}", node_id));
                     // Only demote when currently ready — a node that
                     // never announced NodeReady stays booting already.
                     if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
-                        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+                        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Optional);
                         handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
                         tracing::info!(
                             node_id,
@@ -682,14 +694,14 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             // arrives after the node's live re-announcement (status
             // online + NodeReady) the guard recognizes it as a stale
             // replay and skips the demotion — otherwise the node stays
-            // demoted until its next reconnect and bootstrap is stuck
-            // in BOOTING. Demote only a node that is currently ready
-            // (a never-ready node is already BOOTING; a Failed node
-            // must not be resurrected by a replay).
+            // demoted (its control gate keeps rejecting work) until
+            // its next reconnect. Demote only a node that is currently
+            // ready (a never-ready node is already BOOTING; a Failed
+            // node must not be resurrected by a replay).
             if !ctx.node_replay_guard.is_replay(&node_id)
                 && registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready)
             {
-                let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+                let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Optional);
                 handle.mark_booting(Some(format!("node '{node_id}' cleared NodeReady (offline)")));
                 tracing::info!(
                     node_id,
@@ -702,7 +714,17 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // or a valid retained replay) — record it as an online signal
         // so subsequent stale replays are suppressed by the guard.
         ctx.node_replay_guard.mark_online(&node_id);
-        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+        // ADR-059 §7.2 (revised): node control planes register as
+        // OPTIONAL subsystems. A node — local or remote — going
+        // offline must NOT pin the aggregated phase in BOOTING: that
+        // used to block every starting Desktop on "N/M required
+        // ready" until the 120s offline-removal grace deregistered
+        // the node. Node availability is surfaced through
+        // `/api/nodes` and the per-node `is_ready` control gate, both
+        // of which are kind-independent. Offline nodes still publish
+        // a fresh bootstrap snapshot `version`, so clients refresh in
+        // real time.
+        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Optional);
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
         tokio::spawn(async move {
@@ -1816,7 +1838,7 @@ mod tests {
         // the reconnect window, not real LWT offlines (ADR-059 §7.2).
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
-        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Optional);
         handle.mark_ready(None);
 
         handle_plaintext_message("acowork/nodes/nytb/status", b"offline", &ctx);
@@ -1837,7 +1859,7 @@ mod tests {
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
         ctx.node_replay_guard.mark_gateway_reconnect();
-        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Optional);
         handle.mark_ready(None);
 
         handle_plaintext_message("acowork/nodes/nytb/status", b"offline", &ctx);
@@ -1846,6 +1868,62 @@ mod tests {
             registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Booting),
             "offline must demote when the node never re-announced after the gateway reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_offline_keeps_aggregate_phase_ready() {
+        // Regression: a killed remote node used to demote its
+        // `node.{id}` subsystem from Required+Ready to Booting, which
+        // pinned the aggregated phase in BOOTING — every starting
+        // Desktop waited on "N/M required ready" until the 120s
+        // offline-removal grace deregistered the node. Node subsystems
+        // are Optional now: the demotion must NOT move the aggregate
+        // out of READY, while the snapshot keeps re-publishing (fresh
+        // version) so clients refresh their node topology.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let orchestrator =
+            crate::bootstrap::BootstrapOrchestrator::new("instance-A".into(), registry.clone());
+        registry
+            .register("vault", crate::bootstrap::ReadinessKind::Required)
+            .mark_ready(None);
+        registry
+            .register("publisher", crate::bootstrap::ReadinessKind::Required)
+            .mark_ready(None);
+        let ctx = ctx_with_registry(registry.clone());
+
+        // Node comes online through the real topic path — registered
+        // as Optional and marked ready.
+        handle_plaintext_message(
+            "acowork/nodes/nytb/ready",
+            &node_ready_payload("nytb"),
+            &ctx,
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        while orchestrator.snapshot().phase != crate::bootstrap::orchestrator::BootstrapPhase::Ready
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            orchestrator.snapshot().phase,
+            crate::bootstrap::orchestrator::BootstrapPhase::Ready
+        );
+
+        // Node is killed: the genuine offline demotes the node
+        // subsystem itself…
+        handle_plaintext_message("acowork/nodes/nytb/status", b"offline", &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.nytb".to_string())),
+            Some(crate::bootstrap::SubsystemState::Booting),
+            "offline must still demote the node subsystem itself"
+        );
+        // …but the aggregated phase must stay READY.
+        assert_eq!(
+            orchestrator.snapshot().phase,
+            crate::bootstrap::orchestrator::BootstrapPhase::Ready,
+            "an offline node must not drag the aggregate out of READY"
         );
     }
 
@@ -1864,7 +1942,7 @@ mod tests {
             .update_status_from_mqtt("acowork/nodes/nytb/status", b"online");
         ctx.node_registry = node_reg.clone();
 
-        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Optional);
         handle.mark_ready(None);
 
         handle_plaintext_message("acowork/nodes/nytb/status", &[], &ctx);
@@ -1903,7 +1981,7 @@ mod tests {
         // through the normal path.
         let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
         let ctx = ctx_with_registry(registry.clone());
-        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Optional);
         handle.mark_ready(None);
 
         handle_plaintext_message("acowork/nodes/nytb/status", &[], &ctx);
