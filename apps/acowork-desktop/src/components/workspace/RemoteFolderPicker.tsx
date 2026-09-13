@@ -24,9 +24,15 @@ interface RemoteFolderPickerProps {
     onSelect: (path: string) => void;
     /** Called when user cancels */
     onCancel: () => void;
+    /**
+     * Node id of the machine whose filesystem to browse (ADR-055 L7-1).
+     * Forwarded as `?target=` to the Gateway, which reverse-proxies to
+     * that node's `/fs/browse`. Omit to browse the Gateway machine.
+     */
+    target?: string;
 }
 
-export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerProps) {
+export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderPickerProps) {
     const { t } = useTranslation();
     const { gatewayUrl } = useSettingsStore();
     const baseUrl = gatewayUrl || DEFAULT_GATEWAY_URL;
@@ -43,11 +49,23 @@ export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerPro
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
     const [expandedEntries, setExpandedEntries] = useState<Map<string, FsBrowseEntry[]>>(new Map());
 
+    // Build a `/api/fs/browse` URL with `target` forwarded when set, so
+    // the Gateway reverse-proxies to the node that actually owns the
+    // filesystem instead of returning its own machine's tree.
+    const browseUrl = useCallback(
+        (path: string) => {
+            const qs = new URLSearchParams({ path });
+            if (target) qs.set("target", target);
+            return `${baseUrl}/api/fs/browse?${qs.toString()}`;
+        },
+        [baseUrl, target],
+    );
+
     const fetchEntries = useCallback(async (path: string) => {
         setLoading(true);
         setError(null);
         try {
-            const resp = await fetch(`${baseUrl}/api/fs/browse?path=${encodeURIComponent(path)}`);
+            const resp = await fetch(browseUrl(path));
             if (!resp.ok) {
                 const err = await resp.json().catch(() => null);
                 setError(err?.error || `Failed to browse: ${resp.status}`);
@@ -61,7 +79,7 @@ export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerPro
         } finally {
             setLoading(false);
         }
-    }, [baseUrl]);
+    }, [browseUrl]);
 
     // Load root on mount
     useEffect(() => {
@@ -111,7 +129,7 @@ export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerPro
         // Fetch sub-entries if not cached
         if (!expandedEntries.has(entry.path)) {
             try {
-                const resp = await fetch(`${baseUrl}/api/fs/browse?path=${encodeURIComponent(entry.path)}`);
+                const resp = await fetch(browseUrl(entry.path));
                 if (resp.ok) {
                     const data: FsBrowseResponse = await resp.json();
                     setExpandedEntries(new Map(expandedEntries).set(entry.path, data.entries));
@@ -120,7 +138,7 @@ export function RemoteFolderPicker({ onSelect, onCancel }: RemoteFolderPickerPro
                 // ignore
             }
         }
-    }, [baseUrl, expandedDirs, expandedEntries]);
+    }, [browseUrl, expandedDirs, expandedEntries]);
 
     const handleConfirm = () => {
         if (selectedPath) {
