@@ -121,7 +121,7 @@ esac
 EXE_NAME="acowork-node"
 SUFFIX=""
 if [ "$OS" = "windows" ]; then EXE_NAME="acowork-node.exe"; SUFFIX=".exe"; fi
-TARGET_DIR="$CORE_DIR/target/$PROFILE"
+TARGET_DIR="$PROJECT_ROOT/target/$PROFILE"
 BIN="$TARGET_DIR/$EXE_NAME"
 
 # ── Build if needed ─────────────────────────────────────────────────
