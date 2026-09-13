@@ -547,6 +547,18 @@ interface ChatStore {
    * disabled.  See ADR-036.
    */
   lastMqttError: string | null;
+  /**
+   * Monotonically incremented counter, bumped on every retained
+   * `bootstrap-state` snapshot the Rust eventloop forwards from the
+   * Gateway's `acowork/global/bootstrap` topic (ADR-059). The Gateway
+   * republishes its aggregated `BootstrapState` whenever any subsystem
+   * transitions — including the per-node online/offline signals that
+   * drive the remote-mode sidebar's green/gray dot. Subscribing to this
+   * counter lets the sidebar refetch `/api/nodes` in real time, replacing
+   * the previous 30s polling fallback (a kill used to take up to 30s to
+   * flip the dot gray, plus a UI focus to "force" it).
+   */
+  bootstrapVersion: number;
   availableModels: ModelEntry[];
   /**
    * LLM availability for the current session, mirrored from the
@@ -767,6 +779,9 @@ interface ChatStore {
 // `disposeMqttListener`.
 let _mqttAgentEventUnlisten: (() => void) | null = null;
 let _mqttStatusUnlisten: (() => void) | null = null;
+// ADR-059: `bootstrap-state` listener — bumps `bootstrapVersion` on every
+// retained snapshot. Held for `disposeMqttListener` cleanup.
+let _bootstrapUnlisten: (() => void) | null = null;
 
 /// Reentrancy guard for `initMqttListener`.
 ///
@@ -892,6 +907,16 @@ async function doInitMqttListener(): Promise<void> {
     }
   });
 
+  // ADR-059: bootstrap snapshot fanout. The Gateway republishes its
+  // aggregated `BootstrapState` on every subsystem transition (including
+  // per-node online/offline signals). Bumping a version counter here is
+  // the real-time trigger for the remote-mode sidebar to refetch
+  // `/api/nodes` — a kill turns the dot gray within ~1s, a reboot
+  // turns it green again within ~1s, no `setInterval` fallback needed.
+  _bootstrapUnlisten = await listen("bootstrap-state", () => {
+    useChatStore.setState((s) => ({ bootstrapVersion: s.bootstrapVersion + 1 }));
+  });
+
   // Pull the *current* status from the Rust side so we don't miss the
   // initial state.  The source of truth is `DesktopMqttClient::session_state`
   // (a watch channel updated synchronously by the poll task).
@@ -937,6 +962,10 @@ export function disposeMqttListener(): void {
     _mqttStatusUnlisten();
     _mqttStatusUnlisten = null;
   }
+  if (_bootstrapUnlisten) {
+    _bootstrapUnlisten();
+    _bootstrapUnlisten = null;
+  }
   useChatStore.setState({ mqttConnected: false, lastMqttError: null });
 }
 
@@ -944,6 +973,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
   mqttConnected: false,
   lastMqttError: null,
+  bootstrapVersion: 0,
   availableModels: [],
   llmAvailability: "unspecified",
 

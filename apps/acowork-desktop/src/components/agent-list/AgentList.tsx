@@ -142,15 +142,28 @@ export function AgentList({ width }: AgentListProps) {
   // Create wizard state
   const [showCreateWizard, setShowCreateWizard] = useState(false);
 
+  // ADR-059: realtime trigger for `/api/nodes` refetch. Every retained
+  // `bootstrap-state` snapshot the Gateway republishes (incl. per-node
+  // online/offline transitions) bumps this counter; the effect below
+  // refetches the node topology so a kill turns the dot gray within ~1s
+  // and a reboot turns it green again within ~1s — no 30s polling
+  // fallback needed (the original loop polled both agents and nodes).
+  const bootstrapVersion = useChatStore((s) => s.bootstrapVersion);
+
   useEffect(() => {
     fetchAgents();
-    void refreshNodes();
     const interval = setInterval(() => {
       fetchAgents();
-      void refreshNodes();
     }, 30_000);
     return () => clearInterval(interval);
-  }, [fetchAgents, refreshNodes]);
+  }, [fetchAgents]);
+
+  // Refetch the node topology on mount and on every bootstrap snapshot
+  // transition. `bootstrapVersion` increments drive the realtime path;
+  // `refreshNodes` recreates whenever `isRemoteMode` flips.
+  useEffect(() => {
+    void refreshNodes();
+  }, [bootstrapVersion, refreshNodes]);
 
   // Ensure every ready agent's latest session title is loaded so the
   // sidebar shows it without requiring the user to click the agent.
