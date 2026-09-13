@@ -504,6 +504,12 @@ pub struct AttachedContextItem {
 ///
 /// Describes a downloadable embedding model with ONNX runtime metadata.
 /// Shared between Gateway, acowork-embed, and Desktop App.
+///
+/// Note: `acowork-embed` carries a parallel definition in
+/// `registry::EmbeddingModelEntry`. Keep both in sync — Gateway uses
+/// this type to **write** `embedding_models.json`, so dropping a field
+/// here would silently strip it from disk on the next save (see
+/// bge-m3 `onnx_output_kind` round-trip).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingModelEntry {
     /// Model identifier (e.g. "bge-small-zh-v1.5")
@@ -527,6 +533,13 @@ pub struct EmbeddingModelEntry {
     /// Pooling strategy for this model
     #[serde(default)]
     pub pooling_strategy: PoolingStrategy,
+    /// ONNX output shape category — drives the inference glue in
+    /// `acowork-embed::model`. `already_pooled` for ONNX exporters
+    /// (e.g. `aapot/bge-m3-onnx`) that bake pooling into the graph
+    /// and emit `[batch, dim]`; `hidden_states` (default) for raw
+    /// `last_hidden_state `[batch, seq_len, dim]`.
+    #[serde(default)]
+    pub onnx_output_kind: OnnxOutputKind,
     /// Path within the HF repo to the ONNX model file (e.g. "onnx/model.onnx")
     pub onnx_file: String,
     /// Path within the HF repo to the tokenizer (e.g. "tokenizer.json")
@@ -534,12 +547,31 @@ pub struct EmbeddingModelEntry {
     /// ONNX model variants (e.g. {"fp32": "onnx/model.onnx", "fp16": "onnx/model_fp16.onnx"})
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onnx_variants: Option<std::collections::HashMap<String, String>>,
+    /// External ONNX data files per variant (e.g. {"fp32": ["onnx/model.onnx_data"]}).
+    /// MUST stay in sync with `acowork-embed` — dropping this on a gateway
+    /// rewrite silently breaks download/load of external-data models.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub external_data_files: std::collections::HashMap<String, Vec<String>>,
     /// Whether the model is bundled with the installation
     #[serde(default)]
     pub bundled: bool,
     /// Whether this is the recommended default model
     #[serde(default)]
     pub recommended: bool,
+}
+
+/// ONNX output shape category — mirror of `acowork-embed::registry::OnnxOutputKind`.
+/// Duplicated here because the gateway uses this protocol type to **serialize**
+/// `embedding_models.json` to disk; the embed crate keeps its own copy for
+/// standalone operation. Keep the two definitions byte-identical.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OnnxOutputKind {
+    /// Raw `last_hidden_state` `[batch, seq_len, hidden_dim]`.
+    #[default]
+    HiddenStates,
+    /// Model already pools (and often normalizes) internally: `[batch, dim]`.
+    AlreadyPooled,
 }
 
 /// Versioned embedding model list persisted to disk.

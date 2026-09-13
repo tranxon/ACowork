@@ -438,6 +438,7 @@ pub async fn load_model(
     // data files are missing, so we protect against that here.
     let model_id_clone = model_id.clone();
     let pooling = entry.pooling_strategy.clone();
+    let output_kind = entry.onnx_output_kind;
     let dimension = entry.dimension;
     let max_tokens = entry.max_tokens;
     let load_result = tokio::task::spawn_blocking(move || {
@@ -446,6 +447,7 @@ pub async fn load_model(
             &onnx_path,
             &tokenizer_path,
             pooling,
+            output_kind,
             dimension,
             max_tokens,
         )

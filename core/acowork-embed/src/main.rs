@@ -293,6 +293,7 @@ fn try_load_model(
         &onnx_path,
         &tokenizer_path,
         entry.pooling_strategy.clone(),
+        entry.onnx_output_kind,
         entry.dimension,
         entry.max_tokens,
     ) {

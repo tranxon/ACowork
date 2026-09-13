@@ -22,12 +22,19 @@
                 "int8": "onnx/model_quantized.onnx"
             },
             "external_data_files": {
-                "fp32": ["onnx/model.onnx_data"],
-                "fp16": ["onnx/model_fp16.onnx_data"],
-                "int8": ["onnx/model_quantized.onnx_data"]
+                "fp32": [
+                    "onnx/model.onnx_data"
+                ],
+                "fp16": [
+                    "onnx/model_fp16.onnx_data"
+                ],
+                "int8": [
+                    "onnx/model_quantized.onnx_data"
+                ]
             },
             "bundled": false,
-            "recommended": true
+            "recommended": true,
+            "onnx_output_kind": "hidden_states"
         },
         {
             "id": "bge-base-zh-v1.5",
@@ -50,7 +57,8 @@
             },
             "external_data_files": {},
             "bundled": false,
-            "recommended": false
+            "recommended": false,
+            "onnx_output_kind": "hidden_states"
         },
         {
             "id": "bge-m3",
@@ -68,13 +76,16 @@
             ],
             "hf_repo": "aapot/bge-m3-onnx",
             "pooling_strategy": "cls",
+            "onnx_output_kind": "already_pooled",
             "onnx_file": "model.onnx",
             "tokenizer_file": "tokenizer.json",
             "onnx_variants": {
                 "fp32": "model.onnx"
             },
             "external_data_files": {
-                "fp32": ["model.onnx.data"]
+                "fp32": [
+                    "model.onnx.data"
+                ]
             },
             "bundled": false,
             "recommended": false
@@ -99,7 +110,8 @@
             },
             "external_data_files": {},
             "bundled": false,
-            "recommended": false
+            "recommended": false,
+            "onnx_output_kind": "hidden_states"
         }
     ]
 }

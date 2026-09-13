@@ -21,7 +21,7 @@ use ort::value::Tensor;
 use tokenizers::Tokenizer;
 
 use crate::pool::{apply_pooling, l2_normalize};
-use crate::registry::PoolingStrategy;
+use crate::registry::{OnnxOutputKind, PoolingStrategy};
 
 // ── Error type ──────────────────────────────────────────────────────────
 
@@ -57,8 +57,13 @@ pub struct EmbeddingModel {
     session: Arc<std::sync::Mutex<Session>>,
     /// HuggingFace tokenizer.
     tokenizer: Tokenizer,
-    /// Pooling strategy for this model.
+    /// Pooling strategy for this model. Only consulted when
+    /// `output_kind == HiddenStates`; ignored for `AlreadyPooled`
+    /// models whose ONNX graph already pools internally.
     pooling: PoolingStrategy,
+    /// ONNX output shape category — drives the inference post-processing
+    /// branch (see [`OnnxOutputKind`]).
+    output_kind: OnnxOutputKind,
     /// Expected embedding dimension.
     dimension: usize,
     /// Maximum token length.
@@ -74,7 +79,9 @@ impl EmbeddingModel {
     /// * `model_id` - Model identifier (must match registry entry).
     /// * `onnx_path` - Path to the ONNX model file.
     /// * `tokenizer_path` - Path to the `tokenizer.json` file.
-    /// * `pooling` - Pooling strategy (CLS / Mean / LastToken).
+    /// * `pooling` - Pooling strategy (CLS / Mean / LastToken). Ignored
+    ///   when `output_kind == AlreadyPooled`.
+    /// * `output_kind` - ONNX output shape category — see [`OnnxOutputKind`].
     /// * `dimension` - Expected embedding vector dimension.
     /// * `max_tokens` - Maximum token length for truncation.
     pub fn load(
@@ -82,6 +89,7 @@ impl EmbeddingModel {
         onnx_path: &Path,
         tokenizer_path: &Path,
         pooling: PoolingStrategy,
+        output_kind: OnnxOutputKind,
         dimension: usize,
         max_tokens: usize,
     ) -> Result<Self, ModelError> {
@@ -137,6 +145,7 @@ impl EmbeddingModel {
                         dimension,
                         max_tokens,
                         pooling = ?pooling,
+                        output_kind = ?output_kind,
                         "Loaded ONNX embedding model"
                     );
 
@@ -144,6 +153,7 @@ impl EmbeddingModel {
                         session: Arc::new(std::sync::Mutex::new(session)),
                         tokenizer,
                         pooling,
+                        output_kind,
                         dimension,
                         max_tokens,
                         model_id: model_id.to_string(),
@@ -236,6 +246,7 @@ impl EmbeddingModel {
         // We use std::sync::Mutex so the guard can be held across the blocking call.
         let session = self.session.clone();
         let pooling = self.pooling.clone();
+        let output_kind = self.output_kind;
         let dimension = self.dimension;
         let model_id = self.model_id.clone();
 
@@ -302,51 +313,89 @@ impl EmbeddingModel {
             drop(outputs);
             drop(session);
 
-            // Validate shape: should be [batch, seq_len, hidden_dim]
-            if shape_vec.len() != 3 || shape_vec[0] != batch_size {
-                return Err(ModelError::InvalidShape(format!(
-                    "Expected [batch, seq_len, dim], got {:?}",
-                    shape_vec
-                )));
-            }
-
-            let seq_len = shape_vec[1];
-            let hidden_dim = shape_vec[2];
-
-            // Apply pooling for each item in batch
+            // Branch on the model's ONNX output shape. Different exporters
+            // bake different amounts of post-processing into the graph:
+            //   * HiddenStates   → raw last_hidden_state [batch, seq_len, dim];
+            //                     we apply pooling_strategy + L2 norm here.
+            //   * AlreadyPooled  → pooled (and often normalized) [batch, dim];
+            //                     we only re-apply L2 norm (idempotent on
+            //                     already-normed vectors) and skip pooling.
+            // ponytail ceiling: shape inspection is the only auto-detect
+            // signal; we still require the registry to opt in via
+            // `onnx_output_kind` so a misconfigured entry fails loud,
+            // not silent.
             let mut results = Vec::with_capacity(batch_size);
-            for b in 0..batch_size {
-                // Extract [seq_len, hidden_dim] for this batch item from flat data
-                let mut hidden_state: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
-                for s in 0..seq_len {
-                    let mut row = Vec::with_capacity(hidden_dim);
-                    for d in 0..hidden_dim {
-                        row.push(data_vec[b * seq_len * hidden_dim + s * hidden_dim + d]);
+            match output_kind {
+                OnnxOutputKind::AlreadyPooled => {
+                    // Expect [batch, dim]
+                    if shape_vec.len() != 2 || shape_vec[0] != batch_size {
+                        return Err(ModelError::InvalidShape(format!(
+                            "Expected [batch, dim] for already-pooled model, got {:?}",
+                            shape_vec
+                        )));
                     }
-                    hidden_state.push(row);
+                    let dim = shape_vec[1];
+                    for b in 0..batch_size {
+                        let mut pooled: Vec<f32> = (0..dim)
+                            .map(|d| data_vec[b * dim + d])
+                            .collect();
+                        l2_normalize(&mut pooled);
+                        if pooled.len() != dimension {
+                            return Err(ModelError::InvalidShape(format!(
+                                "Expected dimension {}, got {}",
+                                dimension,
+                                pooled.len()
+                            )));
+                        }
+                        results.push(pooled);
+                    }
                 }
+                OnnxOutputKind::HiddenStates => {
+                    // Expect [batch, seq_len, hidden_dim]
+                    if shape_vec.len() != 3 || shape_vec[0] != batch_size {
+                        return Err(ModelError::InvalidShape(format!(
+                            "Expected [batch, seq_len, dim], got {:?}",
+                            shape_vec
+                        )));
+                    }
 
-                // Extract attention_mask for this batch item
-                let mask: Vec<i64> = (0..max_len)
-                    .map(|s| attention_mask_for_pooling[b * max_len + s])
-                    .collect();
+                    let seq_len = shape_vec[1];
+                    let hidden_dim = shape_vec[2];
 
-                // Apply pooling
-                let mut pooled = apply_pooling(&hidden_state, &mask, &pooling);
+                    for b in 0..batch_size {
+                        // Extract [seq_len, hidden_dim] for this batch item from flat data
+                        let mut hidden_state: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
+                        for s in 0..seq_len {
+                            let mut row = Vec::with_capacity(hidden_dim);
+                            for d in 0..hidden_dim {
+                                row.push(data_vec[b * seq_len * hidden_dim + s * hidden_dim + d]);
+                            }
+                            hidden_state.push(row);
+                        }
 
-                // L2 normalize
-                l2_normalize(&mut pooled);
+                        // Extract attention_mask for this batch item
+                        let mask: Vec<i64> = (0..max_len)
+                            .map(|s| attention_mask_for_pooling[b * max_len + s])
+                            .collect();
 
-                // Validate dimension
-                if pooled.len() != dimension {
-                    return Err(ModelError::InvalidShape(format!(
-                        "Expected dimension {}, got {}",
-                        dimension,
-                        pooled.len()
-                    )));
+                        // Apply pooling
+                        let mut pooled = apply_pooling(&hidden_state, &mask, &pooling);
+
+                        // L2 normalize
+                        l2_normalize(&mut pooled);
+
+                        // Validate dimension
+                        if pooled.len() != dimension {
+                            return Err(ModelError::InvalidShape(format!(
+                                "Expected dimension {}, got {}",
+                                dimension,
+                                pooled.len()
+                            )));
+                        }
+
+                        results.push(pooled);
+                    }
                 }
-
-                results.push(pooled);
             }
 
             Ok(results)
