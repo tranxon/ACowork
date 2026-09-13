@@ -464,7 +464,7 @@ pub async fn run_cron_scheduler(
             // this path is addressed by the INSTANCE identity. Resolve the
             // canonical instance key up-front and fail loudly when the
             // trigger key does not correspond to any installed instance.
-            let (instance_id, package_id) = {
+            let (instance_id, package_id, hosting_node_id) = {
                 let gw = gateway_state.read().await;
                 let inst = match gw.resolve_installed_key(&trigger_id) {
                     Some(inst) => inst,
@@ -478,8 +478,11 @@ pub async fn run_cron_scheduler(
                         continue;
                     }
                 };
-                let pkg = match gw.installed(&inst) {
-                    Some(i) => i.agent_id.clone(),
+                // ADR-055 §6.2: start commands route by node — resolve
+                // the node hosting the instance (fallback `local` for
+                // records that predate node aggregation).
+                let (pkg, hosting) = match gw.installed(&inst) {
+                    Some(i) => (i.agent_id.clone(), i.node_id.clone()),
                     None => {
                         tracing::error!(
                             "Cron: resolved instance '{}' for trigger '{}' has no install record; \
@@ -491,7 +494,7 @@ pub async fn run_cron_scheduler(
                         continue;
                     }
                 };
-                (inst, pkg)
+                (inst, pkg, hosting)
             };
 
             // Check if the instance is running; if not, try to start it.
@@ -506,8 +509,9 @@ pub async fn run_cron_scheduler(
                     instance_id,
                     package_id
                 );
-                // ADR-055 §6.2: start via the local node control plane
-                // (the node hosts the Runtime).
+                // ADR-055 §6.2: start via the node HOSTING the instance
+                // (a remote instance must not be routed to the local
+                // node — the command would time out unacknowledged).
                 let Some(node_control) = &node_control else {
                     tracing::error!(
                         "Cron: node control unavailable, cannot start instance {}",
@@ -517,7 +521,7 @@ pub async fn run_cron_scheduler(
                 };
                 match node_control
                     .start_agent(
-                        &acowork_core::node::local_node_id(),
+                        &hosting_node_id,
                         &instance_id,
                         &package_id,
                         false,

@@ -643,6 +643,9 @@ export function AgentList({ width }: AgentListProps) {
                   <NodeGroupHeader
                     nodeName={nodeDisplayName(group)}
                     online={group.node?.online ?? false}
+                    statusLabel={t(
+                      group.node?.online ? "settings.nodesOnline" : "settings.nodesOffline",
+                    )}
                     collapsed={collapsed}
                     onToggle={() => toggleNode(group.nodeId)}
                     agentCount={group.agents.length}
@@ -689,7 +692,10 @@ export function AgentList({ width }: AgentListProps) {
                     }}
                     className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
                   >
-                    <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />
+                    {/* Node install picker only lists online nodes, so the
+                        dot renders solid emerald — same online/offline
+                        badge as the group header (gray when offline). */}
+                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
                     {node.node_id}
                     <span className="ml-auto text-zinc-400">
                       {node.os ?? ""} {node.arch ?? ""}
@@ -806,14 +812,20 @@ export function AgentList({ width }: AgentListProps) {
 
 /**
  * ADR-073 §4: collapsible group header shown above each node bucket in
- * remote-mode view. ~1/3 of an agent row's height (h-5 = 20px vs row's
- * ~56px), no background, no border — only the same divider the agent
- * rows use, plus a chevron + the node display name. Click anywhere on
- * the row to toggle; default state is collapsed=false (expanded).
+ * remote-mode view — compact (h-6 = 24px vs the agent row's ~56px), no
+ * background, bordered top and bottom with the same divider color the
+ * agent rows use, plus a chevron + the node display name. Click anywhere
+ * on the row to toggle; default state is collapsed=false (expanded).
+ *
+ * The leading dot doubles as the node's online/offline badge: solid
+ * emerald while the node's MQTT session is alive, solid gray once the
+ * Gateway has marked it offline. `statusLabel` is surfaced through the
+ * native `title` tooltip so the dot's meaning is discoverable on hover.
  */
 interface NodeGroupHeaderProps {
   nodeName: string;
   online: boolean;
+  statusLabel: string;
   collapsed: boolean;
   onToggle: () => void;
   agentCount: number;
@@ -822,6 +834,7 @@ interface NodeGroupHeaderProps {
 function NodeGroupHeader({
   nodeName,
   online,
+  statusLabel,
   collapsed,
   onToggle,
   agentCount,
@@ -832,17 +845,19 @@ function NodeGroupHeader({
       onClick={onToggle}
       aria-expanded={!collapsed}
       aria-label={`Toggle node group: ${nodeName}`}
+      title={statusLabel}
       data-testid="node-group-header"
       className={cn(
-        // h-5 (20px) ≈ 1/3 of the agent row's ~56px height.
-        "flex h-5 w-full items-center gap-1.5 px-3 text-left",
+        // h-6 (24px) — a touch taller than a third of the agent row's
+        // ~56px, so the node label has comfortable breathing room.
+        "flex h-6 w-full items-center gap-1.5 px-3 text-left",
         "text-[10px] font-medium uppercase tracking-wide",
         "text-zinc-400 dark:text-zinc-500",
         "hover:text-zinc-600 dark:hover:text-zinc-300",
         "transition-colors duration-150",
-        // Mirror the agent row's bottom divider so visual rhythm is
-        // preserved even when the header sits above an empty group.
-        "border-b border-nav-divider/40 dark:border-zinc-600/40",
+        // Dedicated divider on BOTH edges so the header reads as its own
+        // row when it sits between agent rows / above an empty group.
+        "border-y border-nav-divider/40 dark:border-zinc-600/40",
       )}
     >
       <ChevronRight
@@ -854,7 +869,7 @@ function NodeGroupHeader({
       <span
         className={cn(
           "h-1.5 w-1.5 shrink-0 rounded-full",
-          online ? "bg-emerald-500/70" : "bg-zinc-400/40 dark:bg-zinc-500/40",
+          online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
         )}
         aria-hidden
       />

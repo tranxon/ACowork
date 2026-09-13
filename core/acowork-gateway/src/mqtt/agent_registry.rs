@@ -288,8 +288,8 @@ impl AgentRegistry {
         self.agents.values().filter(|s| s.online).count()
     }
 
-    /// Remove an agent instance from the registry (e.g. on uninstall).
-    #[allow(dead_code)]
+    /// Remove an agent instance from the registry (e.g. on uninstall,
+    /// or when its hosting node is removed from the fleet).
     pub fn remove(&mut self, instance_id: &str) {
         self.agents.remove(instance_id);
     }

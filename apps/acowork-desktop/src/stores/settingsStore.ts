@@ -31,6 +31,10 @@ import {
  *     were hardcoded to 127.0.0.1:19876 in Rust)
  *   - The Rust side knows whether to skip spawning a local Gateway on
  *     the next boot (remote mode)
+ *   - An address change also rebuilds the MQTT connection: the Rust
+ *     `connect_mqtt` command detects that the configured broker differs
+ *     from the one the live client was created for and reconnects — no
+ *     app restart needed
  *
  * Best-effort: errors are logged but never thrown, because settings
  * persistence must not be blocked by transient Tauri command failures
@@ -41,6 +45,17 @@ async function pushGatewayConfigToRust(mode: GatewayMode, url: string): Promise<
     await invoke("set_gateway_config", {
       config: { mode, url },
     });
+    // The MQTT client derives its broker host/port from the Gateway URL
+    // at creation time. Re-run `connect_mqtt` here so saving a new
+    // address — SplashScreen timeout retry or Settings — tears down a
+    // stale connection and rebuilds it against the configured broker.
+    // No-op when the endpoint is unchanged.
+    try {
+      await invoke("connect_mqtt");
+    } catch {
+      // Rust-side MQTT may not be booted yet (e.g. page reload before
+      // the SplashScreen boot flow runs) — the boot path covers it.
+    }
   } catch (err) {
     log.warn("Failed to push gateway config to Rust:", err);
   }

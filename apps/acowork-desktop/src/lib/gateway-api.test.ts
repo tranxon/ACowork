@@ -5,6 +5,7 @@
  * - `POST /api/users` answers with an `OperationAck` (ADR-059 §7.3)
  * - `PUT  /api/users/{user_id}` answers with `UserResponse { user, version }`
  * - `POST /api/users/{user_id}/activate` answers with `ActivateResponse`
+ * - `GET  /api/nodes` answers snake_case `NodeResponse` (legacy camelCase normalized)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -14,6 +15,7 @@ import {
     activateUser,
     fetchActiveUser,
     verifyAgentHealth,
+    fetchNodes,
 } from "./gateway-api";
 import type { BackendUserProfile } from "./types";
 
@@ -223,5 +225,71 @@ describe("verifyAgentHealth (HTTP double-check on MQTT disconnect)", () => {
         expect(calls[0].url).toBe(
             "http://gw/api/agents/com.acowork.senior-engineer/health",
         );
+    });
+});
+
+// ── fetchNodes field normalization (remote-mode node grouping) ───────────
+//
+// Regression: Gateway builds from ADR-055 Phases 1–3 serialized
+// `NodeResponse` in camelCase while the desktop consumed snake_case
+// (`NodeInfo`). Every `node_id` parsed as `undefined`, the node never
+// matched its agent bucket, and the remote sidebar collapsed into one
+// gray "unknown" group — while the node was actually online. The
+// normalize layer accepts both field-name shapes so a desktop build
+// works against old and new Gateways alike.
+
+describe("fetchNodes field normalization", () => {
+    it("reads the snake_case contract (new Gateways) verbatim", async () => {
+        mockFetchOnce([
+            {
+                node_id: "nicholas-pc",
+                online: true,
+                hostname: "NICHOLAS-PC",
+                os: "windows",
+                arch: "x86_64",
+                node_version: "0.1.0",
+                agent_count: 2,
+                max_agents: 16,
+                capabilities: ["control_plane"],
+                http_endpoint: "http://127.0.0.1:19900",
+            },
+        ]);
+
+        const nodes = await fetchNodes("http://gw");
+
+        expect(nodes).toHaveLength(1);
+        expect(nodes[0].node_id).toBe("nicholas-pc");
+        expect(nodes[0].online).toBe(true);
+        expect(nodes[0].agent_count).toBe(2);
+        expect(nodes[0].http_endpoint).toBe("http://127.0.0.1:19900");
+        expect(calls[0].url).toBe("http://gw/api/nodes");
+    });
+
+    it("normalizes legacy camelCase payloads (ADR-055 Phase 1–3 Gateways)", async () => {
+        mockFetchOnce([
+            {
+                nodeId: "nicholas-pc",
+                online: true,
+                hostname: "NICHOLAS-PC",
+                os: "windows",
+                arch: "x86_64",
+                nodeVersion: "0.1.0",
+                agentCount: 2,
+                maxAgents: 16,
+                capabilities: ["control_plane"],
+                httpEndpoint: "http://127.0.0.1:19900",
+            },
+        ]);
+
+        const nodes = await fetchNodes("http://gw");
+
+        // The regression: node_id was undefined → partitionAgentsByNode
+        // could never match this node → gray "unknown" group in the sidebar.
+        expect(nodes[0].node_id).toBe("nicholas-pc");
+        expect(nodes[0].online).toBe(true);
+        expect(nodes[0].node_version).toBe("0.1.0");
+        expect(nodes[0].agent_count).toBe(2);
+        expect(nodes[0].max_agents).toBe(16);
+        expect(nodes[0].http_endpoint).toBe("http://127.0.0.1:19900");
     });
 });

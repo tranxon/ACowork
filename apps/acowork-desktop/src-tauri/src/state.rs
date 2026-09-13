@@ -134,6 +134,17 @@ pub struct AppState {
     /// module docs.
     pub mqtt_client: Arc<Mutex<Option<SharedDesktopMqttClient>>>,
 
+    /// Broker `(host, port)` the active `mqtt_client` was created for.
+    ///
+    /// Written by `connect_mqtt` on success and cleared by
+    /// `disconnect_mqtt`. It lets `connect_mqtt` detect that the Gateway
+    /// address changed while a stale client was still connected (e.g.
+    /// the user edited the remote URL on the SplashScreen timeout view
+    /// or in Settings) and rebuild the connection instead of
+    /// short-circuiting on the outdated client. Lock order (when both
+    /// are held): `mqtt_client` then `mqtt_endpoint`.
+    pub mqtt_endpoint: Arc<Mutex<Option<(String, u16)>>>,
+
     /// ADR-059: latest Gateway bootstrap snapshot.
     ///
     /// Updated by the MQTT `bootstrap_handler` on every push of the
@@ -158,6 +169,7 @@ impl AppState {
             gateway_process: Arc::new(Mutex::new(None)),
             gateway_keep_running_on_exit: Arc::new(AtomicBool::new(false)),
             mqtt_client: Arc::new(Mutex::new(None)),
+            mqtt_endpoint: Arc::new(Mutex::new(None)),
             bootstrap_state: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }

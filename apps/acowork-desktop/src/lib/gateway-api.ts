@@ -778,13 +778,42 @@ export async function setDefaultCompactModel(
  *
  * Returns an empty list when the Gateway has no node registry (MQTT
  * disabled) or when no node has ever reported.
+ *
+ * Field normalization: the Gateway contract is snake_case (`node_id`,
+ * `agent_count`, …) — matching the `NodeInfo` type below. Gateway
+ * builds from ADR-055 Phases 1–3 instead serialized `NodeResponse`
+ * with camelCase names, which the desktop parsed as `undefined` —
+ * every node failed to match its agent bucket, collapsing the
+ * remote-mode sidebar into a single gray "unknown" group. Accepting
+ * both shapes keeps desktop and Gateway independently upgradeable.
  */
 export async function fetchNodes(gatewayUrl = getGatewayUrl()): Promise<NodeInfo[]> {
   const resp = await fetch(`${gatewayUrl}/api/nodes`);
   if (!resp.ok) {
     throw new Error(`Failed to fetch nodes: ${resp.status}`);
   }
-  return (await resp.json()) as NodeInfo[];
+  const raw = (await resp.json()) as Array<Record<string, unknown>>;
+  return raw.map(normalizeNode);
+}
+
+/** Normalize one `/api/nodes` entry (snake_case contract or legacy camelCase) into `NodeInfo`. */
+function normalizeNode(raw: Record<string, unknown>): NodeInfo {
+  const snakeOrCamel = (snake: string, camel: string): unknown => raw[snake] ?? raw[camel];
+  return {
+    node_id: (snakeOrCamel("node_id", "nodeId") ?? "") as string,
+    online: raw.online === true,
+    online_since: snakeOrCamel("online_since", "onlineSince") as string | undefined,
+    machine_uid: snakeOrCamel("machine_uid", "machineUid") as string | undefined,
+    hostname: raw.hostname as string | undefined,
+    os: raw.os as string | undefined,
+    arch: raw.arch as string | undefined,
+    node_version: snakeOrCamel("node_version", "nodeVersion") as string | undefined,
+    protocol_version: snakeOrCamel("protocol_version", "protocolVersion") as number | undefined,
+    capabilities: (raw.capabilities ?? []) as string[],
+    max_agents: snakeOrCamel("max_agents", "maxAgents") as number | undefined,
+    agent_count: snakeOrCamel("agent_count", "agentCount") as number | undefined,
+    http_endpoint: snakeOrCamel("http_endpoint", "httpEndpoint") as string | undefined,
+  };
 }
 
 // ── Structured error codes (ADR-059 §6.3) ──────────────────────────────

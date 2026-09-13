@@ -24,8 +24,14 @@ use crate::http::routes::AppState;
 /// arch, version, counts, endpoint) are `None` until the node publishes
 /// its first info message; a node discovered only via the status topic
 /// still appears with its `node_id` + `online` state.
+///
+/// Field names are snake_case: the payload is consumed verbatim by the
+/// Desktop's `NodeInfo` type via `fetchNodes`
+/// (`apps/acowork-desktop/src/lib/types.ts`). Do NOT add
+/// `#[serde(rename_all = "camelCase")]` — an earlier revision did and
+/// silently broke `node_id`/`agent_count` parsing (guarded by the
+/// serialization regression test below).
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct NodeResponse {
     /// Logical node id (`local` for the Gateway's own node).
     pub node_id: String,
@@ -217,5 +223,64 @@ mod tests {
         let resp = list_nodes(State(state)).await;
         let ids: Vec<&str> = resp.0.iter().map(|n| n.node_id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn node_response_serializes_with_snake_case_fields() {
+        // Contract: the Desktop `NodeInfo` type (snake_case) consumes this
+        // payload verbatim via `fetchNodes`. A camelCase `rename_all` here
+        // silently broke `node_id`/`agent_count` parsing — every node
+        // failed to match its agent bucket, collapsing the remote-mode
+        // sidebar into one gray "unknown node" group.
+        let resp = NodeResponse {
+            node_id: "nicholas-pc".to_string(),
+            online: true,
+            online_since: Some("2026-09-13T05:10:21+00:00".to_string()),
+            machine_uid: Some("uid-1".to_string()),
+            hostname: Some("NICHOLAS-PC".to_string()),
+            os: Some("windows".to_string()),
+            arch: Some("x86_64".to_string()),
+            node_version: Some("0.1.0".to_string()),
+            protocol_version: Some(1),
+            capabilities: vec!["control_plane".to_string()],
+            max_agents: Some(16),
+            agent_count: Some(2),
+            http_endpoint: Some("http://127.0.0.1:19900".to_string()),
+        };
+
+        let json = serde_json::to_value(&resp).expect("NodeResponse serializes");
+        let obj = json.as_object().expect("serializes to a JSON object");
+
+        for key in [
+            "node_id",
+            "online",
+            "online_since",
+            "machine_uid",
+            "hostname",
+            "os",
+            "arch",
+            "node_version",
+            "protocol_version",
+            "capabilities",
+            "max_agents",
+            "agent_count",
+            "http_endpoint",
+        ] {
+            assert!(obj.contains_key(key), "missing snake_case field `{key}`");
+        }
+        for key in [
+            "nodeId",
+            "onlineSince",
+            "machineUid",
+            "nodeVersion",
+            "protocolVersion",
+            "maxAgents",
+            "agentCount",
+            "httpEndpoint",
+        ] {
+            assert!(!obj.contains_key(key), "unexpected camelCase field `{key}`");
+        }
+        assert_eq!(obj["node_id"], "nicholas-pc");
+        assert_eq!(obj["agent_count"], 2);
     }
 }

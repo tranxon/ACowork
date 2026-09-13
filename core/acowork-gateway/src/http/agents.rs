@@ -532,6 +532,27 @@ pub(crate) async fn resolve_agent_identity(
     Ok((inst, aid))
 }
 
+/// Resolve the node HOSTING an agent instance (ADR-055 §6.2 routing).
+///
+/// Node resolution order: the instance's install record (node-local
+/// authority, aggregated from retained inventory), then the running
+/// record, then `local` as the fallback for records that predate
+/// node aggregation (legacy / MQTT-disabled setups).
+///
+/// Routing control commands to the hosting node is what makes
+/// start/stop/restart/uninstall work for agents installed on a REMOTE
+/// node: the command topic is `acowork/nodes/{node_id}/agents/…`, so a
+/// hardcoded local node id publishes into a topic nobody subscribes
+/// to (command timeout + Desktop retry loop).
+pub(crate) async fn resolve_agent_node_id(state: &AppState, instance_id: &str) -> String {
+    let gw = state.gateway_state.read().await;
+    gw.installed_agents
+        .get(instance_id)
+        .map(|i| i.node_id.clone())
+        .or_else(|| gw.running_agents.get(instance_id).map(|r| r.node_id.clone()))
+        .unwrap_or_else(acowork_core::node::local_node_id)
+}
+
 /// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
 /// source file from the package registry (ADR-055 §3.2). This is how a
 /// remote Node pulls the package during an asynchronous install.
@@ -1198,7 +1219,7 @@ pub(crate) fn extract_manifest_from_package(
 async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
     // Resolve everything from an immutable snapshot first; the write
     // lock is only taken for the final upsert (avoids E0502).
-    let (resolved_agent_id, workspace) = {
+    let (resolved_agent_id, workspace, node_id) = {
         let gw = state.gateway_state.read().await;
         let info = gw.installed(agent_id);
         let resolved_agent_id = info
@@ -1212,7 +1233,14 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
                     .to_string()
             })
             .unwrap_or_default();
-        (resolved_agent_id, workspace)
+        // ADR-055 §6.2: the hosting node comes from the instance's
+        // install record; fall back to `local` only when the record is
+        // missing (a Runtime auto-tracked before its inventory was
+        // aggregated).
+        let node_id = info
+            .map(|i| i.node_id.clone())
+            .unwrap_or_else(acowork_core::node::local_node_id);
+        (resolved_agent_id, workspace, node_id)
     };
 
     let mut gw = state.gateway_state.write().await;
@@ -1222,7 +1250,7 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
-        node_id: acowork_core::node::local_node_id(),
+        node_id,
         connected: false,
         ready: false,
         dev_mode,
@@ -1463,17 +1491,20 @@ pub async fn uninstall_agent(
         }
     }
 
-    // ADR-055 §6.2: delegate uninstall to the local node. The node clears
-    // the retained installed-info entry; the Gateway drops the agent from
+    // ADR-055 §6.2: delegate uninstall to the HOSTING node (the agent
+    // may live on a remote node — routing to the local node would
+    // publish into a topic nobody subscribes to). The node clears the
+    // retained installed-info entry; the Gateway drops the agent from
     // installed_agents via the dispatch aggregation path.
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
+    let node_id = resolve_agent_node_id(&state, &instance_id).await;
     let event = node_control
         .uninstall_agent(
-            &acowork_core::node::local_node_id(),
+            &node_id,
             &instance_id,
             &resolved_agent_id,
         )
@@ -1681,13 +1712,18 @@ pub async fn start_agent(
             },
         )
     })?;
-    check_node_compatible(&state, &acowork_core::node::local_node_id()).await?;
     // ADR-073: route the command to the instance identity.
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
+    // ADR-055 §6.2: route to the node HOSTING the instance — the
+    // command topic is per-node, so a hardcoded local node would
+    // publish into a topic nobody subscribes to (timeout + Desktop
+    // retry loop for an agent installed on a remote node).
+    let node_id = resolve_agent_node_id(&state, &instance_id).await;
+    check_node_compatible(&state, &node_id).await?;
     let event = node_control
         .start_agent(
-            &acowork_core::node::local_node_id(),
+            &node_id,
             &instance_id,
             &resolved_agent_id,
             req.dev_mode,
@@ -1891,9 +1927,11 @@ pub async fn stop_agent(
     })?;
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
+    // ADR-055 §6.2: route to the node hosting the instance.
+    let node_id = resolve_agent_node_id(&state, &instance_id).await;
     let event = node_control
         .stop_agent(
-            &acowork_core::node::local_node_id(),
+            &node_id,
             &instance_id,
             &resolved_agent_id,
             "user",
@@ -1991,9 +2029,11 @@ pub async fn restart_agent_in_debug(
     // Stop current process
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
+    // ADR-055 §6.2: route to the node hosting the instance.
+    let node_id = resolve_agent_node_id(&state, &instance_id).await;
     let stop_event = node_control
         .stop_agent(
-            &acowork_core::node::local_node_id(),
+            &node_id,
             &instance_id,
             &resolved_agent_id,
             "debug-restart",
@@ -2016,7 +2056,7 @@ pub async fn restart_agent_in_debug(
     // Start with dev_mode=true
     let start_event = node_control
         .start_agent(
-            &acowork_core::node::local_node_id(),
+            &node_id,
             &instance_id,
             &resolved_agent_id,
             true,

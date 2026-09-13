@@ -66,6 +66,12 @@ pub enum SubsystemState {
     /// `READY` (e.g. dev mode skipping embedding). Treated as "ready"
     /// for the purpose of phase aggregation but distinct in `phase_detail`.
     Skipped,
+    /// The subsystem record has been removed for good (e.g. its Node was
+    /// removed from the fleet — ADR-055 §6.13.3). Never stored in the
+    /// registry; it appears only as the `current` state of the
+    /// [`ReadinessUpdate`] broadcast by [`SubsystemReadinessRegistry::deregister`]
+    /// so subscribers (the orchestrator) recompute without it.
+    Deregistered,
 }
 
 impl SubsystemState {
@@ -74,6 +80,8 @@ impl SubsystemState {
     /// Both [`SubsystemState::Ready`] and [`SubsystemState::Skipped`]
     /// satisfy the required-subsystem check — `Skipped` is for
     /// optional subsystems that were intentionally not started.
+    /// [`SubsystemState::Deregistered`] never satisfies anything; the
+    /// record it describes no longer exists.
     pub fn is_satisfying(self) -> bool {
         matches!(self, SubsystemState::Ready | SubsystemState::Skipped)
     }
@@ -293,6 +301,37 @@ impl SubsystemReadinessRegistry {
         let _ = self.inner.lock().tx.send(update);
     }
 
+    /// Remove a subsystem record for good and broadcast a
+    /// [`SubsystemState::Deregistered`] update so subscribers (the
+    /// orchestrator) recompute the aggregated phase without it.
+    ///
+    /// Used when a Node leaves the fleet permanently (ADR-055
+    /// §6.13.3): its `node.{id}` record must not linger in `Booting`,
+    /// otherwise the aggregated bootstrap phase stays stuck there
+    /// forever. A Node that reconnects re-announces readiness, which
+    /// registers a fresh `Booting` record through the normal path.
+    ///
+    /// Returns `true` iff a record existed and was removed. Removing
+    /// an unknown subsystem is a no-op (no event is emitted).
+    pub fn deregister(&self, id: &SubsystemId) -> bool {
+        let update = {
+            let mut inner = self.inner.lock();
+            inner.subsystems.remove(id).map(|rec| ReadinessUpdate {
+                id: id.clone(),
+                previous: rec.state,
+                current: SubsystemState::Deregistered,
+                kind: rec.kind,
+                detail: rec.detail,
+            })
+        };
+        let Some(update) = update else {
+            return false;
+        };
+        // Best-effort broadcast, same contract as `transition`.
+        let _ = self.inner.lock().tx.send(update);
+        true
+    }
+
     /// Subscribe to readiness updates.
     ///
     /// The orchestrator holds one subscription across its lifetime.
@@ -422,6 +461,7 @@ mod tests {
         assert!(SubsystemState::Skipped.is_satisfying());
         assert!(!SubsystemState::Booting.is_satisfying());
         assert!(!SubsystemState::Failed.is_satisfying());
+        assert!(!SubsystemState::Deregistered.is_satisfying());
     }
 
     #[test]
@@ -461,6 +501,55 @@ mod tests {
         drop(registry);
         // No panic: dropped registry means the upgrade fails.
         handle.mark_ready(None);
+    }
+
+    #[test]
+    fn deregister_removes_record_and_broadcasts() {
+        let registry = SubsystemReadinessRegistry::new_shared();
+        let handle = registry.register("node.nytb", ReadinessKind::Required);
+        let mut rx = registry.subscribe();
+
+        handle.mark_ready(Some("node online".into()));
+        assert!(rx.try_recv().is_ok());
+
+        let id: SubsystemId = "node.nytb".into();
+        assert!(registry.deregister(&id));
+        assert_eq!(registry.state(&id), None);
+
+        let update = rx.try_recv().expect("deregister event delivered");
+        assert_eq!(update.id.0, "node.nytb");
+        assert_eq!(update.previous, SubsystemState::Ready);
+        assert_eq!(update.current, SubsystemState::Deregistered);
+        assert_eq!(update.kind, ReadinessKind::Required);
+
+        // Second deregister is a no-op: no record, no event.
+        assert!(!registry.deregister(&id));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn deregister_unblocks_booting_phase() {
+        // A required subsystem stuck in Booting keeps the aggregated
+        // phase from ever reaching READY; deregistering it must
+        // remove it from the required set so aggregation can pass.
+        let registry = SubsystemReadinessRegistry::new_shared();
+        let h1 = registry.register("vault", ReadinessKind::Required);
+        let h2 = registry.register("node.dead", ReadinessKind::Required);
+
+        h1.mark_ready(None);
+        assert!(registry.any_required_booting());
+        assert!(!registry.all_required_ready());
+
+        assert!(registry.deregister(&SubsystemId::from("node.dead")));
+        assert!(!registry.any_required_booting());
+        assert!(registry.all_required_ready());
+        assert_eq!(registry.registered_required_count(), 1);
+
+        // A late update from the retired handle is ignored; the
+        // record does not resurrect.
+        h2.mark_ready(None);
+        assert_eq!(registry.registered_required_count(), 1);
+        assert_eq!(registry.state(h2.id()), None);
     }
 
     #[test]

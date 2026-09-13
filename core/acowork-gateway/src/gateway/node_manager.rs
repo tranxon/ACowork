@@ -635,15 +635,19 @@ pub async fn drain_node_via_mqtt(
 }
 
 /// `nodes remove <node_id>` — remove a node's records by clearing its
-/// retained status/info (ADR-055 §6.13.3). The node must be offline;
-/// the CLI cannot assert liveness here, but an offline node's retained
-/// status is `offline` and the registry drops it on the empty payload.
+/// retained topics (ADR-055 §6.13.3). The empty retained status is the
+/// removal signal: the Gateway dispatcher reacts to it by deregistering
+/// the node's bootstrap subsystem and dropping all node/instance
+/// records, and the empty ready/lsps/info snapshots ensure a Gateway
+/// restart cannot replay a ghost.
 pub async fn remove_node_via_mqtt(
     mqtt_host: &str,
     mqtt_port: u16,
     node_id: &str,
 ) -> crate::error::Result<()> {
-    use acowork_core::node::{node_info_topic, node_status_topic};
+    use acowork_core::node::{
+        node_info_topic, node_lsps_topic, node_ready_topic, node_status_topic,
+    };
 
     use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
 
@@ -656,17 +660,22 @@ pub async fn remove_node_via_mqtt(
         })?;
 
     // Publishing an empty retained message clears the retained entry
-    // (MQTT semantics), which drops the node from `nodes list`.
-    client
-        .publish_raw(&node_status_topic(node_id), Vec::new(), MqttQoS::AtLeastOnce, true)
-        .await
-        .map_err(|e| crate::error::GatewayError::Ipc(e.to_string()))?;
-    client
-        .publish_raw(&node_info_topic(node_id), Vec::new(), MqttQoS::AtLeastOnce, true)
-        .await
-        .map_err(|e| crate::error::GatewayError::Ipc(e.to_string()))?;
+    // (MQTT semantics). Status goes first — it is the signal the
+    // Gateway dispatcher turns into the full record cleanup.
+    let topics = [
+        node_status_topic(node_id),
+        node_info_topic(node_id),
+        node_ready_topic(node_id),
+        node_lsps_topic(node_id),
+    ];
+    for topic in &topics {
+        client
+            .publish_raw(topic, Vec::new(), MqttQoS::AtLeastOnce, true)
+            .await
+            .map_err(|e| crate::error::GatewayError::Ipc(e.to_string()))?;
+    }
 
-    println!("Removed node '{node_id}' (cleared retained status/info).");
+    println!("Removed node '{node_id}' (cleared retained status/info/ready/lsps).");
     Ok(())
 }
 

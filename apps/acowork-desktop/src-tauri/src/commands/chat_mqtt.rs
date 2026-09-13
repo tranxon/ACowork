@@ -36,9 +36,6 @@ use acowork_core::defaults;
 #[tauri::command]
 pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.mqtt_client.lock().await;
-    if guard.is_some() {
-        return Ok(()); // Already connected
-    }
 
     let user_id = "default"; // Single-user phase; multi-user will use actual user_id
 
@@ -72,6 +69,29 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     let mqtt_credentials = mqtt_credentials
         .as_ref()
         .map(|(u, p)| (u.as_str(), p.as_str()));
+
+    // Idempotence guard: reuse the existing client only when it targets
+    // the same broker endpoint as the current configuration. A stale
+    // client — created before the user edited the remote Gateway address
+    // on the SplashScreen timeout view or in Settings — would otherwise
+    // keep publishing every control command (chat messages, session
+    // management) to the OLD Gateway's broker with no visible error,
+    // while all agents live on the new one. Tear it down so the rebuild
+    // below targets the configured broker.
+    if guard.is_some() {
+        let current_endpoint = state.mqtt_endpoint.lock().await.clone();
+        if endpoint_matches(current_endpoint.as_ref(), &mqtt_host, mqtt_port) {
+            return Ok(()); // Already connected to the configured broker
+        }
+        tracing::info!(
+            previous = ?current_endpoint,
+            configured = %format!("{mqtt_host}:{mqtt_port}"),
+            "Gateway address changed - recreating MQTT client"
+        );
+        // Dropping the client tears down its poll task via the internal
+        // EventLoopGuard; the `guard` slot is re-filled below.
+        *guard = None;
+    }
 
     // Create callback that decodes MQTT protobuf messages and emits
     // structured flat-JSON events to the React frontend.
@@ -593,6 +613,9 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
     let shared = Arc::new(tokio::sync::Mutex::new(client));
     *guard = Some(shared);
+    // Record the endpoint this client was created for so a later
+    // `connect_mqtt` call can detect a Gateway-address change.
+    *state.mqtt_endpoint.lock().await = Some((mqtt_host, mqtt_port));
 
     tracing::info!("Desktop MQTT client connected and subscribed to all agent topics");
     Ok(())
@@ -603,6 +626,9 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 pub async fn disconnect_mqtt(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.mqtt_client.lock().await;
     *guard = None;
+    // Clear the endpoint record together with the client (same lock
+    // order as `connect_mqtt`: `mqtt_client` then `mqtt_endpoint`).
+    *state.mqtt_endpoint.lock().await = None;
     tracing::info!("Desktop MQTT client disconnected");
     Ok(())
 }
@@ -989,6 +1015,41 @@ fn fs_change_kind_str(kind: i32) -> &'static str {
 fn derive_mqtt_broker_host(gateway_base_url: &str) -> Option<String> {
     let url = reqwest::Url::parse(gateway_base_url).ok()?;
     url.host_str().map(|h| h.to_string())
+}
+
+/// Whether the active MQTT client (identified by the endpoint recorded
+/// in `AppState::mqtt_endpoint`) already targets the configured broker.
+///
+/// `connect_mqtt` uses this to pick between the fast path (existing
+/// client reused) and the rebuild path (Gateway address changed while a
+/// stale client was still connected — see the idempotence-guard comment
+/// in `connect_mqtt`).
+fn endpoint_matches(recorded: Option<&(String, u16)>, host: &str, port: u16) -> bool {
+    match recorded {
+        Some((h, p)) => h == host && *p == port,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod mqtt_endpoint_tests {
+    use super::*;
+
+    /// The idempotence guard must rebuild whenever the recorded broker
+    /// endpoint differs from the configured one (SplashScreen retry /
+    /// Settings address change) and short-circuit only on an exact
+    /// (host, port) match.
+    #[test]
+    fn endpoint_matches_requires_identical_host_and_port() {
+        let recorded = Some(("192.168.3.61".to_string(), 19875));
+        assert!(endpoint_matches(recorded.as_ref(), "192.168.3.61", 19875));
+        // Different host — the 67 → 61 address-change incident.
+        assert!(!endpoint_matches(recorded.as_ref(), "192.168.3.67", 19875));
+        // Different port — e.g. a custom mqtt_port discovered via /api/status.
+        assert!(!endpoint_matches(recorded.as_ref(), "192.168.3.61", 19876));
+        // No client recorded yet (fresh start / after disconnect).
+        assert!(!endpoint_matches(None, "192.168.3.61", 19875));
+    }
 }
 
 #[cfg(test)]
