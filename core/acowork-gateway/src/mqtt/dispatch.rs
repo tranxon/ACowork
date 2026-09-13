@@ -1532,19 +1532,28 @@ async fn track_running_agent_for_status(
         }
         return;
     }
-    let workspace = gw
-        .installed(agent_id)
-        .map(|i| {
+    // The status topic (`acowork/agents/{id}/status`) carries no node
+    // identity, so the install record is the only place to learn which
+    // node hosts this Runtime. ADR-075 D6: only a MISSING record falls
+    // back to the `"local"` bookkeeping anchor — hardcoding it here
+    // mis-attributed remote-node Runtimes whenever the Gateway had to
+    // re-install the entry (restart / post-wake), which the Desktop's
+    // per-node grouping then surfaced as a bogus `local` node.
+    let (workspace, resolved_agent_id, node_id) = match gw.installed(agent_id) {
+        Some(i) => (
             std::path::PathBuf::from(&i.install_path)
                 .join("workspace")
                 .to_string_lossy()
-                .to_string()
-        })
-        .unwrap_or_default();
-    let resolved_agent_id = gw
-        .installed(agent_id)
-        .map(|i| i.agent_id.clone())
-        .unwrap_or_else(|| agent_id.to_string());
+                .to_string(),
+            i.agent_id.clone(),
+            i.node_id.clone(),
+        ),
+        None => (
+            String::new(),
+            agent_id.to_string(),
+            acowork_core::node::LOCAL_NODE_ID.to_string(),
+        ),
+    };
     gw.add_running(crate::gateway::state::RunningAgentInfo {
         instance_id: agent_id.to_string(),
         agent_id: resolved_agent_id,
@@ -1554,8 +1563,9 @@ async fn track_running_agent_for_status(
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
-        // ADR-075 D6: fallback anchor for the local node.
-        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+        // Hosting node from the install record, `"local"` only when the
+        // record is missing (ADR-075 D6).
+        node_id,
         connected: true,
         // `ready` defaults to false; the ready topic handler upgrades
         // it the moment `ready=true` is observed. The Desktop's
@@ -2714,6 +2724,91 @@ mod tests {
             .expect("entry must be installed after status=online");
         assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
         assert!(entry.connected, "entry must report connected after a live online signal");
+    }
+
+    /// Minimal install record for `node_id` attribution tests.
+    fn installed_agent_info(node_id: &str) -> crate::gateway::state::AgentInfo {
+        crate::gateway::state::AgentInfo {
+            instance_id: INSTANCE_ARCHITECT.to_string(),
+            agent_id: "com.acowork.architect".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Architect".to_string(),
+            install_path: "/tmp/pkg/architect".to_string(),
+            manifest: acowork_core::AgentManifest {
+                agent_id: "com.acowork.architect".to_string(),
+                version: "1.0.0".to_string(),
+                name: "Architect".to_string(),
+                display_name: None,
+                role: None,
+                avatar: None,
+                builtin_avatar: None,
+                description: "test".to_string(),
+                author: "test".to_string(),
+                runtime_version: "0.1.0".to_string(),
+                permissions: vec![],
+                triggers: vec![],
+                llm: Default::default(),
+                memory: Default::default(),
+                identity_deps: vec![],
+                tools: vec![],
+                capabilities: Default::default(),
+                resources: Default::default(),
+                sandbox: Default::default(),
+                system: false,
+                dev: false,
+                skills: Default::default(),
+            },
+            node_id: node_id.to_string(),
+        }
+    }
+
+    /// ADR-075: the hosting node must be taken from the install record.
+    /// The status topic (`acowork/agents/{id}/status`) carries no node
+    /// identity, so hardcoding the `"local"` bookkeeping anchor made
+    /// every re-track (Gateway restart / post-wake) mis-attribute a
+    /// remote-node Runtime, which the Desktop's per-node grouping then
+    /// rendered as a bogus `local` node. `"local"` is only correct when
+    /// the record is genuinely absent.
+    #[tokio::test]
+    async fn track_running_agent_for_status_takes_node_id_from_install_record() {
+        const REMOTE: &str = "9f1c4e2a-1111-4bbb-8ccc-0123456789ab";
+        const UNKNOWN: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+        let state = test_state();
+        {
+            let mut gw = state.write().await;
+            gw.installed_agents
+                .insert(INSTANCE_ARCHITECT.to_string(), installed_agent_info(REMOTE));
+        }
+
+        track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
+        let entry = state
+            .read()
+            .await
+            .running_agents
+            .get(INSTANCE_ARCHITECT)
+            .cloned()
+            .expect("entry must be installed");
+        assert_eq!(
+            entry.node_id, REMOTE,
+            "node_id must come from the install record, not the `local` anchor"
+        );
+
+        // No install record (inventory not aggregated yet) → the
+        // documented `local` fallback is the only correct answer.
+        track_running_agent_for_status(&state, UNKNOWN, false).await;
+        let entry = state
+            .read()
+            .await
+            .running_agents
+            .get(UNKNOWN)
+            .cloned()
+            .expect("entry must be installed");
+        assert_eq!(
+            entry.node_id,
+            acowork_core::node::LOCAL_NODE_ID,
+            "missing record must still fall back to the `local` anchor"
+        );
     }
 
     /// Repeated `online` signals on the same agent must be idempotent
