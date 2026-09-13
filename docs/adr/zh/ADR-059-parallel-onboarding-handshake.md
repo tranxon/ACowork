@@ -159,7 +159,7 @@ Gateway process
 | 冷启动 onboarding | `acowork/global/bootstrap` + HTTP `/api/bootstrap` | BOOTING → READY | 全新 HOME、Vault 首次解锁、首次 publisher、首次 Node enroll | 同 §7.3、§7.4 |
 | 热启动 Gateway 重启 | `acowork/global/bootstrap`（新 instance_id） | BOOTING（短）→ READY | Gateway 进程重启 | 同 §7.3、§7.4 |
 | Desktop 重连已运行 Gateway | `acowork/global/bootstrap` | READY（断线期间可能间跳 BOOTING） | 网络抖动 / 休眠唤醒 | 同 §7.3、§7.4 |
-| 远程 Node 重连 / 故障恢复 | `acowork/global/bootstrap` + `acowork/nodes/{id}/ready` | READY → BOOTING → READY | Node LWT / MQTT 重连 | 同 §7.4 |
+| 远程 Node 重连 / 故障恢复 | `acowork/global/bootstrap` + `acowork/nodes/{id}/ready` | READY（node 为 Optional 子系统，仅 version 递增，见 §7.2） | Node LWT / MQTT 重连 | 同 §7.4 |
 | 运行中 mutation（provider / MCP / identity） | `acowork/global/providers` 等 retained + BootstrapState | READY | 不阻塞 | 同 §7.3 |
 | Gateway 进程内 restart | `acowork/global/bootstrap`（instance_id 换发） | READY → BOOTING → READY | Gateway 进程重启 | 同 §7.3、§7.4，强制带 expected_version |
 
@@ -201,7 +201,7 @@ Gateway process
 
 - 冷启动：BootstrapState 从 BOOTING 演进到 READY，期间 capability 集合逐步 ready；
 - 热启动：新 Gateway 实例产生新 `instance_id`，BootstrapState 短暂 BOOTING 后进入 READY；Desktop 不能跳过对新 snapshot 的校验而假设上一会话的 READY 仍有效；
-- 故障恢复：MQTT 断线、Node LWT、Vault 解锁超时等事件让 BootstrapState 重新回到 BOOTING，并发布新的 `version`；客户端把上一会话的 operation 标记为 `operation_uncertain` 而非成功。
+- 故障恢复：平台级事件（MQTT 断线、Vault 解锁超时等）让 BootstrapState 重新回到 BOOTING；Node LWT 属于 Optional 子系统事件（§7.2），聚合 phase 保持 READY，只发布新的 `version` 驱动客户端实时刷新。两类事件下客户端都把上一会话的 operation 标记为 `operation_uncertain` 而非成功。
 
 下文给出该 snapshot 的定义。语义不以“是否 onboarding”为前提。
 
@@ -345,6 +345,7 @@ Embedding运行时  ─┤
 - 每个子系统在启动时调用 `CapabilityRegistry::register(name, ready_signal)`，其中 `ready_signal` 是一个 `tokio::sync::Notify` / `watch::channel` / `oneshot` / `Stream`，由 Gateway 实现选择，不依赖任何协议字段。
 - `BootstrapState 编排器` 订阅 `CapabilityRegistry` 的变化事件，维护聚合 phase：
   - 当任意 *必需* 子系统从 not-ready 转为 ready：重新计算 phase；如上一状态为 BOOTING 且所有必需子系统 ready，则转为 READY。
+  - 当 Optional 子系统进入 not-ready / booting：聚合 phase 不变（READY 保持 READY）；仍推进 `version` 并重发 retained snapshot 供客户端实时刷新。Node 控制面即按 Optional 注册（§7.2 / §7.6.2）。
   - 当任意子系统进入 failed 状态：转为 FAILED 或 DEGRADED（视该子系统是否为必需）。
   - 当 Gateway 进程进入 shutdown：转为 SHUTTING_DOWN。
 - 子系统并行完成、独立 ready；编排器不依次等待子系统的 ready 信号，不为任何子系统保留独享阶段。
@@ -504,7 +505,7 @@ acowork/nodes/{node_id}/ready
 - Node 已在客户端侧确认订阅请求已提交，且 process identity、machine uid、node token 已持久化。
 - Node 才发布 `NodeReady` retained（QoS 1）。
 - Gateway 只有在 token registry 和 `NodeReady` 都确认后，才允许为该 Node 投递新的 control 命令（由 Gateway 内部的 CapabilityRegistry 维护，外部不可见）。
-- Node 因 LWT 或 status offline 导致控制通道失效时，Gateway 内部将该 Node 标记为 not-ready，并发布新的 `BootstrapState`（phase 可能从 READY 变为 BOOTING）。
+- Node 因 LWT 或 status offline 导致控制通道失效时，Gateway 内部将该 Node 标记为 not-ready，并发布新的 `BootstrapState`。node 控制面按 **Optional 子系统**注册（§5.4.3）：该事件只推进 `version` 驱动客户端实时刷新，聚合 phase 保持 READY；某 Node 是否可接受 control 命令由内部 per-node control gate 独立判定，与聚合 phase 无关。
 
 NodeReady 事件仅携带**协议级字段**：
 
@@ -620,13 +621,13 @@ sequenceDiagram
     N->>B: SUB acowork/nodes/{id}/.../control/#
     N->>G: retained NodeReady
     G->>B: retained acowork/global/bootstrap (instance_id=I, version=N+1, phase=READY)
-    Note over G: BootstrapState phase 转为 READY；<br/>旧 NodeReady retained 由 broker 自动覆盖
+    Note over G: node 注册为 Optional 子系统：phase 保持 READY，<br/>仅 version 递增驱动客户端刷新；<br/>旧 NodeReady retained 由 broker 自动覆盖
 ```
 
 与冷启动的关键差异：
 
 - Node 重启重发 NodeEnroll，Gateway 必须重发 NodeEnrollResult，并强制 Node 重新提供 NodeReady；不允许“NodeEnroll 复用上一次凭据”以掩盖控制订阅未建立。
-- Gateway 内部维护“节点控制订阅 generation”映射，用于 pending queue 与 control 投递；该 generation **不通过协议暴露**。BootstrapState 仅体现为 phase 变化：control 通道 ready 后 phase 转为 READY；控制失效后 phase 短暂回退到 BOOTING（详见 §5.4）。
+- Gateway 内部维护“节点控制订阅 generation”映射，用于 pending queue 与 control 投递；该 generation **不通过协议暴露**。node 控制面注册为 Optional 子系统（§7.2）：control 通道的 ready 与失效都不改变聚合 phase（保持 READY），只让 `version` 单调递增，客户端通过 retained snapshot 实时感知；待投递的 control 命令由 per-node pending queue 在 NodeReady 后继续投递（§7.4）。
 - Gateway 不得在未收到 NodeReady 的前提下为该 Node 投递 control 命令，即使 Node status 是 online；这是与 §7.2 同样的原则，但热启动下保留这一约束尤为关键 —— 仅“`status=online`”不能修复远程 Node 重连的控制订阅竞态。
 
 #### 7.6.3 运行中 mutation
@@ -827,8 +828,8 @@ gate 会 latch false 导致死等）。
 
 冷启动 handshake 落地后，热启动路径必须使用同一协议事实源，不再保留独立弱握手：
 
-- Desktop Tauri backend 把 `wait_for_gateway_health` 收敛为“HTTP `/health` 200 + 立即订阅 `acowork/global/bootstrap`”，不再独立等待 Node online；Node readiness 由 BootstrapState 的 `node.local` capability 字段决定。
-- 把 `wait_for_node_online`（`/api/nodes` polling）替换为对 `acowork/global/bootstrap` 的 retained snapshot 监听；保留旧的 Node status 字段作为诊断，但不作为 readiness 来源。
+- Desktop Tauri backend 把 `wait_for_gateway_health` 收敛为“HTTP `/health` 200 + 立即订阅 `acowork/global/bootstrap`”，不再独立等待 Node online；node 可用性为 Optional 子系统语义（§7.2），不由聚合 phase 表达，而由 per-node control gate（`dependency_not_ready`）与 `/api/nodes` 诊断反映。
+- 把 `wait_for_node_online`（`/api/nodes` polling）替换为对 `acowork/global/bootstrap` retained snapshot 的监听（node 在线状态变化仍推进 `version` 以触发刷新）；保留旧的 Node status 字段作为诊断，但不作为 readiness 来源。
 - 现有 `POST /api/agents/install` 的 503 “Node never enrolled” 路径在所有客户端迁移到 BootstrapState 后保留仅作兼容；新客户端必须依据结构化 `dependency_not_ready` 和 `required_capabilities` 决策。
 - `smoke_test.py` 中只因冷启动 / 热启动竞态而存在的任意 `sleep` 必须删除，替换为 retained snapshot + operation ack 断言；保留 `time.sleep` 仅用于强制断线、强制进程退出等故障注入。
 - 远程 Node 接入脚本、Gateway reload 脚本、Desktop 自动更新后重启路径都必须按 §7.6 校验 `instance_id` 与 `version`，不再信任“上一会话的 retained”。
@@ -843,7 +844,7 @@ gate 会 latch false 导致死等）。
 
 - `BootstrapState` 单调 version、旧 `instance_id` 丢弃、聚合 phase 判定。
 - BootstrapState protobuf 字段名 / 字段号在子系统重构后保持不变（OCP 稳定性断言，见 §5.4.6）。
-- 内部 `CapabilityRegistry`：子系统 readiness 事件顺序无关，必需子系统 ready 后 phase 转 READY，optional 子系统 failure 不影响 READY。
+- 内部 `CapabilityRegistry`：子系统 readiness 事件顺序无关，必需子系统 ready 后 phase 转 READY，optional 子系统 failure / not-ready / booting 均不影响 READY（Node 控制面离线走此路径，见 §7.2）。
 - 子系统 readiness signal 是 `tokio::sync::Notify` / `watch::channel` / `Stream`，不为任何子系统保留独享阶段（§5.4.5）。
 - mutation ack 携带 `resource_version`，但不携带内部 capability / 子系统 generation。
 - pending operation 按 `operation_id` 去重，重复 completed/failed 幂等。
@@ -866,7 +867,7 @@ gate 会 latch false 导致死等）。
    - Node 延迟启动并延迟 control subscription。
    - Desktop 尝试 submit install。
    - assert 早期只收到 `dependency_not_ready`，错误中不含 capability 列表、仅含 `current_phase` 与 `phase_detail`。
-   - NodeReady 后 phase 转 READY，operation 可完成。
+   - NodeReady 后 per-node control gate 放行，operation 可完成；聚合 phase 不因 node readiness 变化（node 为 Optional 子系统，见 §7.2）。
 
 3. **System Agent**
    - System Agent 延迟完成 Runtime ready。
@@ -903,7 +904,7 @@ gate 会 latch false 导致死等）。
 
 9. **远程 Node 重连**
    - 远程 Node 重启重 enroll，旧 NodeReady retained 仍残留在 broker。
-   - assert Gateway 收到新 NodeReady 后 phase 重新转为 READY。
+   - assert Gateway 收到新 NodeReady 后聚合 phase 保持 READY（node 为 Optional 子系统，见 §7.2），仅 version 递增；per-node control gate 重新放行 control 投递。
    - assert 旧 NodeReady 在被新 NodeReady 覆盖前不应让 Desktop 启用依赖 Node 的动作。
    - assert BootstrapState 协议字段未变化（不出现 control_gen / 子系统标识）。
 
@@ -923,7 +924,7 @@ gate 会 latch false 导致死等）。
 `dev/e2e_frontend_smoke/onboarding_installs_all_agents.py` 应至少增加以下断言：
 
 - 冷启动的首次 `BootstrapState` 来自当前 `instance_id` 和 version。
-- Node readiness 之后，BootstrapState phase 转为 READY。
+- node 为 Optional 子系统：BootstrapState phase 到达 READY 不等待 node readiness；node 就绪状态通过 per-node control gate（`dependency_not_ready`）与 `/api/nodes` 表达（见 §7.2）。
 - provider mutation ack 后，`acowork/global/providers` version 达到 expected version。
 - 每个 install 有 operation ID；最终通过 operation 终态和 installed inventory 判断成功。
 - 三个安装操作不依赖固定 sleep 完成。
@@ -935,7 +936,7 @@ gate 会 latch false 导致死等）。
 `onboarding_installs_all_agents.py` 同样承担热启动 / 重连回归（与冷启动用例复用同一 fixture 与断言框架）：
 
 - 已运行 Gateway + Node + 已安装 agent 的场景下，Desktop 重启并校验 BootstrapState `instance_id` 是否与上一会话一致；不一致时丢弃本地缓存与上一会话的 in-flight operation。
-- 远程 Node 短暂离线后重连，断言 BootstrapState 短暂回到 BOOTING 后恢复 READY，并校验旧 NodeReady retained 不被误用。
+- 远程 Node 短暂离线后重连，断言聚合 phase 始终保持 READY 且 `version` 单调递增，并校验旧 NodeReady retained 不被误用。
 - Gateway 进程内 restart：断言重启后旧 `operation_id` 进入 `operation_uncertain` 而不是被默认为成功。
 - Desktop 在运行中修改 provider key，断言 retained provider version 达到 expected version 且 BootstrapState phase 仍为 READY。
 
@@ -1023,7 +1024,7 @@ gate 会 latch false 导致死等）。
 
 - Gateway 是 Bootstrap snapshot 和 overall readiness 的唯一 owner；外部协议只见 `phase` 与必要 `instance_id` / `version`。
 - Desktop 只能依据当前 instance 的 `phase=READY` 启用依赖 Gateway 的动作，不读取任何内部 capability 名称。
-- Node、Runtime、Publisher 通过 Gateway 内部 `CapabilityRegistry` + 事件总线（§5.4）以 phase 变化体现就绪，不以在线 / PID / 2xx / retained `READY` 推断。
+- Node、Runtime、Publisher 通过 Gateway 内部 `CapabilityRegistry` + 事件总线（§5.4）体现就绪，不以在线 / PID / 2xx / retained `READY` 推断；平台级必需子系统以 phase 变化体现，Node 控制面为 Optional 子系统，以 `version` 递增与 per-node control gate 体现（§7.2）。
 - 异步 write / install 必须携带 `operation_id`，以 NodeEvent 与 retained inventory / resource snapshot 共同确认终态；错误码严格只携带协议级字段（§5.4.4）。
 - 固定 sleep 只允许用于测试故障保护和兼容旧客户端；核心正确性不能依赖 timeout。
 - 不存在真实依赖的工作必须并行；存在真实依赖的工作必须通过 snapshot 或 ack 串行。
@@ -1032,3 +1033,19 @@ gate 会 latch false 导致死等）。
 - 各子系统 ready 信号使用 `tokio::sync::Notify` / `watch::channel` / `Stream`推送，不为任何子系统保留独享阶段；process 内部事件驱动、process 之间 snapshot 推送，握手描述中不出现子系统清单。
 
 **决策结果：已确认“握手 + 并行化 + OCP”方向，ADR-059 进入提案状态。协议基线同时覆盖冷启动 onboarding 与 Gateway 整个生命周期的 handshake、reconnect 与运行中 mutation，并以开闭原则约束 BootstrapState 与错误码的边界。**
+
+---
+
+## 15. 修订记录
+
+### 15.1 Node 控制面改注册为 Optional 子系统（2026-09）
+
+**背景**：原设计将每个 Node（含远程 Node）在 `NodeReady` 后注册为 **Required** 子系统。远程 Node 被硬杀后，LWT 将该 `node.{node_id}` 子系统变为 not-ready，聚合 phase 从 READY 退回 BOOTING；直到离线清理宽限期（`NODE_OFFLINE_REMOVAL_GRACE`，默认 120s）到期删除该记录后才恢复 READY。后果：启动中的 Desktop 被“等待一个已下线的远程 Node”阻塞，长时间停在 `N/M required ready`。
+
+**决策**：Node 控制面（`node.{node_id}`，本地 / 远程一视同仁）一律注册为 **Optional** 子系统：
+
+- 某 Node 离线 / 重连不再改变聚合 phase（READY 保持 READY），只推进 `version` 并重发 retained snapshot，驱动 Desktop 实时刷新 node 在线状态（§7.2 / §7.6.2）。
+- per-node control gate 语义不变：control 投递仍需 `NodeReady` 确认，未就绪时按 §7.4 进入 per-node pending queue 或返回 `dependency_not_ready`；该 gate 与子系统 kind 无关。
+- 平台级必需子系统（Vault / MQTT / Publisher / System Agent）保持 Required；它们失效时仍按原规则影响聚合 phase。
+
+**同步修订**：§4.3 场景矩阵、§5.1、§5.4.3、§7.2、§7.6.2、§11（Phase 5）、§12.1、§12.2、§12.3、§14。
