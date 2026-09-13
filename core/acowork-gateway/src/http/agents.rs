@@ -532,25 +532,47 @@ pub(crate) async fn resolve_agent_identity(
     Ok((inst, aid))
 }
 
-/// Resolve the node HOSTING an agent instance (ADR-055 §6.2 routing).
+/// Resolve the Gateway's own-machine node id from the NodeRegistry
+/// (ADR-075 D5/D6) and fail LOUD when it cannot be resolved.
 ///
-/// Node resolution order: the instance's install record (node-local
-/// authority, aggregated from retained inventory), then the running
-/// record, then `local` as the fallback for records that predate
-/// node aggregation (legacy / MQTT-disabled setups).
-///
-/// Routing control commands to the hosting node is what makes
-/// start/stop/restart/uninstall work for agents installed on a REMOTE
-/// node: the command topic is `acowork/nodes/{node_id}/agents/…`, so a
-/// hardcoded local node id publishes into a topic nobody subscribes
-/// to (command timeout + Desktop retry loop).
-pub(crate) async fn resolve_agent_node_id(state: &AppState, instance_id: &str) -> String {
-    let gw = state.gateway_state.read().await;
-    gw.installed_agents
-        .get(instance_id)
-        .map(|i| i.node_id.clone())
-        .or_else(|| gw.running_agents.get(instance_id).map(|r| r.node_id.clone()))
-        .unwrap_or_else(acowork_core::node::local_node_id)
+/// The `"local"` anchor is a state placeholder for Gateway-direct agents
+/// (ADR-075 D6) — it is NOT a routable MQTT topic (no Node subscribes to
+/// `acowork/nodes/local/...`), so a dispatch path must never fall back to
+/// it: the command would be published into a topic nobody subscribes to
+/// (command timeout + Desktop retry loop). ADR-075 Q2: "install 等默认
+/// 落点不得静默落到任一远程节点".
+pub(crate) async fn resolve_local_node_id(state: &AppState) -> Result<String, ApiError> {
+    let resolved = match state.node_registry.as_ref() {
+        Some(reg) => crate::mqtt::node_registry::local_node_id(reg).await,
+        None => None,
+    };
+    resolved.ok_or_else(|| {
+        ApiError::conflict(
+            "the Gateway's own-machine node is not online — cannot resolve the local node id \
+             (no `gateway_managed` node in the node registry); retry once GET /api/bootstrap \
+             reports READY, or pass an explicit node_id",
+        )
+    })
+}
+
+/// Resolve the node hosting an agent instance: the install/running record
+/// first (ADR-055 §6.5), else the Gateway's own-machine node. Fails loud
+/// when neither can be resolved — see [`resolve_local_node_id`].
+pub(crate) async fn resolve_agent_node_id(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<String, ApiError> {
+    let resolved = {
+        let gw = state.gateway_state.read().await;
+        gw.installed_agents
+            .get(instance_id)
+            .map(|i| i.node_id.clone())
+            .or_else(|| gw.running_agents.get(instance_id).map(|r| r.node_id.clone()))
+    };
+    if let Some(node_id) = resolved {
+        return Ok(node_id);
+    }
+    resolve_local_node_id(state).await
 }
 
 /// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
@@ -753,7 +775,10 @@ struct AgentUploadForm {
 }
 
 /// Read the install/ensure multipart body.
-async fn read_agent_upload(mut multipart: Multipart) -> Result<AgentUploadForm, ApiError> {
+async fn read_agent_upload(
+    state: &AppState,
+    mut multipart: Multipart,
+) -> Result<AgentUploadForm, ApiError> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
     // ADR-059 §7.3: optional optimistic-concurrency precondition — the
@@ -798,7 +823,13 @@ async fn read_agent_upload(mut multipart: Multipart) -> Result<AgentUploadForm, 
 
     Ok(AgentUploadForm {
         package_bytes,
-        node_id: node_id.unwrap_or_else(acowork_core::node::local_node_id),
+        node_id: match node_id {
+            Some(id) => id,
+            // ADR-075 D5/Q2: no node_id in the form → resolve the local
+            // node's UUID from the registry; loud failure when it is not
+            // online (never the non-routable "local" anchor).
+            None => resolve_local_node_id(state).await?,
+        },
         expected_version,
     })
 }
@@ -926,7 +957,7 @@ pub async fn ensure_agent(
     State(state): State<AppState>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<EnsureAck>), ApiError> {
-    let form = read_agent_upload(multipart).await?;
+    let form = read_agent_upload(&state, multipart).await?;
     let node_id = form.node_id;
 
     // The package must be opened to learn its `agent_id`; the staged temp
@@ -1000,7 +1031,7 @@ pub async fn install_agent(
     State(state): State<AppState>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
-    let form = read_agent_upload(multipart).await?;
+    let form = read_agent_upload(&state, multipart).await?;
     let package_bytes = form.package_bytes;
     let node_id = form.node_id;
     let expected_version = form.expected_version;
@@ -1156,7 +1187,14 @@ async fn publish_to_registry(
         )));
     }
     let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+    // ADR-075 D5: resolve the Gateway's own-machine node from the
+    // registry (loopback dial); None → the "local" anchor (D6).
+    let local_node_id = match state.node_registry.as_ref() {
+        Some(reg) => crate::mqtt::node_registry::local_node_id(reg).await,
+        None => None,
+    };
     let url_host = crate::gateway::node_manager::dispatch_url_host(
+        local_node_id.as_deref(),
         node_id,
         &config.http.host,
         gw.advertise_host.as_str(),
@@ -1234,12 +1272,12 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
             })
             .unwrap_or_default();
         // ADR-055 §6.2: the hosting node comes from the instance's
-        // install record; fall back to `local` only when the record is
-        // missing (a Runtime auto-tracked before its inventory was
-        // aggregated).
+        // install record; fall back to the "local" anchor only when the
+        // record is missing (a Runtime auto-tracked before its inventory
+        // was aggregated — ADR-075 D6).
         let node_id = info
             .map(|i| i.node_id.clone())
-            .unwrap_or_else(acowork_core::node::local_node_id);
+            .unwrap_or_else(|| acowork_core::node::LOCAL_NODE_ID.to_string());
         (resolved_agent_id, workspace, node_id)
     };
 
@@ -1501,7 +1539,7 @@ pub async fn uninstall_agent(
     })?;
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
-    let node_id = resolve_agent_node_id(&state, &instance_id).await;
+    let node_id = resolve_agent_node_id(&state, &instance_id).await?;
     let event = node_control
         .uninstall_agent(
             &node_id,
@@ -1719,7 +1757,7 @@ pub async fn start_agent(
     // command topic is per-node, so a hardcoded local node would
     // publish into a topic nobody subscribes to (timeout + Desktop
     // retry loop for an agent installed on a remote node).
-    let node_id = resolve_agent_node_id(&state, &instance_id).await;
+    let node_id = resolve_agent_node_id(&state, &instance_id).await?;
     check_node_compatible(&state, &node_id).await?;
     let event = node_control
         .start_agent(
@@ -1928,7 +1966,7 @@ pub async fn stop_agent(
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
     // ADR-055 §6.2: route to the node hosting the instance.
-    let node_id = resolve_agent_node_id(&state, &instance_id).await;
+    let node_id = resolve_agent_node_id(&state, &instance_id).await?;
     let event = node_control
         .stop_agent(
             &node_id,
@@ -2030,7 +2068,7 @@ pub async fn restart_agent_in_debug(
     let (instance_id, resolved_agent_id) =
         resolve_agent_identity(&state, &agent_id).await?;
     // ADR-055 §6.2: route to the node hosting the instance.
-    let node_id = resolve_agent_node_id(&state, &instance_id).await;
+    let node_id = resolve_agent_node_id(&state, &instance_id).await?;
     let stop_event = node_control
         .stop_agent(
             &node_id,
@@ -2415,7 +2453,8 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::local_node_id(),
+                // ADR-075 D6: fallback anchor for the local node.
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 connected: true,
                 ready: true,
                 dev_mode: false,
@@ -2966,7 +3005,8 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::local_node_id(),
+                // ADR-075 D6: fallback anchor for the local node.
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 connected: true,
                 ready: true,
                 dev_mode: false,

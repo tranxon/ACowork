@@ -93,6 +93,12 @@ pub fn check_connect_auth(
         return true;
     }
     if let Some(node_id) = client_id.strip_prefix(NODE_CLIENT_ID_PREFIX) {
+        // ADR-075 D4: `node:{id}:rename` is the temporary client_id the
+        // node's `rename` command connects with — same credential as
+        // the node itself (no LWT, so it never flips the status).
+        if let Some(real_id) = node_id.strip_suffix(":rename") {
+            return ctx.node_tokens.node_token_matches(real_id, password);
+        }
         if ctx.node_tokens.node_token_matches(node_id, password) {
             return true;
         }
@@ -444,12 +450,26 @@ mod tests {
     fn node_accepts_node_token() {
         let enrollment = empty_enrollment();
         let mut node_tokens = empty_node_tokens();
-        let token = node_tokens.upsert("gpu-1", "uid-1");
+        let token = node_tokens.upsert("gpu-1");
         let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
         assert!(check_connect_auth("node:gpu-1", "", &token, &ctx));
         assert!(!check_connect_auth("node:gpu-1", "", "wrong", &ctx));
         // Unenrolled node — no node token, no enrollment token.
         assert!(!check_connect_auth("node:other", "", "wrong", &ctx));
+    }
+
+    #[test]
+    fn node_rename_client_accepts_node_token() {
+        // ADR-075 D4: `node:{id}:rename` (temporary rename client) uses
+        // the node's own credential — and must never be accepted with
+        // an enrollment token (rename is only for enrolled nodes).
+        let enrollment = empty_enrollment();
+        let mut node_tokens = empty_node_tokens();
+        let token = node_tokens.upsert("gpu-1");
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
+        assert!(check_connect_auth("node:gpu-1:rename", "", &token, &ctx));
+        assert!(!check_connect_auth("node:gpu-1:rename", "", "wrong", &ctx));
+        assert!(!check_connect_auth("node:other:rename", "", &token, &ctx));
     }
 
     #[test]
@@ -470,7 +490,7 @@ mod tests {
     fn agent_accepts_any_registered_node_token() {
         let enrollment = empty_enrollment();
         let mut node_tokens = empty_node_tokens();
-        let token = node_tokens.upsert("gpu-1", "uid-1");
+        let token = node_tokens.upsert("gpu-1");
         let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
         // Phase 5a simplification: ownership is not verified.
         assert!(check_connect_auth("agent:com.example", "", &token, &ctx));

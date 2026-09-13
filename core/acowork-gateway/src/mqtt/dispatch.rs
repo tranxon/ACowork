@@ -548,7 +548,9 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                         None => (
                             String::new(),
                             agent_id_for_log.clone(),
-                            acowork_core::node::local_node_id(),
+                            // ADR-075 D6: no install record yet (legacy
+                            // auto-track) → assume the local node.
+                            acowork_core::node::LOCAL_NODE_ID.to_string(),
                         ),
                     };
                 gw.add_running(crate::gateway::state::RunningAgentInfo {
@@ -1240,11 +1242,11 @@ fn extract_node_id_from_ready_topic(topic: &str) -> Option<String> {
 /// Outcome of the enrollment decision (ADR-055 Phase 5a).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EnrollDecision {
-    /// Accepted; `reuse` is true when the node re-enrolls with the
-    /// same machine_uid (its existing node token is reused).
-    /// `consume_enrollment_token` is true when the presented token is
-    /// a one-time enrollment token that must be consumed afterwards
-    /// (false for a pre-issued node token — local-node path).
+    /// Accepted; `reuse` is true when the node re-enrolls (its existing
+    /// node token is reused). `consume_enrollment_token` is true when
+    /// the presented token is a one-time enrollment token that must be
+    /// consumed afterwards (false for a pre-issued node token — local-
+    /// node path).
     Accept {
         reuse: bool,
         consume_enrollment_token: bool,
@@ -1259,18 +1261,15 @@ enum EnrollDecision {
 ///    (known, unexpired, unconsumed) one-time enrollment token — the
 ///    standard path — OR the node's own long-lived token (pre-issued
 ///    local-node credential; mirrors the broker CONNECT check).
-/// 2. `node_id` uniqueness: unclaimed → accept fresh; claimed by the
-///    same machine_uid → accept with token reuse (idempotent
-///    re-enrollment, e.g. after a Gateway restart); claimed by a
-///    different machine_uid → reject (the node_id is a broker-level
-///    identity and cannot be hijacked). A pre-issued record with an
-///    empty machine_uid counts as unclaimed and is reused.
+/// 2. ADR-075 D7: `node_id` is a globally-unique UUID v4, so there is
+///    no conflict detection — a node_id that already has a record
+///    reuses its token (idempotent re-enrollment), a fresh node_id is
+///    accepted and minted on first enrollment.
 ///
 /// All side effects (token consumption, minting, registry write, reply)
 /// are performed by the caller after this returns.
 fn decide_enroll(
     node_id: &str,
-    machine_uid: &str,
     enrollment_token: Option<&str>,
     auth_enabled: bool,
     enrollment_store: Option<&EnrollmentTokenStore>,
@@ -1302,28 +1301,22 @@ fn decide_enroll(
             };
         }
     }
-    match node_store.and_then(|s| s.machine_uid_of(node_id)) {
-        None => EnrollDecision::Accept {
-            reuse: false,
-            consume_enrollment_token,
-        },
-        Some(existing) if existing.is_empty() || existing == machine_uid => EnrollDecision::Accept {
-            reuse: true,
-            consume_enrollment_token,
-        },
-        Some(_) => EnrollDecision::Reject {
-            reason: format!("node_id '{node_id}' is already claimed by another machine"),
-        },
+    // ADR-075 D7: UUID node_ids are globally unique — no conflict
+    // detection. A node_id that already has a record reuses its token;
+    // a fresh node_id is accepted and minted on first enrollment.
+    EnrollDecision::Accept {
+        reuse: node_store
+            .map(|s| s.get(node_id).is_some())
+            .unwrap_or(false),
+        consume_enrollment_token,
     }
 }
 
 /// Parse a `DataEnvelope<NodeEnroll>` payload and enforce
 /// topic/payload consistency: the payload's node_id must equal the
 /// topic's node_id (otherwise a node could register a peer's identity).
-fn parse_enroll_payload(
-    payload: &[u8],
-    topic_node_id: &str,
-) -> Result<(String, Option<String>), String> {
+/// Returns the optional one-time enrollment token.
+fn parse_enroll_payload(payload: &[u8], topic_node_id: &str) -> Result<Option<String>, String> {
     let envelope = DataEnvelope::decode(payload).map_err(|e| format!("bad DataEnvelope: {e}"))?;
     let enroll = match envelope.payload {
         Some(data_envelope::Payload::NodeEnroll(enroll)) => enroll,
@@ -1340,7 +1333,7 @@ fn parse_enroll_payload(
     } else {
         Some(enroll.enrollment_token)
     };
-    Ok((enroll.machine_uid, token))
+    Ok(token)
 }
 
 /// Process an enrollment request end-to-end: validate → mint/reuse
@@ -1358,17 +1351,13 @@ async fn process_enroll_message(
     node_tokens: Option<SharedNodeTokenStore>,
     auth_enabled: bool,
 ) {
-    let (machine_uid, enrollment_token) = match parse_enroll_payload(&payload, &node_id) {
+    let enrollment_token = match parse_enroll_payload(&payload, &node_id) {
         Ok(ok) => ok,
         Err(error) => {
             tracing::warn!(node_id = %node_id, error = %error, "dropping malformed enroll message");
             return;
         }
     };
-    if machine_uid.is_empty() {
-        tracing::warn!(node_id = %node_id, "enroll payload missing machine_uid — dropping");
-        return;
-    }
 
     // Read-only decision; both guards drop before any await below
     // (std::sync::MutexGuard is not Send, so it cannot cross a
@@ -1382,7 +1371,6 @@ async fn process_enroll_message(
             .map(|s| s.lock().unwrap_or_else(|e| e.into_inner()));
         decide_enroll(
             &node_id,
-            &machine_uid,
             enrollment_token.as_deref(),
             auth_enabled,
             enroll_guard.as_deref(),
@@ -1397,7 +1385,6 @@ async fn process_enroll_message(
                 &mqtt_client,
                 NodeEnrollResult {
                     node_id,
-                    machine_uid,
                     node_token: String::new(),
                     status: "rejected".to_string(),
                     message: reason,
@@ -1427,7 +1414,6 @@ async fn process_enroll_message(
                         &mqtt_client,
                         NodeEnrollResult {
                             node_id,
-                            machine_uid,
                             node_token: String::new(),
                             status: "rejected".to_string(),
                             message: "enrollment token already used".to_string(),
@@ -1442,7 +1428,7 @@ async fn process_enroll_message(
                 Some(store) => store
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .upsert(&node_id, &machine_uid),
+                    .upsert(&node_id),
                 // No store wired (unit tests): mint a one-off token so
                 // the handshake still completes with a usable credential.
                 None => crate::mqtt::enrollment::generate_token(),
@@ -1460,7 +1446,6 @@ async fn process_enroll_message(
                 &mqtt_client,
                 NodeEnrollResult {
                     node_id,
-                    machine_uid,
                     node_token,
                     status: "ok".to_string(),
                     message: String::new(),
@@ -1569,7 +1554,8 @@ async fn track_running_agent_for_status(
         pid: 0,
         started_at: chrono::Utc::now(),
         workspace,
-        node_id: acowork_core::node::local_node_id(),
+        // ADR-075 D6: fallback anchor for the local node.
+        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
         connected: true,
         // `ready` defaults to false; the ready topic handler upgrades
         // it the moment `ready=true` is observed. The Desktop's
@@ -1653,7 +1639,8 @@ pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &Shar
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace,
-                node_id: acowork_core::node::local_node_id(),
+                // ADR-075 D6: fallback anchor for the local node.
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 connected: true,
                 ready: false,
                 dev_mode: false,
@@ -2112,7 +2099,6 @@ mod tests {
 
         let info = acowork_core::mqtt_proto::NodeInfo {
             node_id: "gpu-1".to_string(),
-            machine_uid: "uid-1".to_string(),
             hostname: "h".to_string(),
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
@@ -2122,6 +2108,8 @@ mod tests {
             max_agents: 16,
             agent_count: 0,
             http_endpoint: "http://127.0.0.1:19900".to_string(),
+            node_name: "gpu-1".to_string(),
+            gateway_managed: true,
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -2143,8 +2131,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let reg = node_reg.read().await;
         assert_eq!(
-            reg.get("gpu-1").and_then(|n| n.machine_uid.clone()),
-            Some("uid-1".to_string())
+            reg.get("gpu-1").and_then(|n| n.node_name.clone()),
+            Some("gpu-1".to_string())
         );
     }
 
@@ -2193,10 +2181,9 @@ mod tests {
         dir
     }
 
-    fn enroll_payload(node_id: &str, machine_uid: &str, token: Option<&str>) -> Vec<u8> {
+    fn enroll_payload(node_id: &str, token: Option<&str>) -> Vec<u8> {
         let enroll = acowork_core::mqtt_proto::NodeEnroll {
             node_id: node_id.to_string(),
-            machine_uid: machine_uid.to_string(),
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
             node_version: "0.1.0".to_string(),
@@ -2224,10 +2211,8 @@ mod tests {
 
     #[test]
     fn parse_enroll_payload_enforces_topic_consistency() {
-        let payload = enroll_payload("gpu-1", "uid-1", Some("tok-1"));
-        let (machine_uid, token) =
-            parse_enroll_payload(&payload, "gpu-1").expect("valid enroll parses");
-        assert_eq!(machine_uid, "uid-1");
+        let payload = enroll_payload("gpu-1", Some("tok-1"));
+        let token = parse_enroll_payload(&payload, "gpu-1").expect("valid enroll parses");
         assert_eq!(token.as_deref(), Some("tok-1"));
 
         // Topic/payload node_id mismatch must be rejected (a node
@@ -2235,15 +2220,13 @@ mod tests {
         assert!(parse_enroll_payload(&payload, "other-node").is_err());
 
         // Empty enrollment token is normalized to None.
-        let no_token = enroll_payload("gpu-1", "uid-1", None);
-        let (_, token) =
-            parse_enroll_payload(&no_token, "gpu-1").expect("token-less enroll parses");
+        let no_token = enroll_payload("gpu-1", None);
+        let token = parse_enroll_payload(&no_token, "gpu-1").expect("token-less enroll parses");
         assert!(token.is_none());
 
         // Non-NodeEnroll envelope payloads are rejected.
         let info = acowork_core::mqtt_proto::NodeInfo {
             node_id: "gpu-1".to_string(),
-            machine_uid: "uid-1".to_string(),
             hostname: "h".to_string(),
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
@@ -2253,6 +2236,8 @@ mod tests {
             max_agents: 16,
             agent_count: 0,
             http_endpoint: "http://127.0.0.1:19900".to_string(),
+            node_name: "gpu-1".to_string(),
+            gateway_managed: false,
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -2268,8 +2253,7 @@ mod tests {
         let dir = temp_test_dir("decide-fresh");
         let enrollment = EnrollmentTokenStore::load(&dir);
         let node_store = NodeTokenStore::load(&dir);
-        let decision =
-            decide_enroll("gpu-1", "uid-1", None, false, Some(&enrollment), Some(&node_store));
+        let decision = decide_enroll("gpu-1", None, false, Some(&enrollment), Some(&node_store));
         assert_eq!(
             decision,
             EnrollDecision::Accept {
@@ -2281,18 +2265,18 @@ mod tests {
 
     #[test]
     fn decide_enroll_accepts_preissued_node_token_without_consuming() {
-        // ADR-055 Phase 5a local-node path: the Gateway pre-issues a
-        // long-lived node token (placeholder machine_uid) BEFORE the
-        // node first connects; enroll must accept it as the credential
-        // without consuming it as a one-time enrollment token.
+        // A node presenting its own long-lived node token (rather than a
+        // one-time enrollment token) must be accepted without consuming
+        // it. ADR-075 D7 removed the Gateway-side pre-issuing placeholder,
+        // but the branch it exercises is still reachable (a re-enrolling
+        // node that already holds its credential).
         let dir = temp_test_dir("decide-preissued");
         let enrollment = EnrollmentTokenStore::load(&dir);
         let mut node_store = NodeTokenStore::load(&dir);
-        let preissued = node_store.upsert("local", "");
+        let preissued = node_store.upsert("local");
 
         let decision = decide_enroll(
             "local",
-            "real-uid",
             Some(&preissued),
             true,
             Some(&enrollment),
@@ -2312,8 +2296,7 @@ mod tests {
         let dir = temp_test_dir("decide-token-required");
         let enrollment = EnrollmentTokenStore::load(&dir);
         let node_store = NodeTokenStore::load(&dir);
-        let decision =
-            decide_enroll("gpu-1", "uid-1", None, true, Some(&enrollment), Some(&node_store));
+        let decision = decide_enroll("gpu-1", None, true, Some(&enrollment), Some(&node_store));
         assert!(matches!(
             decision,
             EnrollDecision::Reject { reason } if reason.contains("required")
@@ -2330,7 +2313,6 @@ mod tests {
         let valid = enrollment.create_token(std::time::Duration::from_secs(3600));
         let decision = decide_enroll(
             "gpu-1",
-            "uid-1",
             Some(&valid),
             true,
             Some(&enrollment),
@@ -2347,7 +2329,6 @@ mod tests {
         // Unknown token → reject.
         let decision = decide_enroll(
             "gpu-1",
-            "uid-1",
             Some("not-a-real-token"),
             true,
             Some(&enrollment),
@@ -2362,7 +2343,6 @@ mod tests {
         assert!(enrollment.consume_token(&valid, "gpu-1"));
         let decision = decide_enroll(
             "gpu-1",
-            "uid-1",
             Some(&valid),
             true,
             Some(&enrollment),
@@ -2377,7 +2357,6 @@ mod tests {
         let expired = enrollment.create_token(std::time::Duration::ZERO);
         let decision = decide_enroll(
             "gpu-1",
-            "uid-1",
             Some(&expired),
             true,
             Some(&enrollment),
@@ -2390,21 +2369,17 @@ mod tests {
     }
 
     #[test]
-    fn decide_enroll_reuses_token_for_same_machine_and_rejects_other() {
+    fn decide_enroll_reuses_token_for_re_enrolled_node() {
+        // ADR-075 D7: no conflict detection — a node_id that already
+        // has a record reuses its token (idempotent re-enrollment,
+        // e.g. after a Gateway restart).
         let dir = temp_test_dir("decide-uid");
         let enrollment = EnrollmentTokenStore::load(&dir);
         let mut node_store = NodeTokenStore::load(&dir);
-        node_store.upsert("gpu-1", "uid-1");
+        node_store.upsert("gpu-1");
 
-        // Same machine_uid re-enrollment → reuse (idempotent).
-        let decision = decide_enroll(
-            "gpu-1",
-            "uid-1",
-            None,
-            false,
-            Some(&enrollment),
-            Some(&node_store),
-        );
+        // Re-enrollment → reuse (idempotent).
+        let decision = decide_enroll("gpu-1", None, false, Some(&enrollment), Some(&node_store));
         assert_eq!(
             decision,
             EnrollDecision::Accept {
@@ -2412,20 +2387,6 @@ mod tests {
                 consume_enrollment_token: false,
             }
         );
-
-        // Different machine_uid claiming the same node_id → reject.
-        let decision = decide_enroll(
-            "gpu-1",
-            "uid-2",
-            None,
-            false,
-            Some(&enrollment),
-            Some(&node_store),
-        );
-        assert!(matches!(
-            decision,
-            EnrollDecision::Reject { reason } if reason.contains("claimed")
-        ));
     }
 
     #[tokio::test]
@@ -2521,7 +2482,7 @@ mod tests {
         // Poll the node event loop in the background (this also flushes
         // the subscribe + pending publishes).
         let enroll_topic = acowork_core::node::node_enroll_topic("gpu-1");
-        let enroll_msg = enroll_payload("gpu-1", "uid-1", Some(&token));
+        let enroll_msg = enroll_payload("gpu-1", Some(&token));
         let node_poll = tokio::spawn(async move {
             let mut saw_result = false;
             for _ in 0..100 {
@@ -2584,10 +2545,10 @@ mod tests {
             TokenValidation::Consumed
         );
 
-        // Re-enrollment with the same machine_uid reuses the token and
-        // still completes (idempotent), even without a fresh token. A
-        // fresh short-lived client carries the re-enroll publish (the
-        // first node client's eventloop task has already finished).
+        // Re-enrollment reuses the token and still completes
+        // (idempotent), even without a fresh token. A fresh short-lived
+        // client carries the re-enroll publish (the first node client's
+        // eventloop task has already finished).
         let reused = enrollment_store
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2598,7 +2559,7 @@ mod tests {
         // re-enroll path after a Gateway restart.
         re_mqttoptions.set_credentials("node:gpu-1".to_string(), node_token.clone());
         let (re_client, mut re_eventloop) = AsyncClient::new(re_mqttoptions, 10);
-        let second_payload = enroll_payload("gpu-1", "uid-1", Some(&reused));
+        let second_payload = enroll_payload("gpu-1", Some(&reused));
         re_client
             .publish(&enroll_topic, QoS::AtLeastOnce, false, second_payload.as_slice())
             .await
@@ -2618,7 +2579,7 @@ mod tests {
                 .get_token("gpu-1")
                 .expect("token preserved on re-enroll"),
             node_token.as_str(),
-            "same machine_uid re-enroll must reuse the node token"
+            "re-enroll must reuse the node token"
         );
     }
 
@@ -2729,7 +2690,7 @@ mod tests {
                         dev: false,
                         skills: Default::default(),
                     },
-                    node_id: acowork_core::node::local_node_id(),
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 },
             );
         }
@@ -2853,7 +2814,7 @@ mod tests {
                         dev: false,
                         skills: Default::default(),
                     },
-                    node_id: acowork_core::node::local_node_id(),
+                    node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 },
             );
         }
@@ -2908,7 +2869,8 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now() - chrono::Duration::seconds(60),
                 workspace: String::new(),
-                node_id: acowork_core::node::local_node_id(),
+                // ADR-075 D6: fallback anchor for the local node.
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 connected: true,
                 ready: true,
                 dev_mode: false,
@@ -2950,7 +2912,8 @@ mod tests {
                 pid: 0,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
-                node_id: acowork_core::node::local_node_id(),
+                // ADR-075 D6: fallback anchor for the local node.
+                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
                 connected: true,
                 ready: false,
                 dev_mode: false,

@@ -299,7 +299,6 @@
     "tabGeneral": "一般",
     "tabAppearance": "外観",
     "tabGateway": "ゲートウェイ",
-    "tabNodes": "ノード",
     "profileTitle": "プロフィール",
     "displayName": "表示名",
     "displayNamePlaceholder": "表示名を入力",
@@ -343,7 +342,6 @@
     "version": "バージョン",
     "testConnection": "接続テスト",
     "testing": "テスト中...",
-    "connectedAgents": "接続中のAgent",
     "connectToSeeAgents": "ゲートウェイに接続して実行中のAgentを表示",
     "noAgentsRunning": "実行中のAgentはありません",
     "debug": "デバッグ",
@@ -389,13 +387,8 @@
     "nodesRefresh": "更新",
     "nodesOnline": "オンライン",
     "nodesOffline": "オフライン",
-    "nodesColNodeId": "ノード",
-    "nodesColStatus": "ステータス",
-    "nodesColOs": "OS",
-    "nodesColArch": "アーキテクチャ",
-    "nodesColVersion": "バージョン",
-    "nodesColHostname": "ホスト名",
-    "nodesColAgents": "Agent 数"
+    "nodesUnassigned": "未割り当て",
+    "nodesUnassignedDesc": "既知のノードに紐付けられていないAgent"
   },
   "agentSetup": {
     "noApiKey": "No API key configured. Add in Harness → Search.",

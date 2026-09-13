@@ -58,10 +58,16 @@ export function partitionAgentsByNode(
 }
 
 /**
- * Display name for a group, prioritising the operator-friendly hostname
- * over the opaque node_id. Falls back to the raw nodeId (e.g.
- * `"__unknown__"` for the orphan bucket) so the header always renders.
+ * Display name for a group (ADR-075 D8): the renameable `node_name`
+ * wins, then the operator-friendly hostname, then the opaque node_id
+ * (a UUID). Falls back to the raw nodeId (e.g. `"__unknown__"` for the
+ * orphan bucket) so the header always renders.
  */
 export function nodeDisplayName(group: AgentNodeGroup): string {
-  return group.node?.hostname ?? group.node?.node_id ?? group.nodeId;
+  return (
+    group.node?.node_name ??
+    group.node?.hostname ??
+    group.node?.node_id ??
+    group.nodeId
+  );
 }

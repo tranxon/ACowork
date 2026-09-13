@@ -117,9 +117,14 @@ pub async fn import_skill(
     let (instance_id, resolved_agent_id) =
         crate::http::agents::resolve_agent_identity(&state, &agent_id).await?;
     let zip_path = temp_file.to_string_lossy().to_string();
+    // ADR-073: route to the node hosting the instance (per-node command
+    // topics — ADR-075 D5 removed the pure hostname derivation).
+    // ADR-075 Q2: unresolvable local node is a loud error, not a
+    // dispatch into the non-routable "local" anchor.
+    let node_id = crate::http::agents::resolve_agent_node_id(&state, &instance_id).await?;
     let event = node_control
         .skills_import(
-            &acowork_core::node::local_node_id(),
+            &node_id,
             &instance_id,
             &resolved_agent_id,
             &zip_path,

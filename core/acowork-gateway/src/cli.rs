@@ -141,7 +141,9 @@ pub enum Commands {
         /// Path to .agent package file
         package: String,
         /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, named by hostname). Wiring lands in Phase 3 —
+        /// machine node, resolved from the broker's retained node
+        /// registry — pass `--node <node_id>` to target a remote node).
+        /// Wiring lands in Phase 3 —
         /// the command is currently delegated to the local node via the
         /// HTTP API.
         #[arg(long)]
@@ -152,7 +154,8 @@ pub enum Commands {
         /// Agent ID to uninstall
         agent_id: String,
         /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, named by hostname).
+        /// machine node, resolved from the broker's retained node
+        /// registry — pass `--node <node_id>` to target a remote node).
         #[arg(long)]
         node: Option<String>,
     },
@@ -163,7 +166,8 @@ pub enum Commands {
         /// Path to new .agent package file
         package: String,
         /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, named by hostname).
+        /// machine node, resolved from the broker's retained node
+        /// registry — pass `--node <node_id>` to target a remote node).
         #[arg(long)]
         node: Option<String>,
     },
@@ -172,7 +176,8 @@ pub enum Commands {
         /// Agent ID to start
         agent_id: String,
         /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, named by hostname).
+        /// machine node, resolved from the broker's retained node
+        /// registry — pass `--node <node_id>` to target a remote node).
         #[arg(long)]
         node: Option<String>,
     },
@@ -181,7 +186,8 @@ pub enum Commands {
         /// Agent ID to stop
         agent_id: String,
         /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, named by hostname).
+        /// machine node, resolved from the broker's retained node
+        /// registry — pass `--node <node_id>` to target a remote node).
         #[arg(long)]
         node: Option<String>,
     },
@@ -293,11 +299,11 @@ impl Cli {
         let gateway = Gateway::new(config)?;
         match self.command {
             Some(Commands::Install { package, node }) => {
-                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
+                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
                 let dispatch = crate::gateway::node_manager::CliPackageDispatch {
                     mqtt_host: &mqtt_host,
                     mqtt_port,
@@ -314,11 +320,11 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Uninstall { agent_id, node }) => {
-                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
+                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
                 rt.block_on(crate::gateway::node_manager::uninstall_agent_via_mqtt(
                     &mqtt_host,
                     mqtt_port,
@@ -327,11 +333,11 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Upgrade { agent_id, package, node }) => {
-                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
+                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
                 let dispatch = crate::gateway::node_manager::CliPackageDispatch {
                     mqtt_host: &mqtt_host,
                     mqtt_port,
@@ -349,12 +355,12 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Start { agent_id, node }) => {
-                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 // Need async runtime for start/stop
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
+                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
                 rt.block_on(crate::gateway::node_manager::start_agent_via_mqtt(
                     &mqtt_host,
                     mqtt_port,
@@ -363,11 +369,11 @@ impl Cli {
                 ))?;
             }
             Some(Commands::Stop { agent_id, node }) => {
-                let node = node.unwrap_or_else(acowork_core::node::local_node_id);
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
+                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
                 rt.block_on(crate::gateway::node_manager::stop_agent_via_mqtt(
                     &mqtt_host,
                     mqtt_port,
@@ -617,6 +623,29 @@ pub(crate) fn update_log_file_count(count: u64) {
 }
 
 // Re-export from acowork-core (shared with Agent Runtime)
+
+/// Resolve the target node of a node-scoped CLI command (ADR-075 D5).
+///
+/// An explicit `--node` wins. Without it the command targets the
+/// Gateway's own-machine node — which must be resolved from the running
+/// broker's retained node registry, because the node id is a UUID the
+/// Node minted (a standalone CLI process has nothing to derive it from).
+/// The `"local"` anchor is deliberately NOT used here: no Node subscribes
+/// to `acowork/nodes/local/...`, so dispatching to it would silently
+/// never arrive.
+fn resolve_target_node(
+    rt: &tokio::runtime::Runtime,
+    node: Option<String>,
+    mqtt_host: &str,
+    mqtt_port: u16,
+) -> Result<String, GatewayError> {
+    match node {
+        Some(node_id) => Ok(node_id),
+        None => rt.block_on(crate::gateway::node_manager::resolve_local_node_via_mqtt(
+            mqtt_host, mqtt_port,
+        )),
+    }
+}
 
 /// Async main entry point for daemon mode
 async fn async_main(

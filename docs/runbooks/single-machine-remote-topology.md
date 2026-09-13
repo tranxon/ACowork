@@ -48,7 +48,7 @@ graph LR
 
 ## 2. 控制 Gateway 是否自动 spawn local node
 
-Gateway 默认 `--daemon` 启动会按 ADR-055 §6.11 自动 spawn 一个 Node Agent（名字 = 本机机器名 slug，如 `nytb`；占 `:19900`/`:19878`）。**单实例调试 / 容器 / 多节点验证等场景需要关掉**，三种方式等价：
+Gateway 默认 `--daemon` 启动会按 ADR-055 §6.11 自动 spawn 一个 Node Agent（node_id = 首次启动生成的 UUID，node_name = 本机机器名 slug，如 `nytb`；占 `:19900`/`:19878`）。**单实例调试 / 容器 / 多节点验证等场景需要关掉**，三种方式等价：
 
 | 层 | 写法 | 默认 |
 |---|---|---|

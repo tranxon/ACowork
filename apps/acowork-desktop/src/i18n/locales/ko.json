@@ -298,7 +298,6 @@
     "tabGeneral": "일반",
     "tabAppearance": "외관",
     "tabGateway": "게이트웨이",
-    "tabNodes": "노드",
     "profileTitle": "프로필",
     "displayName": "표시 이름",
     "displayNamePlaceholder": "표시 이름 입력",
@@ -342,7 +341,6 @@
     "version": "버전",
     "testConnection": "연결 테스트",
     "testing": "테스트 중...",
-    "connectedAgents": "연결된 Agent",
     "connectToSeeAgents": "게이트웨이에 연결하여 실행 중인 Agent 확인",
     "noAgentsRunning": "실행 중인 Agent 없음",
     "debug": "디버그",
@@ -388,13 +386,8 @@
     "nodesRefresh": "새로고침",
     "nodesOnline": "온라인",
     "nodesOffline": "오프라인",
-    "nodesColNodeId": "노드",
-    "nodesColStatus": "상태",
-    "nodesColOs": "OS",
-    "nodesColArch": "아키텍처",
-    "nodesColVersion": "버전",
-    "nodesColHostname": "호스트 이름",
-    "nodesColAgents": "Agent 수"
+    "nodesUnassigned": "할당되지 않음",
+    "nodesUnassignedDesc": "알려진 호스팅 노드가 없는 Agent"
   },
   "agentSetup": {
     "noApiKey": "No API key configured. Add in Harness → Search.",

@@ -97,13 +97,23 @@ mod tests {
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
 
+    /// Unique temp dir per test — a pid-only key makes these tests race
+    /// when they run in parallel (`remove_dir_all` under another test's
+    /// open vault → "Cannot create a file when that file already exists").
+    fn unique_temp_dir() -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "acowork-test-bootstrap-api-{}-{}",
+            std::process::id(),
+            seq
+        ))
+    }
+
     /// AppState with a live orchestrator attached; returns the registry
     /// so tests can drive readiness transitions.
     async fn test_state() -> (AppState, Arc<SubsystemReadinessRegistry>) {
-        let dir = std::env::temp_dir().join(format!(
-            "acowork-test-bootstrap-api-{}",
-            std::process::id()
-        ));
+        let dir = unique_temp_dir();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
@@ -173,10 +183,7 @@ mod tests {
     }
     #[tokio::test]
     async fn missing_orchestrator_is_503() {
-        let dir = std::env::temp_dir().join(format!(
-            "acowork-test-bootstrap-api-noorch-{}",
-            std::process::id()
-        ));
+        let dir = unique_temp_dir();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));

@@ -14,8 +14,7 @@
 //!    `acowork-node` whose cmdline carries our spawn markers
 //!    (`--gateway-managed --gateway 127.0.0.1:{port}`). The
 //!    `--gateway-managed` marker is set ONLY by the Gateway, so this
-//!    never touches user-managed nodes on the same machine — the name
-//!    itself is a plain hostname slug with no reserved value.
+//!    never touches user-managed nodes on the same machine.
 //!
 //! **Loopback-only spawn rule (local-mode decision):** a
 //! Gateway-spawned node is by definition on this very machine, so it
@@ -48,24 +47,20 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
 use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
-use crate::mqtt::node_registry::SharedNodeRegistry;
-
-/// Node id of the Gateway's own-machine node — the machine hostname
-/// slug (same value the Node derives at first start without `--name`).
-fn local_node_id() -> String {
-    acowork_core::node::local_node_id()
-}
+use crate::mqtt::node_registry::{local_node_id, SharedNodeRegistry};
 
 /// URL host a package-dispatch download must target: the local node dials
 /// the (normalized) HTTP bind host — a wildcard bind must still be reached
 /// via loopback — while remote nodes dial the advertise host they can route
-/// to (ADR-055 D3).
+/// to (ADR-055 D3). `local_node_id` is the registry-resolved id of the
+/// Gateway's own-machine node (ADR-075 D5), None when unknown.
 pub fn dispatch_url_host<'a>(
+    local_node_id: Option<&str>,
     node_id: &str,
     http_host: &'a str,
     advertise_host: &'a str,
 ) -> &'a str {
-    if node_id == local_node_id() {
+    if Some(node_id) == local_node_id {
         acowork_core::addr::connect_host(http_host)
     } else {
         advertise_host
@@ -247,9 +242,10 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
 /// a retained `online` from an already-running node reaches the
 /// registry during the reuse window.
 ///
-/// `local_token` (ADR-055 Phase 5a) is the pre-issued local node
-/// credential, forwarded to the child via `--token` when MQTT auth is
-/// enabled (None keeps the pre-5a credential-less spawn).
+/// `local_token` (ADR-075) is the local node's boot credential — a
+/// one-time enrollment token when MQTT auth is enabled, forwarded to
+/// the child via `--token` and swapped for the long-lived node_token at
+/// enroll time (None keeps the credential-less spawn).
 pub async fn ensure_local_node(
     mqtt_port: u16,
     packages_dir: &str,
@@ -268,12 +264,12 @@ pub async fn ensure_local_node(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    // Step 2: reuse window — an `online` local node (externally
+    // Step 2: reuse window — an `online` gateway-managed node (externally
     // managed) wins over spawning our own.
     let deadline = tokio::time::Instant::now() + REUSE_WINDOW;
     let mut reused = false;
     while tokio::time::Instant::now() < deadline {
-        if node_registry.read().await.is_online(&local_node_id()) {
+        if local_node_id(&node_registry).await.is_some() {
             tracing::info!("Local node agent already online — reusing it");
             reused = true;
             break;
@@ -352,7 +348,7 @@ async fn spawn_and_supervise(
             if supervisor.stopping.load(Ordering::SeqCst) {
                 return;
             }
-            if node_registry.read().await.is_online(&local_node_id()) {
+            if local_node_id(&node_registry).await.is_some() {
                 tracing::info!("Local node agent online again (external) — not respawning");
                 return;
             }
@@ -372,7 +368,7 @@ async fn spawn_and_supervise(
                         if supervisor.stopping.load(Ordering::SeqCst) {
                             return;
                         }
-                        if node_registry.read().await.is_online(&local_node_id()) {
+                        if local_node_id(&node_registry).await.is_some() {
                             tracing::info!(
                                 "Local node agent online (external) — supervisor standing down"
                             );
@@ -450,15 +446,18 @@ fn spawn_node_child(
     cmd.spawn()
 }
 
-/// `acowork-gateway nodes list` — query the running Gateway's broker
-/// for retained node status/info and print a table.
+/// Connect to the running Gateway's broker as the publisher client and
+/// collect the retained node status/info topics into a NodeRegistry.
 ///
-/// Connects to the broker as the publisher client (which auto-subscribes
-/// `acowork/nodes/+/status` + `acowork/nodes/+/info` via the ConnAck
-/// persistent-subscription handler), collects retained messages for a
-/// short window, then renders the registry snapshot. No daemon state or
-/// HTTP endpoint is touched — the retained topics ARE the node view.
-pub async fn list_nodes_via_mqtt(mqtt_host: &str, mqtt_port: u16) -> crate::error::Result<()> {
+/// The publisher client auto-subscribes `acowork/nodes/+/status` +
+/// `acowork/nodes/+/info` via the ConnAck persistent-subscription
+/// handler; we wait a short window for the retained messages to drain,
+/// then hand back the registry. No daemon state or HTTP endpoint is
+/// touched — the retained topics ARE the node view (ADR-055 §6.13.3).
+async fn collect_node_registry_via_mqtt(
+    mqtt_host: &str,
+    mqtt_port: u16,
+) -> crate::error::Result<crate::mqtt::node_registry::SharedNodeRegistry> {
     use crate::mqtt::client::{GatewayMqttClient, MqttMessageCallback};
 
     let node_registry = crate::mqtt::node_registry::new_shared_registry();
@@ -495,8 +494,42 @@ pub async fn list_nodes_via_mqtt(mqtt_host: &str, mqtt_port: u16) -> crate::erro
     // Let retained status/info messages drain in.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    let nodes = node_registry.read().await.list_nodes();
     drop(client);
+    Ok(node_registry)
+}
+
+/// Resolve the Gateway's own-machine node id from the broker's retained
+/// topics (ADR-075 D5): `gateway_managed == true` && online, newest
+/// `last_updated` wins.
+///
+/// Why the CLI needs this: `--node` defaults to "the Gateway's own
+/// machine", but the node id is a UUID minted by the Node — a standalone
+/// CLI process has no daemon registry to read. The `"local"` anchor is
+/// NOT a routable MQTT topic (no Node subscribes to
+/// `acowork/nodes/local/...`), so falling back to it would publish into
+/// a topic nobody receives: the command would silently never arrive.
+/// Failure is loud instead (ADR-075 Q2).
+pub async fn resolve_local_node_via_mqtt(
+    mqtt_host: &str,
+    mqtt_port: u16,
+) -> crate::error::Result<String> {
+    let registry = collect_node_registry_via_mqtt(mqtt_host, mqtt_port).await?;
+    crate::mqtt::node_registry::local_node_id(&registry)
+        .await
+        .ok_or_else(|| {
+            crate::error::GatewayError::Config(
+                "the Gateway's own-machine node is not online (no `gateway_managed` node in the \
+                 retained node registry) — pass `--node <node_id>` explicitly"
+                    .to_string(),
+            )
+        })
+}
+
+/// `acowork-gateway nodes list` — query the running Gateway's broker
+/// for retained node status/info and print a table.
+pub async fn list_nodes_via_mqtt(mqtt_host: &str, mqtt_port: u16) -> crate::error::Result<()> {
+    let node_registry = collect_node_registry_via_mqtt(mqtt_host, mqtt_port).await?;
+    let nodes = node_registry.read().await.list_nodes();
 
     if nodes.is_empty() {
         println!("No nodes discovered.");
@@ -762,8 +795,10 @@ pub async fn install_agent_via_mqtt(
 
     // The download URL must be reachable from the target node: the
     // loopback-bound local node dials the HTTP bind host, remote nodes
-    // the advertise host (ADR-055 D3).
-    let url_host = dispatch_url_host(dispatch.node_id, dispatch.http_host, dispatch.advertise_host);
+    // the advertise host (ADR-055 D3). CLI dispatch has no registry —
+    // the local-node resolution is not available here, so a CLI-named
+    // node always gets the advertise host (ADR-075 D5 boundary).
+    let url_host = dispatch_url_host(None, dispatch.node_id, dispatch.http_host, dispatch.advertise_host);
     let url = format!(
         "http://{url_host}:{}/api/packages/{agent_id}/download",
         dispatch.http_port
@@ -816,8 +851,9 @@ pub async fn upgrade_agent_via_mqtt(
     std::fs::copy(package_path, &registry_path).map_err(crate::error::GatewayError::Io)?;
 
     // Same host selection as install: the local node dials the bind
-    // host, remote nodes the advertise host (ADR-055 D3).
-    let url_host = dispatch_url_host(dispatch.node_id, dispatch.http_host, dispatch.advertise_host);
+    // host, remote nodes the advertise host (ADR-055 D3). No registry
+    // on the CLI path (ADR-075 D5) → advertise host.
+    let url_host = dispatch_url_host(None, dispatch.node_id, dispatch.http_host, dispatch.advertise_host);
     let url = format!(
         "http://{url_host}:{}/api/packages/{agent_id}/download",
         dispatch.http_port

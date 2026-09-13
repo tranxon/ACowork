@@ -39,6 +39,11 @@ export interface AgentListResponse {
   agent_id: string;
   /** ADR-073: instance identity (UUID) — canonical addressing key. */
   instance_id: string;
+  /** ADR-073: current location (node hosting this instance; mutable on
+   *  migration). Rust `AgentListResponse` always serialises this — the
+   *  Gateway-local case uses `local_node_id()` ("local"). Display-only
+   *  metadata — never a registry key. */
+  node_id: string;
   name: string;
   display_name: string | null;
   role: string | null;
@@ -75,7 +80,10 @@ export interface NodeInfo {
   node_id: string;
   online: boolean;
   online_since?: string;
-  machine_uid?: string;
+  /** ADR-075 D2: display name (slug, renameable) — never a routing key. */
+  node_name?: string;
+  /** ADR-075 D5: true when the node was spawned by the Gateway. */
+  gateway_managed: boolean;
   hostname?: string;
   os?: string;
   arch?: string;

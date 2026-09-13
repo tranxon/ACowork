@@ -76,7 +76,8 @@ pub fn build_node_info(
 ) -> NodeInfo {
     NodeInfo {
         node_id: identity.node_id.clone(),
-        machine_uid: identity.machine_uid.clone(),
+        node_name: identity.node_name.clone(),
+        gateway_managed: identity.gateway_managed,
         hostname: system_hostname(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -665,7 +666,6 @@ fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> DataEnv
     let info = build_node_info(identity, config, &config.advertise_host, 0);
     let enroll = NodeEnroll {
         node_id: identity.node_id.clone(),
-        machine_uid: identity.machine_uid.clone(),
         os: info.os,
         arch: info.arch,
         node_version: info.node_version,
@@ -816,8 +816,12 @@ impl NodeControlPlane {
         config.ensure_dirs()?;
 
         let gateway_addr = config.gateway_addr();
-        let identity =
-            NodeIdentity::load_or_create(&config.home, config.name.as_deref(), Some(&gateway_addr))?;
+        let identity = NodeIdentity::load_or_create(
+            &config.home,
+            config.name.as_deref(),
+            Some(&gateway_addr),
+            config.gateway_managed,
+        )?;
         let node_id = identity.node_id.clone();
         tracing::info!(
             node_id = %node_id,
@@ -1368,6 +1372,19 @@ impl NodeControlPlane {
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    // ADR-075 D4: converge a display-name rename performed
+                    // while the daemon keeps running — identity.json is
+                    // the source of truth; `node_id` never changes.
+                    if let Ok(Some(disk)) = NodeIdentity::load(&self.config.home)
+                        && disk.node_name != self.identity.node_name
+                    {
+                        tracing::info!(
+                            old = %self.identity.node_name,
+                            new = %disk.node_name,
+                            "Node display name updated from identity.json"
+                        );
+                        self.identity.node_name = disk.node_name;
+                    }
                     // §6.3.3: refresh the live host on every heartbeat so
                     // a network change converges within one interval.
                     let live_host =
@@ -1479,6 +1496,12 @@ impl NodeControlPlane {
             s.save_snapshot(&self.config.home);
         }
         if self.identity.enrollment == EnrollmentState::Enrolled {
+            // ADR-075 D4: a rename may have landed since the last heartbeat
+            // (identity.json is the source of truth) — re-read the display
+            // name so shutdown cannot clobber it.
+            if let Ok(Some(disk)) = NodeIdentity::load(&self.config.home) {
+                self.identity.node_name = disk.node_name;
+            }
             let _ = self.identity.save(&self.config.home);
         }
     }
@@ -1496,8 +1519,12 @@ impl NodeControlPlane {
         config.ensure_dirs()?;
 
         let gateway_addr = config.gateway_addr();
-        let identity =
-            NodeIdentity::load_or_create(&config.home, config.name.as_deref(), Some(&gateway_addr))?;
+        let identity = NodeIdentity::load_or_create(
+            &config.home,
+            config.name.as_deref(),
+            Some(&gateway_addr),
+            config.gateway_managed,
+        )?;
         let node_id = identity.node_id.clone();
 
         let state: SharedNodeState = Arc::new(RwLock::new(crate::state::NodeState::new(
@@ -1636,7 +1663,7 @@ impl NodeControlPlane {
         identity.save(&config.home)?;
         tracing::info!(
             node_id = %identity.node_id,
-            machine_uid = %identity.machine_uid,
+            node_name = %identity.node_name,
             node_token = identity.node_token.as_deref().map(|_| "<set>").unwrap_or("<none>"),
             gateway = %gateway_addr,
             "Node enrolled (identity persisted)"
@@ -1644,73 +1671,143 @@ impl NodeControlPlane {
         Ok(())
     }
 
-    /// `acowork-node rename <new>` — migrate the node's logical name
-    /// (ADR-055 §6.12). Migrates the retained info/status/installed
-    /// topics to the new node_id, clears the old retained set, and
-    /// persists the new name to identity.json. Crash-safe: the old
-    /// name stays valid until the retained migration completes
-    /// (identity.json is written last).
+    /// `acowork-node rename <new>` — change ONLY the display name
+    /// (ADR-075 D4). `node_id` (the UUID routing key) NEVER changes, so
+    /// there is no retained migration, no installed-inventory rebuild,
+    /// and no daemon-stop precondition — the daemon keeps running with
+    /// its `node:{uuid}` client.
     ///
-    /// Precondition: the node daemon is stopped (rename reuses the old
-    /// node_id client id, which collides with a running daemon).
+    /// Precondition: the node is online (retained status = "online").
+    /// Flow: connect with the temporary client_id `node:{uuid}:rename`
+    /// (no LWT — the daemon's status/LWT stay untouched), read the
+    /// retained status, then update identity.json + republish the
+    /// info retained snapshot with the new node_name.
     pub async fn rename(config: NodeConfig, new_name: &str) -> Result<(), NodeError> {
         config.ensure_dirs()?;
 
         let mut identity = NodeIdentity::load(&config.home)?.ok_or_else(|| {
             NodeError::Identity("No identity.json — run `acowork-node start` first".to_string())
         })?;
-        let old_id = identity.node_id.clone();
-        validate_rename_target(&old_id, new_name)?;
+        let node_id = identity.node_id.clone();
+        validate_rename_target(&identity.node_name, new_name)?;
 
-        // Rebuild the local install table so the retained `installed`
-        // inventory is republished under the new node_id (§6.5).
-        let mut state = NodeState::new(config.max_agents);
-        crate::package::restore_installed_agents(&mut state, &config.packages_dir());
-        let installed: Vec<_> = state.installed_agents.values().cloned().collect();
-
-        // NodeInfo under the NEW name (machine_uid / hostname unchanged).
-        let mut new_identity = identity.clone();
-        new_identity.node_id = new_name.to_string();
-        let live_host = refresh_live_advertise_host(&state, &config);
-        let info = build_node_info(&new_identity, &config, &live_host, installed.len() as u32);
-
-        let old_id_for_cb = old_id.clone();
-        let new_id_for_cb = new_name.to_string();
-        let installed_for_cb = installed.clone();
-        let info_for_cb = info.clone();
-        let bootstrap = Arc::new(move |client: AsyncClient| {
-            let old_id = old_id_for_cb.clone();
-            let new_id = new_id_for_cb.clone();
-            let installed = installed_for_cb.clone();
-            let info = info_for_cb.clone();
-            tokio::spawn(async move {
-                migrate_retained(&client, &old_id, &new_id, &info, &installed).await;
-            });
-        });
-
-        let client = NodeMqttClient::connect(
+        // Temporary client_id `node:{uuid}:rename` (ADR-075 §3.3): the
+        // running daemon owns `node:{uuid}` — reconnecting under the
+        // same id would kick it off the broker.
+        let client_id = format!("{}:rename", acowork_core::node::node_client_id(&node_id));
+        let mut options = rumqttc::MqttOptions::new(
+            &client_id,
             &config.gateway_host,
             config.gateway_mqtt_port,
-            &old_id,
-            // ADR-055 Phase 5a: present the long-lived node token so
-            // rename works against an auth-enabled broker.
-            Arc::new(Mutex::new(identity.node_token.clone())),
-            // One-shot rename does not announce NodeReady.
-            None,
-            bootstrap,
-            None,
-        )
-        .await?;
+        );
+        options.set_keep_alive(std::time::Duration::from_secs(5));
+        if let Some(token) = identity.node_token.as_deref() {
+            options.set_credentials(client_id.clone(), token.to_string());
+        }
+        let (client, mut eventloop) = rumqttc::AsyncClient::new(options, 10);
 
-        // Let the bootstrap publish flush before disconnecting.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        drop(client);
+        // Subscribe to the retained status AND the retained info (the
+        // snapshot we are about to update — see the merge below). An
+        // offline node refuses rename (the retained status is the single
+        // source of liveness truth).
+        let status_topic = node_status_topic(&node_id);
+        let info_topic = node_info_topic(&node_id);
+        for topic in [&status_topic, &info_topic] {
+            client
+                .subscribe(topic, QoS::AtLeastOnce)
+                .await
+                .map_err(|e| NodeError::Identity(format!("Subscribe failed: {e}")))?;
+        }
 
-        // Persist the new name LAST — the old name remains valid if any
-        // step above failed (crash-safe, §6.12).
-        identity.node_id = new_name.to_string();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut status: Option<String> = None;
+        let mut retained_info: Option<acowork_core::mqtt_proto::NodeInfo> = None;
+        while tokio::time::Instant::now() <= deadline {
+            if status.is_some() && retained_info.is_some() {
+                break;
+            }
+            match eventloop.poll().await {
+                Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p)))
+                    if p.topic == status_topic =>
+                {
+                    status = Some(String::from_utf8_lossy(&p.payload).trim().to_string());
+                }
+                Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p)))
+                    if p.topic == info_topic =>
+                {
+                    if let Ok(envelope) = DataEnvelope::decode(&p.payload[..])
+                        && let Some(data_envelope::Payload::NodeInfo(info)) = envelope.payload
+                    {
+                        retained_info = Some(info);
+                    }
+                }
+                Ok(rumqttc::Event::Incoming(_)) | Ok(rumqttc::Event::Outgoing(_)) => {}
+                Err(e) => {
+                    return Err(NodeError::Identity(format!("MQTT error during rename: {e}")));
+                }
+            }
+        }
+        let status = status.ok_or_else(|| {
+            NodeError::Identity(format!(
+                "Timed out reading retained status for node '{node_id}' — is the broker reachable?"
+            ))
+        })?;
+        if status != "online" {
+            return Err(NodeError::Identity(format!(
+                "Node '{node_id}' is not online (status = '{status}') — rename requires the node to be online"
+            )));
+        }
+
+        // Persist the new display name; node_id untouched.
+        let old_name = identity.node_name.clone();
+        identity.node_name = new_name.to_string();
         identity.save(&config.home)?;
-        tracing::info!(old_node_id = %old_id, node_id = %new_name, "Node renamed");
+
+        // Republish the info retained snapshot with the new node_name so
+        // the NodeRegistry display converges immediately (the daemon's
+        // next heartbeat confirms it — and self-heals if we die here).
+        // The merge is over the snapshot we just read: agent_count /
+        // endpoints / live host belong to the daemon, and fabricating them
+        // from a fresh empty state would lie to the Gateway for up to one
+        // heartbeat interval.
+        match retained_info {
+            Some(mut info) => {
+                info.node_id = node_id.clone();
+                info.node_name = new_name.to_string();
+                let envelope = DataEnvelope {
+                    version: 1,
+                    payload: Some(data_envelope::Payload::NodeInfo(info)),
+                };
+                let _ = client
+                    .publish(
+                        info_topic,
+                        QoS::AtLeastOnce,
+                        true,
+                        prost::Message::encode_to_vec(&envelope),
+                    )
+                    .await;
+            }
+            None => tracing::warn!(
+                node_id = %node_id,
+                "No retained info snapshot to update — the daemon heartbeat will republish the new display name"
+            ),
+        }
+
+        // Flush the QoS 1 publish before disconnecting (raw AsyncClient
+        // sends on the event-loop poll).
+        for _ in 0..10 {
+            if eventloop.poll().await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        drop(client);
+        tracing::info!(
+            node_id = %node_id,
+            old_node_name = %old_name,
+            node_name = %new_name,
+            "Node display name renamed"
+        );
         Ok(())
     }
 
@@ -1770,74 +1867,27 @@ impl NodeControlPlane {
     }
 }
 
-/// Validate a rename target: a valid slug, and different from the
-/// current name (ADR-055 §6.12). There is no reserved name — every
-/// node is named by its machine hostname slug.
-fn validate_rename_target(old_id: &str, new_name: &str) -> Result<(), NodeError> {
-    if !acowork_core::node::node_id_is_valid(new_name) {
+/// Validate a rename target (ADR-075 D2/D4): a valid `node_name` slug
+/// (which already rejects the reserved word `"local"` and consecutive
+/// `--`), different from the current name. `node_id` is never touched.
+fn validate_rename_target(old_name: &str, new_name: &str) -> Result<(), NodeError> {
+    if !acowork_core::node::node_name_is_valid(new_name) {
         return Err(NodeError::Identity(format!(
             "Invalid node name '{new_name}': must be 2-32 chars of [a-z0-9-], \
-             no leading/trailing hyphen"
+             no consecutive '--', no leading/trailing hyphen, and must not \
+             be the reserved word 'local'"
         )));
     }
-    if new_name == old_id {
+    if new_name == old_name {
         return Err(NodeError::Identity(format!(
-            "Node is already named '{old_id}'"
+            "Node is already named '{old_name}'"
         )));
     }
     Ok(())
 }
 
-/// Migrate the retained topics from `old_id` to `new_id` (ADR-055
-/// §6.12 step ②/③): publish info + installed inventory under the new
-/// name, then clear the old retained set with zero-byte publishes.
-async fn migrate_retained(
-    client: &AsyncClient,
-    old_id: &str,
-    new_id: &str,
-    info: &NodeInfo,
-    installed: &[crate::state::InstalledAgent],
-) {
-    // 1. Publish retained info under the NEW node_id.
-    let info_envelope = DataEnvelope {
-        version: 1,
-        payload: Some(data_envelope::Payload::NodeInfo(info.clone())),
-    };
-    let _ = client
-        .publish(
-            node_info_topic(new_id),
-            QoS::AtLeastOnce,
-            true,
-            prost::Message::encode_to_vec(&info_envelope),
-        )
-        .await;
-
-    // 2. Republish the installed inventory under the NEW node_id.
-    for entry in installed {
-        if let Some(installed_info) = crate::package::build_installed_info(entry) {
-            let instance_id = installed_info.instance_id.clone();
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::InstalledAgentInfo(installed_info)),
-            };
-            let _ = client
-                .publish(
-                    node_agent_installed_topic(new_id, &instance_id),
-                    QoS::AtLeastOnce,
-                    true,
-                    prost::Message::encode_to_vec(&envelope),
-                )
-                .await;
-        }
-    }
-
-    // 3. Clear the OLD retained set (zero-byte retained = delete).
-    clear_retained(client, old_id, installed).await;
-}
-
 /// Clear a node's retained status/info/installed topics with zero-byte
-/// publishes (MQTT delete semantics). Used by both `rename` (old name)
-/// and `leave` (current name).
+/// publishes (MQTT delete semantics). Used by `leave` (current name).
 async fn clear_retained(
     client: &AsyncClient,
     node_id: &str,
@@ -2598,11 +2648,9 @@ mod tests {
     }
 
     #[test]
-    fn rename_target_hostname_slug_is_accepted() {
-        // "local" is no longer reserved — it is a plain slug and is
-        // valid unless it equals the current name.
-        assert!(validate_rename_target("gpu-server", "local").is_ok());
+    fn rename_target_valid_slugs_are_accepted() {
         assert!(validate_rename_target("gpu-server", "gpu-2").is_ok());
+        assert!(validate_rename_target("gpu-server", "gpu-server-2").is_ok());
     }
 
     #[test]
@@ -2610,6 +2658,11 @@ mod tests {
         assert!(validate_rename_target("gpu-server", "Bad_Name").is_err());
         assert!(validate_rename_target("gpu-server", "-lead").is_err());
         assert!(validate_rename_target("gpu-server", "a").is_err());
+        // "local" is the Gateway-direct agent placeholder — reserved
+        // (ADR-075 D2).
+        assert!(validate_rename_target("gpu-server", "local").is_err());
+        // Consecutive hyphens are not a valid slug.
+        assert!(validate_rename_target("gpu-server", "a--b").is_err());
     }
 
     #[test]
@@ -2622,8 +2675,9 @@ mod tests {
 
     fn test_identity() -> NodeIdentity {
         NodeIdentity {
-            node_id: "gpu-1".to_string(),
-            machine_uid: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+            node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+            node_name: "gpu-1".to_string(),
+            gateway_managed: false,
             node_token: None,
             gateway_addr: None,
             enrollment: EnrollmentState::Created,
@@ -2634,8 +2688,7 @@ mod tests {
 
     fn enroll_result_envelope(node_token: &str, status: &str) -> Vec<u8> {
         let result = acowork_core::mqtt_proto::NodeEnrollResult {
-            node_id: "gpu-1".to_string(),
-            machine_uid: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+            node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
             node_token: node_token.to_string(),
             status: status.to_string(),
             message: "test reply".to_string(),
@@ -2657,8 +2710,7 @@ mod tests {
         let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
             panic!("expected NodeEnroll payload");
         };
-        assert_eq!(enroll.node_id, "gpu-1");
-        assert_eq!(enroll.machine_uid, "0f0e0d0c-0b0a-4009-8007-060504030201");
+        assert_eq!(enroll.node_id, "0f0e0d0c-0b0a-4009-8007-060504030201");
         assert_eq!(enroll.enrollment_token, "tok-1234");
         assert_eq!(enroll.protocol_version, NODE_PROTOCOL_VERSION);
         assert!(!enroll.capabilities.is_empty());
@@ -2710,7 +2762,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
         let identity = Arc::new(RwLock::new(test_identity()));
-        let topic = node_enroll_result_topic("gpu-1");
+        let topic = node_enroll_result_topic(&identity.read().await.node_id);
         let payload = enroll_result_envelope("tok-node-0001", "ok");
 
         assert!(handle_enroll_result(&topic, &payload, &identity, home).await);

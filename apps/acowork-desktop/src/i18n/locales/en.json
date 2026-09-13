@@ -412,7 +412,6 @@
     "tabGeneral": "General",
     "tabAppearance": "Appearance",
     "tabGateway": "Gateway",
-    "tabNodes": "Nodes",
     "profileTitle": "Your Profile",
     "displayName": "Display Name",
     "displayNamePlaceholder": "Your display name",
@@ -456,7 +455,6 @@
     "version": "Version",
     "testConnection": "Test Connection",
     "testing": "Testing...",
-    "connectedAgents": "Connected Agents",
     "connectToSeeAgents": "Connect to Gateway to see running agents",
     "noAgentsRunning": "No agents running",
     "debug": "Debug",
@@ -502,13 +500,8 @@
     "nodesRefresh": "Refresh",
     "nodesOnline": "Online",
     "nodesOffline": "Offline",
-    "nodesColNodeId": "Node",
-    "nodesColStatus": "Status",
-    "nodesColOs": "OS",
-    "nodesColArch": "Arch",
-    "nodesColVersion": "Version",
-    "nodesColHostname": "Hostname",
-    "nodesColAgents": "Agents"
+    "nodesUnassigned": "Unassigned",
+    "nodesUnassignedDesc": "Agents without a known hosting node"
   },
   "agentSetup": {
     "noApiKey": "No API key configured. Add in Harness → Search.",

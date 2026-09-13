@@ -197,7 +197,6 @@ impl EnrollmentTokenStore {
 pub struct NodeTokenRecord {
     pub node_id: String,
     pub token: String,
-    pub machine_uid: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -242,36 +241,13 @@ impl NodeTokenStore {
         self.nodes.get(node_id)
     }
 
-    /// The machine_uid recorded for a node (enrollment conflict check).
-    pub fn machine_uid_of(&self, node_id: &str) -> Option<&str> {
-        self.nodes.get(node_id).map(|r| r.machine_uid.as_str())
-    }
-
-    /// Mint (or reuse) the long-lived token for a node and persist.
-    ///
-    /// Re-enrollment by the same machine_uid reuses the existing token
-    /// so a reconnecting node keeps its credential (idempotent); a
-    /// different machine_uid (or a fresh node) gets a new token.
-    /// A record with an EMPTY machine_uid is a pre-issued placeholder
-    /// (ADR-055 Phase 5a local-node pre-enrollment): the first real
-    /// enrollment claims it — recording the machine_uid — and reuses
-    /// the token. Persisted on change.
-    pub fn upsert(&mut self, node_id: &str, machine_uid: &str) -> String {
+    /// Mint (or reuse) the long-lived token for a node and persist
+    /// (ADR-075 D7 — simplified: UUID node_ids never collide, so the
+    /// placeholder-claim and conflict branches are gone). Idempotent:
+    /// an already-enrolled node keeps its credential.
+    pub fn upsert(&mut self, node_id: &str) -> String {
         if let Some(record) = self.nodes.get(node_id) {
-            if record.machine_uid == machine_uid {
-                return record.token.clone();
-            }
-            if record.machine_uid.is_empty() && !machine_uid.is_empty() {
-                // Claim the pre-issued placeholder: record the real
-                // machine_uid, keep the token (persist after the
-                // immutable borrow ends).
-                let token = record.token.clone();
-                if let Some(record) = self.nodes.get_mut(node_id) {
-                    record.machine_uid = machine_uid.to_string();
-                }
-                self.persist();
-                return token;
-            }
+            return record.token.clone();
         }
         let token = generate_token();
         self.nodes.insert(
@@ -279,7 +255,6 @@ impl NodeTokenStore {
             NodeTokenRecord {
                 node_id: node_id.to_string(),
                 token: token.clone(),
-                machine_uid: machine_uid.to_string(),
                 created_at: Utc::now(),
             },
         );
@@ -414,14 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn node_token_upsert_reuses_for_same_machine() {
+    fn node_token_upsert_reuses_for_same_node() {
         let dir = test_dir("nodetoken-upsert");
         let mut store = NodeTokenStore::load(&dir);
-        let first = store.upsert("gpu-1", "uid-1");
+        let first = store.upsert("gpu-1");
         assert_eq!(first.len(), 64);
-        assert_eq!(store.upsert("gpu-1", "uid-1"), first, "same machine reuses token");
+        assert_eq!(store.upsert("gpu-1"), first, "re-enroll reuses token");
         assert_eq!(store.get_token("gpu-1"), Some(first.as_str()));
-        assert_eq!(store.machine_uid_of("gpu-1"), Some("uid-1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -429,7 +403,7 @@ mod tests {
     fn node_token_matches_constant_time() {
         let dir = test_dir("nodetoken-match");
         let mut store = NodeTokenStore::load(&dir);
-        let token = store.upsert("gpu-1", "uid-1");
+        let token = store.upsert("gpu-1");
         assert!(store.node_token_matches("gpu-1", &token));
         assert!(!store.node_token_matches("gpu-1", "wrong"));
         assert!(!store.node_token_matches("gpu-2", &token), "unenrolled node");
@@ -441,13 +415,12 @@ mod tests {
         let dir = test_dir("nodetoken-persist");
         {
             let mut store = NodeTokenStore::load(&dir);
-            store.upsert("gpu-1", "uid-1");
+            store.upsert("gpu-1");
         }
         {
             let store = NodeTokenStore::load(&dir);
             let token = store.get_token("gpu-1").expect("token persisted");
             assert_eq!(token.len(), 64);
-            assert_eq!(store.machine_uid_of("gpu-1"), Some("uid-1"));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

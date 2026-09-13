@@ -1,7 +1,7 @@
 # ADR-055：Runtime 远程化部署 - Node Agent 拓扑
 
 **状态**：已定案（Phase 1–5a 实施完成；Phase 5b 待办）
-**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差。2026-08-27 修订：§6.8 新增对端 IP 白名单安全兜底（`[security].allowed_node_ips`，HTTP 403 / MQTT TCP pre-filter）；Desktop「本地/远程单一拓扑」语义定稿——本地模式仅表示 Desktop 可能 spawn Gateway，Gateway/Node/Runtime 行为与配置在两种模式完全一致（相关 runbook 同步）。2026-08-28 修订：node 命名统一为机器名 slug——移除保留名 `local`（`LOCAL_NODE_ID` 常量删除，改为共享函数 `local_node_id()`）；Gateway spawn 本机节点不再传 `--name`，改传内部标记 `--gateway-managed`（孤儿清理专用）；§6.11/§6.12 同步）
+**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差。2026-08-27 修订：§6.8 新增对端 IP 白名单安全兜底（`[security].allowed_node_ips`，HTTP 403 / MQTT TCP pre-filter）；Desktop「本地/远程单一拓扑」语义定稿——本地模式仅表示 Desktop 可能 spawn Gateway，Gateway/Node/Runtime 行为与配置在两种模式完全一致（相关 runbook 同步）。2026-08-28 修订：node 命名统一为机器名 slug——移除保留名 `local`（`LOCAL_NODE_ID` 常量删除，改为共享函数 `local_node_id()`）；Gateway spawn 本机节点不再传 `--name`，改传内部标记 `--gateway-managed`（孤儿清理专用）；§6.11/§6.12 同步。2026-08-29 修订（ADR-075）：node_id 升级为持久化 UUID v4（稳定路由键），新增 node_name（slug、纯展示、可 rename），删除 machine_uid；冲突检测删除，enrollment 幂等化；`local` 恢复为保留字（`LOCAL_NODE_ID` 常量，Gateway 直管 agent 固定字面量）；rename 简化为仅改 node_name）
 **决策者**：大鱼
 **前置**：
 - [ADR-033](./ADR-033-mqtt-replace-grpc-websocket.md)（MQTT 替换 gRPC + WebSocket）
@@ -275,7 +275,7 @@ Gateway 通过 SSH 连到目标机器执行 spawn/kill/安装。
 |--------|---------|---------|---------------|
 | Node 鉴权 | 注册令牌 + per-node 长期令牌（§6.8） | mTLS（双向证书） | mTLS 需 PKI 基础设施（CA 签发/吊销/轮换），对第一档「可信网络」是过度工程；token 可 TTL、可吊销、可审计，配合 ACL 足够。Phase 5b（公网）再评估 mTLS |
 | Node 对外暴露 | Node 内置反代（`/agents/{id}/*`） | Service mesh（linkerd/istio）或 Runtime 直接 bind 0.0.0.0 | mesh 引入 sidecar 注入 + 独立控制平面，对 <100 节点规模是杀鸡用牛刀；Runtime 直连则 N 个端口 + 无鉴权服务暴露网络（§6.4 已论证）。Node 反代 = 1 端口 + 1 鉴权点 |
-| node_id 形式 | slug（`^[a-z0-9]…$`，§6.12） | FQDN / 原始 hostname | FQDN 可能变化（DHCP、云主机）、含大写/下划线/点（MQTT topic 与 ACL 敏感）；slug 稳定、可读、topic/ACL 友好。32 字符上限对齐短标识惯例，足够可读性且限制 topic 长度 |
+| node_id 形式 | UUID v4（`node_name` 为 slug，§6.12，ADR-075） | FQDN / 原始 hostname / slug node_id | FQDN 可能变化（DHCP、云主机）、含大写/下划线/点（MQTT topic 与 ACL 敏感）；slug 可读但作为路由键不够稳定（改名即断路由）。UUID 路由键稳定唯一，展示交给 `node_name`（slug），两者职责分离 |
 | Node 状态传播 | MQTT retained（LWT + info） | 独立注册中心（etcd/consul） | 项目已确立「MQTT 是控制面」（ADR-033）；引入新存储违反 ADR-034「同一语义只用一条传输」。retained 天然提供 Gateway 重启后的状态恢复 |
 | install 状态机 | 202 + MQTT events 异步回执 | 同步 HTTP 长轮询 | 远程 install 涉及下载/解压/校验，耗时不可预测；同步 API 阻塞 Desktop。异步 + events 复用 Desktop 已有 MQTT 订阅管道（§6.2） |
 
@@ -298,14 +298,15 @@ Gateway 通过 SSH 连到目标机器执行 spawn/kill/安装。
 
 ```text
 acowork/nodes/{node_id}/status                      QoS1 Retained   节点上线状态（含 LWT 遗嘱：offline）
-acowork/nodes/{node_id}/info                        QoS1 Retained   节点元数据（hostname、os、arch、runtime_version、能力集）
+acowork/nodes/{node_id}/info                        QoS1 Retained   节点元数据（node_name、hostname、os、arch、
+                                                                     runtime_version、能力集、gateway_managed）
 acowork/nodes/{node_id}/enroll                     QoS1            Node → Gateway 注册请求（Phase 5a）：
                                                                    protobuf DataEnvelope<NodeEnroll>
-                                                                   { node_id, machine_uid, os, arch, node_version,
+                                                                   { node_id, os, arch, node_version,
                                                                      protocol_version, capabilities, enrollment_token }
 acowork/nodes/{node_id}/enroll_result              QoS1            Gateway → Node 注册回执（per-request，不 retained）：
                                                                    DataEnvelope<NodeEnrollResult>
-                                                                   { node_id, machine_uid, node_token, status, message }
+                                                                   { node_id, node_token, status, message }
 acowork/nodes/{node_id}/agents/{id}/control/{cmd}   QoS1            Gateway → Node 的 agent 生命周期指令
                                                                     cmd ∈ {install, uninstall, start, stop,
                                                                             start_debug, skills_import,
@@ -476,7 +477,7 @@ Gateway 侧触碰共享领地的所有代码点的归宿：
 pub struct InstalledAgentInfo {
     pub agent_id: String,
     pub version: String,
-    pub node_id: String,          // 新增：安装在哪台节点（本机节点名 = 机器名 slug）
+    pub node_id: String,          // 新增：安装在哪台节点（本机节点 = UUID，Gateway 直管 agent = "local"）
     pub install_path: String,     // 语义变化：节点本机路径（Gateway 仅记录，不再解引用）
     // ... manifest 缓存字段保留（供 /api/agents 列表快速渲染）
 }
@@ -507,14 +508,14 @@ pub struct RunningAgentInfo {
 
 ### 6.11 单机模式 = local node（D1 落地）
 
-- Gateway 启动时若发现本机无 Node Agent 在线（`acowork/nodes/{机器名}/status` 无 retained online），spawn 一个 `acowork-node` 子进程（sibling 二进制，复用 L1-1 的定位逻辑），node_id = 机器名 slug（统一命名规则：不传 `--name` 即用 hostname，无保留名）。
+- Gateway 启动时若发现本机无 Node Agent 在线（`acowork/nodes/{node_id}/status` 无 retained online，node_id 为 UUID），spawn 一个 `acowork-node` 子进程（sibling 二进制，复用 L1-1 的定位逻辑），node_id = 首次启动生成的 UUID（ADR-075），node_name = hostname slug 规整（不传 `--name` 即用 hostname）。
 - **loopback-only spawn（§6.3.3 #4 不变式）**：Gateway spawn local node 恒传 `--gateway 127.0.0.1:{mqtt_port} --addr 127.0.0.1:19900 --gateway-managed`——本机链路不依赖任何 LAN IP，Wi-Fi 换网 / 热点切换零影响；孤儿清理标记（`--gateway-managed --gateway 127.0.0.1:{port}`）与 spawn 参数严格一致（§6.3.4）。
 - **启动时序与竞争避让**：
   1. **顺序保证**：local node 的 spawn 点位于 MQTT broker 就绪之后（Gateway 启动序列中的显式前置步骤）；即便时序竞争失败，Node 侧 ADR-039 指数退避重连兜底——双保险。
-  2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/{机器名}/status`（retained）后等待短窗口（默认 500ms）。窗口内收到 `online` → 复用现有 node（覆盖「Gateway 重启、本机 node 存活」场景）；超时 → 进入 spawn 判定。
+  2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/+/status`（retained）后等待短窗口（默认 500ms）。窗口内收到 `online` 且 `gateway_managed=true` → 复用现有 node（覆盖「Gateway 重启、本机 node 存活」场景）；超时 → 进入 spawn 判定。
   3. **重复 spawn 避让**：spawn 前探测本机 `:19900`（local node 反代端口）。端口被占用且 health 返回本节点身份 → 判定 node 已在运行但 MQTT 未连（broker 刚重启）→ 不重复 spawn，等其重连；端口空闲 → spawn。spawn 失败记录日志并周期重试（60s）。
   4. **崩溃自愈**：Gateway 对 local node 子进程挂 reaper（同 Runtime reaper 模式）；退出后回到上述判定窗口重新 spawn。local node 崩溃不杀其 Runtime 子进程（§8「Node 单点」同一语义），Runtime 由 MQTT 重连框架维持，Node 重启后按 §6.19 re-adopt 收养。
-- **Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认本机节点（机器名 slug）。
+- **Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认本机节点（Gateway 直管 agent 固定 `"local"`）。
 - 这保证「单机用户零额外步骤」且「Gateway 代码只有一条路径」——不存在 `if remote { ... } else { ... }` 的协议分叉，只有 `node_id` 路由参数化。
 - **关闭自动 spawn 的出口**（多节点 / 容器 / 单步调试场景）：
   - CLI flag `--no-spawn-local-node`
@@ -526,14 +527,16 @@ pub struct RunningAgentInfo {
 
 ### 6.12 Node 身份模型（node_id 的定义与生成）
 
-Node 与 Runtime 是**一对多**（一个 Node Agent 管理本机 N 个 Runtime 进程），因此 node_id 是「一台机器」的身份，不是「一个 agent」的身份。身份模型采用**双身份分离**：
+Node 与 Runtime 是**一对多**（一个 Node Agent 管理本机 N 个 Runtime 进程），因此 node_id 是「一台机器」的身份，不是「一个 agent」的身份。身份模型采用**双身份分离**（ADR-075 修订）：
 
 | 身份 | 格式 | 生成 | 生命周期 | 用途 |
 |------|------|------|----------|------|
-| **`machine_uid`** | UUID v4 | Node 首次启动时生成，持久化于 `{node_data_dir}/identity.json` | 永不变（重装除外） | 机器指纹：Gateway 判定「重名不同机」冲突、「改名后仍是同一台」、enrollment 重放防护 |
-| **`node_id`** | slug：`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`（小写字母/数字/连字符，2-32 字符） | `--name` 显式指定；缺省从 hostname 规整（小写化、非法字符转 `-`、截断 32 字符） | 持久化于同一 identity.json；可通过 `rename` 命令变更 | **一切 topic / client_id / ACL / UI 展示使用的逻辑名**：`node:{node_id}`、`acowork/nodes/{node_id}/#` |
+| **`node_id`** | UUID v4 | Node 首次启动时 `Uuid::new_v4()` 生成，持久化于 `{node_data_dir}/identity.json` | 永不变（重装除外）；**rename 不改变** | **一切路由键**：topic（`acowork/nodes/{node_id}/#`）、client_id（`node:{node_id}`）、ACL、`installed_agents.node_id` 引用 |
+| **`node_name`** | slug：`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`（小写字母/数字/连字符，2-32 字符，禁止连续 `--`，`local` 为保留字） | `--name` 显式指定；缺省从 hostname 规整（`node_name_from_hostname`） | 持久化于同一 identity.json；可通过 `rename` 命令变更 | **纯展示**：UI 显示名、日志标识；不参与任何路由 |
 
-保留前缀：`node-`（避免与 agent_id 空间混淆的显示层约定）。**没有保留名**：本机节点与远程节点统一用机器名 slug 命名（`node_id_from_hostname(hostname)`，Gateway 侧与 Node 侧从同一函数推导，天然一致）；Gateway 靠内部 spawn 标记 `--gateway-managed` 识别自己 spawn 的子进程（孤儿清理专用），因此无需靠保留名区分。
+> `node_id`（UUID）与 `node_name`（slug）分离的原因：UUID 保证路由键全局唯一且可安全改名（改名不牵动 topic/client_id/引用），slug 保证人可读可写。ADR-055 旧版曾以「hostname 派生 slug 作为 node_id + `machine_uid` 作为机器指纹」实现同一目标，ADR-075 将其合并：`node_id` 直接吸收机器指纹职能（UUID 天然唯一），`machine_uid` 删除。
+
+保留前缀：`node-`（避免与 agent_id 空间混淆的显示层约定）。**Gateway 直管 agent** 的节点标识固定为字面量 `LOCAL_NODE_ID = "local"`（保留字，`node_name_is_valid` 拒绝用户使用），不经过 UUID 生成——本地与远程的分界在身份层面显式可见。
 
 **为什么 node_id 必须在首次 CONNECT 之前定稿**：MQTT LastWill 是 CONNECT 报文的一部分（`LastWill::new("acowork/nodes/{node_id}/status", "offline", QoS1, retained)`，同 `runtime/mqtt/client.rs:449` 的 Runtime 模式）——遗嘱 topic 在建立连接时就要确定，不存在「连上之后再协商分配名字」的时序空间。因此身份在 enrollment 阶段一次性定稿并落盘，后续启动只读不写。
 
@@ -543,32 +546,28 @@ Node 与 Runtime 是**一对多**（一个 Node Agent 管理本机 N 个 Runtime
 acowork-node enroll --gateway 192.168.1.10:19876 --token <enrollment-token> [--name gpu-server]
 
  1. 读 {data_dir}/identity.json：已存在 → 直接复用（幂等重入，脚本友好）
- 2. 生成 machine_uid（uuid v4）；node_id = --name 或 hostname slug 规整
+ 2. node_id = 已存在 UUID 或新生成；node_name = --name 或 hostname slug 规整
  3. CONNECT  client_id = "node:{node_id}"
             LWT = acowork/nodes/{node_id}/status = "offline" (retained)
  4. PUBLISH  acowork/nodes/{node_id}/enroll (QoS1)
-            payload = { machine_uid, os, arch, runtime_version, capabilities }
+            payload = { node_id, os, arch, runtime_version, capabilities, enrollment_token }
  5. Gateway 校验：
     a. enrollment token 有效？（Phase 5a 起必检；auth_enabled=false 时免检）
-    b. node_id 唯一性：
-       - 未占用                        → 注册成功
-       - 已被同一 machine_uid 占用      → 视为重新注册，成功（enroll 重跑）
-       - 已被不同 machine_uid 占用      → 拒绝：明确报错 "node name 'gpu-server'
-                                          already taken by another machine"，
-                                          用户换 --name 重跑
- 6. Gateway 签发 node_token（enrollment 回执，`enroll_result` topic）
+    b. node_id 是否已注册（node_tokens.json 中是否存在）：
+       - 未注册  → 签发新 node_token，注册成功
+       - 已注册  → 复用既有 node_token，视为重新注册（enroll 重跑，幂等）
+    （UUID 全局唯一，不存在「重名冲突」；ADR-055 旧版的 machine_uid 冲突检测删除）
+ 6. Gateway 签发/复用 node_token（enrollment 回执，`enroll_result` topic）
  7. node_token 追加持久化到 identity.json；发布 status=online + info retained
 ```
 
-**重名冲突的处置哲学**：显式报错，不做自动后缀（`gpu-server-2`）。静默改名会让用户困惑「我的 agent 怎么跑到了 -2 机器上」，且破坏已有 `installed_agents.node_id` 引用。Kubernetes 对 Node 重名同样是拒绝而非改写。报错信息必须给出下一步动作提示（换 `--name`）。
-
-**改名（`acowork-node rename <new>`）**：在线状态下执行，顺序严格——① 校验新名可用（新名 enrollment 探测）→ ② 迁移 retained（新 topic 发布 info/status，旧 topic 发布**零字节 retained** 清除）→ ③ Gateway 端 `NodeRegistry` 迁移 + `installed_agents.node_id` 批量更新 + Runtime `http_endpoint` 重注册 → ④ 更新 identity.json。断点安全：任一步失败，旧 node_id 仍是有效身份（retained 未清），rename 可重试。
+**改名（`acowork-node rename <new>`）**：仅在线操作，只改 `node_name`（display），不动 `node_id`（路由键）——因此**无需**迁移 retained、重建 installed inventory、停 daemon 或搬迁旧 topic。流程：① 校验新名合法（`node_name_is_valid`，拒绝保留字 `local`）→ ② 用临时 client_id `node:{uuid}:rename` 连接（不发布 LWT），校验 retained status 为 online → ③ 直接改写 identity.json 的 node_name → ④ 重发 `info` retained。心跳循环每次 re-read identity 取当前 node_name，防 rename 后心跳覆盖。
 
 **节点数据目录布局**（对齐 Gateway 的 home 惯例）：
 
 ```text
 $HOME/.acowork/acowork-node/
-├── identity.json        # { node_id, machine_uid, node_token, gateway_addr }
+├── identity.json        # { node_id(UUID), node_name, node_token, gateway_addr, gateway_managed }
 ├── logs/                # node 自身日志（rolling，同 acowork_core::logging 惯例）
 ├── packages/            # 本机 agent 安装目录（install_path 的落点，从 gateway data_dir 迁移）
 │   └── {agent_id}/
@@ -808,7 +807,7 @@ core/acowork-node/
 | 2a.3 | 节点控制面协议落地：`acowork/nodes/#` topic 族 + request_id 去重 + 指令幂等语义（§6.2）+ 版本协商（§6.9）；protobuf 契约 golden 测试（acowork-core） |
 | 2a.4 | Gateway 侧：`NodeRegistry`（LWT 驱动）+ spawn local node + 启动时序/竞争避让（§6.11） |
 
-**验证**：local node（本机节点，机器名 slug）常驻运行、`acowork-gateway nodes list` 可见本机节点、`acowork-node status` 可用；既有 agent 功能零影响（Node 此时尚不管理任何 Runtime）；全量既有测试 + clippy 门禁通过。
+**验证**：local node（本机节点，Gateway spawn、`gateway_managed=true`、UUID node_id）常驻运行、`acowork-gateway nodes list` 可见本机节点、`acowork-node status` 可用；既有 agent 功能零影响（Node 此时尚不管理任何 Runtime）；全量既有测试 + clippy 门禁通过。
 
 #### Phase 2b：lifecycle + package_manager 迁移（硬切，Gateway 同变更内删除）
 
@@ -864,7 +863,7 @@ core/acowork-node/
 | 层 | 内容 | 归属 |
 |----|------|------|
 | 随迁单测 | lifecycle 24 + package_manager 17 = **41 个既有单测**随代码迁入 acowork-node 并保持全绿——迁移回归的硬门禁 | 2b |
-| 新协议单测 | 五类纯逻辑必须单测：① request_id 去重与指令幂等（§6.2）；② install 异步状态机（202 → events 进度）；③ enrollment 幂等 / 重名拒绝 / token 签发（§6.12）；④ rename 断点安全（§6.12）；⑤ re-adopt 对账规则（§6.19） | 2a/2b |
+| 新协议单测 | 五类纯逻辑必须单测：① request_id 去重与指令幂等（§6.2）；② install 异步状态机（202 → events 进度）；③ enrollment 幂等 / token 复用（§6.12）；④ rename 断点安全（§6.12）；⑤ re-adopt 对账规则（§6.19） | 2a/2b |
 | Contract 测试 | `acowork/nodes/#` topic 族 protobuf payload 的 golden 测试（acowork-core，防契约漂移，对齐 ADR-033 proto 纪律） | 2a |
 | 多节点 e2e harness | **固化为可复用测试夹具入库**：同机模拟 N 节点 = N 个 `--home` data_dir + 同 broker（扩展 `mqtt_e2e_full` 的 fresh_broker_port 模式） | 3 |
 | 三机真机 e2e | Phase 3 验证清单（chat / 远程工具执行 / 文件上传下载 / memory / cron auto-spawn / Intent 跨节点路由） | 3 |
@@ -903,7 +902,7 @@ core/acowork-node/
 | `core/acowork-node/`（新 crate，内部模块结构与依赖红线见 §6.20） | Node Agent：identity / control / process（迁自 lifecycle）/ package（迁自 package_manager）/ proxy / sidecar（Phase 4 迁入 LSP）/ cli 七模块 |
 | `acowork-node` 二进制 + CLI（§6.13.2） | start/enroll/status/agents{list,logs,kill}/rename/leave/service 命令 |
 | `acowork-gateway` CLI 扩展（§6.13.3） | 既有 Commands 增加 `--node <node_id>`；新增 `nodes {list,drain,remove,token create}` 子命令组 |
-| `{node_data_dir}/identity.json` | §6.12 身份持久化：`{ node_id, machine_uid, node_token, gateway_addr }` |
+| `{node_data_dir}/identity.json` | §6.12 身份持久化：`{ node_id(UUID), node_name, node_token, gateway_addr, gateway_managed }` |
 | `acowork/nodes/#` topic 族 | 节点状态（LWT）/ 指令 / 事件 / per-node LSP / per-node sidecar 状态 |
 | Gateway `NodeRegistry` | LWT 驱动的节点在线表 |
 | Runtime `GET /workspaces/raw/{path}` | 原始字节静态端点 |

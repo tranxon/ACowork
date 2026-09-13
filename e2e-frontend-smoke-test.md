@@ -686,15 +686,18 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 - **前置**：TC-AUTH-01 的 token；auth Gateway 已启动并安装被测 agent。
 - **步骤**：
   1. 以 `user:smoke-test:desktop:*`（password = `<home>/data/http_token`）
-     连接 auth broker，订阅 `acowork/nodes/smoke-node/{enroll,enroll_result,status}`
+     连接 auth broker，订阅 `acowork/nodes/+/{enroll,enroll_result,status}`
+     （node_id 是 UUID，首次启动生成后落盘 identity.json，测试先读 UUID
+     再按具体 topic 断言）
   2. `acowork-node start --name smoke-node --proxy-port 19781 --token <token>`
-     （独立 node home）
+     （独立 node home；`--name` 只决定 node_name 展示名，路由键 node_id
+     是 identity.json 中的 UUID）
   3. 等待 `enroll` 请求：DataEnvelope oneof **85**（`node_enroll`），含
-     `node_id`/`machine_uid`（token 在 CONNECT 层消费，不在 payload 中）
+     `node_id`（UUID；token 在 CONNECT 层消费，不在 payload 中）
   4. 等待 `enroll_result`：oneof **86**，含新签发 `node_token`；断言
      `identity.json` 中 node_token 一致
   5. kill 后用 `--home` 重启**不带 token** → 收到 `status=online`（凭
-     `node:{id}` broker 规则以持久化 node_token 重连）
+     `node:{uuid}` broker 规则以持久化 node_token 重连）
 - **期望**：上述全部成立；enroll_result `status=ok`。
 
 #### TC-AUTH-03 匿名 CONNECT 被拒（negative）
