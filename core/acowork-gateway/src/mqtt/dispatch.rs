@@ -52,6 +52,16 @@ use crate::operation_store::SharedOperationStore;
 /// is a replay.
 const REPLAY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Grace period a node's records survive after its last offline signal
+/// (ADR-055 §6.13.3). A node killed hard (no graceful shutdown) stops
+/// publishing forever; without removal its records — the `node.{id}`
+/// bootstrap subsystem above all — linger, pinning the aggregated
+/// phase in BOOTING and leaving the Desktop showing a ghost entry.
+/// The timer arms on offline and fires only if the node is still
+/// offline at expiry; a reconnect inside the window re-announces every
+/// retained record, so nothing is lost by waiting.
+pub const NODE_OFFLINE_REMOVAL_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// How often the reconcile loop re-aligns `running_agents` to the
 /// authoritative `agent_registry` view. Cheap (a couple of `HashMap`
 /// walks) so a 5-second cadence is fine. The loop's first tick fires
@@ -137,6 +147,16 @@ impl NodeReplayGuard {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         matches!(signals.get(node_id), Some(t) if *t > gw_reconnect)
+    }
+
+    /// Drop the per-node bookkeeping (the node left the fleet for
+    /// good — ADR-055 §6.13.3). Keeps the map from growing with dead
+    /// node ids and clears any stale suppression state.
+    pub fn forget(&self, node_id: &str) {
+        self.last_online_signal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(node_id);
     }
 }
 
@@ -508,26 +528,33 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             // live state and POST /start can short-circuit idempotently
             // instead of paying a control/start round-trip.
             if !gw.running_agents.contains_key(&agent_id_for_log) {
-                let workspace = gw
-                    .installed(&agent_id_for_log)
-                    .map(|i| {
-                        std::path::PathBuf::from(&i.install_path)
-                            .join("workspace")
-                            .to_string_lossy()
-                            .to_string()
-                    })
-                    .unwrap_or_default();
-                let resolved_agent_id = gw
-                    .installed(&agent_id_for_log)
-                    .map(|i| i.agent_id.clone())
-                    .unwrap_or_else(|| agent_id_for_log.clone());
+                // ADR-073: the instance's install record is the
+                // authority for the hosting node (and workspace);
+                // fall back to the local node only for a Runtime with
+                // no aggregated inventory yet (legacy auto-track).
+                let (workspace, resolved_agent_id, hosting_node_id) =
+                    match gw.installed(&agent_id_for_log) {
+                        Some(i) => (
+                            std::path::PathBuf::from(&i.install_path)
+                                .join("workspace")
+                                .to_string_lossy()
+                                .to_string(),
+                            i.agent_id.clone(),
+                            i.node_id.clone(),
+                        ),
+                        None => (
+                            String::new(),
+                            agent_id_for_log.clone(),
+                            acowork_core::node::local_node_id(),
+                        ),
+                    };
                 gw.add_running(crate::gateway::state::RunningAgentInfo {
                     instance_id: agent_id_for_log.clone(),
                     agent_id: resolved_agent_id,
                     pid: 0,
                     started_at: chrono::Utc::now(),
                     workspace,
-                    node_id: acowork_core::node::local_node_id(),
+                    node_id: hosting_node_id,
                     connected: true,
                     ready,
                     dev_mode: false,
@@ -568,7 +595,25 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // re-marks it ready; `mark_booting` (not `mark_failed`) keeps
         // that path open.
         if let Some(node_id) = extract_node_id_from_status_topic(topic) {
-            let is_offline = String::from_utf8_lossy(payload).trim() == "offline";
+            let payload_text = String::from_utf8_lossy(payload);
+            let trimmed = payload_text.trim();
+            // ADR-055 §6.13.3: an empty retained status is a removal
+            // signal (the `nodes remove` CLI, or this dispatcher's own
+            // cleanup pass). Run the full record cleanup — it is
+            // convergent, so the echo of the cleanup's own publish
+            // finds no traces and stops.
+            if trimmed.is_empty() {
+                tracing::info!(
+                    node_id,
+                    "Node status retained cleared — running node record cleanup"
+                );
+                let ctx_cleanup = ctx.clone();
+                tokio::spawn(async move {
+                    remove_node_records(&ctx_cleanup, &node_id).await;
+                });
+                return;
+            }
+            let is_offline = trimmed == "offline";
             // Live online signals reset the replay guard so a stale
             // replayed `offline` (queued at subscribe time) cannot
             // demote a node that already reconnected and re-announced
@@ -576,21 +621,29 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             if !is_offline {
                 ctx.node_replay_guard.mark_online(&node_id);
             }
-            if is_offline
-                && !ctx.node_replay_guard.is_replay(&node_id)
-                && let Some(registry) = ctx.bootstrap_registry.as_ref()
-            {
-                let subsystem = SubsystemId(format!("node.{}", node_id));
-                // Only demote when currently ready — a node that never
-                // announced NodeReady stays booting already.
-                if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
-                    let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
-                    handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
-                    tracing::info!(
-                        node_id,
-                        "Node offline — demoted node.{node_id} to booting (ADR-059 §7.2)"
-                    );
+            if is_offline && !ctx.node_replay_guard.is_replay(&node_id) {
+                // ADR-059 §7.2: demote the node's readiness so the
+                // aggregated phase drops out of READY. The node
+                // re-announces `NodeReady` on its next (re)connect,
+                // which re-marks it ready; `mark_booting` (not
+                // `mark_failed`) keeps that path open.
+                if let Some(registry) = ctx.bootstrap_registry.as_ref() {
+                    let subsystem = SubsystemId(format!("node.{}", node_id));
+                    // Only demote when currently ready — a node that
+                    // never announced NodeReady stays booting already.
+                    if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
+                        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+                        handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
+                        tracing::info!(
+                            node_id,
+                            "Node offline — demoted node.{node_id} to booting (ADR-059 §7.2)"
+                        );
+                    }
                 }
+                // ADR-055 §6.13.3: arm the permanent-offline cleanup
+                // timer — a node still offline when the grace period
+                // elapses is removed from the fleet records entirely.
+                schedule_node_offline_cleanup(ctx, &node_id);
             }
         }
     } else if topic_matches("acowork/nodes/+/ready", topic) {
@@ -607,12 +660,23 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             return;
         };
         let subsystem = SubsystemId(format!("node.{}", node_id));
-        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
         if payload.is_empty() {
             // Retained snapshot cleared (graceful shutdown or poll-task
             // disconnect clear). Demote to booting; NOT terminal — the
             // Node re-announces NodeReady on reconnect.
             //
+            // Never register here: an empty retained payload must not
+            // resurrect a node subsystem that the removal cleanup
+            // (ADR-055 §6.13.3) just deregistered — the cleanup's own
+            // empty-ready publish would otherwise re-create the ghost
+            // it just removed and pin the aggregated phase in BOOTING.
+            if registry.state(&subsystem).is_none() {
+                tracing::debug!(
+                    node_id,
+                    "Empty NodeReady for unknown subsystem — ignored (no resurrection)"
+                );
+                return;
+            }
             // Replay guard: the empty snapshot is retained, so the
             // broker replays it to a reconnecting Gateway. When it
             // arrives after the node's live re-announcement (status
@@ -625,6 +689,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             if !ctx.node_replay_guard.is_replay(&node_id)
                 && registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready)
             {
+                let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
                 handle.mark_booting(Some(format!("node '{node_id}' cleared NodeReady (offline)")));
                 tracing::info!(
                     node_id,
@@ -637,6 +702,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // or a valid retained replay) — record it as an online signal
         // so subsequent stale replays are suppressed by the guard.
         ctx.node_replay_guard.mark_online(&node_id);
+        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
         tokio::spawn(async move {
@@ -887,6 +953,203 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             }
         });
     }
+}
+
+/// Arm (or re-arm) the permanent-offline cleanup timer for `node_id`
+/// (ADR-055 §6.13.3).
+///
+/// Called on every live offline signal. The timer fires after
+/// [`NODE_OFFLINE_REMOVAL_GRACE`] and only acts when the node is still
+/// offline at expiry — a node that reconnects inside the window
+/// re-announces all of its retained records, so waiting is safe.
+/// Re-arms are idempotent in effect: a duplicated timer finds its
+/// traces already gone and no-ops.
+fn schedule_node_offline_cleanup(ctx: &DispatchContext, node_id: &str) {
+    let ctx_cleanup = ctx.clone();
+    let node_id_owned = node_id.to_string();
+    let registry = ctx.node_registry.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(NODE_OFFLINE_REMOVAL_GRACE).await;
+        if registry.read().await.is_online(&node_id_owned) {
+            tracing::debug!(
+                node_id = %node_id_owned,
+                "Node reconnected within grace period — cleanup skipped"
+            );
+            return;
+        }
+        tracing::warn!(
+            node_id = %node_id_owned,
+            grace_secs = NODE_OFFLINE_REMOVAL_GRACE.as_secs(),
+            "Node offline beyond grace period — removing its records (ADR-055 §6.13.3)"
+        );
+        remove_node_records(&ctx_cleanup, &node_id_owned).await;
+    });
+}
+
+/// Full record cleanup for a node that left the fleet for good
+/// (ADR-055 §6.13.3).
+///
+/// Removes the `node.{id}` readiness subsystem (the orchestrator
+/// recomputes the aggregated phase on the deregister broadcast), the
+/// NodeRegistry record, every instance trace hosted on the node
+/// (install table, running table, agent registry, in-memory cron
+/// scheduler, persisted cron store), and clears the node's retained
+/// broker topics (status / info / ready / lsps / per-instance
+/// installed) so no replay or `nodes discover` scan can resurrect the
+/// ghost.
+///
+/// Convergent: every step first checks for real traces, and when none
+/// remain the call is a pure no-op. The retained-clear publications
+/// echo back through the dispatcher and re-enter this function; the
+/// trace check makes that echo a no-op, so cleanup cannot loop.
+pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
+    let subsystem = SubsystemId(format!("node.{}", node_id));
+
+    // Gather traces first (one read pass) so the no-op decision and
+    // the work list are consistent.
+    let (instances, running_instances, had_subsystem) = {
+        let gw = ctx.state.read().await;
+        let instances: Vec<String> = gw
+            .installed_agents
+            .values()
+            .filter(|i| i.node_id == node_id)
+            .map(|i| i.instance_id.clone())
+            .collect();
+        let running: Vec<String> = gw
+            .running_agents
+            .values()
+            .filter(|r| r.node_id == node_id)
+            .map(|r| r.instance_id.clone())
+            .collect();
+        let had_subsystem = ctx
+            .bootstrap_registry
+            .as_ref()
+            .map(|reg| reg.state(&subsystem).is_some())
+            .unwrap_or(false);
+        (instances, running, had_subsystem)
+    };
+    let had_registry_record = ctx.node_registry.read().await.get(node_id).is_some();
+
+    if instances.is_empty()
+        && running_instances.is_empty()
+        && !had_subsystem
+        && !had_registry_record
+    {
+        tracing::debug!(node_id, "Node cleanup found no traces — no-op");
+        return;
+    }
+
+    tracing::info!(
+        node_id,
+        instances = instances.len(),
+        running = running_instances.len(),
+        had_subsystem,
+        had_registry_record,
+        "Removing node records (ADR-055 §6.13.3)"
+    );
+
+    // 1) Readiness subsystem. `deregister` broadcasts a Deregistered
+    //    update, so the orchestrator recomputes the phase immediately
+    //    without the dead `node.{id}` required subsystem.
+    if let Some(registry) = ctx.bootstrap_registry.as_ref() {
+        registry.deregister(&subsystem);
+    }
+
+    // 2) NodeRegistry record + replay-guard bookkeeping.
+    ctx.node_registry.write().await.remove(node_id);
+    ctx.node_replay_guard.forget(node_id);
+
+    // 3) Per-instance tables (ADR-073 instance keys). Union install +
+    //    running so an entry surviving its install record is covered.
+    let mut all_instances = instances.clone();
+    for id in &running_instances {
+        if !all_instances.contains(id) {
+            all_instances.push(id.clone());
+        }
+    }
+    {
+        let mut gw = ctx.state.write().await;
+        for id in &all_instances {
+            gw.remove_installed(id);
+            gw.remove_running(id);
+            gw.cron_scheduler.unregister_agent(id);
+        }
+    }
+    {
+        let mut agents = ctx.agent_registry.write().await;
+        for id in &all_instances {
+            agents.remove(id);
+        }
+    }
+    // Persisted cron entries (blocking file I/O off the async runtime,
+    // same pattern as the HTTP uninstall path).
+    let cron_store = ctx.state.read().await.cron_store.clone();
+    if let Some(store) = cron_store {
+        for id in &all_instances {
+            let store = store.clone();
+            let instance_id = id.clone();
+            match tokio::task::spawn_blocking(move || store.delete_by_agent(&instance_id)).await {
+                Ok(Ok(removed)) => {
+                    if removed > 0 {
+                        tracing::info!(
+                            node_id,
+                            instance_id = %id,
+                            removed,
+                            "Removed persisted cron entries for removed node"
+                        );
+                    }
+                }
+                Ok(Err(e)) => tracing::warn!(
+                    node_id,
+                    instance_id = %id,
+                    error = %e,
+                    "Failed to remove persisted cron entries"
+                ),
+                Err(e) => tracing::warn!(
+                    node_id,
+                    instance_id = %id,
+                    error = %e,
+                    "Cron store cleanup task failed"
+                ),
+            }
+        }
+    }
+
+    // 4) Clear the retained node topics. The empty payloads echo back
+    //    into the dispatcher and re-enter this function; the trace
+    //    check above turns that echo into a no-op.
+    if let Some(client) = ctx.mqtt_client.as_ref() {
+        let node_topics = [
+            acowork_core::node::node_status_topic(node_id),
+            acowork_core::node::node_info_topic(node_id),
+            acowork_core::node::node_ready_topic(node_id),
+            acowork_core::node::node_lsps_topic(node_id),
+        ];
+        for topic in node_topics {
+            if let Err(e) = client
+                .publish_raw(&topic, Vec::new(), MqttQoS::AtLeastOnce, true)
+                .await
+            {
+                tracing::warn!(node_id, topic, error = %e, "Failed to clear retained node topic");
+            }
+        }
+        for id in &all_instances {
+            let topic = acowork_core::node::node_agent_installed_topic(node_id, id);
+            if let Err(e) = client
+                .publish_raw(&topic, Vec::new(), MqttQoS::AtLeastOnce, true)
+                .await
+            {
+                tracing::warn!(
+                    node_id,
+                    topic,
+                    error = %e,
+                    "Failed to clear retained installed topic"
+                );
+            }
+        }
+    }
+
+    tracing::info!(node_id, "Node records removed");
 }
 
 /// Extract `(node_id, agent_id)` from
@@ -1583,6 +1846,79 @@ mod tests {
             registry.state(&SubsystemId("node.nytb".to_string())),
             Some(crate::bootstrap::SubsystemState::Booting),
             "offline must demote when the node never re-announced after the gateway reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_status_payload_removes_node_records() {
+        // ADR-055 §6.13.3: an empty retained status is a removal
+        // signal — the subsystem is deregistered (the phase recomputes
+        // without the dead required subsystem) and the NodeRegistry
+        // record is dropped.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let mut ctx = ctx_with_registry(registry.clone());
+        let node_reg = crate::mqtt::node_registry::new_shared_registry();
+        node_reg
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/nytb/status", b"online");
+        ctx.node_registry = node_reg.clone();
+
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
+        handle.mark_ready(None);
+
+        handle_plaintext_message("acowork/nodes/nytb/status", &[], &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert_eq!(
+            registry.state(&SubsystemId("node.nytb".to_string())),
+            None,
+            "empty status must deregister the node subsystem"
+        );
+        assert!(node_reg.read().await.get("nytb").is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_ready_does_not_resurrect_removed_subsystem() {
+        // The cleanup's own empty-ready publish must not re-create the
+        // subsystem it just removed (no resurrection): an empty ready
+        // for an unknown subsystem is a no-op.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let ctx = ctx_with_registry(registry.clone());
+
+        handle_plaintext_message("acowork/nodes/ghost/ready", &[], &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            registry.state(&SubsystemId("node.ghost".to_string())),
+            None,
+            "empty ready must not register a subsystem"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_re_announcement_after_removal_rebuilds_subsystem() {
+        // Self-heal guarantee: a node that reconnects after its records
+        // were removed re-announces NodeReady and is registered again
+        // through the normal path.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let ctx = ctx_with_registry(registry.clone());
+        let handle = registry.register("node.nytb", crate::bootstrap::ReadinessKind::Required);
+        handle.mark_ready(None);
+
+        handle_plaintext_message("acowork/nodes/nytb/status", &[], &ctx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(registry.state(&SubsystemId("node.nytb".to_string())), None);
+
+        handle_plaintext_message(
+            "acowork/nodes/nytb/ready",
+            &node_ready_payload("nytb"),
+            &ctx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.state(&SubsystemId("node.nytb".to_string())),
+            Some(crate::bootstrap::SubsystemState::Ready)
         );
     }
 

@@ -1434,16 +1434,25 @@ impl Gateway {
                         return;
                     }
                 };
-                let sa_agent_id = {
+                let (sa_agent_id, sa_node_id) = {
                     let gw = sa_state.read().await;
-                    gw.installed(&sa_instance_id)
+                    let agent_id = gw
+                        .installed(&sa_instance_id)
                         .map(|i| i.agent_id.clone())
-                        .unwrap_or_else(|| SYSTEM_AGENT_ID.to_string())
+                        .unwrap_or_else(|| SYSTEM_AGENT_ID.to_string());
+                    // ADR-055 §6.2: route the start to the node HOSTING
+                    // the System Agent instance (fallback `local` when
+                    // the record predates node aggregation).
+                    let node_id = gw
+                        .installed(&sa_instance_id)
+                        .map(|i| i.node_id.clone())
+                        .unwrap_or_else(acowork_core::node::local_node_id);
+                    (agent_id, node_id)
                 };
 
                 match nc
                     .start_agent(
-                        &acowork_core::node::local_node_id(),
+                        &sa_node_id,
                         &sa_instance_id,
                         &sa_agent_id,
                         false,
@@ -1475,7 +1484,7 @@ impl Gateway {
                                 pid: 0,
                                 started_at: chrono::Utc::now(),
                                 workspace,
-                                node_id: acowork_core::node::local_node_id(),
+                                node_id: sa_node_id.clone(),
                                 connected: false,
                                 ready: false,
                                 dev_mode: false,
@@ -1485,7 +1494,10 @@ impl Gateway {
                                 current_embed_dim: None,
                                 migration: None,
                             });
-                            tracing::info!("Auto-started System Agent via local node");
+                            tracing::info!(
+                                node_id = %sa_node_id,
+                                "Auto-started System Agent via node control plane"
+                            );
                         }
                     }
                     Err(e) => tracing::warn!("Failed to auto-start System Agent: {}", e),

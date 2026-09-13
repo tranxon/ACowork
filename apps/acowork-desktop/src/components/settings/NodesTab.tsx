@@ -79,14 +79,17 @@ export function NodesTab() {
                 <tr key={node.node_id}>
                   <td className="px-3 py-2 font-medium">{node.node_id}</td>
                   <td className="px-3 py-2">
+                    {/* Online/offline badge — same color language as the
+                        sidebar node group header: solid emerald = online,
+                        solid gray = offline. */}
                     <span className="inline-flex items-center gap-1.5">
                       <span
                         className={cn(
                           "h-2 w-2 rounded-full",
-                          node.online ? "bg-[var(--color-accent)]" : "bg-zinc-400",
+                          node.online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
                         )}
                       />
-                      <span className={node.online ? "text-[var(--color-accent)]" : "text-zinc-500"}>
+                      <span className={node.online ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-500"}>
                         {node.online ? t("settings.nodesOnline") : t("settings.nodesOffline")}
                       </span>
                     </span>

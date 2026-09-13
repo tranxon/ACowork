@@ -66,7 +66,9 @@ impl NodeRegistry {
     ///
     /// `topic` must match `acowork/nodes/{node_id}/status`; payload is
     /// "online" / "offline" (UTF-8 text, mirrors the agent status
-    /// topic contract).
+    /// topic contract). An empty payload (retained clear, sent by the
+    /// `nodes remove` CLI) is a removal signal: the node's record is
+    /// dropped for good.
     pub fn update_status_from_mqtt(&mut self, topic: &str, payload: &[u8]) {
         let parts: Vec<&str> = topic.split('/').collect();
         if parts.len() != 4
@@ -94,7 +96,30 @@ impl NodeRegistry {
                 "offline"
             }
         };
+        // Empty payload = the retained status was cleared, i.e. the
+        // node left the fleet for good (ADR-055 §6.13.3, `nodes
+        // remove` CLI). Drop the record: the clear is a removal
+        // signal and must never resurrect a ghost entry.
+        if payload_str.is_empty() {
+            let removed = self.nodes.remove(node_id).is_some();
+            tracing::info!(
+                node_id,
+                removed,
+                "Node status retained cleared — registry record dropped"
+            );
+            return;
+        }
+
         let online = payload_str == "online";
+
+        // An `offline` for an unknown node carries no usable state
+        // (e.g. a stale LWT replay): do not materialise a record for
+        // it — only `online` / `info` / `lsps` messages may create
+        // entries.
+        if !online && !self.nodes.contains_key(node_id) {
+            tracing::debug!(node_id, "Offline status for unknown node — ignored");
+            return;
+        }
 
         let now = Instant::now();
         let entry = self.nodes.entry(node_id.to_string()).or_insert_with(|| {
@@ -134,6 +159,19 @@ impl NodeRegistry {
             return;
         }
         let node_id = parts[2].to_string();
+
+        // Empty retained payload = the info topic was cleared (node
+        // removed / left). Clear the snapshot on an existing record
+        // but never create one from a cleared topic.
+        if payload.is_empty() {
+            if let Some(entry) = self.nodes.get_mut(&node_id) {
+                entry.info = None;
+                entry.machine_uid = None;
+                entry.last_updated = Instant::now();
+                tracing::debug!(node_id = %node_id, "Node info cleared (retained empty)");
+            }
+            return;
+        }
 
         let envelope = match DataEnvelope::decode(payload) {
             Ok(env) => env,
@@ -198,27 +236,16 @@ impl NodeRegistry {
         }
         let node_id = parts[2].to_string();
 
-        let now = Instant::now();
-        let entry = self.nodes.entry(node_id.clone()).or_insert_with(|| {
-            tracing::info!(node_id = %node_id, "Node discovered via lsps topic");
-            NodeInfoState {
-                node_id: node_id.clone(),
-                online: false,
-                info: None,
-                lsp_endpoint: None,
-                machine_uid: None,
-                node_token: None,
-                last_updated: now,
-                online_since: None,
-            }
-        });
-
         // Empty retained payload = the node cleared its lsps state
         // (shutdown / leave) — the relay is no longer available.
+        // Clear the endpoint on an existing record; never create a
+        // record from a cleared topic.
         if payload.is_empty() {
-            entry.lsp_endpoint = None;
-            entry.last_updated = now;
-            tracing::debug!(node_id = %node_id, "Node lsps cleared (retained empty)");
+            if let Some(entry) = self.nodes.get_mut(&node_id) {
+                entry.lsp_endpoint = None;
+                entry.last_updated = Instant::now();
+                tracing::debug!(node_id = %node_id, "Node lsps cleared (retained empty)");
+            }
             return;
         }
 
@@ -237,11 +264,27 @@ impl NodeRegistry {
             }
         };
 
-        entry.lsp_endpoint = if lsps.ready && !lsps.endpoint.is_empty() {
+        let endpoint = if lsps.ready && !lsps.endpoint.is_empty() {
             Some(lsps.endpoint)
         } else {
             None
         };
+
+        let now = Instant::now();
+        let entry = self.nodes.entry(node_id.clone()).or_insert_with(|| {
+            tracing::info!(node_id = %node_id, "Node discovered via lsps topic");
+            NodeInfoState {
+                node_id: node_id.clone(),
+                online: false,
+                info: None,
+                lsp_endpoint: None,
+                machine_uid: None,
+                node_token: None,
+                last_updated: now,
+                online_since: None,
+            }
+        });
+        entry.lsp_endpoint = endpoint;
         entry.last_updated = now;
         tracing::debug!(
             node_id = %node_id,
@@ -272,8 +315,8 @@ impl NodeRegistry {
         self.nodes.values().filter(|n| n.online).count()
     }
 
-    /// Remove a node record (e.g. `nodes remove` CLI, Phase 2c).
-    #[allow(dead_code)]
+    /// Remove a node record (e.g. `nodes remove` CLI, Phase 2c, or
+    /// the permanent-offline cleanup in `dispatch`).
     pub fn remove(&mut self, node_id: &str) {
         self.nodes.remove(node_id);
     }
@@ -349,6 +392,30 @@ mod tests {
     }
 
     #[test]
+    fn empty_status_payload_drops_record() {
+        let mut registry = NodeRegistry::new();
+        registry.update_status_from_mqtt("acowork/nodes/local/status", b"online");
+        assert!(registry.get("local").is_some());
+
+        // Retained clear (nodes remove) = removal signal.
+        registry.update_status_from_mqtt("acowork/nodes/local/status", b"");
+        assert!(registry.get("local").is_none());
+        assert!(registry.list_nodes().is_empty());
+
+        // Clearing an unknown node is a no-op.
+        registry.update_status_from_mqtt("acowork/nodes/ghost/status", b"");
+        assert!(registry.list_nodes().is_empty());
+    }
+
+    #[test]
+    fn offline_status_for_unknown_node_creates_no_record() {
+        let mut registry = NodeRegistry::new();
+        registry.update_status_from_mqtt("acowork/nodes/ghost/status", b"offline");
+        assert!(registry.get("ghost").is_none());
+        assert!(registry.list_nodes().is_empty());
+    }
+
+    #[test]
     fn info_topic_populates_metadata() {
         let mut registry = NodeRegistry::new();
         registry.update_info_from_mqtt(
@@ -360,6 +427,23 @@ mod tests {
         assert_eq!(node.info.as_ref().unwrap().protocol_version, 1);
         // Info alone does not imply online.
         assert!(!registry.is_online("gpu-1"));
+    }
+
+    #[test]
+    fn empty_info_payload_clears_without_creating_record() {
+        let mut registry = NodeRegistry::new();
+        registry.update_info_from_mqtt(
+            "acowork/nodes/gpu-1/info",
+            &info_envelope("gpu-1", "uid-1234"),
+        );
+        registry.update_info_from_mqtt("acowork/nodes/gpu-1/info", &[]);
+        let node = registry.get("gpu-1").unwrap();
+        assert!(node.info.is_none());
+        assert!(node.machine_uid.is_none());
+
+        // Unknown node stays unknown.
+        registry.update_info_from_mqtt("acowork/nodes/ghost/info", &[]);
+        assert!(registry.get("ghost").is_none());
     }
 
     #[test]
@@ -440,6 +524,14 @@ mod tests {
         );
         registry.update_lsps_from_mqtt("acowork/nodes/gpu-1/lsps", &[]);
         assert!(registry.get("gpu-1").unwrap().lsp_endpoint.is_none());
+    }
+
+    #[test]
+    fn empty_lsps_payload_for_unknown_node_creates_no_record() {
+        let mut registry = NodeRegistry::new();
+        registry.update_lsps_from_mqtt("acowork/nodes/ghost/lsps", &[]);
+        assert!(registry.get("ghost").is_none());
+        assert!(registry.list_nodes().is_empty());
     }
 
     #[test]
