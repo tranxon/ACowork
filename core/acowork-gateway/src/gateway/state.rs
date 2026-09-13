@@ -42,10 +42,11 @@ pub struct AgentInfo {
     pub name: String,
     pub install_path: String,
     pub manifest: acowork_core::AgentManifest,
-    /// Which node hosts this installed agent (ADR-055 §6.5).
-    /// `"local"` for the Gateway's own machine; a remote node_id once
-    /// the installed-package inventory is aggregated from node retained
-    /// info (Phase 2b.3 / Phase 3).
+    /// Which node hosts this installed agent (ADR-055 §6.5) — the node's
+    /// routing key, i.e. its UUID since ADR-075. Populated from the node's
+    /// retained installed-package inventory, so the Gateway's own-machine
+    /// node carries its UUID here too, NOT the `"local"` bookkeeping
+    /// anchor reserved for Gateway-direct agents.
     pub node_id: String,
 }
 
