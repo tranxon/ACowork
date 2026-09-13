@@ -63,7 +63,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $CoreDir = Join-Path $ProjectRoot "core"
-$Bin = Join-Path $CoreDir "target\$Profile\acowork-node.exe"
+$Bin = Join-Path $ProjectRoot "target\$Profile\acowork-node.exe"
 
 # Node spawns its agent Runtimes and LSP sidecars from sibling binaries
 # (current_exe().parent()), so all three must live in the same target dir:
