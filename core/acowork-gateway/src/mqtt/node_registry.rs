@@ -36,9 +36,13 @@ pub struct NodeInfoState {
     /// `Some(endpoint)` while the node's relay is ready, `None` while
     /// unavailable or before the first message.
     pub lsp_endpoint: Option<String>,
-    /// Machine fingerprint from the info snapshot — Gateway-side
-    /// "same name, different machine" conflict detection (§6.12).
-    pub machine_uid: Option<String>,
+    /// Display name from the info snapshot (ADR-075 D2) — user-facing
+    /// only, never a routing key.
+    pub node_name: Option<String>,
+    /// Whether the Node reports being spawned by the Gateway
+    /// (`gateway_managed` in NodeInfo, ADR-075 D5). The Gateway uses
+    /// it to recognize its own-machine node.
+    pub gateway_managed: bool,
     /// Long-lived per-node credential issued at enroll time (ADR-055
     /// §6.12 / Phase 5a). Persisted in NodeTokenStore; this slot is
     /// the in-memory mirror so HTTP handlers (X-ACowork-Node-Token
@@ -129,7 +133,8 @@ impl NodeRegistry {
                 online: false,
                 info: None,
                 lsp_endpoint: None,
-                machine_uid: None,
+                node_name: None,
+                gateway_managed: false,
                 node_token: None,
                 last_updated: now,
                 online_since: None,
@@ -166,7 +171,8 @@ impl NodeRegistry {
         if payload.is_empty() {
             if let Some(entry) = self.nodes.get_mut(&node_id) {
                 entry.info = None;
-                entry.machine_uid = None;
+                entry.node_name = None;
+                entry.gateway_managed = false;
                 entry.last_updated = Instant::now();
                 tracing::debug!(node_id = %node_id, "Node info cleared (retained empty)");
             }
@@ -201,7 +207,8 @@ impl NodeRegistry {
         }
 
         let now = Instant::now();
-        let machine_uid = Some(info.machine_uid.clone());
+        let node_name = (!info.node_name.is_empty()).then(|| info.node_name.clone());
+        let gateway_managed = info.gateway_managed;
         let entry = self.nodes.entry(node_id.clone()).or_insert_with(|| {
             tracing::info!(node_id = %node_id, "Node discovered via info topic");
             NodeInfoState {
@@ -209,14 +216,16 @@ impl NodeRegistry {
                 online: false,
                 info: None,
                 lsp_endpoint: None,
-                machine_uid: None,
+                node_name: None,
+                gateway_managed: false,
                 node_token: None,
                 last_updated: now,
                 online_since: None,
             }
         });
         entry.info = Some(info);
-        entry.machine_uid = machine_uid;
+        entry.node_name = node_name;
+        entry.gateway_managed = gateway_managed;
         entry.last_updated = now;
     }
 
@@ -278,7 +287,8 @@ impl NodeRegistry {
                 online: false,
                 info: None,
                 lsp_endpoint: None,
-                machine_uid: None,
+                node_name: None,
+                gateway_managed: false,
                 node_token: None,
                 last_updated: now,
                 online_since: None,
@@ -333,7 +343,8 @@ impl NodeRegistry {
                 online: false,
                 info: None,
                 lsp_endpoint: None,
-                machine_uid: None,
+                node_name: None,
+                gateway_managed: false,
                 node_token: None,
                 last_updated: now,
                 online_since: None,
@@ -352,14 +363,47 @@ pub fn new_shared_registry() -> SharedNodeRegistry {
     Arc::new(RwLock::new(NodeRegistry::new()))
 }
 
+/// The node_id of the Gateway's own-machine node (ADR-075 D5).
+///
+/// NOT a pure function anymore: `node_id` is a UUID minted by the Node
+/// at first start, so the Gateway cannot derive it from the hostname.
+/// It queries the registry for a node that is `gateway_managed == true`
+/// (persisted at spawn, reported on every NodeInfo) and currently
+/// online. Multiple hits → the newest `last_updated` wins (WARN);
+/// none → `None`, and callers must fail loud ("本机节点未上线") instead
+/// of silently targeting a remote node.
+pub async fn local_node_id(registry: &SharedNodeRegistry) -> Option<String> {
+    let reg = registry.read().await;
+    let mut candidates: Vec<&NodeInfoState> = reg
+        .nodes
+        .values()
+        .filter(|n| n.gateway_managed && n.online)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|n| n.last_updated);
+    let best = candidates.pop().expect("non-empty");
+    if !candidates.is_empty() {
+        let others: Vec<&str> = candidates.iter().map(|n| n.node_id.as_str()).collect();
+        tracing::warn!(
+            best = %best.node_id,
+            others = ?others,
+            "Multiple gateway-managed nodes online — using the most recently updated"
+        );
+    }
+    Some(best.node_id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn info_envelope(node_id: &str, machine_uid: &str) -> Vec<u8> {
+    fn info_envelope(node_id: &str, node_name: &str, gateway_managed: bool) -> Vec<u8> {
         let info = NodeInfo {
             node_id: node_id.to_string(),
-            machine_uid: machine_uid.to_string(),
+            node_name: node_name.to_string(),
+            gateway_managed,
             hostname: "h".to_string(),
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
@@ -420,10 +464,11 @@ mod tests {
         let mut registry = NodeRegistry::new();
         registry.update_info_from_mqtt(
             "acowork/nodes/gpu-1/info",
-            &info_envelope("gpu-1", "uid-1234"),
+            &info_envelope("gpu-1", "gpu-box", true),
         );
         let node = registry.get("gpu-1").unwrap();
-        assert_eq!(node.machine_uid.as_deref(), Some("uid-1234"));
+        assert_eq!(node.node_name.as_deref(), Some("gpu-box"));
+        assert!(node.gateway_managed);
         assert_eq!(node.info.as_ref().unwrap().protocol_version, 1);
         // Info alone does not imply online.
         assert!(!registry.is_online("gpu-1"));
@@ -434,12 +479,13 @@ mod tests {
         let mut registry = NodeRegistry::new();
         registry.update_info_from_mqtt(
             "acowork/nodes/gpu-1/info",
-            &info_envelope("gpu-1", "uid-1234"),
+            &info_envelope("gpu-1", "gpu-box", true),
         );
         registry.update_info_from_mqtt("acowork/nodes/gpu-1/info", &[]);
         let node = registry.get("gpu-1").unwrap();
         assert!(node.info.is_none());
-        assert!(node.machine_uid.is_none());
+        assert!(node.node_name.is_none());
+        assert!(!node.gateway_managed);
 
         // Unknown node stays unknown.
         registry.update_info_from_mqtt("acowork/nodes/ghost/info", &[]);
@@ -451,7 +497,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         registry.update_info_from_mqtt(
             "acowork/nodes/other/info",
-            &info_envelope("gpu-1", "uid-1234"),
+            &info_envelope("gpu-1", "gpu-box", true),
         );
         // The info is untrustworthy (topic says "other", payload says
         // "gpu-1") — no entry is created at all; the status topic will
@@ -540,5 +586,67 @@ mod tests {
         registry.update_lsps_from_mqtt("acowork/global/lsps", &lsps_envelope("x", true));
         registry.update_lsps_from_mqtt("acowork/nodes/a/b/lsps", &lsps_envelope("x", true));
         assert!(registry.list_nodes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_node_id_resolves_gateway_managed_online_node() {
+        let registry = new_shared_registry();
+        assert_eq!(local_node_id(&registry).await, None, "no node → None");
+
+        // Online but NOT gateway-managed → still None.
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/remote-1/status", b"online");
+        registry
+            .write()
+            .await
+            .update_info_from_mqtt(
+                "acowork/nodes/remote-1/info",
+                &info_envelope("remote-1", "remote-box", false),
+            );
+        assert_eq!(local_node_id(&registry).await, None);
+
+        // Online + gateway_managed → resolved.
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/local-1/status", b"online");
+        registry
+            .write()
+            .await
+            .update_info_from_mqtt(
+                "acowork/nodes/local-1/info",
+                &info_envelope("local-1", "local-box", true),
+            );
+        assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-1"));
+
+        // Gateway-managed but OFFLINE → None again.
+        registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/local-1/status", b"offline");
+        assert_eq!(local_node_id(&registry).await, None);
+    }
+
+    #[tokio::test]
+    async fn local_node_id_prefers_most_recently_updated_on_multiple_hits() {
+        let registry = new_shared_registry();
+        for id in ["local-1", "local-2"] {
+            registry
+                .write()
+                .await
+                .update_status_from_mqtt(&format!("acowork/nodes/{id}/status"), b"online");
+            registry
+                .write()
+                .await
+                .update_info_from_mqtt(
+                    &format!("acowork/nodes/{id}/info"),
+                    &info_envelope(id, &format!("{id}-box"), true),
+                );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // local-2 was updated last → it wins.
+        assert_eq!(local_node_id(&registry).await.as_deref(), Some("local-2"));
     }
 }

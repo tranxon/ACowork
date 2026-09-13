@@ -177,7 +177,10 @@ pub async fn install_locally(
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
-    let target_node = acowork_core::node::local_node_id();
+    // ADR-075 D5/Q2: resolve the local node's UUID from the registry and
+    // fail loud when it is not online (the control topic is per-node —
+    // "local" alone would publish into a topic nobody subscribes to).
+    let target_node = crate::http::agents::resolve_local_node_id(&state).await?;
     let event = node_control
         .install_agent(NodeInstallDispatch {
             node_id: &target_node,

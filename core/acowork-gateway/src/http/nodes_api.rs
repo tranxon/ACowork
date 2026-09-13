@@ -33,7 +33,8 @@ use crate::http::routes::AppState;
 /// serialization regression test below).
 #[derive(Debug, Serialize)]
 pub struct NodeResponse {
-    /// Logical node id (`local` for the Gateway's own node).
+    /// Logical node id (UUID v4 routing key, ADR-075 D1; the `"local"`
+    /// literal only ever appears on Gateway-direct agent records).
     pub node_id: String,
     /// Whether the node is currently online (status topic / LWT).
     pub online: bool,
@@ -41,9 +42,11 @@ pub struct NodeResponse {
     /// the node has never been observed online).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online_since: Option<String>,
-    /// Machine fingerprint (UUID v4) from the info snapshot.
+    /// Display name (slug, renameable, ADR-075 D2) from the info snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub machine_uid: Option<String>,
+    pub node_name: Option<String>,
+    /// True when this node was spawned by the Gateway (ADR-075 D5).
+    pub gateway_managed: bool,
     /// Node hostname (info snapshot).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
@@ -92,7 +95,8 @@ pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<NodeResponse>
                 node_id: n.node_id,
                 online: n.online,
                 online_since: n.online_since.map(|t| t.to_rfc3339()),
-                machine_uid: info.map(|i| i.machine_uid.clone()),
+                node_name: n.node_name.clone(),
+                gateway_managed: n.gateway_managed,
                 hostname: info.map(|i| i.hostname.clone()),
                 os: info.map(|i| i.os.clone()),
                 arch: info.map(|i| i.arch.clone()),
@@ -146,7 +150,6 @@ mod tests {
     fn info(node_id: &str) -> NodeInfo {
         NodeInfo {
             node_id: node_id.to_string(),
-            machine_uid: "uid-1".to_string(),
             hostname: "gpu-box".to_string(),
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
@@ -156,6 +159,8 @@ mod tests {
             max_agents: 16,
             agent_count: 2,
             http_endpoint: "http://10.0.0.2:19900".to_string(),
+            node_name: "gpu-1".to_string(),
+            gateway_managed: true,
         }
     }
 
@@ -236,7 +241,8 @@ mod tests {
             node_id: "nicholas-pc".to_string(),
             online: true,
             online_since: Some("2026-09-13T05:10:21+00:00".to_string()),
-            machine_uid: Some("uid-1".to_string()),
+            node_name: Some("nicholas-pc".to_string()),
+            gateway_managed: true,
             hostname: Some("NICHOLAS-PC".to_string()),
             os: Some("windows".to_string()),
             arch: Some("x86_64".to_string()),
@@ -255,7 +261,8 @@ mod tests {
             "node_id",
             "online",
             "online_since",
-            "machine_uid",
+            "node_name",
+            "gateway_managed",
             "hostname",
             "os",
             "arch",
@@ -271,6 +278,8 @@ mod tests {
         for key in [
             "nodeId",
             "onlineSince",
+            "nodeName",
+            "gatewayManaged",
             "machineUid",
             "nodeVersion",
             "protocolVersion",

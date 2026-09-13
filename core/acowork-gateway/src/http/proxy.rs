@@ -3141,10 +3141,16 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tokio::sync::RwLock as TokioRwLock;
 
+        // Unique per call: several tests share an `agent_id`, so a
+        // pid+agent_id key makes them race on `remove_dir_all` when they
+        // run in parallel (observed as a spurious FAILED).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "acowork-test-health-proxy-{}-{}",
+            "acowork-test-health-proxy-{}-{}-{}",
             std::process::id(),
-            agent_id
+            agent_id,
+            seq
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -260,13 +260,13 @@ def decode_session_message(buf):
 
 def decode_node_enroll(buf):
     f = _parse_fields(buf)
-    return {"node_id": _field_str(f, 1), "machine_uid": _field_str(f, 2),
+    return {"node_id": _field_str(f, 1),
             "enrollment_token": _field_str(f, 8)}
 
 
 def decode_node_enroll_result(buf):
     f = _parse_fields(buf)
-    return {"node_id": _field_str(f, 1), "machine_uid": _field_str(f, 2),
+    return {"node_id": _field_str(f, 1),
             "node_token": _field_str(f, 3), "status": _field_str(f, 4),
             "message": _field_str(f, 5)}
 
@@ -349,7 +349,8 @@ class Gateway:
         log("INFO", f"Starting Gateway (http :{self.http_port}, mqtt :{self.mqtt_port}, "
                     f"auth={self.auth_enabled}): {self.bin}")
         # ACOWORK_NODE_HOME: the Gateway spawns its local node agent
-        # (`--name local`) WITHOUT --home, so the node would otherwise
+        # (`--gateway-managed`, no explicit --name) WITHOUT --home, so the
+        # node would otherwise
         # use the shared default ~/.acowork/acowork-node. A stale
         # identity.json there (left by an earlier auth-enabled run)
         # makes the node proxy demand X-ACowork-Node-Token even when
@@ -604,6 +605,23 @@ def ensure_agent_installed(http, base):
         time.sleep(1)
     fail(f"agent install: not visible after {TIMEOUT}s (HTTP {r.status_code})")
     return False
+
+
+def wait_identity_node_id(node_home, timeout=TIMEOUT):
+    """Wait until identity.json carries a node_id (UUID)."""
+    path = Path(node_home) / "identity.json"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                nid = data.get("node_id", "")
+                if nid:
+                    return nid
+            except Exception:
+                pass
+        time.sleep(0.3)
+    return None
 
 
 def wait_identity_token(node_home, timeout=TIMEOUT):
@@ -1662,8 +1680,12 @@ def test_tc_auth_02_enroll_reconnect(node_bin, auth_gw, mqtt_port, token, node_h
     if not observer.connect(port=mqtt_port, timeout=8):
         fail(f"observer CONNECT failed (connack={observer.connack_rc}) — http_token from {auth_gw.home}/data")
         return None
-    for t in (f"acowork/nodes/{NODE_ID}/enroll", f"acowork/nodes/{NODE_ID}/enroll_result",
-              f"acowork/nodes/{NODE_ID}/status"):
+    # node_id is a UUID generated at first start and persisted to
+    # identity.json — the enroll/status topics use that UUID, not --name.
+    # Subscribe to the wildcard first (so no message is missed while the
+    # UUID is being discovered), then read the UUID from identity.json.
+    for t in ("acowork/nodes/+/enroll", "acowork/nodes/+/enroll_result",
+              "acowork/nodes/+/status"):
         observer.subscribe(t, qos=1)
     time.sleep(0.3)
 
@@ -1677,23 +1699,28 @@ def test_tc_auth_02_enroll_reconnect(node_bin, auth_gw, mqtt_port, token, node_h
 
     child = spawn_node(["--token", token])
     try:
-        payload = observer.wait_for(f"acowork/nodes/{NODE_ID}/enroll", timeout=20)
+        node_id = wait_identity_node_id(node_home, timeout=20)
+        if not node_id:
+            fail("identity.json node_id (UUID) never appeared")
+            return None
+        ok(f"node identity: node_id={node_id[:8]}… node_name={NODE_ID}")
+        enroll_topic = f"acowork/nodes/{node_id}/enroll"
+        result_topic = f"acowork/nodes/{node_id}/enroll_result"
+        status_topic = f"acowork/nodes/{node_id}/status"
+        payload = observer.wait_for(enroll_topic, timeout=20)
         if not payload:
             fail("no enroll request received")
             return None
         enroll = decode_node_enroll(decode_envelope_payload(payload)[1])
         # The enrollment token is consumed at the MQTT CONNECT layer (the
         # broker's `node:{id}` rule) and is NOT echoed back inside the
-        # enroll_request body — only node_id + machine_uid travel there.
-        if enroll.get("node_id") != NODE_ID:
+        # enroll_request body — only node_id (UUID) travels there.
+        if enroll.get("node_id") != node_id:
             fail(f"enroll payload node_id mismatch: {enroll.get('node_id', '')!r}")
             return None
-        if not enroll.get("machine_uid"):
-            fail("enroll payload missing machine_uid")
-            return None
-        ok(f"enroll received: node={enroll['node_id']} machine_uid={enroll['machine_uid'][:8]}…")
+        ok(f"enroll received: node_id={enroll['node_id'][:8]}…")
 
-        payload = observer.wait_for(f"acowork/nodes/{NODE_ID}/enroll_result", timeout=20)
+        payload = observer.wait_for(result_topic, timeout=20)
         if not payload:
             fail("no enroll_result from Gateway dispatch")
             return None
@@ -1714,7 +1741,7 @@ def test_tc_auth_02_enroll_reconnect(node_bin, auth_gw, mqtt_port, token, node_h
         child.kill()
         child.wait()
         child2 = spawn_node([])
-        status = observer.wait_for(f"acowork/nodes/{NODE_ID}/status", timeout=20,
+        status = observer.wait_for(status_topic, timeout=20,
                                    predicate=lambda p: b"online" in p)
         if status:
             ok("restart reconnected with node_token (status=online)")
@@ -1796,11 +1823,13 @@ def run_recovery_suite(gw_bin, node_bin, http):
     # Pre-seed the node home (the Gateway spawns its local node against
     # `ACOWORK_NODE_HOME = <home>/node`) with a stale enrolled identity.
     stale_token = "a" * 64
+    stale_node_id = str(uuid.uuid4())
     node_dir = Path(gw.home) / "node"
     node_dir.mkdir(parents=True, exist_ok=True)
     (node_dir / "identity.json").write_text(json.dumps({
-        "node_id": "local",
-        "machine_uid": str(uuid.uuid4()),
+        "node_id": stale_node_id,
+        "node_name": "smoke-node",
+        "gateway_managed": True,
         "node_token": stale_token,
         "enrollment": "enrolled",
         "created_at": "2026-08-01T00:00:00Z",
@@ -1816,7 +1845,7 @@ def run_recovery_suite(gw_bin, node_bin, http):
         while time.time() < deadline:
             if store_path.exists():
                 try:
-                    store_token = json.loads(store_path.read_text()).get("local", {}).get("token")
+                    store_token = json.loads(store_path.read_text()).get(stale_node_id, {}).get("token")
                 except Exception:
                     pass
                 if store_token:

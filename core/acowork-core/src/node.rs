@@ -12,7 +12,7 @@
 /// Bump when the `acowork/nodes/#` contract changes incompatibly.
 /// The Gateway compares against [`NODE_MIN_SUPPORTED_PROTOCOL_VERSION`]
 /// before issuing install/start commands (ADR-055 §6.9).
-pub const NODE_PROTOCOL_VERSION: u32 = 1;
+pub const NODE_PROTOCOL_VERSION: u32 = 2;
 
 /// Minimum node protocol version the Gateway accepts commands to.
 pub const NODE_MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
@@ -35,8 +35,15 @@ pub const NODE_HTTP_PORT_BASE: u16 = 19901;
 /// `gateway:publisher` convention in the protocol docs §8.5).
 pub const NODE_CLIENT_ID_PREFIX: &str = "node:";
 
-/// Maximum length of a node_id slug (ADR-055 §6.12).
-const NODE_ID_MAX_LEN: usize = 32;
+/// Anchor node_id for Gateway-directly-managed agents (ADR-075 D6):
+/// the Gateway's own machine is identified by the literal `"local"` in
+/// `installed_agents.node_id` / `running_agents.node_id` grouping keys
+/// and dispatch fallbacks — it is NEVER a broker-routable node id (the
+/// real local node id is a UUID resolved from the node registry).
+pub const LOCAL_NODE_ID: &str = "local";
+
+/// Maximum length of a node_name slug (ADR-075 D2).
+const NODE_NAME_MAX_LEN: usize = 32;
 
 /// Build the MQTT client_id for a Node Agent.
 pub fn node_client_id(node_id: &str) -> String {
@@ -130,29 +137,46 @@ pub fn node_enroll_result_topic(node_id: &str) -> String {
     format!("acowork/nodes/{node_id}/enroll_result")
 }
 
-/// Validate a node_id slug: `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
-/// (lowercase letters / digits / hyphens, 2–32 chars, no leading or
-/// trailing hyphen).
-pub fn node_id_is_valid(node_id: &str) -> bool {
-    if node_id.len() < 2 || node_id.len() > NODE_ID_MAX_LEN {
+/// Validate a node_name slug (ADR-075 D2):
+/// `^[a-z0-9](?:[a-z0-9]-?)*[a-z0-9]$`, 2–32 chars, no consecutive `--`,
+/// and `"local"` is a reserved word (rejected — it is the Gateway-direct
+/// agent placeholder and must not collide).
+pub fn node_name_is_valid(node_name: &str) -> bool {
+    if node_name.len() < 2
+        || node_name.len() > NODE_NAME_MAX_LEN
+        || node_name == "local"
+    {
         return false;
     }
-    let bytes = node_id.as_bytes();
-    let is_slug_char =
-        |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
-    if !bytes.iter().all(|&b| is_slug_char(b)) {
+    let bytes = node_name.as_bytes();
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    // First and last char must be alphanumeric (regex anchors).
+    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
         return false;
     }
-    // No leading/trailing hyphen (len >= 2 guarantees both ends exist).
-    bytes[0] != b'-' && bytes[bytes.len() - 1] != b'-'
+    let mut prev_hyphen = false;
+    for &b in &bytes[1..bytes.len() - 1] {
+        if b == b'-' {
+            if prev_hyphen {
+                return false; // consecutive `--` is not a valid slug
+            }
+            prev_hyphen = true;
+        } else if is_alnum(b) {
+            prev_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
-/// Normalize a hostname into a valid node_id slug: lowercase, map every
+/// Normalize a hostname into a valid node_name slug: lowercase, map every
 /// character outside `[a-z0-9]` to `-`, collapse nothing, truncate to
 /// 32 chars, trim leading/trailing hyphens. Falls back to `"node"`
 /// when the result would be empty or a single char (e.g. hosts named
-/// "W" or "___").
-pub fn node_id_from_hostname(hostname: &str) -> String {
+/// "W" or "___") or the reserved `"local"` (ADR-075 D2 — a host named
+/// "local" cannot name a Node).
+pub fn node_name_from_hostname(hostname: &str) -> String {
     let slug: String = hostname
         .chars()
         .map(|c| {
@@ -162,10 +186,10 @@ pub fn node_id_from_hostname(hostname: &str) -> String {
                 '-'
             }
         })
-        .take(NODE_ID_MAX_LEN)
+        .take(NODE_NAME_MAX_LEN)
         .collect();
     let trimmed = slug.trim_matches('-');
-    if node_id_is_valid(trimmed) {
+    if node_name_is_valid(trimmed) {
         trimmed.to_string()
     } else {
         "node".to_string()
@@ -196,19 +220,6 @@ pub fn system_hostname() -> String {
         }
     }
     "localhost".to_string()
-}
-
-/// Node id of the Gateway's own-machine Node Agent: the machine
-/// hostname normalized into a slug (ADR-055 §6.11).
-///
-/// Unified naming rule: every Node Agent — whether spawned by the
-/// Gateway or started manually on a remote machine — defaults to its
-/// machine's hostname slug; there is no reserved `local` name anymore.
-/// The Gateway computes this from its own hostname, which equals the
-/// name the Node derives at first start (`--name` absent), so registry
-/// lookups / topics / orphan-cleanup all agree.
-pub fn local_node_id() -> String {
-    node_id_from_hostname(&system_hostname())
 }
 
 /// Whether a node's reported protocol version can receive commands
@@ -262,37 +273,40 @@ mod tests {
     }
 
     #[test]
-    fn node_id_validation_accepts_valid_slugs() {
-        assert!(node_id_is_valid("local"));
-        assert!(node_id_is_valid("gpu-server"));
-        assert!(node_id_is_valid("a1"));
-        assert!(node_id_is_valid(&"a".repeat(32)));
+    fn node_name_validation_accepts_valid_slugs() {
+        assert!(node_name_is_valid("gpu-server"));
+        assert!(node_name_is_valid("a1"));
+        assert!(node_name_is_valid("a-b-c")); // single hyphens are fine
+        assert!(node_name_is_valid(&"a".repeat(32)));
     }
 
     #[test]
-    fn node_id_validation_rejects_invalid_slugs() {
-        assert!(!node_id_is_valid("a")); // too short
-        assert!(!node_id_is_valid(&"a".repeat(33))); // too long
-        assert!(!node_id_is_valid("-abc"));
-        assert!(!node_id_is_valid("abc-"));
-        assert!(!node_id_is_valid("Abc")); // uppercase
-        assert!(!node_id_is_valid("ab_c")); // underscore
-        assert!(!node_id_is_valid("ab.c")); // dot
-        assert!(!node_id_is_valid("ab c")); // space
-        assert!(!node_id_is_valid("")); // empty
+    fn node_name_validation_rejects_invalid_slugs() {
+        assert!(!node_name_is_valid("a")); // too short
+        assert!(!node_name_is_valid(&"a".repeat(33))); // too long
+        assert!(!node_name_is_valid("-abc"));
+        assert!(!node_name_is_valid("abc-"));
+        assert!(!node_name_is_valid("Abc")); // uppercase
+        assert!(!node_name_is_valid("ab_c")); // underscore
+        assert!(!node_name_is_valid("ab.c")); // dot
+        assert!(!node_name_is_valid("ab c")); // space
+        assert!(!node_name_is_valid("")); // empty
+        assert!(!node_name_is_valid("a--b")); // consecutive hyphens
+        assert!(!node_name_is_valid("local")); // reserved word (ADR-075 D2)
     }
 
     #[test]
     fn hostname_normalization() {
-        assert_eq!(node_id_from_hostname("NICHOLAS-PC"), "nicholas-pc");
-        assert_eq!(node_id_from_hostname("My_Server.01"), "my-server-01");
-        assert_eq!(node_id_from_hostname("--"), "node"); // all-invalid
-        assert_eq!(node_id_from_hostname("W"), "node"); // single char
+        assert_eq!(node_name_from_hostname("NICHOLAS-PC"), "nicholas-pc");
+        assert_eq!(node_name_from_hostname("My_Server.01"), "my-server-01");
+        assert_eq!(node_name_from_hostname("--"), "node"); // all-invalid
+        assert_eq!(node_name_from_hostname("W"), "node"); // single char
+        assert_eq!(node_name_from_hostname("local"), "node"); // reserved word
         // 40-char hostname truncates to 32 valid slug chars
         let long = "abcdefghij".repeat(4); // 40 chars
-        let slug = node_id_from_hostname(&long);
+        let slug = node_name_from_hostname(&long);
         assert_eq!(slug.len(), 32);
-        assert!(node_id_is_valid(&slug));
+        assert!(node_name_is_valid(&slug));
     }
 
     #[test]
@@ -305,16 +319,6 @@ mod tests {
     #[test]
     fn system_hostname_is_non_empty() {
         assert!(!system_hostname().is_empty());
-    }
-
-    #[test]
-    fn local_node_id_is_valid_hostname_slug() {
-        let id = local_node_id();
-        assert!(node_id_is_valid(&id), "local_node_id() = '{id}' must be a valid slug");
-        // The Gateway and the Node must derive the SAME id from the
-        // same machine — the identity created at first start reuses
-        // this exact function.
-        assert_eq!(id, node_id_from_hostname(&system_hostname()));
     }
 }
 

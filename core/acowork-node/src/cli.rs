@@ -52,8 +52,9 @@ pub enum Command {
         /// machine). Prefer `--addr HOST:PORT` for explicit control.
         #[arg(long, env = "ACOWORK_NODE_PROXY_PORT")]
         proxy_port: Option<u16>,
-        /// Node name (slug). Default: derived from the hostname at
-        /// first start; ignored when identity.json already exists.
+        /// Node display name (slug, ADR-075 D2). Default: derived from
+        /// the hostname at first start; ignored when identity.json
+        /// already exists. Display only — never a routing key.
         #[arg(long, env = "ACOWORK_NODE_NAME")]
         name: Option<String>,
         /// Node data / work directory (default: $HOME/.acowork/acowork-node).
@@ -75,10 +76,10 @@ pub enum Command {
         #[arg(long, env = "ACOWORK_NODE_LSP_RELAY_PORT", default_value = "19878")]
         lsp_relay_port: u16,
         /// Internal spawn marker: set ONLY by the Gateway when it
-        /// spawns its own-machine node (hidden from help). Lets the
-        /// Gateway's orphan cleanup identify its own children without
-        /// reserving a name — the node's name stays the machine
-        /// hostname slug either way. No behavioural effect on the node.
+        /// spawns its own-machine node (hidden from help). Persisted
+        /// into identity.json at creation so the Gateway can recognize
+        /// its own node even after a service/container restart drops
+        /// this flag (ADR-075 D5). No other behavioural effect.
         #[arg(long, hide = true)]
         gateway_managed: bool,
     },
@@ -110,9 +111,12 @@ pub enum Command {
         #[command(subcommand)]
         cmd: AgentsCommands,
     },
-    /// Rename this node (ADR-055 §6.12). The daemon must be stopped.
+    /// Rename this node's display name (ADR-075 D4). Changes ONLY
+    /// `node_name` — `node_id` (the routing key) never changes, so no
+    /// retained migration is needed and the daemon may keep running.
+    /// Requires the node to be online.
     Rename {
-        /// New node name (slug).
+        /// New node display name (slug; `"local"` is reserved).
         new_name: String,
         #[arg(long, visible_alias = "work-dir", env = "ACOWORK_NODE_HOME")]
         home: Option<PathBuf>,
@@ -222,7 +226,7 @@ impl Cli {
                 token,
                 max_agents,
                 lsp_relay_port,
-                gateway_managed: _,
+                gateway_managed,
             }) => {
                 let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
                 // Public address: explicit `--addr`, else the machine's
@@ -261,6 +265,7 @@ impl Cli {
                     gateway_host,
                     gateway_mqtt_port,
                     name,
+                    gateway_managed,
                     token,
                     max_agents,
                     advertise_host,
@@ -419,7 +424,7 @@ fn print_status(identity: &Option<NodeIdentity>, snapshot: Option<&crate::state:
     match identity {
         Some(id) => {
             println!("node_id     : {}", id.node_id);
-            println!("machine_uid : {}", id.machine_uid);
+            println!("node_name   : {}", id.node_name);
             println!("enrollment  : {:?}", id.enrollment);
             println!("gateway     : {}", id.gateway_addr.as_deref().unwrap_or("(never connected)"));
             println!("created_at  : {}", id.created_at.to_rfc3339());

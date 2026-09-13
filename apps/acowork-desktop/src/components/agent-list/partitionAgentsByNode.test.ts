@@ -130,10 +130,23 @@ describe("partitionAgentsByNode", () => {
 });
 
 describe("nodeDisplayName", () => {
-  it("prefers hostname over node_id", () => {
+  it("prefers node_name over hostname and node_id (ADR-075 D8)", () => {
     const g = {
       nodeId: "abc-123",
-      node: node({ node_id: "abc-123", hostname: "macbook-pro.local" }),
+      node: node({
+        node_id: "abc-123",
+        node_name: "gpu-1",
+        hostname: "macbook-pro.local",
+      }),
+      agents: [],
+    };
+    expect(nodeDisplayName(g)).toBe("gpu-1");
+  });
+
+  it("falls back to hostname when node_name is absent", () => {
+    const g = {
+      nodeId: "abc-123",
+      node: node({ node_id: "abc-123", node_name: undefined, hostname: "macbook-pro.local" }),
       agents: [],
     };
     expect(nodeDisplayName(g)).toBe("macbook-pro.local");
@@ -142,7 +155,7 @@ describe("nodeDisplayName", () => {
   it("falls back to node_id when hostname is absent", () => {
     const g = {
       nodeId: "abc-123",
-      node: node({ node_id: "abc-123", hostname: undefined }),
+      node: node({ node_id: "abc-123", node_name: undefined, hostname: undefined }),
       agents: [],
     };
     expect(nodeDisplayName(g)).toBe("abc-123");

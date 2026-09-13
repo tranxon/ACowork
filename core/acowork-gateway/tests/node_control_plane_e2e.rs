@@ -31,13 +31,14 @@ use tokio::sync::mpsc;
 
 use acowork_core::mqtt_proto::{
     data_envelope, node_control_command, DataEnvelope, NodeControlCommand, NodeEnroll,
-    NodeEnrollResult, NodeEvent,
+    NodeEnrollResult, NodeEvent, NodeInfo,
 };
-use acowork_core::node::node_enroll_result_topic;
+use acowork_core::node::{node_enroll_result_topic, node_info_topic, node_status_topic};
 use acowork_gateway::mqtt::enrollment::{
     EnrollmentTokenStore, NodeTokenStore, SharedEnrollmentTokenStore, SharedNodeTokenStore,
     TokenValidation,
 };
+use acowork_gateway::mqtt::node_registry::{local_node_id, new_shared_registry};
 use acowork_gateway::mqtt::{start_broker_with_auth, BrokerAuth};
 
 const NODE_ID: &str = "verify-node";
@@ -57,6 +58,13 @@ const PUBLISHER_TOKEN: &str = "e2e-publisher-token";
 const GATE_TEST_PORT: u16 = 18993;
 const GATE_NODE_ID: &str = "gate-node";
 const GATE_NODE_PROXY_PORT: u16 = 19902;
+/// ADR-075 D4: rename runs on an isolated port so it can run in
+/// parallel with the other tests.
+const RENAME_TEST_PORT: u16 = 18994;
+const RENAME_NODE_ID: &str = "rename-node";
+/// ADR-075 D5: the gateway-managed boot marker runs on an isolated port.
+const GW_MANAGED_TEST_PORT: u16 = 18995;
+const GW_MANAGED_NODE_ID: &str = "gw-managed-node";
 
 /// Locate the compiled `acowork-node` binary (workspace target dir).
 fn node_binary() -> Option<std::path::PathBuf> {
@@ -177,16 +185,24 @@ async fn node_binary_speaks_the_control_plane_contract() {
 
     let mut collector = Collector::connect(TEST_PORT, "test:node-e2e", None);
 
+    // ADR-075 D1: the node_id is a UUID v4 minted at first start —
+    // read it back from identity.json (the `--name` value is now the
+    // display-only node_name).
+    let node_id = wait_for_identity_node_id(&node_home.join("identity.json"), Duration::from_secs(10))
+        .await
+        .expect("node_id persisted to identity.json");
+    assert_ne!(node_id, NODE_ID, "node_id is a UUID, not the --name slug");
+
     // 1) status = online (retained).
     let status = collector
-        .wait_for_topic(&format!("/nodes/{NODE_ID}/status"), Duration::from_secs(10))
+        .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
         .await
         .expect("status topic");
     assert_eq!(std::str::from_utf8(&status).unwrap().trim(), "online");
 
     // 2) info = NodeInfo envelope (retained).
     let info_bytes = collector
-        .wait_for_topic(&format!("/nodes/{NODE_ID}/info"), Duration::from_secs(10))
+        .wait_for_topic(&format!("/nodes/{node_id}/info"), Duration::from_secs(10))
         .await
         .expect("info topic");
     let info = DataEnvelope::decode(&info_bytes[..])
@@ -196,13 +212,14 @@ async fn node_binary_speaks_the_control_plane_contract() {
     let data_envelope::Payload::NodeInfo(info) = info else {
         panic!("expected NodeInfo");
     };
-    assert_eq!(info.node_id, NODE_ID);
+    assert_eq!(info.node_id, node_id);
+    assert_eq!(info.node_name, NODE_ID, "--name becomes node_name (ADR-075 D2)");
     assert_eq!(info.protocol_version, acowork_core::node::NODE_PROTOCOL_VERSION);
 
     // 3) ping → pong.
-    send_ping(NODE_ID, "req-e2e-1").await;
+    send_ping(&node_id, "req-e2e-1").await;
     let pong = collector
-        .wait_for_topic(&format!("/nodes/{NODE_ID}/events"), Duration::from_secs(5))
+        .wait_for_topic(&format!("/nodes/{node_id}/events"), Duration::from_secs(5))
         .await
         .expect("pong event");
     let event = decode_event(&pong);
@@ -211,9 +228,9 @@ async fn node_binary_speaks_the_control_plane_contract() {
     assert_eq!(event.message, "pong");
 
     // 4) request_id dedup: same id → a second (cached) reply.
-    send_ping(NODE_ID, "req-e2e-1").await;
+    send_ping(&node_id, "req-e2e-1").await;
     let dup_pong = collector
-        .wait_for_topic(&format!("/nodes/{NODE_ID}/events"), Duration::from_secs(5))
+        .wait_for_topic(&format!("/nodes/{node_id}/events"), Duration::from_secs(5))
         .await
         .expect("duplicate pong");
     assert_eq!(decode_event(&dup_pong).request_id, "req-e2e-1");
@@ -221,7 +238,7 @@ async fn node_binary_speaks_the_control_plane_contract() {
     // 5) LWT: hard-kill → broker publishes retained "offline".
     let _ = child.kill();
     let offline = collector
-        .wait_for_topic(&format!("/nodes/{NODE_ID}/status"), Duration::from_secs(10))
+        .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
         .await
         .expect("offline status");
     assert_eq!(std::str::from_utf8(&offline).unwrap().trim(), "offline");
@@ -289,6 +306,23 @@ async fn wait_for_identity_token(path: &std::path::Path, timeout: Duration) -> O
             && let Some(token) = json.get("node_token").and_then(|v| v.as_str())
         {
             return Some(token.to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    None
+}
+
+/// Poll `identity.json` until the `node_id` appears (written on first
+/// start — ADR-075 D1: node_id is a UUID v4, NOT derivable from
+/// `--name`, so tests must read it back to build the node topics).
+async fn wait_for_identity_node_id(path: &std::path::Path, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(content) = std::fs::read_to_string(path)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(id) = json.get("node_id").and_then(|v| v.as_str())
+        {
+            return Some(id.to_string());
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -381,13 +415,21 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
         .expect("spawn node");
 
     // ── 2) Enroll request arrives; act as the Gateway ──────────────────
+    // ADR-075 D1: the node_id is a UUID v4 minted at first start —
+    // read it back from identity.json and key the whole handshake on it
+    // (the --name value is the display-only node_name).
+    let identity_path = node_home.join("identity.json");
+    let node_id = wait_for_identity_node_id(&identity_path, Duration::from_secs(10))
+        .await
+        .expect("node_id persisted to identity.json");
+    assert_ne!(node_id, AUTH_NODE_ID, "node_id is a UUID, not the --name slug");
+
     let enroll_bytes = collector
-        .wait_for_topic(&format!("/nodes/{AUTH_NODE_ID}/enroll"), Duration::from_secs(10))
+        .wait_for_topic(&format!("/nodes/{node_id}/enroll"), Duration::from_secs(10))
         .await
         .expect("enroll request");
     let enroll = decode_enroll(&enroll_bytes);
-    assert_eq!(enroll.node_id, AUTH_NODE_ID);
-    assert!(!enroll.machine_uid.is_empty());
+    assert_eq!(enroll.node_id, node_id);
     assert_eq!(
         enroll.enrollment_token, enrollment_token,
         "node presents the --token in the enroll payload"
@@ -401,18 +443,14 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
             TokenValidation::Valid,
             "one-time enrollment token is still valid"
         );
-        assert!(store.consume_token(&enrollment_token, AUTH_NODE_ID));
+        assert!(store.consume_token(&enrollment_token, &node_id));
     }
-    let node_token = node_tokens
-        .lock()
-        .unwrap()
-        .upsert(AUTH_NODE_ID, &enroll.machine_uid);
+    let node_token = node_tokens.lock().unwrap().upsert(&node_id);
     assert!(!node_token.is_empty());
 
     // Answer with `enroll_result` (QoS 1, non-retained).
     let result = NodeEnrollResult {
-        node_id: AUTH_NODE_ID.to_string(),
-        machine_uid: enroll.machine_uid.clone(),
+        node_id: node_id.clone(),
         node_token: node_token.clone(),
         status: "ok".to_string(),
         message: String::new(),
@@ -423,13 +461,12 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     };
     collector
         .publish(
-            &node_enroll_result_topic(AUTH_NODE_ID),
+            &node_enroll_result_topic(&node_id),
             envelope.encode_to_vec(),
         )
         .await
         .expect("publish enroll_result");
     // ── 3) Node persists the token and reconnects with it ──────────────
-    let identity_path = node_home.join("identity.json");
     let persisted = wait_for_identity_token(&identity_path, Duration::from_secs(10))
         .await
         .expect("node_token persisted to identity.json");
@@ -464,7 +501,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
     // publishes its own retained "online".
     let status = loop {
         let msg = collector
-            .wait_for_topic(&format!("/nodes/{AUTH_NODE_ID}/status"), Duration::from_secs(10))
+            .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
             .await
             .expect("status after node_token reconnect");
         if std::str::from_utf8(&msg).unwrap_or("").trim() == "online" {
@@ -509,7 +546,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
 /// exits on error — if it dies, the queued publish never flushes.
 async fn send_start_command(
     port: u16,
-    node_id: &str,
+    node_id: String,
     instance_id: &str,
     request_id: &str,
 ) {
@@ -537,7 +574,7 @@ async fn send_start_command(
     let (client, mut eventloop) = AsyncClient::new(opts, 16);
     client
         .publish(
-            acowork_core::node::node_agent_control_topic(node_id, instance_id, "start"),
+            acowork_core::node::node_agent_control_topic(&node_id, instance_id, "start"),
             QoS::AtLeastOnce,
             false,
             envelope.encode_to_vec(),
@@ -560,7 +597,7 @@ async fn send_start_command(
 /// produces a single NodeEvent we need to inspect.
 async fn wait_for_agent_event(
     port: u16,
-    node_id: &str,
+    node_id: String,
     instance_id: &str,
     request_id: &str,
     timeout: Duration,
@@ -573,7 +610,7 @@ async fn wait_for_agent_event(
     opts.set_clean_session(true);
     let (client, mut eventloop) = AsyncClient::new(opts, 16);
 
-    let topic = acowork_core::node::node_agent_events_topic(node_id, instance_id);
+    let topic = acowork_core::node::node_agent_events_topic(&node_id, instance_id);
     client
         .subscribe(&topic, QoS::AtLeastOnce)
         .await
@@ -689,6 +726,12 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         .expect("spawn node");
     let child_guard = ChildGuard(child);
 
+    // ADR-075 D1: resolve the UUID node_id from identity.json (the
+    // `--name` value is the display-only node_name).
+    let node_id = wait_for_identity_node_id(&node_home.join("identity.json"), Duration::from_secs(10))
+        .await
+        .expect("node_id persisted to identity.json");
+
     // Hard timeout around the whole body so a hang cannot leak the
     // node past the test harness. Drop guard still fires on unwind.
     let result: Result<(), String> = async {
@@ -700,7 +743,7 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         // control subscriptions land (control/mod.rs:969-979), so
         // seeing status implies the agent control filter is live.
         let status = collector
-            .wait_for_topic(&format!("/nodes/{GATE_NODE_ID}/status"), Duration::from_secs(10))
+            .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
             .await
             .expect("node online");
         assert_eq!(std::str::from_utf8(&status).unwrap().trim(), "online");
@@ -724,14 +767,14 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         // or queue.)
         let bad_listener = tokio::spawn(wait_for_agent_event(
             GATE_TEST_PORT,
-            GATE_NODE_ID,
+            node_id.clone(),
             bad_id,
             "req-bad-1",
             Duration::from_secs(8),
         ));
         // Give the SUBSCRIBE packet time to flush before we publish.
         tokio::time::sleep(Duration::from_millis(500)).await;
-        send_start_command(GATE_TEST_PORT, GATE_NODE_ID, bad_id, "req-bad-1").await;
+        send_start_command(GATE_TEST_PORT, node_id.clone(), bad_id, "req-bad-1").await;
 
         let reply = bad_listener
             .await
@@ -770,7 +813,7 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
         //    empty string does NOT spawn a Runtime. ──
         let empty_listener = tokio::spawn(wait_for_agent_event(
             GATE_TEST_PORT,
-            GATE_NODE_ID,
+            node_id.clone(),
             // Empty segment ⇒ `parse_control_topic` returns `None` and
             // the command is silently dropped before any handler runs.
             // Subscribe to the per-agent events topic that *would* be
@@ -781,7 +824,7 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
             Duration::from_secs(5),
         ));
         tokio::time::sleep(Duration::from_millis(500)).await;
-        send_start_command(GATE_TEST_PORT, GATE_NODE_ID, "", "req-bad-2").await;
+        send_start_command(GATE_TEST_PORT, node_id.clone(), "", "req-bad-2").await;
         let empty_result = empty_listener
             .await
             .expect("subscriber task panicked");
@@ -873,4 +916,281 @@ async fn auth_broker_rejects_uncredentialed_node_connects() {
     );
 
     drop(broker_handle);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-075 D4: rename updates ONLY the display name — the UUID routing
+// key never changes, so there is no retained migration, no installed
+// inventory rebuild, and no daemon-stop precondition. The daemon keeps
+// running under `node:{uuid}` while a temporary `node:{uuid}:rename`
+// connection performs the rename.
+//
+// Scenario:
+// 1. Real node binary boots against an isolated broker.
+// 2. Assert identity.json node_id is a UUID and the info topic carries
+//    the boot-time node_name.
+// 3. Run `acowork-node rename <new>` against the live broker.
+// 4. Assert: exit 0; identity.json node_id UNCHANGED, node_name updated;
+//    a fresh info retained snapshot with the new node_name arrives;
+//    status stays "online" (the rename's temp connection has no LWT, so
+//    it never flips the daemon's status).
+// ═══════════════════════════════════════════════════════════════════════
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_rename_updates_display_name_without_touching_uuid() {
+    let Some(bin) = node_binary() else {
+        eprintln!("SKIP: acowork-node binary not found — run `cargo build --workspace` first");
+        return;
+    };
+
+    let broker_handle =
+        acowork_gateway::mqtt::start_broker("127.0.0.1", RENAME_TEST_PORT).expect("broker starts");
+
+    let home = tempfile::tempdir().unwrap();
+    let node_home = home.path().join("node-home");
+
+    let mut child = std::process::Command::new(&bin)
+        .args([
+            "start",
+            "--gateway",
+            &format!("127.0.0.1:{RENAME_TEST_PORT}"),
+            "--name",
+            RENAME_NODE_ID,
+            "--home",
+        ])
+        .arg(&node_home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn node");
+
+    let mut collector = Collector::connect(RENAME_TEST_PORT, "test:rename-e2e", None);
+
+    // ADR-075 D1: node_id is a UUID, read back from identity.json.
+    let identity_path = node_home.join("identity.json");
+    let node_id = wait_for_identity_node_id(&identity_path, Duration::from_secs(10))
+        .await
+        .expect("node_id persisted to identity.json");
+    assert_ne!(node_id, RENAME_NODE_ID, "node_id is a UUID, not the --name slug");
+
+    // Boot state: online + info with the original node_name.
+    let status = collector
+        .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
+        .await
+        .expect("status topic");
+    assert_eq!(std::str::from_utf8(&status).unwrap().trim(), "online");
+
+    let boot_info = collector
+        .wait_for_topic(&format!("/nodes/{node_id}/info"), Duration::from_secs(10))
+        .await
+        .expect("boot info topic");
+    let boot_info = decode_info(&boot_info);
+    assert_eq!(boot_info.node_id, node_id);
+    assert_eq!(boot_info.node_name, RENAME_NODE_ID, "boot name is the --name slug");
+
+    // Run the rename against the live broker (separate process, like the
+    // real CLI). auth_enabled=false → no credential needed.
+    let new_name = "renamed-box";
+    let out = std::process::Command::new(&bin)
+        .args([
+            "rename",
+            new_name,
+            "--gateway",
+            &format!("127.0.0.1:{RENAME_TEST_PORT}"),
+            "--home",
+        ])
+        .arg(&node_home)
+        .output()
+        .expect("rename runs");
+    assert!(
+        out.status.success(),
+        "rename must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // identity.json: node_id UNCHANGED, node_name updated (ADR-075 D4).
+    let identity = std::fs::read_to_string(&identity_path).expect("identity re-read");
+    let identity: serde_json::Value =
+        serde_json::from_str(&identity).expect("identity parses");
+    assert_eq!(
+        identity["node_id"].as_str().unwrap(),
+        node_id,
+        "rename must NOT change node_id (the UUID routing key)"
+    );
+    assert_eq!(
+        identity["node_name"].as_str().unwrap(),
+        new_name,
+        "rename must update node_name"
+    );
+
+    // The rename republishes the info retained snapshot with the new
+    // node_name; read until it shows up (the collector may still have the
+    // boot snapshot in flight).
+    let renamed_info = loop {
+        let info = collector
+            .wait_for_topic(&format!("/nodes/{node_id}/info"), Duration::from_secs(10))
+            .await
+            .expect("info topic after rename");
+        let info = decode_info(&info);
+        if info.node_name == new_name {
+            break info;
+        }
+    };
+    assert_eq!(renamed_info.node_id, node_id, "info node_id unchanged after rename");
+
+    // Status must still be online — the rename used a temp connection with
+    // no LWT, so the daemon's retained status is untouched. The rename does
+    // NOT republish status (only info), so open a fresh subscription: MQTT
+    // replays the retained snapshot on subscribe, which is exactly what a
+    // Gateway would observe after the rename.
+    let retained = expect_retained_status(RENAME_TEST_PORT, &node_id, Duration::from_secs(10)).await;
+    assert_eq!(
+        retained.as_deref(),
+        Some("online"),
+        "daemon's retained status must still be online after rename (rename has no LWT)"
+    );
+
+    // Cleanup.
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(broker_handle);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-075 D5: the Gateway recognizes its own-machine node by the
+// `gateway_managed` marker — persisted into identity.json at spawn
+// (`--gateway-managed`), carried on every NodeInfo, and queried via the
+// NodeRegistry `local_node_id()` (gateway_managed == true && online).
+//
+// Scenario:
+// 1. Real node binary boots with `--gateway-managed`.
+// 2. Assert the marker is persisted in identity.json AND the info topic
+//    carries gateway_managed = true.
+// 3. Feed a real NodeRegistry the same way MQTT dispatch does (status +
+//    info retained topics) and assert `local_node_id()` resolves to this
+//    node's UUID.
+// ═══════════════════════════════════════════════════════════════════════
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
+    let Some(bin) = node_binary() else {
+        eprintln!("SKIP: acowork-node binary not found — run `cargo build --workspace` first");
+        return;
+    };
+
+    let broker_handle = acowork_gateway::mqtt::start_broker("127.0.0.1", GW_MANAGED_TEST_PORT)
+        .expect("broker starts");
+
+    let home = tempfile::tempdir().unwrap();
+    let node_home = home.path().join("node-home");
+
+    let mut child = std::process::Command::new(&bin)
+        .args([
+            "start",
+            "--gateway",
+            &format!("127.0.0.1:{GW_MANAGED_TEST_PORT}"),
+            "--name",
+            GW_MANAGED_NODE_ID,
+            "--gateway-managed",
+            "--home",
+        ])
+        .arg(&node_home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn node");
+
+    let mut collector = Collector::connect(GW_MANAGED_TEST_PORT, "test:gw-managed-e2e", None);
+
+    let identity_path = node_home.join("identity.json");
+    let node_id = wait_for_identity_node_id(&identity_path, Duration::from_secs(10))
+        .await
+        .expect("node_id persisted to identity.json");
+
+    // The spawn marker is persisted (ADR-075 D5) — a service/container
+    // restart that drops the flag still leaves a recognized node.
+    let identity = std::fs::read_to_string(&identity_path).expect("identity read");
+    let identity: serde_json::Value = serde_json::from_str(&identity).expect("identity parses");
+    assert_eq!(
+        identity["gateway_managed"].as_bool(),
+        Some(true),
+        "gateway_managed must be persisted into identity.json at spawn"
+    );
+
+    // NodeInfo carries the marker on the wire.
+    let status = collector
+        .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
+        .await
+        .expect("status topic");
+    assert_eq!(std::str::from_utf8(&status).unwrap().trim(), "online");
+
+    let info_bytes = collector
+        .wait_for_topic(&format!("/nodes/{node_id}/info"), Duration::from_secs(10))
+        .await
+        .expect("info topic");
+    let info = decode_info(&info_bytes);
+    assert_eq!(info.node_id, node_id);
+    assert_eq!(info.node_name, GW_MANAGED_NODE_ID);
+    assert!(
+        info.gateway_managed,
+        "NodeInfo must carry gateway_managed=true for a Gateway-spawned node"
+    );
+
+    // Feed the registry exactly like MQTT dispatch does (status + info
+    // retained), then ask local_node_id() — ADR-075 D5 query semantics.
+    let registry = new_shared_registry();
+    registry
+        .write()
+        .await
+        .update_status_from_mqtt(&node_status_topic(&node_id), b"online");
+    registry
+        .write()
+        .await
+        .update_info_from_mqtt(&node_info_topic(&node_id), &info_bytes);
+
+    let resolved = local_node_id(&registry).await;
+    assert_eq!(
+        resolved.as_deref(),
+        Some(node_id.as_str()),
+        "local_node_id() must resolve the gateway-managed online node to its UUID"
+    );
+
+    // Cleanup.
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(broker_handle);
+}
+
+/// Decode a `DataEnvelope<NodeInfo>` payload.
+fn decode_info(bytes: &[u8]) -> NodeInfo {
+    let envelope = DataEnvelope::decode(bytes).expect("info decodes");
+    match envelope.payload.expect("info payload") {
+        data_envelope::Payload::NodeInfo(info) => info,
+        _ => panic!("expected NodeInfo"),
+    }
+}
+
+/// Subscribe to a node's status topic and return the retained snapshot
+/// (MQTT replays retained messages on subscribe). `None` on timeout.
+async fn expect_retained_status(port: u16, node_id: &str, timeout: Duration) -> Option<String> {
+    let mut opts = MqttOptions::new("test:retained-probe", "127.0.0.1", port);
+    opts.set_keep_alive(Duration::from_secs(5));
+    let (client, mut eventloop) = AsyncClient::new(opts, 16);
+    let topic = node_status_topic(node_id);
+    client
+        .subscribe(&topic, QoS::AtLeastOnce)
+        .await
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, eventloop.poll()).await {
+            Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))))
+                if p.topic == topic =>
+            {
+                return Some(String::from_utf8_lossy(&p.payload).trim().to_string());
+            }
+            Ok(Ok(_)) | Ok(Err(_)) => {}
+            Err(_) => return None,
+        }
+    }
+    None
 }

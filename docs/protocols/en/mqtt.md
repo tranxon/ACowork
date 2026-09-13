@@ -363,12 +363,12 @@ acowork/nodes/{node_id}/
 │                                     #   node metadata (hostname, os, arch, runtime_version, capability set)
 ├── enroll                            # [QoS 1] Node → Gateway registration request (Phase 5a)
 │                                     #   payload = DataEnvelope<NodeEnroll>
-│                                     #   { node_id, machine_uid, os, arch, node_version,
+│                                     #   { node_id, os, arch, node_version,
 │                                     #     protocol_version, capabilities, enrollment_token }
 │                                     #   carries `--token` enrollment token when auth enabled
 ├── enroll_result                     # [QoS 1] Gateway → Node response (per-request, not retained)
 │                                     #   payload = DataEnvelope<NodeEnrollResult>
-│                                     #   { node_id, machine_uid, node_token, status, message }
+│                                     #   { node_id, node_token, status, message }
 │                                     #   status = "ok" | "rejected"
 ├── agents/{id}/control/{cmd}         # [QoS 1] Gateway → Node agent lifecycle commands
 │                                     #   cmd ∈ {install, uninstall, start, stop, ...}
@@ -378,8 +378,8 @@ acowork/nodes/{node_id}/
 
 **Enrollment Semantics (Phase 5a)**:
 
-- On first start (identity.json missing), Node PUBLISHes `enroll` in bootstrap; Gateway validates enrollment token (when auth enabled) → node_id uniqueness (unused / same machine_uid reuse / different machine_uid rejected) → issues (or reuses) node_token and persists to `{data_dir}/node_tokens.json` → replies with `enroll_result`; Node persists node_token into identity.json.
-- **Idempotent**: Same machine_uid re-enroll reuses existing node_token; Node already holding token does not overwrite.
+- On first start (identity.json missing), Node PUBLISHes `enroll` in bootstrap; Gateway validates enrollment token (when auth enabled) → looks up `node_tokens.json` by node_id (UUID): not registered → issues new node_token; registered → reuses existing token (UUID is globally unique, no name-conflict detection) → persists to `{data_dir}/node_tokens.json` → replies with `enroll_result`; Node persists node_token into identity.json.
+- **Idempotent**: Same node_id re-enroll reuses existing node_token; Node already holding token does not overwrite.
 - `enroll_result` is not retained—the response is per-request; reconnects rely on CONNECT credentials (node_token) to maintain identity.
 
 ---
@@ -962,7 +962,7 @@ Default `mqtt.auth_enabled = false` (anonymous, keeping single-machine status); 
 Other rules:
 
 - Credential comparison is constant-time (`constant_time_eq`); enrollment tokens only store sha256 hash (`{data_dir}/enrollment_tokens.json`), one-time consumption.
-- Long-term credentials issued to Nodes are stored in plaintext in `{data_dir}/node_tokens.json` (node_id → {token, machine_uid, created_at})—this is the trust anchor for node credentials, with protection level equivalent to `http_token`. After Gateway restarts, already-registered nodes auto-reconnect with node_token (persistent validation).
+- Long-term credentials issued to Nodes are stored in plaintext in `{data_dir}/node_tokens.json` (node_id → {token, created_at})—this is the trust anchor for node credentials, with protection level equivalent to `http_token`. After Gateway restarts, already-registered nodes auto-reconnect with node_token (persistent validation).
 - **Topic-level ACL deviation**: rumqttd 0.20 has no per-topic ACL capability; Phase 5a only implements CONNECT-layer authentication; mosquitto switch evaluation is slated for Phase 5b (ADR-055 §6.8).
 - **HTTP channel authentication**: Node pulling packages (`GET /api/packages/{id}/download`) and Node inbound reverse-proxy validation use the `X-ACowork-Node-Token` header (see [http.md](./http.md)); Gateway outbound reverse-proxy requests automatically inject this header (resolved by agent → host Node).
 

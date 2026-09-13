@@ -1224,10 +1224,8 @@ message SectionMeta {
 /// Topic: acowork/nodes/{node_id}/info (Retained, QoS 1)
 message NodeInfo {
   string node_id = 1;
-  /// Machine fingerprint (UUID v4, persisted in identity.json, ADR-055
-  /// §6.12). Lets the Gateway detect "same name, different machine"
-  /// enrollment conflicts and makes enrollment idempotent.
-  string machine_uid = 2;
+  // (field 2 retired — ADR-075: machine_uid deleted, slot left unused;
+  // node_id is now the stable UUID v4 routing key)
   string hostname = 3;
   string os = 4;      // std::env::consts::OS
   string arch = 5;    // std::env::consts::ARCH
@@ -1248,6 +1246,14 @@ message NodeInfo {
   /// ADR-055 §6.3). The Gateway uses it to reach node-local HTTP services
   /// (e.g. `/fs/browse` for remote filesystem browsing, L7-1).
   string http_endpoint = 11;
+  /// Display name (slug, renameable, ADR-075 D2) — user-facing only,
+  /// NEVER a routing key. Defaults to the hostname slug at first start.
+  string node_name = 12;
+  /// True when this node was spawned by the Gateway (`--gateway-managed`)
+  /// and the marker was persisted into identity.json (ADR-075 D5). The
+  /// Gateway uses it to recognize its own-machine node. Authority: this
+  /// field on every online NodeInfo (enroll never carries it).
+  bool gateway_managed = 13;
 }
 
 /// Node → Gateway installed-agent inventory entry (ADR-055 §6.5).
@@ -1475,10 +1481,8 @@ message NodeEvent {
 /// long-lived `node_token`.
 message NodeEnroll {
   string node_id = 1;
-  /// Machine fingerprint (UUID v4, persisted in identity.json) — lets
-  /// the Gateway detect "same name, different machine" conflicts and
-  /// make re-enrollment idempotent (same machine_uid reuses the token).
-  string machine_uid = 2;
+  // (field 2 retired — ADR-075: machine_uid deleted; enrollment is
+  // idempotent on node_id alone, slot left unused)
   string os = 3;      // std::env::consts::OS
   string arch = 4;    // std::env::consts::ARCH
   /// Version of the acowork-node binary (CARGO_PKG_VERSION).
@@ -1499,7 +1503,7 @@ message NodeEnroll {
 /// `status` mirrors the NodeEvent vocabulary ("ok" | "error").
 message NodeEnrollResult {
   string node_id = 1;
-  string machine_uid = 2;
+  // (field 2 retired — ADR-075: machine_uid deleted, slot left unused)
   /// Long-lived per-node credential. Also used for HTTP-channel
   /// authentication via the `X-ACowork-Node-Token` header. The Node
   /// persists it into identity.json; present only on success.
@@ -1598,9 +1602,10 @@ message BootstrapState {
 /// `control_gen` / generation counters belong on the per-command
 /// envelope (`NodeControlCommand`), not here.
 message NodeReady {
-  /// Stable Node identifier (matches `NodeInfo.node_id`).
+  /// Stable Node identifier (UUID v4 routing key, matches
+  /// `NodeInfo.node_id`, ADR-075).
   string node_id = 1;
   /// Protocol version of the Node control plane (mirrors
-  /// `NodeInfo.protocol_version`). Currently `1`.
+  /// `NodeInfo.protocol_version`). Currently `2`.
   uint32 protocol_version = 2;
 }

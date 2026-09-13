@@ -315,8 +315,9 @@ mod tests {
         NodeHttpState {
             node: Arc::new(RwLock::new(NodeState::new(16))),
             identity: Arc::new(RwLock::new(NodeIdentity {
-                node_id: "node-1".to_string(),
-                machine_uid: "machine-1".to_string(),
+                node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+                node_name: "node-1".to_string(),
+                gateway_managed: false,
                 node_token: node_token.map(str::to_string),
                 gateway_addr: None,
                 enrollment: EnrollmentState::Enrolled,

@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import type { AgentListResponse, GatewayConfig, GatewayMode } from "../../lib/types";
+import type { AgentListResponse, GatewayConfig, GatewayMode, NodeInfo } from "../../lib/types";
+import { fetchNodes } from "../../lib/gateway-api";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
@@ -14,12 +15,11 @@ import { inputReadonly, inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { ProfileTab } from "./ProfileTab";
-import { NodesTab } from "./NodesTab";
 import { TabButton } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
-type SettingsTab = "gateway" | "appearance" | "general" | "profile" | "nodes";
+type SettingsTab = "gateway" | "appearance" | "general" | "profile";
 
 export function SettingsPage({ initialTab = "profile" }: { initialTab?: SettingsTab }) {
   const { t } = useTranslation();
@@ -30,7 +30,6 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
     { id: "general", label: t("settings.tabGeneral") },
     { id: "appearance", label: t("settings.tabAppearance") },
     { id: "gateway", label: t("settings.tabGateway") },
-    { id: "nodes", label: t("settings.tabNodes") },
   ];
 
   return (
@@ -56,7 +55,6 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
         <div style={{ display: activeTab === "appearance" ? "block" : "none" }}><AppearanceTab /></div>
         <div style={{ display: activeTab === "general" ? "block" : "none" }}><GeneralTab /></div>
         <div style={{ display: activeTab === "profile" ? "block" : "none" }}><ProfileTab /></div>
-        <div style={{ display: activeTab === "nodes" ? "block" : "none" }}><NodesTab /></div>
       </div>
     </div>
   );
@@ -73,6 +71,8 @@ function GatewayTab() {
   const [testing, setTesting] = useState(false);
   const [agents, setAgents] = useState<AgentListResponse[]>([]);
   const [agentsLoading, setAgentsLoading] = useState(false);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [nodesLoading, setNodesLoading] = useState(false);
   const [urlDraft, setUrlDraft] = useState(gatewayUrl);
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -80,7 +80,9 @@ function GatewayTab() {
   const [gatewayModeOpen, setGatewayModeOpen] = useState(true);
   const [localGatewayOpen, setLocalGatewayOpen] = useState(true);
   const [gatewayConnOpen, setGatewayConnOpen] = useState(true);
-  const [agentsOpen, setAgentsOpen] = useState(true);
+  const [nodesOpen, setNodesOpen] = useState(true);
+  // Per-node level-1 collapse state inside the Nodes section.
+  const [openNodeIds, setOpenNodeIds] = useState<Record<string, boolean>>({});
 
   // Sync draft when gatewayUrl changes externally
   useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
@@ -169,11 +171,33 @@ function GatewayTab() {
     }
   }, []);
 
+  const fetchAll = useCallback(async () => {
+    await Promise.all([
+      fetchAgents(),
+      (async () => {
+        setNodesLoading(true);
+        try {
+          setNodes(await fetchNodes());
+        } catch {
+          // Gateway unreachable — empty topology, matches the prior
+          // NodesTab behaviour.
+          setNodes([]);
+        } finally {
+          setNodesLoading(false);
+        }
+      })(),
+    ]);
+  }, [fetchAgents]);
+
   useEffect(() => {
     if (status === "connected") {
-      fetchAgents();
+      void fetchAll();
     }
-  }, [status, fetchAgents]);
+  }, [status, fetchAll]);
+
+  const toggleNode = useCallback((nodeId: string) => {
+    setOpenNodeIds((prev) => ({ ...prev, [nodeId]: !prev[nodeId] }));
+  }, []);
 
   const localIsRunning = gatewayMode === "local" && (status === "connected" || localState === "running");
   const localIsStarting = gatewayMode === "local" && (localState === "starting" || starting) && status !== "connected";
@@ -354,27 +378,39 @@ function GatewayTab() {
         </ListBox>
       )}
 
-      {/* Connected Agents (shared between modes) */}
+      {/* Nodes + their agents (shared between modes) */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={agentsOpen}
-          onToggle={() => setAgentsOpen((v) => !v)}
-          title={t("settings.connectedAgents")}
-          ariaLabel={t("settings.connectedAgents")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          open={nodesOpen}
+          onToggle={() => setNodesOpen((v) => !v)}
+          title={t("settings.nodesTitle", { count: nodes.length })}
+          ariaLabel={t("settings.nodesTitle", { count: nodes.length })}
+          trailing={
+            <span onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => void fetchAll()}
+                disabled={nodesLoading || agentsLoading}
+                className="rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+              >
+                {t("settings.nodesRefresh")}
+              </button>
+            </span>
+          }
+          bodyClassName="overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
         >
           {status !== "connected" ? (
             <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.connectToSeeAgents")}</div>
-          ) : agentsLoading ? (
+          ) : nodesLoading && nodes.length === 0 ? (
             <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.loading")}</div>
-          ) : agents.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.noAgentsRunning")}</div>
+          ) : nodes.length === 0 ? (
+            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.nodesEmpty")}</div>
           ) : (
-            <ListBox variant="plain">
-              {agents.map((agent) => (
-                <RuntimeRow key={agent.instance_id} agent={agent} />
-              ))}
-            </ListBox>
+            <NodesTree
+              nodes={nodes}
+              agents={agents}
+              openNodeIds={openNodeIds}
+              onToggleNode={toggleNode}
+            />
           )}
         </ExpandableRow>
       </ListBox>
@@ -382,8 +418,104 @@ function GatewayTab() {
   );
 }
 
+/** Synthetic node_id bucket for agents whose node doesn't appear in
+ *  `/api/nodes` (gateway-local agents before the node registry sees the
+ *  local node, or stale rows after a node leaves). Keeps them visible
+ *  instead of dropping them silently. */
+const UNASSIGNED_NODE_ID = "__unassigned__";
+
+/** Two-level collapsible list: each node row expands to reveal its agents. */
+function NodesTree({
+  nodes,
+  agents,
+  openNodeIds,
+  onToggleNode,
+}: {
+  nodes: NodeInfo[];
+  agents: AgentListResponse[];
+  openNodeIds: Record<string, boolean>;
+  onToggleNode: (nodeId: string) => void;
+}) {
+  const { t } = useTranslation();
+  // Bucket agents by node_id; agents without a matching node fall into the
+  // UNASSIGNED bucket so they never disappear from the view.
+  const buckets = new Map<string, AgentListResponse[]>();
+  for (const node of nodes) buckets.set(node.node_id, []);
+  const orphan: AgentListResponse[] = [];
+  for (const agent of agents) {
+    const bucket = buckets.get(agent.node_id);
+    if (bucket) bucket.push(agent);
+    else orphan.push(agent);
+  }
+  const showUnassigned = orphan.length > 0;
+  const renderedNodes: Array<{ id: string; node?: NodeInfo }> = [
+    ...nodes.map((n) => ({ id: n.node_id, node: n })),
+    ...(showUnassigned ? [{ id: UNASSIGNED_NODE_ID }] : []),
+  ];
+
+  return (
+    <ListBox variant="plain">
+      {renderedNodes.map(({ id, node }) => {
+        const nodeAgents = id === UNASSIGNED_NODE_ID ? orphan : (buckets.get(id) ?? []);
+        return (
+          <ExpandableRow
+            key={id}
+            open={!!openNodeIds[id]}
+            onToggle={() => onToggleNode(id)}
+            surface="inset"
+            title={node?.node_name ?? node?.hostname ?? node?.node_id ?? t("settings.nodesUnassigned")}
+            meta={
+              <span className="inline-flex items-center gap-1 text-[10px]">
+                <span
+                  className={cn(
+                    "h-1.5 w-1.5 rounded-full",
+                    node ? (node.online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500") : "bg-zinc-400 dark:bg-zinc-500",
+                  )}
+                />
+                <span className={node?.online ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-500"}>
+                  {node ? (node.online ? t("settings.nodesOnline") : t("settings.nodesOffline")) : t("settings.nodesOffline")}
+                </span>
+              </span>
+            }
+            description={buildNodeDescription(node, t)}
+            trailing={
+              <span className="text-xs text-zinc-500">
+                {nodeAgents.length}
+                {node?.max_agents !== undefined && <span className="text-zinc-400">/{node.max_agents}</span>}
+              </span>
+            }
+            bodyClassName="bg-zinc-50 dark:bg-zinc-900/60"
+          >
+            {nodeAgents.length === 0 ? (
+              <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.noAgentsRunning")}</div>
+            ) : (
+              <ListBox variant="plain">
+                {nodeAgents.map((agent) => (
+                  <RuntimeRow key={agent.instance_id} agent={agent} padding="nested" />
+                ))}
+              </ListBox>
+            )}
+          </ExpandableRow>
+        );
+      })}
+    </ListBox>
+  );
+}
+
+/** Build the small description line for a node row: hostname · os/arch. */
+function buildNodeDescription(node: NodeInfo | undefined, t: (key: string) => string) {
+  if (!node) return t("settings.nodesUnassignedDesc");
+  const parts: string[] = [];
+  if (node.hostname) parts.push(node.hostname);
+  if (node.os && node.arch) parts.push(`${node.os}/${node.arch}`);
+  else if (node.os) parts.push(node.os);
+  else if (node.arch) parts.push(node.arch);
+  if (node.node_version) parts.push(`v${node.node_version}`);
+  return parts.join(" · ") || "—";
+}
+
 /** Single runtime row component — fetches model info independently */
-function RuntimeRow({ agent }: { agent: AgentListResponse }) {
+function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "default" | "nested" }) {
   const { t } = useTranslation();
   const [modelInfo, setModelInfo] = useState<{ provider: string; model: string } | null>(null);
 
@@ -405,6 +537,7 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
   return (
     <ListRow
       surface="inset"
+      padding={padding ?? "default"}
       leading={<Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />}
       trailing={
         <div className="flex items-center gap-2 shrink-0">

@@ -71,6 +71,7 @@ fn zip_dir_to_agent_package(
 async fn dispatch_bundled_agent_install(
     config: &GatewayConfig,
     node_control: &crate::mqtt::node_control::NodeControlClient,
+    local_node_id: &str,
     src_dir: &std::path::Path,
 ) -> Result<(), String> {
     use crate::mqtt::node_control::{NodeInstallDispatch, NodePackageSource};
@@ -95,7 +96,12 @@ async fn dispatch_bundled_agent_install(
     let registry_path = registry_dir.join(format!("{}.agent", agent_id));
     std::fs::write(&registry_path, &bytes).map_err(|e| format!("write registry entry: {}", e))?;
 
-    let node_id = acowork_core::node::local_node_id();
+    // ADR-075 D5/D6: `"local"` is the Gateway-direct *bookkeeping*
+    // anchor, NOT a routable MQTT topic — no Node subscribes to
+    // `acowork/nodes/local/...`. The caller resolves the gateway-managed
+    // Node's UUID from the registry (this install IS a node-control-plane
+    // dispatch, unlike the Gateway-direct records in `state.rs`).
+    let node_id = local_node_id;
     // A wildcard bind must be dialed via loopback; the local node shares
     // our host, so `advertise_host` (for remote nodes) is the wrong answer
     // here — see `http::agents::publish_to_registry`.
@@ -110,7 +116,7 @@ async fn dispatch_bundled_agent_install(
     let instance_id = uuid::Uuid::new_v4().to_string();
     node_control
         .install_agent_by_url(NodeInstallDispatch {
-            node_id: &node_id,
+            node_id,
             instance_id: &instance_id,
             agent_id: &agent_id,
             source: NodePackageSource::Url(&package_url),
@@ -1221,17 +1227,18 @@ impl Gateway {
         // ADR-055 §6.11: ensure a local Node Agent is running and
         // supervise it (orphan cleanup → reuse window → spawn + reaper).
         // Must run AFTER the MQTT broker + Gateway client are up so the
-        // retained `acowork/nodes/local/status` reuse window works.
-        // ADR-055 Phase 5a: when MQTT auth is enabled, pre-issue the
-        // local node's long-lived credential BEFORE the spawn so the
-        // child can connect + enroll on first boot (the record carries
-        // a placeholder machine_uid, claimed at enroll time).
+        // retained `acowork/nodes/+/status` reuse window works.
+        // ADR-075 D7: the Gateway no longer pre-issues placeholder node
+        // tokens (enroll mints the long-lived credential on first
+        // connect). When MQTT auth is enabled, hand the child a one-time
+        // enrollment token as its boot credential — it is swapped for
+        // the persisted node_token at enroll time.
         let local_node_token = if mqtt_config.auth_enabled {
             Some(
-                node_tokens
+                enrollment_tokens
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .upsert(&acowork_core::node::local_node_id(), ""),
+                    .create_token(std::time::Duration::from_secs(3600)),
             )
         } else {
             None
@@ -1276,10 +1283,9 @@ impl Gateway {
             tokio::spawn(async move {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
                 while tokio::time::Instant::now() < deadline {
-                    if registry_for_ready
-                        .read()
+                    if crate::mqtt::node_registry::local_node_id(&registry_for_ready)
                         .await
-                        .is_online(&acowork_core::node::local_node_id())
+                        .is_some()
                     {
                         let st = ready_state.read().await;
                         if let Some(ref h) = st.mqtt_publisher_handle {
@@ -1321,6 +1327,7 @@ impl Gateway {
             let sa_slot = node_control_slot.clone();
             let sa_state = shared_state.clone();
             let sa_config = self.config.clone();
+            let local_node_registry = node_registry.clone();
             tokio::spawn(async move {
                 // Take the node-control handle WITHOUT holding the slot
                 // lock across the wait loop below. A `MutexGuard` born in
@@ -1380,9 +1387,21 @@ impl Gateway {
                             tracing::info!(
                                 "System Agent not found in install table — dispatching bundled install to the node"
                             );
+                            let Some(local_node_id) =
+                                crate::mqtt::node_registry::local_node_id(
+                                    &local_node_registry,
+                                )
+                                .await
+                            else {
+                                tracing::warn!(
+                                    "No gateway-managed node is online —                                      skipping bundled System Agent install                                      (a dispatch cannot be routed without it)"
+                                );
+                                return;
+                            };
                             match dispatch_bundled_agent_install(
                                 &sa_config,
                                 &nc,
+                                &local_node_id,
                                 &system_agent_src,
                             )
                             .await
@@ -1440,6 +1459,10 @@ impl Gateway {
                         return;
                     }
                 };
+                // Resolve outside the `sa_state` read guard: never hold a
+                // lock across an await.
+                let fallback_node_id =
+                    crate::mqtt::node_registry::local_node_id(&local_node_registry).await;
                 let (sa_agent_id, sa_node_id) = {
                     let gw = sa_state.read().await;
                     let agent_id = gw
@@ -1447,12 +1470,25 @@ impl Gateway {
                         .map(|i| i.agent_id.clone())
                         .unwrap_or_else(|| SYSTEM_AGENT_ID.to_string());
                     // ADR-055 §6.2: route the start to the node HOSTING
-                    // the System Agent instance (fallback `local` when
-                    // the record predates node aggregation).
-                    let node_id = gw
-                        .installed(&sa_instance_id)
-                        .map(|i| i.node_id.clone())
-                        .unwrap_or_else(acowork_core::node::local_node_id);
+                    // the System Agent instance. ADR-075 D5/D6: the
+                    // `"local"` literal is a bookkeeping anchor and NOT a
+                    // routable topic, so the missing-record fallback must
+                    // be the registry-resolved gateway-managed Node —
+                    // absent that there is nowhere to route, so fail loud
+                    // instead of publishing into a dead topic.
+                    let node_id = match gw.installed(&sa_instance_id) {
+                        Some(i) => i.node_id.clone(),
+                        None => match fallback_node_id {
+                            Some(ref id) => id.clone(),
+                            None => {
+                                tracing::warn!(
+                                    "Install record for System Agent instance                                      {} is missing and no gateway-managed node                                      is online — skipping auto-start",
+                                    sa_instance_id
+                                );
+                                return;
+                            }
+                        },
+                    };
                     (agent_id, node_id)
                 };
 

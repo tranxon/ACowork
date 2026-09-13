@@ -300,7 +300,6 @@
     "tabGeneral": "通用",
     "tabAppearance": "外观",
     "tabGateway": "网关",
-    "tabNodes": "节点",
     "profileTitle": "个人资料",
     "displayName": "显示名称",
     "displayNamePlaceholder": "输入您的显示名称",
@@ -344,7 +343,6 @@
     "version": "版本",
     "testConnection": "测试连接",
     "testing": "测试中...",
-    "connectedAgents": "已连接的 Agent",
     "connectToSeeAgents": "连接网关以查看运行中的 Agent",
     "noAgentsRunning": "没有运行中的 Agent",
     "debug": "调试",
@@ -390,13 +388,8 @@
     "nodesRefresh": "刷新",
     "nodesOnline": "在线",
     "nodesOffline": "离线",
-    "nodesColNodeId": "节点",
-    "nodesColStatus": "状态",
-    "nodesColOs": "系统",
-    "nodesColArch": "架构",
-    "nodesColVersion": "版本",
-    "nodesColHostname": "主机名",
-    "nodesColAgents": "Agent 数"
+    "nodesUnassigned": "未分配",
+    "nodesUnassignedDesc": "无法匹配到已知节点的 Agent"
   },
   "agentSetup": {
     "noApiKey": "未配置 API 密钥。请在 Harness → 搜索中添加。",

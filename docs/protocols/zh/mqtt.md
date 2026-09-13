@@ -364,12 +364,12 @@ acowork/nodes/{node_id}/
 │                                     #   节点元数据（hostname、os、arch、runtime_version、能力集）
 ├── enroll                            # [QoS 1] Node → Gateway 注册请求（Phase 5a）
 │                                     #   payload = DataEnvelope<NodeEnroll>
-│                                     #   { node_id, machine_uid, os, arch, node_version,
+│                                     #   { node_id, os, arch, node_version,
 │                                     #     protocol_version, capabilities, enrollment_token }
 │                                     #   开启鉴权时携带 `--token` 传入的 enrollment token
 ├── enroll_result                     # [QoS 1] Gateway → Node 回执（per-request，不 retained）
 │                                     #   payload = DataEnvelope<NodeEnrollResult>
-│                                     #   { node_id, machine_uid, node_token, status, message }
+│                                     #   { node_id, node_token, status, message }
 │                                     #   status = "ok" | "rejected"
 ├── agents/{id}/control/{cmd}         # [QoS 1] Gateway → Node agent 生命周期指令
 │                                     #   cmd ∈ {install, uninstall, start, stop, ...}
@@ -379,8 +379,8 @@ acowork/nodes/{node_id}/
 
 **Enrollment 语义（Phase 5a）**：
 
-- 首次启动（identity.json 缺失）时 Node 在 bootstrap 里 PUBLISH `enroll`；Gateway 校验 enrollment token（开启鉴权时）→ node_id 唯一性（未占用 / 同 machine_uid 复用 / 不同 machine_uid 拒绝）→ 签发（或复用）node_token 并持久化到 `{data_dir}/node_tokens.json` → 回执 `enroll_result`；Node 将 node_token 持久化进 identity.json。
-- **幂等**：同 machine_uid 重新 enroll 复用既有 node_token；Node 已持有 token 时不回写、不覆盖。
+- 首次启动（identity.json 缺失）时 Node 在 bootstrap 里 PUBLISH `enroll`；Gateway 校验 enrollment token（开启鉴权时）→ 按 node_id（UUID）查 `node_tokens.json`：未注册 → 签发新 node_token；已注册 → 复用既有 token（UUID 全局唯一，无重名冲突检测）→ 持久化到 `{data_dir}/node_tokens.json` → 回执 `enroll_result`；Node 将 node_token 持久化进 identity.json。
+- **幂等**：同 node_id 重新 enroll 复用既有 node_token；Node 已持有 token 时不回写、不覆盖。
 - `enroll_result` 不 retained——回执是 per-request 应答，重连后由 CONNECT 凭据（node_token）维持身份。
 
 ---
@@ -963,7 +963,7 @@ client.publish(
 其余规则：
 
 - 凭据比较为常量时间（`constant_time_eq`）；enrollment token 只存 sha256 哈希（`{data_dir}/enrollment_tokens.json`），一次性消费。
-- Node 签发的长期凭据明文存 `{data_dir}/node_tokens.json`（node_id → {token, machine_uid, created_at}）——这是节点凭据的信任锚，保护级别等同 `http_token`。Gateway 重启后已注册 node 用 node_token 自动重连（持久化验证）。
+- Node 签发的长期凭据明文存 `{data_dir}/node_tokens.json`（node_id → {token, created_at}）——这是节点凭据的信任锚，保护级别等同 `http_token`。Gateway 重启后已注册 node 用 node_token 自动重连（持久化验证）。
 - **topic 级 ACL 偏差**：rumqttd 0.20 无 per-topic ACL 能力，Phase 5a 仅落地 CONNECT 层鉴权；mosquitto 切换评估列入 Phase 5b（ADR-055 §6.8）。
 - **HTTP 通道鉴权**：Node 拉取 package（`GET /api/packages/{id}/download`）与 Node 入站反代校验使用 `X-ACowork-Node-Token` header（详见 [http.md](./http.md)）；Gateway 出站反代请求自动注入该 header（按 agent → 宿主 Node 解析）。
 
