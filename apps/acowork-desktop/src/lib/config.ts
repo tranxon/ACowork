@@ -43,8 +43,12 @@ export function getGatewayUrl(): string {
 
 /**
  * Check if the current Gateway URL points to a local address.
- * Debug WebSocket is a direct Desktop ↔ Runtime connection only works locally.
- * In remote mode, the Debug Panel should skip the WebSocket connection.
+ *
+ * Used by local-only features (e.g. "Reveal in File Explorer" — opening
+ * the OS file manager on a remote Gateway host has no value to the user).
+ * Debug Protocol itself is NOT local-only — RPC rides Gateway HTTP and
+ * events ride MQTT with the broker host derived from the Gateway URL
+ * (ADR-048 D6 + ADR-055/058), so remote mode is fully supported.
  */
 export function isGatewayLocal(): boolean {
   const url = getGatewayUrl();
