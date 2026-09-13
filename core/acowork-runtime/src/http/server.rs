@@ -5396,22 +5396,26 @@ mod tests {
             resp.status()
         );
 
-        // Precondition: resolver knows the workspace but has no prompt_file.
+        // Precondition: resolver knows the workspace; create auto-injects
+        // a root-level AGENTS.md as the prompt file (ADR-040 default), so
+        // the injected value is already visible in the in-memory resolver.
         {
             let guard = workspace_resolver.read().unwrap();
             let ws = guard
                 .find_by_id("ws-prompt-file")
                 .expect("workspace must exist after POST");
             assert_eq!(
-                ws.prompt_file, None,
-                "fresh workspace must start without prompt_file"
+                ws.prompt_file.as_deref(),
+                Some("AGENTS.md"),
+                "create must auto-inject root AGENTS.md as prompt_file"
             );
         }
 
-        // The desktop's setPromptFile call.
+        // The desktop's setPromptFile call — a different file must be
+        // visible in the shared resolver after the reload.
         let resp = client
             .put(format!("{}/workspaces/ws-prompt-file/prompt-file", base))
-            .json(&serde_json::json!({ "prompt_file": "AGENTS.md" }))
+            .json(&serde_json::json!({ "prompt_file": "CLAUDE.md" }))
             .send()
             .await
             .unwrap();
@@ -5429,7 +5433,7 @@ mod tests {
             .expect("workspace must exist");
         assert_eq!(
             ws.prompt_file.as_deref(),
-            Some("AGENTS.md"),
+            Some("CLAUDE.md"),
             "resolver must see the freshly-set prompt_file after reload (session creation reads the in-memory resolver, not disk)"
         );
 
