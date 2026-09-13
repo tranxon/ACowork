@@ -21,6 +21,15 @@ function workspaceDisplayName(dir: WorkspaceDir) {
 export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDirection?: "up" | "down"; textHidden?: boolean }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
+  // Node id of the machine hosting the selected agent instance — when set,
+  // the RemoteFolderPicker browses that node's filesystem via the
+  // Gateway's `/api/fs/browse?target=...` reverse proxy (ADR-055 L7-1).
+  // Undefined for locally-spawned agents on the Gateway machine, in which
+  // case the picker falls back to browsing the Gateway filesystem (same
+  // machine, equivalent result).
+  const browseTargetNodeId = useAgentStore((s) =>
+    selectedAgentId ? s.agents[selectedAgentId]?.meta?.node_id : undefined,
+  );
   // Note: we intentionally do NOT gate `fetchWorkspaces` on
   // `s.agents[selectedAgentId]?.meta?.ready` here. Bug B v3 fix —
   // the meta.ready flag is pushed by MQTT retained messages whose
@@ -356,6 +365,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
       {/* Remote folder picker (only shown in remote mode) */}
       {showRemotePicker && selectedAgentId && (
         <RemoteFolderPicker
+          target={browseTargetNodeId}
           onSelect={async (path: string) => {
             setShowRemotePicker(false);
             try {
