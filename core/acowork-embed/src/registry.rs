@@ -1,51 +1,16 @@
 //! Model registry — reads and manages the embedding_models.json registry.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Pooling strategy for embedding models.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PoolingStrategy {
-    /// Use [CLS] token output (BGE models).
-    #[default]
-    Cls,
-    /// Mean pooling over token embeddings weighted by attention_mask (MiniLM).
-    Mean,
-    /// Use last token output (causal LMs).
-    LastToken,
-}
-
-/// Embedding model entry in embedding_models.json.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingModelEntry {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub dimension: usize,
-    pub max_tokens: usize,
-    pub size_mb: u64,
-    pub languages: Vec<String>,
-    pub hf_repo: String,
-    #[serde(default)]
-    pub pooling_strategy: PoolingStrategy,
-    pub onnx_file: String,
-    pub tokenizer_file: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onnx_variants: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub external_data_files: HashMap<String, Vec<String>>,
-    pub bundled: bool,
-    pub recommended: bool,
-}
-
-/// Versioned embedding model list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingModelsFile {
-    pub version: u64,
-    pub models: Vec<EmbeddingModelEntry>,
-}
+// Embedding model registry types live in `acowork-core` (protocol layer)
+// and are shared with the Gateway, which also serializes them to disk.
+// Re-export here so `pool.rs` / `model.rs` keep using `crate::registry::`
+// paths unchanged — there is exactly ONE definition, no drift.
+pub use acowork_core::protocol::{
+    EmbeddingModelEntry, EmbeddingModelsFile, OnnxOutputKind, PoolingStrategy,
+};
 
 /// Model download/load status (internal representation).
 ///
@@ -349,5 +314,40 @@ mod tests {
         let strategy: PoolingStrategy =
             serde_json::from_value(v["pooling_strategy"].clone()).unwrap();
         assert_eq!(strategy, PoolingStrategy::Mean);
+    }
+
+    #[test]
+    fn test_onnx_output_kind_defaults_to_hidden_states() {
+        // Existing entries that don't set `onnx_output_kind` must keep
+        // the old behavior (raw last_hidden_state → manual pooling).
+        // Use a full entry (the field is on `EmbeddingModelEntry`) and
+        // verify the default kicks in when the key is omitted.
+        let json = r#"{
+            "id": "x",
+            "name": "X",
+            "dimension": 64,
+            "max_tokens": 32,
+            "size_mb": 1,
+            "languages": ["en"],
+            "hf_repo": "r",
+            "pooling_strategy": "cls",
+            "onnx_file": "m.onnx",
+            "tokenizer_file": "t.json",
+            "bundled": false,
+            "recommended": false
+        }"#;
+        let entry: EmbeddingModelEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.onnx_output_kind, OnnxOutputKind::HiddenStates);
+    }
+
+    #[test]
+    fn test_onnx_output_kind_already_pooled_roundtrip() {
+        // The bge-m3 entry and any future already-pooled encoder must
+        // deserialize from the JSON tag and serialize back identically.
+        let json = r#""already_pooled""#;
+        let kind: OnnxOutputKind = serde_json::from_str(json).unwrap();
+        assert_eq!(kind, OnnxOutputKind::AlreadyPooled);
+        let back = serde_json::to_string(&kind).unwrap();
+        assert_eq!(back, r#""already_pooled""#);
     }
 }
