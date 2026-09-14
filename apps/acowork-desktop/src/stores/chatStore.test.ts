@@ -11,7 +11,18 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mergeMessageWindow, useChatStore, handleMessageEvent, scheduleSendReconciliation } from "./chatStore";
+import {
+  mergeMessageWindow,
+  useChatStore,
+  handleMessageEvent,
+  scheduleSendReconciliation,
+  computeEffectiveConnection,
+  appendTransition,
+  dedupeError,
+  updateConnectingSince,
+  type ConnectionStatus,
+  type TransitionLogEntry,
+} from "./chatStore";
 import {
   ingestStreamDelta,
   ingestRecordComplete,
@@ -1346,5 +1357,182 @@ describe("event_cleared drops pending blocking cards", () => {
     // No panic, no spurious state change to messages.
     const after = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!.messages;
     expect(after).toBe(before);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// MQTT connection watchdog (P0 of unified-diagnostics plan §3.1.2)
+//
+// These tests pin the pure helpers that drive the 6-state
+// `effectiveConnection` machine. The watchdog's setInterval path (with
+// real timers + Rust IPC) is covered separately by `chatStore.watcher.test.ts`
+// (TODO if/when we add one); here we focus on the deterministic contract
+// each helper provides:
+//
+//   computeEffectiveConnection(snapshot)      → ConnectionStatus
+//   appendTransition(log, from, to, reason)   → capped ring buffer
+//   dedupeError(prev, next)                   → no flicker
+//   updateConnectingSince(prev, next, now)    → connecting-episode clock
+// ─────────────────────────────────────────────────────────────────────
+describe("watchdog: computeEffectiveConnection state machine", () => {
+  it("idle when no snapshot has been observed yet", () => {
+    expect(computeEffectiveConnection(null)).toBe("idle");
+    expect(computeEffectiveConnection({ known: false, connected: false })).toBe("idle");
+  });
+
+  it("connected wins over every other flag when snapshot.connected is true", () => {
+    expect(
+      computeEffectiveConnection({ known: true, connected: true, reason: "err-msg" }),
+    ).toBe("connected");
+    expect(
+      computeEffectiveConnection({ known: true, connected: true, connecting: true }),
+    ).toBe("connected");
+  });
+
+  it("connecting wins over disconnected when Rust reports an in-flight connect", () => {
+    expect(
+      computeEffectiveConnection({ known: true, connected: false, connecting: true }),
+    ).toBe("connecting");
+  });
+
+  it("reconnecting wins over disconnected when Rust reports a retry", () => {
+    expect(
+      computeEffectiveConnection({ known: true, connected: false, reconnecting: true }),
+    ).toBe("reconnecting");
+  });
+
+  it("disconnected is the fallback when no transient flag is set (reason does not reclassify)", () => {
+    expect(
+      computeEffectiveConnection({ known: true, connected: false }),
+    ).toBe("disconnected");
+    expect(
+      computeEffectiveConnection({ known: true, connected: false, reason: "tcp refused" }),
+    ).toBe("disconnected");
+  });
+
+  it("does NOT compute 'stale' here — that verdict lives in applyConnectionTransition so this stays pure", () => {
+    // The stale verdict requires Date.now() against the episode clock,
+    // which is a side-effecting check that belongs in the orchestrator.
+    // Keeping this function pure means it can be unit-tested with no clock.
+    expect(
+      computeEffectiveConnection({ known: true, connected: false, connecting: true }),
+    ).toBe("connecting");
+  });
+});
+
+describe("watchdog: appendTransition ring buffer (capacity = 20)", () => {
+  // Real Date.now() so the test mirrors production.
+  const make = (from: ConnectionStatus, to: ConnectionStatus, reason: string | null = null): TransitionLogEntry => ({
+    timestamp: Date.now(),
+    from,
+    to,
+    reason,
+  });
+
+  it("returns the same log when from === to (no spurious entries)", () => {
+    const log: TransitionLogEntry[] = [make("idle", "connecting")];
+    const next = appendTransition(log, "connecting", "connecting", null);
+    expect(next).toBe(log);
+    expect(next).toHaveLength(1);
+  });
+
+  it("appends new transitions when from !== to", () => {
+    const log: TransitionLogEntry[] = [make("idle", "connecting")];
+    const next = appendTransition(log, "connecting", "connected", "broker ready");
+    expect(next).toHaveLength(2);
+    expect(next[1].from).toBe("connecting");
+    expect(next[1].to).toBe("connected");
+    expect(next[1].reason).toBe("broker ready");
+  });
+
+  it("caps the buffer at 20 entries — older ones are dropped", () => {
+    let log: TransitionLogEntry[] = [];
+    const states: ConnectionStatus[] = [
+      "idle", "connecting", "connected", "disconnected", "connecting",
+      "connected", "disconnected", "connecting", "connected", "disconnected",
+      "connecting", "connected", "disconnected", "connecting", "connected",
+      "disconnected", "connecting", "connected", "disconnected", "connecting",
+      "connected", "disconnected", "connecting", "connected",
+    ];
+    for (let i = 0; i < states.length - 1; i++) {
+      log = appendTransition(log, states[i], states[i + 1], null);
+    }
+    expect(log).toHaveLength(20);
+    // The oldest (idle → connecting) was dropped — the buffer keeps the last 20.
+    expect(log[0].from).not.toBe("idle");
+    // The newest entry survived.
+    expect(log[log.length - 1].to).toBe("connected");
+  });
+});
+
+describe("watchdog: dedupeError (banner-flicker prevention)", () => {
+  it("returns null when next is null (no error)", () => {
+    expect(dedupeError("prev-err", null)).toBeNull();
+  });
+
+  it("returns next when prev is null (first error)", () => {
+    expect(dedupeError(null, "broker unreachable")).toBe("broker unreachable");
+  });
+
+  it("returns prev unchanged when next equals prev (dedup)", () => {
+    const prev = "broker unreachable";
+    // Identity-preserved: a SET-state-equality check should NOT trigger
+    // a re-render that would flicker the banner.
+    expect(dedupeError(prev, prev)).toBe(prev);
+  });
+
+  it("returns next when next differs from prev", () => {
+    expect(dedupeError("old-err", "new-err")).toBe("new-err");
+  });
+});
+
+describe("watchdog: updateConnectingSince (connecting-episode clock)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts the clock on entering the connecting family", () => {
+    const t0 = Date.now();
+    expect(updateConnectingSince(null, "connecting")).toBe(t0);
+    expect(updateConnectingSince(null, "reconnecting")).toBe(t0);
+    expect(updateConnectingSince(null, "stale")).toBe(t0);
+  });
+
+  it("keeps the SAME timestamp across moves within the family (no threshold reset)", () => {
+    const t0 = Date.now();
+    let clock = updateConnectingSince(null, "connecting");
+    expect(clock).toBe(t0);
+
+    vi.advanceTimersByTime(5_000);
+    // connecting → reconnecting: still the same episode.
+    clock = updateConnectingSince(clock, "reconnecting");
+    expect(clock).toBe(t0);
+
+    vi.advanceTimersByTime(28_000);
+    // reconnecting → stale: STILL the same episode — this is what lets
+    // the 30s force-reconnect deadline fire deterministically (B-1).
+    clock = updateConnectingSince(clock, "stale");
+    expect(clock).toBe(t0);
+  });
+
+  it("clears the clock when the connection settles", () => {
+    const clock = updateConnectingSince(null, "connecting")!;
+    expect(updateConnectingSince(clock, "connected")).toBeNull();
+    expect(updateConnectingSince(clock, "disconnected")).toBeNull();
+    expect(updateConnectingSince(clock, "idle")).toBeNull();
+  });
+
+  it("starts a NEW episode after the previous one settled", () => {
+    const first = updateConnectingSince(null, "connecting")!;
+    vi.advanceTimersByTime(1_000);
+    expect(updateConnectingSince(first, "connected")).toBeNull();
+    vi.advanceTimersByTime(1_000);
+    const second = updateConnectingSince(null, "reconnecting");
+    expect(second).not.toBeNull();
+    expect(second!).toBeGreaterThan(first);
   });
 });
