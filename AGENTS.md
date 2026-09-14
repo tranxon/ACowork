@@ -113,5 +113,5 @@ Do not wrap paths in quotes — they become unclickable.
 ## Rules (Do NOT)
 
 - Do NOT commit in Chinese
-- Do NOT act before the user confirms your plan
+- Do NOT act before the user confirms your plan.
 - Do NOT kill gateway or runtime process when testing — you are running inside it

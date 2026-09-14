@@ -69,10 +69,11 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
       data-testid="git-status-bar"
       className={cn(
         // h-6 — mirrors NodeGroupHeader (AgentList.tsx L847).
+        // Text color aligned with WorkspaceSelector's toolbarButton (lib/ui-styles.ts L29)
+        // so the bottom-of-panel strip reads as part of the same toolbar family.
         "flex h-6 w-full shrink-0 items-center gap-1.5 px-3 text-left",
         "text-[10px] font-medium uppercase tracking-wide",
-        "text-zinc-400 dark:text-zinc-500",
-        "hover:text-zinc-600 dark:hover:text-zinc-300",
+        "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
         "transition-colors duration-150",
         "border-y border-nav-divider/40 dark:border-zinc-600/40",
       )}
@@ -89,7 +90,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
       ) : (
         <RefreshCw
-          className="h-3 w-3 shrink-0 transition-colors hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="h-3 w-3 shrink-0 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200"
           onClick={(e) => {
             e.stopPropagation();
             void refresh(agentId, workspaceId);
