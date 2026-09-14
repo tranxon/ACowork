@@ -505,6 +505,14 @@ interface AgentState {
   preferredModel: string | null;
   /** ADR-012: Agent's preferred provider */
   preferredProvider: string | null;
+  /**
+   * LLM availability for THIS agent, mirrored from its own
+   * `SessionConfig.llm_availability` retained MQTT topic. Per-agent (not
+   * global) because the Desktop subscribes to many agents at once and any
+   * one of them flashing MISSING during a reconnect race must not put a
+   * banner over every other agent's chat.
+   */
+  llmAvailability: LlmAvailability;
 }
 
 const DEFAULT_AGENT_STATE: AgentState = {
@@ -515,6 +523,7 @@ const DEFAULT_AGENT_STATE: AgentState = {
   isSessionInitLoading: false,
   preferredModel: null,
   preferredProvider: null,
+  llmAvailability: "unspecified",
 };
 
 const MAX_CACHED_SESSIONS = 32;
@@ -729,17 +738,6 @@ interface ChatStore {
    */
   bootstrapVersion: number;
   availableModels: ModelEntry[];
-  /**
-   * LLM availability for the current session, mirrored from the
-   * `SessionConfig.llm_availability` retained MQTT topic. Drives the
-   * three-state banner in `ChatPanel`.
-   *
-   * - `unspecified`  — runtime hasn't published yet, render nothing
-   * - `loading`      — bootstrap not READY / vault not populated, render placeholder
-   * - `configured`   — vault has at least one usable provider, render nothing
-   * - `missing`      — vault empty or every provider unusable, render red banner
-   */
-  llmAvailability: LlmAvailability;
 
   // ---- Actions ----
   sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
@@ -1290,7 +1288,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   transitionLog: [],
   bootstrapVersion: 0,
   availableModels: [],
-  llmAvailability: "unspecified",
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -3424,19 +3421,23 @@ export function handleMessageEvent(
         log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
       }
-      // LLM availability is a global-runtime signal; store at the top
-      // level (not per-session) since every session of the same agent
-      // sees the same value. `data.llm_availability` is the protobuf
-      // wire field (i32 / enum string from JSON conversion).
+      // LLM availability is an agent-level (instance-level) signal, NOT
+      // global: the Desktop subscribes to many agents on the same broker
+      // and each Runtime publishes its own retained SessionConfig. A
+      // per-agent field keeps one agent's reconnect race (see the
+      // runtime `compute()` comment) from putting a misconfig banner
+      // over every other agent's chat. `data.llm_availability` is the
+      // protobuf wire field (i32 / enum string from JSON conversion).
       const nextAvail = llmAvailabilityFromWire(data.llm_availability);
+      const curAvail = getAgentState(get(), agentId).llmAvailability;
       // `unspecified` means "this message carries no availability info"
       // (old runtime without the field, or a per-session config
       // re-publish that wasn't tagged). Never downgrade a known state
       // back to unspecified — that would hide the banner until the next
       // availability transition fires.
-      if (nextAvail !== "unspecified" || get().llmAvailability === "unspecified") {
-        if (nextAvail !== get().llmAvailability) {
-          set({ llmAvailability: nextAvail });
+      if (nextAvail !== "unspecified" || curAvail === "unspecified") {
+        if (nextAvail !== curAvail) {
+          set((state) => updateAgentState(state, agentId, { llmAvailability: nextAvail }));
         }
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.

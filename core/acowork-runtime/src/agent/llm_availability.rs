@@ -79,7 +79,24 @@ fn compute(
     if phase != BootstrapPhase::Ready {
         return LlmAvailability::Loading;
     }
-    let Some(p) = providers else { return LlmAvailability::Missing };
+    // `bootstrap=Ready` but `providers=None` is a retained re-delivery
+    // race, not a real misconfiguration. After a (remote) Gateway
+    // restart the Runtime's cache layer clears old-generation resource
+    // snapshots the moment a new `acowork/global/bootstrap` arrives
+    // (see `AvailableResourceCache::update_from_mqtt` → generation
+    // switch); `acowork/global/providers` is a separate retained topic
+    // and the broker does not guarantee cross-topic ordering, so we can
+    // observe `providers=None` for tens of milliseconds before its
+    // retained payload lands. Reporting Missing here would surface a
+    // false yellow "LLM 未配置" banner on the Desktop for that window.
+    // Per ADR-059 §5.3 (single-snapshot atomicity) the bootstrap phase
+    // is the only authoritative cross-topic signal — so Loading is the
+    // honest verdict until the providers snapshot itself arrives.
+    // A genuinely empty vault always travels as `providers=Some([])`
+    // (the Gateway's `MqttGlobalResourcesPublisher` always emits a
+    // non-None envelope once its ready barrier lifts), which still
+    // maps to Missing via the empty-list branch below.
+    let Some(p) = providers else { return LlmAvailability::Loading };
     if p.providers.is_empty() {
         return LlmAvailability::Missing;
     }
@@ -214,9 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_when_providers_none() {
+    fn loading_when_providers_none() {
+        // `bootstrap=Ready` but `providers=None` is the retained
+        // re-delivery race after a (remote) Gateway restart — not a
+        // real misconfiguration. See the long-form comment in
+        // `compute()` and ADR-059 §5.3.
         let s = bs(BootstrapPhase::Ready);
-        assert_eq!(compute(Some(&s), None), LlmAvailability::Missing);
+        assert_eq!(compute(Some(&s), None), LlmAvailability::Loading);
     }
 
     #[test]
@@ -268,14 +289,26 @@ mod tests {
             "empty cache → initial Loading"
         );
 
-        // Bootstrap becomes Ready but providers still empty → Missing.
+        // Bootstrap becomes Ready but providers retained has not yet
+        // landed — this is the post-restart retained race window, NOT
+        // a real misconfiguration. State must stay Loading until the
+        // providers payload arrives (see `compute()` long-form
+        // comment), with no spurious transition to Missing.
         {
             let mut g = cache.write().await;
             g.bootstrap = Some(bs(BootstrapPhase::Ready));
         }
-        assert!(
-            wait_for_change(&mut rx, LlmAvailability::Missing, POLL_INTERVAL * 5).await,
-            "Missing transition should fire within budget"
+        // Drain any pending state-change notifications so the next
+        // assertion only sees transitions caused by the providers
+        // write below.
+        rx.borrow_and_update();
+        // Let one poll tick run, then assert no transition fired and
+        // the current state is still Loading.
+        tokio::time::sleep(POLL_INTERVAL * 2).await;
+        assert_eq!(
+            *rx.borrow(),
+            LlmAvailability::Loading,
+            "post-restart race window must stay Loading, not flash Missing"
         );
 
         // Add a usable provider → Configured.

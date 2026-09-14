@@ -720,10 +720,18 @@ export function ChatPanel() {
   // the "X seconds until auto-reconnect" countdown.
   const mqttStaleSince = useChatStore((s) => s.staleSince);
   const availableModels = useChatStore((s) => s.availableModels);
-  // Mirrored from `SessionConfig.llm_availability` retained MQTT topic.
-  // Drives the three-state banner; the previous boolean check caused a
-  // visible flash on every startup (vault race).
-  const llmAvailability = useChatStore((s) => s.llmAvailability);
+  // Mirrored from this agent's `SessionConfig.llm_availability` retained
+  // MQTT topic. Per-agent: each Runtime publishes its own value, and a
+  // banner should reflect the CURRENTLY selected agent — not some other
+  // agent on the same broker flashing MISSING during a reconnect race.
+  // The previous boolean check caused a visible flash on every startup
+  // (vault race).
+  const llmAvailability = useChatStore(
+    (s) =>
+      selectedAgentId
+        ? (s.agentStates[selectedAgentId]?.llmAvailability ?? "unspecified")
+        : "unspecified",
+  );
   // Stable function refs
   const {
     sendMessage,
