@@ -1466,6 +1466,19 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 // intact even when FileEditorPanel is
                                 // squeezed by a wide right panel / agent list.
                                 useInlineViewWhenSpaceIsLimited: false,
+                                // Disable Monaco's diff overview ruler. The
+                                // ruler paints a 30-px-wide marker strip on
+                                // the modified (right) pane only — see
+                                // monaco-editor/.../overviewRulerFeature.js
+                                // (ONE_OVERVIEW_WIDTH=15, ENTIRE=15*2=30) —
+                                // which stacks visually on top of the
+                                // 14-px scrollbar there. Result: the right
+                                // scrollbar looks ~2x wider than the left's
+                                // (which has no ruler). Diff markers are
+                                // still conveyed by the per-line green/red
+                                // highlights inside the panes, which is the
+                                // primary affordance.
+                                renderOverviewRuler: false,
                                 automaticLayout: true,
                                 padding: { top: 8 },
                             }}
