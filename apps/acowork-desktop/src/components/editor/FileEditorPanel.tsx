@@ -1453,22 +1453,32 @@ export function FileEditorPanel({ width }: { width: number }) {
                     // original (HEAD) vs. working-tree content. GitDiffKind
                     // "deleted" arrives with empty `modified`, which Monaco
                     // renders as an empty right pane.
-                    <DiffEditor
-                        original={activeFile.originalContent}
-                        modified={activeFile.content}
-                        language={activeFile.language}
-                        theme={resolvedMonacoTheme}
-                        options={{
-                            minimap: { enabled: false },
-                            fontSize: editorFontSize,
-                            lineNumbers: "on",
-                            scrollBeyondLastLine: false,
-                            readOnly: true,
-                            renderSideBySide: true,
-                            automaticLayout: true,
-                            padding: { top: 8 },
-                        }}
-                    />
+                    activeFile.gitDiffKind === "binary" ? (
+                        // ADR-078 decision 4/7 — binary diffs degrade to a
+                        // placeholder: /git/diff returns kind=binary with no
+                        // content, so show an explicit notice rather than two
+                        // empty panes.
+                        <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+                            {t("gitStatus.binaryDiff")}
+                        </div>
+                    ) : (
+                        <DiffEditor
+                            original={activeFile.originalContent}
+                            modified={activeFile.content}
+                            language={activeFile.language}
+                            theme={resolvedMonacoTheme}
+                            options={{
+                                minimap: { enabled: false },
+                                fontSize: editorFontSize,
+                                lineNumbers: "on",
+                                scrollBeyondLastLine: false,
+                                readOnly: true,
+                                renderSideBySide: true,
+                                automaticLayout: true,
+                                padding: { top: 8 },
+                            }}
+                        />
+                    )
                 ) : activeFile.kind === "log" ? (
                     // ADR-078 decision 7 — read-only single-pane commit log.
                     <Editor

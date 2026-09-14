@@ -1157,7 +1157,9 @@
     "untracked": "未追跡",
     "deleted": "削除",
     "renamed": "名前変更",
-    "added": "追加"
+    "added": "追加",
+    "conflicted": "競合",
+    "binaryDiff": "バイナリファイル — diff は表示されません"
   },
   "fileTree": {
     "deleteConfirmOk": "削除",

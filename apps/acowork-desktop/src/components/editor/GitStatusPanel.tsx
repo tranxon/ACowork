@@ -11,6 +11,7 @@ import {
   ArrowRightLeft,
   FileMinus,
   FilePlus,
+  GitMerge,
   Pencil,
 } from "lucide-react";
 import {
@@ -67,6 +68,16 @@ function languageForPath(path: string): string {
 }
 
 function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; labelKey: string } {
+  // Unmerged / conflicted paths take priority — never rendered as "clean"
+  // (ADR-078 invariant 5; runtime maps porcelain `UU`/`AU`/`AA`/... to
+  // `conflicted` on both columns).
+  if (c.index === "conflicted" || c.worktree === "conflicted") {
+    return {
+      icon: <GitMerge size={13} />,
+      color: "text-red-500 dark:text-red-400",
+      labelKey: "gitStatus.conflicted",
+    };
+  }
   if (c.index === "renamed" || c.index === "added") {
     return {
       icon: c.index === "renamed" ? <ArrowRightLeft size={13} /> : <FilePlus size={13} />,

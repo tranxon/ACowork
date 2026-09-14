@@ -25,6 +25,7 @@ const translations: Record<string, string> = {
   "gitStatus.staged": "staged",
   "gitStatus.renamed": "renamed",
   "gitStatus.added": "added",
+  "gitStatus.conflicted": "conflicted",
   "gitStatus.deleted": "deleted",
   "gitStatus.untracked": "untracked",
   "gitStatus.modified": "modified",
@@ -356,11 +357,14 @@ describe("GitStatusPanel", () => {
     expect(screen.getByText("boom 500")).toBeTruthy();
   });
 
-  it("maps status states to icons (untracked / deleted / staged renamed)", () => {
+  it("maps status states to icons (untracked / deleted / staged renamed / conflicted)", () => {
     const changes: GitStatusResponse["changes"] = [
       { path: "u.txt", oldPath: null, index: "unmodified", worktree: "untracked", staged: false },
       { path: "d.txt", oldPath: null, index: "deleted", worktree: "deleted", staged: false },
       { path: "r.txt", oldPath: "old.txt", index: "renamed", worktree: "modified", staged: true },
+      // Unmerged paths arrive as conflicted on both columns — must render as
+      // a conflict icon, never as clean/modified (ADR-078 invariant 5).
+      { path: "c.txt", oldPath: null, index: "conflicted", worktree: "conflicted", staged: false },
     ];
     setEntry({
       data: { isRepo: true, branch: "main", error: null, truncated: false, changes },
@@ -370,5 +374,9 @@ describe("GitStatusPanel", () => {
     expect(container.querySelector(".lucide-file-plus")).toBeTruthy();
     expect(container.querySelector(".lucide-file-minus")).toBeTruthy();
     expect(container.querySelector(".lucide-arrow-right-left")).toBeTruthy();
+    expect(container.querySelector(".lucide-git-merge")).toBeTruthy();
+    // Conflicted rows must not show a staged badge.
+    const cRow = screen.getByText("c.txt").closest("li");
+    expect(cRow?.textContent).not.toContain("staged");
   });
 });

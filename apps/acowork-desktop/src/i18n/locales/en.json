@@ -391,7 +391,9 @@
     "untracked": "untracked",
     "deleted": "deleted",
     "renamed": "renamed",
-    "added": "added"
+    "added": "added",
+    "conflicted": "conflicted",
+    "binaryDiff": "Binary file — diff not shown"
   },
   "fileTree": {
     "deleteConfirmOk": "Delete",

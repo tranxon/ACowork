@@ -1158,7 +1158,9 @@
     "untracked": "추적 안 됨",
     "deleted": "삭제됨",
     "renamed": "이름 변경됨",
-    "added": "추가됨"
+    "added": "추가됨",
+    "conflicted": "충돌",
+    "binaryDiff": "바이너리 파일 — diff가 표시되지 않습니다"
   },
   "fileTree": {
     "deleteConfirmOk": "삭제",

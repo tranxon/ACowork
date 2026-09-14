@@ -1178,7 +1178,9 @@
     "untracked": "未跟踪",
     "deleted": "已删除",
     "renamed": "已重命名",
-    "added": "新增"
+    "added": "新增",
+    "conflicted": "冲突",
+    "binaryDiff": "二进制文件 — 不显示差异"
   },
   "fileTree": {
     "deleteConfirmOk": "删除",

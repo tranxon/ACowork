@@ -28,6 +28,7 @@ vi.mock("../../i18n/useTranslation", () => ({
 
 /** Fake gitStore state fed through the selector pattern the component uses. */
 const mocks = {
+  expandedKey: null as string | null,
   isExpanded: vi.fn(() => false),
   status: {} as Record<string, unknown>,
   setExpanded: vi.fn(),
@@ -36,8 +37,11 @@ const mocks = {
 
 vi.mock("../../stores/gitStore", () => ({
   gitGroupKey: (a: string, w: string) => `${a}\u0000${w}`,
-  useGitStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector(mocks as unknown as Record<string, unknown>),
+  useGitStore: Object.assign(
+    (selector: (s: Record<string, unknown>) => unknown) =>
+      selector(mocks as unknown as Record<string, unknown>),
+    { getState: () => mocks as unknown as Record<string, unknown> },
+  ),
 }));
 
 // ── SUT ──────────────────────────────────────────────────────────────────
@@ -51,6 +55,7 @@ function setEntry(entry: Record<string, unknown> | undefined) {
 }
 
 beforeEach(() => {
+  mocks.expandedKey = null;
   mocks.isExpanded.mockReset().mockReturnValue(false);
   mocks.setExpanded.mockReset();
   mocks.refresh.mockReset();
@@ -138,5 +143,46 @@ describe("GitStatusBar", () => {
     expect(mocks.refresh).toHaveBeenCalledWith("a1", "ws1");
     // Toggle must NOT have fired (stopPropagation).
     expect(mocks.setExpanded).not.toHaveBeenCalled();
+  });
+
+  it("clears a stale expansion from another group on mount (releases old fs-watch)", () => {
+    // Scenario: the bar mounted with the workspace panel collapsed / no file
+    // open, but `expandedKey` still points at a DIFFERENT group from a
+    // previous agent/workspace. The demand-driven fs-watch subscription
+    // would keep watching that stale group (ADR-078 invariant 6) — the bar
+    // must collapse it on mount.
+    mocks.expandedKey = "b1\u0000ws9";
+    mocks.isExpanded.mockReturnValue(false); // this group not expanded
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.setExpanded).toHaveBeenCalledWith("a1", "ws1", false);
+  });
+
+  it("keeps an own-group expansion intact on mount", () => {
+    mocks.expandedKey = "a1\u0000ws1";
+    mocks.isExpanded.mockReturnValue(true);
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.setExpanded).not.toHaveBeenCalled();
+  });
+
+  it("collapses on unmount when this group is expanded (panel no longer visible)", () => {
+    mocks.isExpanded.mockReturnValue(true); // expanded while mounted
+    const { unmount } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.setExpanded).not.toHaveBeenCalled(); // no-op while mounted
+    unmount();
+    // Panel disappeared (active file closed / agent switched) → the
+    // subscription must be released, not left watching in the background.
+    expect(mocks.setExpanded).toHaveBeenCalledWith("a1", "ws1", false);
+  });
+
+  it("collapses a stale other-group expansion exactly once (setup), not again on unmount", () => {
+    // A stale group from a previous agent/workspace must be collapsed on
+    // mount (fs-watch released). Once cleared, unmount must NOT repeat it.
+    mocks.expandedKey = "b1\u0000ws9";
+    mocks.isExpanded.mockReturnValue(false);
+    const { unmount } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.setExpanded).toHaveBeenCalledTimes(1);
+    expect(mocks.setExpanded).toHaveBeenCalledWith("a1", "ws1", false);
+    unmount();
+    expect(mocks.setExpanded).toHaveBeenCalledTimes(1); // no repeat
   });
 });

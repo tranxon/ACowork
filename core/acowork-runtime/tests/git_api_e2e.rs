@@ -66,6 +66,13 @@ fn register_workspace(work_dir: &Path, ws_id: &str, path: &Path) {
 // ── server + HTTP helpers ────────────────────────────────────────────────
 
 async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
+    spawn_server_with_git_bin(tag, "git".to_string()).await
+}
+
+/// Like [`spawn_server`], but injects a custom git executable path. Tests
+/// pass a non-existent path to exercise the `git_unavailable` wire contract
+/// (status → 200 is_repo:false; diff/log → 503) without mutating PATH.
+async fn spawn_server_with_git_bin(tag: &str, git_bin: String) -> (u16, std::path::PathBuf) {
     let temp_dir = std::env::temp_dir().join(format!(
         "acowork-test-git-e2e-{}-{}",
         std::process::id(),
@@ -91,9 +98,10 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
     let git_query: Arc<
         tokio::sync::Mutex<Option<Arc<dyn acowork_runtime::usecases::GitQueryService>>>,
     > = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
-        acowork_runtime::usecases::git_query_impl::RuntimeGitQueryService::new(
+        acowork_runtime::usecases::git_query_impl::RuntimeGitQueryService::new_with_git_bin(
             temp_dir.clone(),
             AGENT_ID.to_string(),
+            git_bin,
         ),
     ))));
     let agent_tools = Arc::new(tokio::sync::Mutex::new(None));
@@ -236,6 +244,29 @@ async fn status_non_repo_returns_is_repo_false() {
     assert_eq!(body["error"], "not_a_repo");
     assert_eq!(body["branch"], serde_json::Value::Null);
     assert_eq!(body["changes"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn git_unavailable_is_200_for_status_and_503_for_diff_log() {
+    // ADR-078 §7.2 wire contract: git missing from the environment is an
+    // explicit state — status → 200 is_repo:false error:"git_unavailable"
+    // (Desktop shows the dedicated empty state), diff/log → 503.
+    let (port, dir) = spawn_server_with_git_bin("git-unavailable", "/nonexistent/git-adr078-e2e".to_string())
+        .await;
+    init_repo(&dir); // repo present — discovery succeeds, spawning fails
+
+    let (status, body) = get_git(port, "status", &[]).await;
+    assert_eq!(status, 200, "status must be 200, got {status}: {body}");
+    assert_eq!(body["isRepo"], false);
+    assert_eq!(body["error"], "git_unavailable");
+    assert_eq!(body["changes"].as_array().unwrap().len(), 0);
+
+    let (status, body) = get_git(port, "diff", &[("path", "a.txt")]).await;
+    assert_eq!(status, 503, "diff must be 503, got {status}: {body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("git"));
+
+    let (status, body) = get_git(port, "log", &[]).await;
+    assert_eq!(status, 503, "log must be 503, got {status}: {body}");
 }
 
 #[tokio::test]

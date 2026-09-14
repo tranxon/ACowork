@@ -102,6 +102,10 @@ pub enum GitIndexStatus {
     Modified,
     Deleted,
     Renamed,
+    /// Merge conflict (unmerged paths: `UU`/`AU`/`UD`/`UA`/`DU`/`AA`/`DD`).
+    /// Deliberately distinct from `unmodified` so a conflicted file is
+    /// never silently shown as "clean" (ADR-078 invariant 5).
+    Conflicted,
     Unmodified,
 }
 
@@ -112,6 +116,8 @@ pub enum GitWorktreeStatus {
     Modified,
     Deleted,
     Untracked,
+    /// Merge conflict (unmerged paths — see [`GitIndexStatus::Conflicted`]).
+    Conflicted,
     Unmodified,
 }
 

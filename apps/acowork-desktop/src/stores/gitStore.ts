@@ -28,11 +28,13 @@ export type GitIndexStatus =
   | "modified"
   | "deleted"
   | "renamed"
+  | "conflicted"
   | "unmodified";
 export type GitWorktreeStatus =
   | "modified"
   | "deleted"
   | "untracked"
+  | "conflicted"
   | "unmodified";
 
 export interface GitChangeDto {

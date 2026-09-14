@@ -5,6 +5,7 @@
  * border-y, hover tint, ChevronRight rotation.
  */
 
+import { useEffect } from "react";
 import { ChevronRight, GitBranch, Loader2, RefreshCw } from "lucide-react";
 import { gitGroupKey, useGitStore } from "../../stores/gitStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -21,6 +22,28 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
   const entry = useGitStore((s) => s.status[gitGroupKey(agentId, workspaceId)]);
   const setExpanded = useGitStore((s) => s.setExpanded);
   const refresh = useGitStore((s) => s.refresh);
+
+  // ADR-078 decision 6 / invariant 6 ("subscription == visibility"): the
+  // expanded (subscribed) group must match the group this bar renders.
+  //   - Setup: a stale expansion from a previous agent/workspace (panel
+  //     switched groups without collapsing) is cleared so the demand-driven
+  //     fs-watch subscription (workspaceFsWatch deriveWatchGroups) is
+  //     released instead of watching the old group in the background.
+  //   - Cleanup: when this bar unmounts or switches groups (active file
+  //     closed / agent or workspace changed) and THIS group is expanded,
+  //     collapse it — the panel is no longer visible.
+  useEffect(() => {
+    const s = useGitStore.getState();
+    if (s.expandedKey && !s.isExpanded(agentId, workspaceId)) {
+      s.setExpanded(agentId, workspaceId, false);
+    }
+    return () => {
+      const cur = useGitStore.getState();
+      if (cur.isExpanded(agentId, workspaceId)) {
+        cur.setExpanded(agentId, workspaceId, false);
+      }
+    };
+  }, [agentId, workspaceId]);
 
   const data = entry?.data;
   const loading = entry?.loading ?? false;

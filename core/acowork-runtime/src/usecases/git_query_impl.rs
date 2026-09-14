@@ -76,13 +76,25 @@ enum BlobRead {
 pub struct RuntimeGitQueryService {
     work_dir: PathBuf,
     _agent_id: String,
+    /// The git executable path. `"git"` in production (resolved via PATH);
+    /// tests inject a non-existent path to exercise the `git_unavailable`
+    /// state without mutating the process-global PATH (which would poison
+    /// parallel tests).
+    git_bin: String,
 }
 
 impl RuntimeGitQueryService {
     pub fn new(work_dir: PathBuf, agent_id: String) -> Self {
+        Self::new_with_git_bin(work_dir, agent_id, "git".to_string())
+    }
+
+    /// Test-only constructor: override the git executable (see
+    /// [`RuntimeGitQueryService::git_bin`]).
+    pub fn new_with_git_bin(work_dir: PathBuf, agent_id: String, git_bin: String) -> Self {
         Self {
             work_dir,
             _agent_id: agent_id,
+            git_bin,
         }
     }
 }
@@ -90,8 +102,8 @@ impl RuntimeGitQueryService {
 // ── Command plumbing ───────────────────────────────────────────────────────
 
 /// Base git command with `cwd = repo_root`.
-fn git_cmd(repo_root: &Path) -> Command {
-    let mut cmd = Command::new("git");
+fn git_cmd(git_bin: &str, repo_root: &Path) -> Command {
+    let mut cmd = Command::new(git_bin);
     cmd.current_dir(repo_root);
     cmd
 }
@@ -256,7 +268,7 @@ fn parse_branch_line(line: &[u8]) -> String {
 /// Index status from porcelain column X.
 fn index_status(x: char) -> GitIndexStatus {
     match x {
-        'M' => GitIndexStatus::Modified,
+        'M' | 'T' => GitIndexStatus::Modified,
         'A' => GitIndexStatus::Added,
         'D' => GitIndexStatus::Deleted,
         'R' | 'C' => GitIndexStatus::Renamed,
@@ -268,10 +280,21 @@ fn index_status(x: char) -> GitIndexStatus {
 fn worktree_status(y: char) -> GitWorktreeStatus {
     match y {
         'M' | 'T' => GitWorktreeStatus::Modified,
+        // Lowercase `m` = submodule has modified content (porcelain v1).
+        'm' => GitWorktreeStatus::Modified,
         'D' => GitWorktreeStatus::Deleted,
         '?' => GitWorktreeStatus::Untracked,
         _ => GitWorktreeStatus::Unmodified,
     }
+}
+
+/// True when the porcelain XY pair denotes an unmerged (conflicted) path.
+/// Porcelain v1 encodes conflicts as X/Y ∈ {A, D, U} (ours/theirs state):
+/// `UU`, `AU`, `UD`, `UA`, `DU`, `AA`, `DD`. `U` never appears outside
+/// conflicts, and `AA`/`DD` cannot be produced by staged+worktree combos
+/// (a staged add is `A `, a worktree add is `??`).
+fn is_unmerged(x: char, y: char) -> bool {
+    x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D')
 }
 
 /// Convert a repo-root-relative porcelain path to a workspace-root-
@@ -299,20 +322,30 @@ fn make_change(
 ) -> Option<GitChangeDto> {
     let ws_path = repo_to_workspace_rel(repo_root, workspace_root, path_repo_rel)?;
     let ws_old = old_repo_rel.and_then(|o| repo_to_workspace_rel(repo_root, workspace_root, o));
-    let index = index_status(x);
-    let worktree = worktree_status(y);
+    // Unmerged paths map both columns to Conflicted so a conflicted file is
+    // never silently rendered as "clean" (ADR-078 invariant 5). `staged` stays
+    // false — a conflict is unresolved, not staged.
+    let (index, worktree, staged) = if is_unmerged(x, y) {
+        (GitIndexStatus::Conflicted, GitWorktreeStatus::Conflicted, false)
+    } else {
+        let index = index_status(x);
+        (index, worktree_status(y), index != GitIndexStatus::Unmodified)
+    };
     Some(GitChangeDto {
         path: ws_path,
         old_path: ws_old,
         index,
         worktree,
-        staged: index != GitIndexStatus::Unmodified,
+        staged,
     })
 }
 
-/// Status sort: staged first, then M / U / D / A / R groups (ADR-078
-/// decision 4 — v1 fixed order, no user sorting).
+/// Status sort: conflicts first, then staged, then M / U / D / A / R groups
+/// (ADR-078 decision 4 — v1 fixed order, no user sorting).
 fn status_sort_key(c: &GitChangeDto) -> (u8, u8, &str) {
+    if c.index == GitIndexStatus::Conflicted || c.worktree == GitWorktreeStatus::Conflicted {
+        return (0, 0, &c.path); // conflicts always on top
+    }
     let staged_rank = if c.staged { 0 } else { 1 };
     let type_rank = if c.worktree == GitWorktreeStatus::Untracked {
         1 // U
@@ -339,11 +372,12 @@ fn status_sort_key(c: &GitChangeDto) -> (u8, u8, &str) {
 /// `git cat-file -s <rev>:<path>` — blob size in bytes, `None` when the
 /// rev:path does not exist. `rev` may be `"HEAD"` or `""` (index).
 async fn cat_file_size(
+    git_bin: &str,
     repo_root: &Path,
     rev: &str,
     path: &str,
 ) -> Result<Option<u64>, GitError> {
-    let mut cmd = git_cmd(repo_root);
+    let mut cmd = git_cmd(git_bin, repo_root);
     cmd.arg("cat-file").arg("-s").arg(format!("{rev}:{path}"));
     let out = run_git(cmd).await?;
     if !out.status.success() {
@@ -358,17 +392,18 @@ async fn cat_file_size(
 /// enters memory — ADR-078 decision 4 > 2 MiB → `TooLarge`). `rev` is
 /// `"HEAD"` or `""` (index).
 async fn read_blob(
+    git_bin: &str,
     repo_root: &Path,
     rev: &str,
     path: &str,
 ) -> Result<BlobRead, GitError> {
-    let Some(size) = cat_file_size(repo_root, rev, path).await? else {
+    let Some(size) = cat_file_size(git_bin, repo_root, rev, path).await? else {
         return Ok(BlobRead::Missing);
     };
     if size > DIFF_SIZE_CAP {
         return Ok(BlobRead::TooLarge);
     }
-    let mut cmd = git_cmd(repo_root);
+    let mut cmd = git_cmd(git_bin, repo_root);
     cmd.arg("show").arg(format!("{rev}:{path}"));
     let out = run_git(cmd).await?;
     if !out.status.success() {
@@ -397,7 +432,7 @@ impl GitQueryService for RuntimeGitQueryService {
             });
         };
 
-        let mut cmd = git_cmd(&repo_root);
+        let mut cmd = git_cmd(&self.git_bin, &repo_root);
         cmd.args([
             "status",
             "--porcelain=v1",
@@ -405,7 +440,23 @@ impl GitQueryService for RuntimeGitQueryService {
             "--untracked-files=all",
             "--branch",
         ]);
-        let out = run_git(cmd).await?;
+        let out = match run_git(cmd).await {
+            Ok(out) => out,
+            Err(GitError::GitUnavailable(_msg)) => {
+                // ADR-078 decision 4 / invariant 5: a missing git binary is
+                // an explicit UI state for /git/status (200 + is_repo:false
+                // + error:"git_unavailable"), NOT a 5xx — the Desktop shows
+                // the dedicated empty state, never a generic error.
+                return Ok(GitStatusResponse {
+                    is_repo: false,
+                    branch: None,
+                    error: Some("git_unavailable".to_string()),
+                    truncated: false,
+                    changes: vec![],
+                });
+            }
+            Err(e) => return Err(e),
+        };
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             if looks_like_not_a_repo(&stderr) {
@@ -482,7 +533,7 @@ impl GitQueryService for RuntimeGitQueryService {
         let original = if is_untracked {
             Vec::new()
         } else {
-            match read_blob(&repo_root, "HEAD", head_repo_rel).await? {
+            match read_blob(&self.git_bin, &repo_root, "HEAD", head_repo_rel).await? {
                 BlobRead::Missing => Vec::new(), // staged-added new file
                 BlobRead::TooLarge => {
                     return Ok(binary_diff_response());
@@ -496,7 +547,7 @@ impl GitQueryService for RuntimeGitQueryService {
             if is_untracked {
                 Vec::new()
             } else {
-                match read_blob(&repo_root, "", &repo_rel).await? {
+                match read_blob(&self.git_bin, &repo_root, "", &repo_rel).await? {
                     BlobRead::Missing => Vec::new(),
                     BlobRead::TooLarge => {
                         return Ok(binary_diff_response());
@@ -535,7 +586,7 @@ impl GitQueryService for RuntimeGitQueryService {
             .unwrap_or(LOG_DEFAULT_LIMIT)
             .min(LOG_MAX_LIMIT);
 
-        let mut cmd = git_cmd(&repo_root);
+        let mut cmd = git_cmd(&self.git_bin, &repo_root);
         cmd.args([
             "log",
             "--no-ext-diff",
@@ -609,7 +660,7 @@ impl RuntimeGitQueryService {
         repo_root: &Path,
         repo_rel: &str,
     ) -> Result<Option<(char, char, Option<String>)>, GitError> {
-        let mut cmd = git_cmd(repo_root);
+        let mut cmd = git_cmd(&self.git_bin, repo_root);
         cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
         let out = run_git(cmd).await?;
         if !out.status.success() {
@@ -656,13 +707,13 @@ impl RuntimeGitQueryService {
         repo_rel: &str,
         cached: u8,
     ) -> Result<GitDiffResponse, GitError> {
-        let original = match read_blob(repo_root, "HEAD", repo_rel).await? {
+        let original = match read_blob(&self.git_bin, repo_root, "HEAD", repo_rel).await? {
             BlobRead::Missing => Vec::new(),
             BlobRead::TooLarge => return Ok(binary_diff_response()),
             BlobRead::Ok(bytes) => bytes,
         };
         let modified = if cached == 1 {
-            match read_blob(repo_root, "", repo_rel).await? {
+            match read_blob(&self.git_bin, repo_root, "", repo_rel).await? {
                 BlobRead::Missing => Vec::new(),
                 BlobRead::TooLarge => return Ok(binary_diff_response()),
                 BlobRead::Ok(bytes) => bytes,
@@ -864,6 +915,48 @@ mod tests {
     }
 
     #[test]
+    fn porcelain_unmerged_maps_to_conflicted() {
+        let ws = Path::new("/repo");
+        let repo = Path::new("/repo");
+        // UU (both modified) + AA (both added) + UD (deleted by them).
+        let raw = b"## main\x00UU uu.txt\x00AA aa.txt\x00UD ud.txt\x00";
+        let (changes, _, _) = parse_status_porcelain(raw, ws, repo);
+        assert_eq!(changes.len(), 3);
+        for c in &changes {
+            assert_eq!(c.index, GitIndexStatus::Conflicted);
+            assert_eq!(c.worktree, GitWorktreeStatus::Conflicted);
+            assert!(!c.staged, "conflict must not be shown as staged: {}", c.path);
+        }
+        // Conflicts sort ahead of staged+modified entries.
+        let mut dtos = changes.clone();
+        dtos.push(GitChangeDto {
+            path: "staged.rs".into(),
+            old_path: None,
+            index: GitIndexStatus::Modified,
+            worktree: GitWorktreeStatus::Unmodified,
+            staged: true,
+        });
+        dtos.sort_by(|a, b| status_sort_key(a).cmp(&status_sort_key(b)));
+        assert!(dtos[0].path.starts_with("uu.txt") || dtos[0].path.starts_with("aa.txt") || dtos[0].path.starts_with("ud.txt"));
+    }
+
+    #[test]
+    fn porcelain_type_change_and_submodule_modified() {
+        let ws = Path::new("/repo");
+        let repo = Path::new("/repo");
+        // `T  ` = staged file-type change (symlink↔file); ` m` = submodule
+        // with modified content; ` D` = worktree deleted.
+        let raw = b"## main\x00T  t.txt\x00 m sub\x00 D gone.rs\x00";
+        let (changes, _, _) = parse_status_porcelain(raw, ws, repo);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0].index, GitIndexStatus::Modified); // T
+        assert!(changes[0].staged);
+        assert_eq!(changes[1].worktree, GitWorktreeStatus::Modified); // m
+        assert!(!changes[1].staged);
+        assert_eq!(changes[2].worktree, GitWorktreeStatus::Deleted);
+    }
+
+    #[test]
     fn truncate_at_nul_keeps_entries_whole() {
         let raw = b"## main\x00 M a.rs\x00 M b.rs\x00";
         // cap 落在第二条 entry 内部 → 截断到最后一个完整 NUL 边界
@@ -993,6 +1086,84 @@ mod tests {
         let untracked = st.changes.iter().find(|c| c.path == "新文件.txt").unwrap();
         assert_eq!(untracked.worktree, GitWorktreeStatus::Untracked);
         assert!(!untracked.staged);
+    }
+
+    #[tokio::test]
+    async fn integration_status_does_not_touch_git_index() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        init_repo(&ws);
+
+        // ADR-078 §7.1 read-only regression: `git status` would otherwise
+        // refresh the index stat-cache (writing `.git/index`) on a
+        // stat-dirty worktree. With `GIT_OPTIONAL_LOCKS=0` neither the
+        // mtime nor the content of `.git/index` may change.
+        let index = ws.join(".git/index");
+        let mtime_before = std::fs::metadata(&index).unwrap().modified().unwrap();
+        let content_before = std::fs::read(&index).unwrap();
+
+        // Stat-dirty the worktree so git would want to refresh the cache.
+        std::fs::write(ws.join("a.txt"), "dirty\n").unwrap();
+
+        let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
+        let st = svc.status(&GitStatusParams::default()).await.unwrap();
+        assert!(st.is_repo);
+        assert_eq!(st.changes.len(), 1);
+
+        let mtime_after = std::fs::metadata(&index).unwrap().modified().unwrap();
+        let content_after = std::fs::read(&index).unwrap();
+        assert_eq!(
+            content_after, content_before,
+            ".git/index content must not change (GIT_OPTIONAL_LOCKS=0)"
+        );
+        assert_eq!(
+            mtime_after, mtime_before,
+            ".git/index mtime must not change (GIT_OPTIONAL_LOCKS=0)"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_git_unavailable_surfaces_explicitly() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        // ADR-078 §7.2: git missing from the environment must surface an
+        // explicit state (status → is_repo:false + error:"git_unavailable",
+        // diff/log → GitUnavailable), never a silent degradation. The repo
+        // is created with the real git first (discovery needs `.git`), then
+        // the service is pointed at a non-existent binary — no process-global
+        // PATH mutation, so parallel tests stay isolated.
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        init_repo(&ws);
+        let svc = RuntimeGitQueryService::new_with_git_bin(
+            ws.clone(),
+            "agent-1".to_string(),
+            "/nonexistent/git-adr078-test".to_string(),
+        );
+
+        let st = svc.status(&GitStatusParams::default()).await.unwrap();
+        assert!(!st.is_repo);
+        assert_eq!(st.error.as_deref(), Some("git_unavailable"));
+
+        let d = svc
+            .diff(&GitDiffParams {
+                workspace_id: None,
+                path: "a.txt".into(),
+                cached: 0,
+            })
+            .await;
+        assert!(matches!(d, Err(GitError::GitUnavailable(_))), "{d:?}");
+
+        let lg = svc.log(&GitLogParams::default()).await;
+        assert!(matches!(lg, Err(GitError::GitUnavailable(_))), "{lg:?}");
     }
 
     #[tokio::test]

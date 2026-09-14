@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { act } from "react";
 
 // ── Hoisted mutable fixtures + spies ─────────────────────────────────────
@@ -283,6 +283,22 @@ describe("FileEditorPanel virtual git tabs (ADR-078 decision 7)", () => {
     // attach LSP clients are only wired for `kind === "file"`.
     const diffProps = h.MockDiffEditor.mock.calls.at(-1)![0] as Record<string, unknown>;
     expect(diffProps.onMount).toBeUndefined();
+    await act(async () => {}); // flush the async initMonaco state update
+  });
+
+  it("renders a binary placeholder instead of empty DiffEditor panes", async () => {
+    // ADR-078 decision 4/7: binary diffs arrive as kind=binary with no
+    // content — the UI shows an explicit notice, never two blank panes.
+    const file = diffFile({ gitDiffKind: "binary" });
+    h.editorState.openFiles = [file];
+    h.editorState.activeFileId = file.id;
+
+    render(<FileEditorPanel width={800} />);
+
+    await vi.waitFor(() => {
+      expect(screen.getByText("gitStatus.binaryDiff")).toBeTruthy();
+    });
+    expect(h.MockDiffEditor).not.toHaveBeenCalled();
     await act(async () => {}); // flush the async initMonaco state update
   });
 });
