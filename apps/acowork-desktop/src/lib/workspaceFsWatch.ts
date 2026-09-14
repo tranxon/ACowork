@@ -44,8 +44,10 @@ let _lastReported = new Map<GroupKey, string[]>();
 /**
  * Derive the current "visible" watch set from frontend state, grouped by
  * (agent, workspace). Empty string represents the workspace root.
+ *
+ * @internal Exported for tests — production entry is `initWorkspaceWatchReporter`.
  */
-function deriveWatchGroups(): Map<GroupKey, string[]> {
+export function deriveWatchGroups(): Map<GroupKey, string[]> {
     const groups = new Map<GroupKey, Set<string>>();
 
     const addPath = (agentId: string, workspaceId: string, relPath: string) => {
