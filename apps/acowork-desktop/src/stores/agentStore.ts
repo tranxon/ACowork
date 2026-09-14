@@ -1002,12 +1002,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             break; // already has a title, skip
           }
           sessions[idx] = { ...existing, title };
-          return {
-            agents: {
-              ...state.agents,
-              [id]: { ...storage, sessions },
-            },
-          };
+          // Mirror `renameSession`: keep the sidebar's `sessionTitle` in sync
+          // when the updated session is the most recently created one
+          // (same heuristic `fetchSessions` uses to derive it from
+          // `sessions[0]`). Without this, the AgentList keeps showing
+          // "Untitled" until the next `fetchSessions` round-trip.
+          return patchAgent(state, id, {
+            sessions,
+            ...(idx === 0 ? { sessionTitle: title } : {}),
+          });
         }
       }
       return state;

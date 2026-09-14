@@ -34,7 +34,7 @@ import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
 import { PromptList } from "../debug/PromptList";
 import { ListBox, ExpandableRow } from "../common/list";
 import { Switch } from "../common/Switch";
-import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
+import { getGatewayUrl } from "../../lib/config";
 
 interface RightPanelProps {
   onCollapse: () => void;
@@ -288,12 +288,10 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     if (!isDebugMode || !selectedAgentId) return;
 
     // ADR-048 D6: debug RPC goes through the Gateway HTTP reverse proxy
-    // and events ride the shared MQTT subscription, but the Desktop MQTT
-    // client still connects to the broker on 127.0.0.1 - in remote mode
-    // (Desktop on a different machine than Gateway/Runtime) debug events
-    // would not flow. Skip silently.
-    if (!isGatewayLocal()) return;
-
+    // and debug events ride the shared MQTT subscription — the broker host
+    // is derived from the Gateway URL (`derive_mqtt_broker_host` in
+    // `commands/chat_mqtt.rs`), so remote mode (Gateway on a different
+    // host) is fully supported. No local-only guard needed.
     const agentChanged = selectedAgentId !== prevAgentId.current;
 
     // ADR-048 follow-up: `debug_state === "enabled"` covers both
@@ -608,17 +606,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   history) are intentionally hidden until the operator
                   commits to a debug session. */}
               {selectedAgent?.debug_state === "enabled" && (
-                !isGatewayLocal() ? (
-                  <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
-                    <WifiOff className="h-5 w-5" />
-                    <span className="text-center text-xs">
-                      {t("rightPanel.debugUnavailableRemote")}
-                    </span>
-                    <span className="text-center text-xs text-zinc-400">
-                      {t("rightPanel.debugRemoteDesc")}
-                    </span>
-                  </div>
-                ) : !connected ? (
+                !connected ? (
                   <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
                     <WifiOff className="h-5 w-5" />
                     <span className="text-center">

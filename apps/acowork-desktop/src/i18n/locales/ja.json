@@ -616,8 +616,6 @@
     "memory": "メモリ",
     "setup": "設定",
     "workspace": "ワークスペース",
-    "debugUnavailableRemote": "リモートモードではデバッグは使用できません",
-    "debugRemoteDesc": "デバッグにはAgentランタイムへの直接ローカル接続が必要です。デスクトップアプリとゲートウェイは同じマシン上で実行する必要があります。",
     "connectingDebug": "デバッグサーバーに接続中...",
     "debugConnectionLost": "デバッグ接続が切断されました",
     "enterDebug": "デバッグに入る",
