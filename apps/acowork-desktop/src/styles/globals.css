@@ -547,6 +547,35 @@ body {
   background: var(--ui-scrollbar-thumb-hover);
 }
 
+/* Suppress native webkit scrollbars inside Monaco editor containers.
+ *
+ * WKWebView on macOS forces native scrollbars to render on any
+ * overflow:auto/scroll ancestor when the system "Show scroll bars"
+ * preference is "Always" (or while a scroll gesture is in progress) —
+ * Monaco's own `.scrollbar.vertical` → `.slider` paints on top, but
+ * the native bar still occupies its gutter. The two then stack
+ * visually: a 6 px native bar (--ui-scrollbar-thumb) next to Monaco's
+ * 14 px custom bar, producing a doubled-width two-tone strip on the
+ * right edge of every Monaco editor — most visible in DiffEditor
+ * (show diff) where both panes always have content.
+ *
+ * Monaco never depends on the native scrollbar (its whole scroll
+ * abstraction is custom — see node_modules/monaco-editor/.../scrollableElement.js),
+ * so disabling webkit-scrollbar here is safe. The selector is scoped
+ * to .monaco-scrollable-element so Monaco's other widgets (context
+ * menus, hover widgets) keep their native scroll behavior intact. */
+.monaco-scrollable-element,
+.monaco-scrollable-element * {
+  scrollbar-width: none; /* Firefox */
+}
+.monaco-scrollable-element::-webkit-scrollbar,
+.monaco-scrollable-element *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+  -webkit-appearance: none;
+}
+
 /* Firefox */
 * {
   scrollbar-width: thin;
