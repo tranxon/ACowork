@@ -162,6 +162,11 @@ async fn run_supervisor(
     // normal mode where any disconnection IS a restart trigger.
     let mut in_startup_grace = true;
 
+    // Tracks how long the embed has been alive-but-unresponsive. When
+    // this exceeds EMBED_STALE_TIMEOUT the supervisor force-kills and
+    // restarts instead of waiting forever (zombie PID guard).
+    let mut stale_since: Option<Instant> = None;
+
     // Wait for the initial embed to bind and start serving /events.
     // Don't count failures during this period against the restart budget.
     {
@@ -228,6 +233,8 @@ async fn run_supervisor(
                 // killing, probe /health to confirm the embed is truly stuck.
                 let health = super::embed::check_embed_health(port).await;
                 if health.is_some() {
+                    // The process answered — it was never really stuck.
+                    stale_since = None;
                     tracing::warn!(
                         elapsed_secs,
                         "Embed heartbeat timeout, but /health probe succeeded — \
@@ -253,6 +260,7 @@ async fn run_supervisor(
                 if embed_alive {
                     // Transient network glitch or the SSE-timeout bug.
                     // Embed is fine — just reconnect.
+                    stale_since = None;
                     tracing::info!(
                         "Embed /events connection lost but server is responding; reconnecting"
                     );
@@ -264,11 +272,36 @@ async fn run_supervisor(
         }
 
         if embed_process_alive(&state, port).await {
-            tracing::info!(
-                "Embed HTTP is not ready yet, but process is still alive; waiting instead of restarting"
+            // PID alive but HTTP/SSE unresponsive. Give it a bounded
+            // window to recover, then force-kill and restart — a zombie
+            // PID keeps `embed_process_alive` true forever, so without
+            // this cap the supervisor would wait indefinitely.
+            let now = Instant::now();
+            if !stale_should_restart(
+                &mut stale_since,
+                now,
+                supervisor_defaults::EMBED_STALE_TIMEOUT,
+            ) {
+                tracing::info!(
+                    "Embed HTTP is not ready yet, but process is still alive; waiting instead of restarting"
+                );
+                sleep(supervisor_defaults::STARTUP_POLL).await;
+                continue;
+            }
+            let waited = now - stale_since.unwrap_or(now);
+            tracing::warn!(
+                ?waited,
+                "Embed process alive but unresponsive too long; killing and restarting"
             );
+            stale_since = None;
+            if let Some(pid) = state.read().await.embed_process.as_ref().map(|e| e.pid)
+                && pid != 0
+            {
+                let _ = super::embed::kill_embed_process(pid).await;
+            }
+            // Give the graceful shutdown a moment to release the port,
+            // then fall through to the normal restart path.
             sleep(supervisor_defaults::STARTUP_POLL).await;
-            continue;
         }
 
         {
@@ -714,3 +747,45 @@ async fn apply_state_event(
 // `acowork/global/sidecar` retained topic in a dedicated publisher
 // task — the old `push_embed_sidecar_to_agents` (which called the
 // no-op `ResourcePusher::push_sidecar_endpoint`) has been removed.
+
+/// Decide whether an alive-but-unresponsive embed should be force-killed.
+///
+/// Records the first sighting in `stale_since`, then returns true only
+/// once the process has stayed unresponsive for at least `timeout`.
+/// Callers reset `stale_since` to `None` when the process is confirmed
+/// healthy again (or restarted).
+fn stale_should_restart(
+    stale_since: &mut Option<Instant>,
+    now: Instant,
+    timeout: Duration,
+) -> bool {
+    let since = *stale_since.get_or_insert(now);
+    now.duration_since(since) >= timeout
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_should_restart_only_after_timeout_elapses() {
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(30);
+
+        // First sighting just records the start; never restarts yet.
+        let mut stale = None;
+        assert!(!stale_should_restart(&mut stale, t0, timeout));
+        assert!(stale.is_some());
+
+        // Still within the window — keep waiting.
+        assert!(!stale_should_restart(&mut stale, t0 + Duration::from_secs(29), timeout));
+
+        // Timeout reached — restart.
+        assert!(stale_should_restart(&mut stale, t0 + Duration::from_secs(30), timeout));
+
+        // After the caller resets on restart, a fresh sighting gets a
+        // fresh window.
+        stale = None;
+        assert!(!stale_should_restart(&mut stale, t0, timeout));
+    }
+}

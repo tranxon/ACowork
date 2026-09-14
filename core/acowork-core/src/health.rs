@@ -64,4 +64,9 @@ pub mod supervisor_defaults {
     pub const RESTART_WINDOW: Duration = Duration::from_secs(5 * 60);
     /// Give up after this many restarts within `RESTART_WINDOW`.
     pub const MAX_RESTART_ATTEMPTS: u32 = 5;
+    /// Max time an alive-but-unresponsive embed is tolerated before the
+    /// supervisor force-kills and restarts it. A zombie PID keeps the
+    /// "process alive" check true forever, so without this cap the
+    /// supervisor would wait indefinitely instead of self-healing.
+    pub const EMBED_STALE_TIMEOUT: Duration = Duration::from_secs(30);
 }

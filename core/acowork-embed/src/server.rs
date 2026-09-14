@@ -907,48 +907,63 @@ pub async fn events(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, axum::Error>>> {
     let mut rx = state.event_bus.subscribe();
+    let shutdown = state.shutdown.clone();
     let stream = async_stream::stream! {
         loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let sse_event = match &*event {
-                        BusEvent::Heartbeat { seq } => {
-                            Event::default()
-                                .event("heartbeat")
-                                .data(serde_json::json!({"seq": seq}).to_string())
-                        }
-                        BusEvent::State { seq, state } => {
-                            let payload = match state {
-                                BusState::Starting => {
-                                    serde_json::json!({"status":"starting","model_id":null,"dimension":0})
+            // Stop streaming once shutdown is requested. This is a
+            // long-lived connection: if we keep it open, axum's graceful
+            // shutdown waits on it forever and the process never exits —
+            // leaving a zombie that no longer serves but still emits
+            // heartbeats (which also fools the gateway's watchdog).
+            tokio::select! {
+                event = rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            let sse_event = match &*event {
+                                BusEvent::Heartbeat { seq } => {
+                                    Event::default()
+                                        .event("heartbeat")
+                                        .data(serde_json::json!({"seq": seq}).to_string())
                                 }
-                                BusState::DownloadingRecommended { model_id, progress } => {
-                                    serde_json::json!({"status":"downloading_recommended","model_id":model_id,"dimension":0,"progress":progress})
-                                }
-                                BusState::Loading { model_id } => {
-                                    serde_json::json!({"status":"loading","model_id":model_id,"dimension":0})
-                                }
-                                BusState::Ready { model_id, dimension } => {
-                                    serde_json::json!({"status":"ready","model_id":model_id,"dimension":dimension})
-                                }
-                                BusState::Error { message } => {
-                                    serde_json::json!({"status":"error","model_id":null,"dimension":0,"message":message})
+                                BusEvent::State { seq, state } => {
+                                    let payload = match state {
+                                        BusState::Starting => {
+                                            serde_json::json!({"status":"starting","model_id":null,"dimension":0})
+                                        }
+                                        BusState::DownloadingRecommended { model_id, progress } => {
+                                            serde_json::json!({"status":"downloading_recommended","model_id":model_id,"dimension":0,"progress":progress})
+                                        }
+                                        BusState::Loading { model_id } => {
+                                            serde_json::json!({"status":"loading","model_id":model_id,"dimension":0})
+                                        }
+                                        BusState::Ready { model_id, dimension } => {
+                                            serde_json::json!({"status":"ready","model_id":model_id,"dimension":dimension})
+                                        }
+                                        BusState::Error { message } => {
+                                            serde_json::json!({"status":"error","model_id":null,"dimension":0,"message":message})
+                                        }
+                                    };
+                                    let data = serde_json::json!({"seq": seq, "state": payload});
+                                    Event::default().event("state").data(data.to_string())
                                 }
                             };
-                            let data = serde_json::json!({"seq": seq, "state": payload});
-                            Event::default().event("state").data(data.to_string())
+                            yield Ok(sse_event);
                         }
-                    };
-                    yield Ok(sse_event);
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // Client is too slow. Emit a comment so the client knows
+                            // events were dropped, and continue.
+                            yield Ok(Event::default().comment(format!("lagged:{n}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // Bus is gone — embed is shutting down. End the stream.
+                            break;
+                        }
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    // Client is too slow. Emit a comment so the client knows
-                    // events were dropped, and continue.
-                    yield Ok(Event::default().comment(format!("lagged:{n}")));
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    // Bus is gone — embed is shutting down. End the stream.
-                    break;
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    if shutdown.is_shutting_down() {
+                        break;
+                    }
                 }
             }
         }
@@ -974,4 +989,59 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/models/{id}/status", get(model_status))
         .route("/models/{id}", delete(delete_model))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body;
+    use axum::response::IntoResponse;
+
+    /// The /events SSE stream must terminate once shutdown is requested.
+    /// A long-lived SSE connection kept open makes axum's graceful
+    /// shutdown wait on it forever, so the embed process never exits —
+    /// leaving a zombie that no longer serves HTTP but keeps the
+    /// gateway's watchdog fed with heartbeats (harness embed test
+    /// failed with "Lifecycle error: Failed to call embeddings
+    /// endpoint" for exactly this reason).
+    #[tokio::test]
+    async fn events_stream_ends_on_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = Shutdown::new();
+        let event_bus = EventBus::new(16);
+        let state = Arc::new(AppState {
+            model: RwLock::new(None),
+            registry: ModelRegistry::load(dir.path()),
+            downloader: Downloader::new(dir.path(), vec![]),
+            download_status: RwLock::new(Default::default()),
+            download_progress: RwLock::new(Default::default()),
+            shutdown: shutdown.clone(),
+            models_dir: dir.path().to_path_buf(),
+            onnx_variant: "fp32".to_string(),
+            default_model: None,
+            download_cancel_flags: RwLock::new(Default::default()),
+            event_bus: event_bus.clone(),
+        });
+
+        let body = events(State(state)).await.into_response().into_body();
+
+        // Stream delivers bus events before shutdown (and stays open).
+        event_bus.publish_state(BusState::Ready {
+            model_id: "test".to_string(),
+            dimension: 8,
+        });
+
+        // After shutdown the stream must end promptly — otherwise axum
+        // waits on this connection forever and the process never exits.
+        shutdown.request();
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            body::to_bytes(body, usize::MAX),
+        )
+        .await;
+        assert!(
+            drained.is_ok(),
+            "SSE stream must terminate after shutdown is requested"
+        );
+    }
 }
