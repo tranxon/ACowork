@@ -1455,6 +1455,17 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 scrollBeyondLastLine: false,
                                 readOnly: true,
                                 renderSideBySide: true,
+                                // ADR-078 decision 7: side-by-side is part of
+                                // the "two-file diff" semantics — must hold at
+                                // any editor width. Monaco otherwise auto-
+                                // switches to inline mode when the container
+                                // is narrower than renderSideBySideInlineBreakpoint
+                                // (default 900 px; see
+                                // monaco-editor/.../diffEditorOptions.js L32).
+                                // Forcing it off keeps the two-pane layout
+                                // intact even when FileEditorPanel is
+                                // squeezed by a wide right panel / agent list.
+                                useInlineViewWhenSpaceIsLimited: false,
                                 automaticLayout: true,
                                 padding: { top: 8 },
                             }}
