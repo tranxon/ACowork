@@ -426,6 +426,18 @@ pub struct MqttConnectConfig<'a> {
     pub node_proxy_update_tx: Option<
         tokio::sync::mpsc::UnboundedSender<String>,
     >,
+    /// §6.3.3 / ADR-055 D3: the node reverse-proxy base URL injected
+    /// at spawn time (`--http-advertise-endpoint`). Cached in
+    /// `BootstrapData` so `run_bootstrap` can re-publish the retained
+    /// `http_endpoint` on every (re)connect — a Gateway restart drops
+    /// all retained state (in-memory broker), and without this the
+    /// Gateway can never route to a Runtime that did not itself
+    /// restart. `None` standalone / tests.
+    pub http_advertise_endpoint: Option<&'a str>,
+    /// Loopback port of this Runtime's HTTP server (`--http-port`).
+    /// Used to build the standalone `http://127.0.0.1:{port}`
+    /// fallback endpoint on (re)connect when no node base is set.
+    pub http_port: Option<u16>,
 }
 
 /// Event payload for `publish_tool_approval_needed`.
@@ -543,6 +555,16 @@ struct BootstrapData {
     /// `Arc<BootstrapData>` between the handler task (Step 7) and the
     /// `publish_ready` caller.
     ready_ever: std::sync::atomic::AtomicBool,
+    /// §6.3.3 / ADR-055 D3: the node reverse-proxy base URL injected
+    /// at spawn time (`--http-advertise-endpoint`), and the Runtime's
+    /// own loopback HTTP port. `run_bootstrap` re-publishes the
+    /// retained `http_endpoint` from these on every (re)connect so a
+    /// Gateway that restarts (its embedded broker is in-memory and
+    /// loses all retained state) can re-discover this Runtime without
+    /// a process restart. `None` for standalone / tests.
+    http_advertise_endpoint: Option<String>,
+    /// Loopback port of this Runtime's HTTP server (`--http-port`).
+    http_port: Option<u16>,
 }
 
 /// Runtime entity handler for the shared [`MqttClient`] (ADR-065 Step 4).
@@ -994,6 +1016,8 @@ impl RuntimeMqttClient {
                 .map(acowork_core::node::node_info_topic),
             ready_topic: format!("acowork/agents/{}/ready", instance_id),
             ready_ever: std::sync::atomic::AtomicBool::new(false),
+            http_advertise_endpoint: cfg.http_advertise_endpoint.map(|s| s.to_string()),
+            http_port: cfg.http_port,
         });
 
         // ADR-065 Step 4: build the entity-only config for the shared
@@ -1256,6 +1280,53 @@ impl RuntimeMqttClient {
                 .map_err(|e| {
                     RuntimeMqttClientError::Subscribe(format!("node info: {}", e))
                 })?;
+        }
+
+        // Step 9: PUBLISH `http_endpoint` (Retained) — §6.3.3 /
+        // ADR-055 D3 re-discovery after a Gateway restart.
+        //
+        // The Gateway embeds an in-memory rumqttd broker; restarting
+        // the Gateway drops every retained message, including this
+        // Runtime's `acowork/agents/{id}/http_endpoint`. The startup
+        // path (`agent_init`) publishes it exactly once per process
+        // lifetime, so a Runtime that merely reconnects after a
+        // Gateway restart is never re-discovered and every
+        // reverse-proxy request 503s ("loading" forever in the
+        // Desktop). Re-stamp the retained bit here on EVERY ConnAck,
+        // same as status/meta/config/ready (ADR-039). The §6.3.3
+        // node-proxy-change re-publish still owns the "node changed
+        // its base URL" case; this step re-publishes the base
+        // captured at spawn time, which is correct unless the node
+        // actually moved networks (then §6.3.3 corrects it).
+        let endpoint = match &data.http_advertise_endpoint {
+            Some(base) => Some(format!(
+                "{}/agents/{}",
+                base.trim_end_matches('/'),
+                data.instance_id
+            )),
+            None => data
+                .http_port
+                .map(|port| format!("http://127.0.0.1:{}", port)),
+        };
+        if let Some(endpoint) = endpoint {
+            let topic = format!("acowork/agents/{}/http_endpoint", data.instance_id);
+            if let Err(e) = client
+                .publish(&topic, QoS::AtLeastOnce, true, endpoint.as_str())
+                .await
+            {
+                tracing::warn!(
+                    agent_id = %data.agent_id,
+                    error = %e,
+                    "Step 9 (http_endpoint) republish failed; \
+                     Gateway will 503 until the next reconnect"
+                );
+            } else {
+                tracing::info!(
+                    agent_id = %data.agent_id,
+                    %endpoint,
+                    "Re-published retained http_endpoint after (re)connect (§6.3.3 reconnect self-heal)"
+                );
+            }
         }
 
         Ok(())
@@ -2408,6 +2479,8 @@ mod tests {
                 work_dir,
                 username: None,
                 password: None,
+                http_advertise_endpoint: None,
+                http_port: None,
             },
         )
         .await
@@ -2505,6 +2578,8 @@ mod tests {
                 work_dir,
                 username: None,
                 password: None,
+                http_advertise_endpoint: None,
+                http_port: None,
             },
         )
         .await
