@@ -23,7 +23,7 @@
   <path d="M32 68 L56 20 L80 68"
         fill="none"
         stroke="#282828"
-        stroke-width="11.5"
+        stroke-width="10"
         stroke-linecap="round"
         stroke-linejoin="round"/>
   <circle cx="56" cy="56" r="8.5" fill="#282828" mask="url(#bite)"/>
