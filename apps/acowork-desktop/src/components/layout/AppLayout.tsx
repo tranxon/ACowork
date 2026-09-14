@@ -271,8 +271,8 @@ export function AppLayout() {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
-  const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.sleeping ?? false) : false;
-  const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.running;
+  const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.meta.sleeping ?? false) : false;
+  const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.alive;
   // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
   // mirrored into the Gateway's list view) — no local override.
   const agentDisplayName = selectedAgent
@@ -488,15 +488,15 @@ export function AppLayout() {
   // user typically leaves status on the offline screen only until the
   // agent actually comes up. ADR follow-up: keeps nav and panel
   // consistent in both directions.
-  const prevRunning = useRef(selectedAgent?.running);
+  const prevAlive = useRef(selectedAgent?.alive);
   useEffect(() => {
-    const isRunning = selectedAgent?.running ?? false;
-    const wasRunning = prevRunning.current;
-    if (isRunning && wasRunning === false) {
+    const isAlive = selectedAgent?.alive ?? false;
+    const wasAlive = prevAlive.current;
+    if (isAlive && wasAlive === false) {
       setActiveTab("workspace");
     } else if (
-      !isRunning &&
-      wasRunning !== false &&
+      !isAlive &&
+      wasAlive !== false &&
       (activeTab === "memory" ||
         activeTab === "setup" ||
         activeTab === "tools" ||
@@ -505,8 +505,8 @@ export function AppLayout() {
     ) {
       setActiveTab("status");
     }
-    prevRunning.current = isRunning;
-  }, [selectedAgent?.running, activeTab]);
+    prevAlive.current = isAlive;
+  }, [selectedAgent?.alive, activeTab]);
 
   // ── Reveal workspace panel on locate-in-tree requests ────────────
   // The FileEditorPanel's "locate" button publishes a request via
@@ -977,7 +977,7 @@ export function AppLayout() {
                 setActiveTab(tab);
               }
             }}
-            agentRunning={selectedAgent?.running ?? false}
+            agentRunning={selectedAgent?.alive ?? false}
             collapsed={rightPanelCollapsed}          />
         )}
 
@@ -1058,7 +1058,7 @@ export function AppLayout() {
             </button>
           </Tooltip>
         )}
-        {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.running && agentDisplayName && (
+        {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentDisplayName && (
           <span className="flex items-center gap-2 truncate">
             <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
               <Bot className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />

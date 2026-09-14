@@ -42,7 +42,7 @@ const mocks = vi.hoisted(() => ({
           // row is a debug-only diagnostic and must stay hidden unless
           // a test explicitly flips this on.
           debug_state: "disabled" as const,
-          running: true,
+          alive: true,
         },
       },
     },
@@ -152,7 +152,7 @@ describe("ContextUsageIcon", () => {
   it("hides the per-turn cache-hit row while DevMode is off", () => {
     // Even with per-turn cache accounting present, the real-time row is
     // a debug-only diagnostic — it must NOT render unless the agent is
-    // in DevMode (`debug_state === "enabled"` && running).
+    // in DevMode (`debug_state === "enabled"` && alive).
     mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage = {
       ...mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].contextUsage,
       cache_read_tokens: 5_000,

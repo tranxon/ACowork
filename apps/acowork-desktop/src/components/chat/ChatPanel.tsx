@@ -411,8 +411,8 @@ export function ChatPanel() {
   // Why ref callback instead of useEffect?
   //
   // ModelMenu and ReasoningEffortMenu are conditionally rendered:
-  //   - ModelMenu:     `availableModels.length > 0 && selectedAgent?.running`
-  //   - ReasoningMenu: `selectedAgent?.running && currentReasoningEffort != null`
+  //   - ModelMenu:     `availableModels.length > 0 && selectedAgent?.alive`
+  //   - ReasoningMenu: `selectedAgent?.alive && currentReasoningEffort != null`
   //
   // On cold start the toolbar div itself may render before its
   // conditionally-rendered children, or vice versa, depending on the
@@ -1052,7 +1052,7 @@ export function ChatPanel() {
   useEffect(() => {
     if (!selectedAgentId) return;
     const agentMeta = useAgentStore.getState().agents[selectedAgentId]?.meta;
-    if (!agentMeta?.running || !agentMeta?.ready) return;
+    if (!agentMeta?.alive || !agentMeta?.ready) return;
 
     const currentSessId = useChatStore.getState().agentStates[selectedAgentId]?.activeSessionId;
     if (!currentSessId) {
@@ -1131,7 +1131,7 @@ export function ChatPanel() {
         messageCount: existingMessages.length,
       });
     }
-  }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
+  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.ready]);
 
   // ── Session switch effect ─────────────────────────────────────────
   // When the user picks a different session from the session panel,
@@ -1924,7 +1924,7 @@ export function ChatPanel() {
   }
 
   // ── Agent not running ──
-  if (!selectedAgent.running) {
+  if (!selectedAgent.alive) {
     return (
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
@@ -2665,7 +2665,7 @@ export function ChatPanel() {
                   single-model setups still need to SEE which model is in
                   use), plus the "Add Models" entry point. Only enabled
                   when agent is running. */}
-              {availableModels.length > 0 && selectedAgent?.running && (
+              {availableModels.length > 0 && selectedAgent?.alive && (
                 <ModelMenu
                   wrapperRef={modelBtnRef}
                   textHidden={textHidden.model}
@@ -2677,7 +2677,7 @@ export function ChatPanel() {
                 />
               )}
               {/* Reasoning effort toggle — shown when session has a non-null reasoningEffort (null = provider doesn't support reasoning) */}
-              {selectedAgent?.running && currentReasoningEffort != null && (
+              {selectedAgent?.alive && currentReasoningEffort != null && (
                 <ReasoningEffortMenu
                   wrapperRef={effortBtnRef}
                   textHidden={textHidden.effort}

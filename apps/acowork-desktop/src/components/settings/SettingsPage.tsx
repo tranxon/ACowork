@@ -171,7 +171,7 @@ function GatewayTab() {
       const resp = await fetch(`${getGatewayUrl()}/api/agents`);
       if (resp.ok) {
         const data: AgentListResponse[] = await resp.json();
-        setAgents(data.filter(a => a.running || a.connected));
+        setAgents(data.filter(a => a.alive));
       }
     } catch {
       // Gateway not reachable

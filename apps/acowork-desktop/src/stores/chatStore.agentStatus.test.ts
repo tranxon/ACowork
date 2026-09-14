@@ -26,26 +26,26 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //    `vi.hoisted`. This is the standard vitest pattern for sharing spies
 //    between the mock factory and the test body.
 
-const { updateCalls, mockVerifyAgentHealth, mockUpdateAgentOnlineStatus } =
+const { updateCalls, mockVerifyAgentHealth, mockUpdateAgentLiveness } =
     vi.hoisted(() => {
         const updateCalls: Array<{
             agentId: string;
-            online: boolean;
+            alive: boolean;
             sleeping: boolean;
         }> = [];
         const mockVerifyAgentHealth = vi.fn<
             [agentId: string, timeoutMs?: number, gatewayUrl?: string],
             Promise<boolean>
         >();
-        const mockUpdateAgentOnlineStatus = vi.fn(
+        const mockUpdateAgentLiveness = vi.fn(
             (agentId: string, online: boolean, sleeping = false) => {
-                updateCalls.push({ agentId, online, sleeping });
+                updateCalls.push({ agentId, alive: online, sleeping });
             },
         );
         return {
             updateCalls,
             mockVerifyAgentHealth,
-            mockUpdateAgentOnlineStatus,
+            mockUpdateAgentLiveness,
         };
     });
 
@@ -62,12 +62,12 @@ vi.mock("../lib/gateway-api", async () => {
     };
 });
 
-// ── Mock the agent store so we can spy on updateAgentOnlineStatus ───────
+// ── Mock the agent store so we can spy on updateAgentLiveness ───────
 
 vi.mock("./agentStore", () => ({
     useAgentStore: {
         getState: () => ({
-            updateAgentOnlineStatus: mockUpdateAgentOnlineStatus,
+            updateAgentLiveness: mockUpdateAgentLiveness,
         }),
     },
 }));
@@ -85,7 +85,7 @@ beforeEach(() => {
     // promise (instead of `undefined`, which would crash `.then()`).
     mockVerifyAgentHealth.mockReset();
     mockVerifyAgentHealth.mockResolvedValue(false);
-    mockUpdateAgentOnlineStatus.mockClear();
+    mockUpdateAgentLiveness.mockClear();
 });
 
 afterEach(() => {
@@ -111,9 +111,9 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         await Promise.resolve();
 
         expect(mockVerifyAgentHealth).not.toHaveBeenCalled();
-        // updateAgentOnlineStatus must still be called once (with online=true).
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledWith(AGENT, true, false);
+        // updateAgentLiveness must still be called once (with online=true).
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, true, false);
     });
 
     it("probes /health on online=false AND overrides back to online when the Runtime is alive", async () => {
@@ -131,8 +131,8 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         );
 
         // First call: the agent_status event itself.
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenLastCalledWith(
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
+        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(
             AGENT,
             false,
             false,
@@ -145,8 +145,8 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         await Promise.resolve();
 
         // Second call: the override after the probe resolves.
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledTimes(2);
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenLastCalledWith(
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(2);
+        expect(mockUpdateAgentLiveness).toHaveBeenLastCalledWith(
             AGENT,
             true,
             false,
@@ -156,7 +156,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
     it("stays offline when the probe finds the Runtime dead (genuine shutdown)", async () => {
         // Even with MQTT saying offline, we confirm with HTTP. If HTTP
         // also says dead, we leave the agent offline — no second
-        // updateAgentOnlineStatus call.
+        // updateAgentLiveness call.
         mockVerifyAgentHealth.mockResolvedValue(false);
 
         handleMessageEvent(
@@ -172,8 +172,8 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         await Promise.resolve();
 
         // Only the initial offline update — no override back to online.
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledWith(AGENT, false, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, false);
     });
 
     it("does not crash if the probe throws (network error, DNS, etc.)", async () => {
@@ -196,8 +196,8 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         await new Promise((r) => setTimeout(r, 10));
 
         // No override — only the initial offline update.
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledTimes(1);
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledWith(AGENT, false, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledTimes(1);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, false);
     });
 
     it("preserves the sleeping flag from the MQTT event when overriding online", async () => {
@@ -221,7 +221,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         );
 
         // Initial: pass through sleeping=true from the event.
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenNthCalledWith(
+        expect(mockUpdateAgentLiveness).toHaveBeenNthCalledWith(
             1,
             AGENT,
             false,
@@ -234,7 +234,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         await Promise.resolve();
 
         // Override: sleeping=false regardless of what MQTT said.
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenNthCalledWith(
+        expect(mockUpdateAgentLiveness).toHaveBeenNthCalledWith(
             2,
             AGENT,
             true,
@@ -252,7 +252,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
             AGENT,
         );
 
-        expect(mockUpdateAgentOnlineStatus).toHaveBeenCalledWith(AGENT, false, false);
+        expect(mockUpdateAgentLiveness).toHaveBeenCalledWith(AGENT, false, false);
     });
 
     it("ignores malformed events without an instance_id", () => {
@@ -264,7 +264,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         );
 
         // No instance_id → no update, no probe.
-        expect(mockUpdateAgentOnlineStatus).not.toHaveBeenCalled();
+        expect(mockUpdateAgentLiveness).not.toHaveBeenCalled();
         expect(mockVerifyAgentHealth).not.toHaveBeenCalled();
     });
 
@@ -277,7 +277,7 @@ describe("agent_status handler: HTTP double-check on offline events", () => {
         );
 
         // No `online` → no update, no probe.
-        expect(mockUpdateAgentOnlineStatus).not.toHaveBeenCalled();
+        expect(mockUpdateAgentLiveness).not.toHaveBeenCalled();
         expect(mockVerifyAgentHealth).not.toHaveBeenCalled();
     });
 });

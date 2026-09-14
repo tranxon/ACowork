@@ -251,10 +251,28 @@ impl AgentRegistry {
     }
 
     /// Check if an agent instance is online (keyed by instance identity).
+    ///
+    /// This is the authoritative distributed liveness signal: the Runtime's
+    /// MQTT session is reachable at the broker level (payload `online`,
+    /// `sleeping` or `degraded` all map to `online=true`). It is topology
+    /// independent — the same answer for local, remote and node-hosted
+    /// Runtimes — and must be preferred over any process-level probe.
     pub fn is_online(&self, instance_id: &str) -> bool {
         self.agents
             .get(instance_id)
             .map(|s| s.online)
+            .unwrap_or(false)
+    }
+
+    /// Check whether the agent instance is in the `sleeping` state
+    /// (Runtime self-reported auto-sleep via the idle watcher before
+    /// `process::exit(0)`). Distinct from `is_online` — a sleeping agent
+    /// is still `online=true` until the LWT `offline` overwrites the
+    /// retained status.
+    pub fn is_sleeping(&self, instance_id: &str) -> bool {
+        self.agents
+            .get(instance_id)
+            .map(|s| s.sleeping)
             .unwrap_or(false)
     }
 

@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
 use crate::http::routes::{ApiError, AppState, OperationAck};
-use crate::lifecycle::process::is_process_alive;
 use crate::gateway::state::GatewayState;
 use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
 use crate::gateway::state::SYSTEM_AGENT_ID;
@@ -136,8 +135,17 @@ pub struct AgentListResponse {
     /// validates this against its bundled icon set.
     pub builtin_avatar: Option<String>,
     pub version: String,
-    pub running: bool,
-    pub connected: bool,
+    /// Distributed liveness verdict: whether the Runtime's MQTT session is
+    /// reachable at the broker level (payload `online` / `sleeping` /
+    /// `degraded`). Topology independent — the same answer for local,
+    /// remote and node-hosted Runtimes, never a process/PID probe.
+    /// The Desktop MUST gate "agent is alive" on this field.
+    pub alive: bool,
+    /// Whether the Runtime self-reported auto-sleep (idle watcher fired)
+    /// before exiting. `alive=true, sleeping=true` means the retained
+    /// `sleeping` status is still cached; the Desktop renders an
+    /// "auto-slept at HH:MM" badge and a Start button, not a live session.
+    pub sleeping: bool,
     /// Whether the agent's SessionTask is initialized and ready to receive messages
     pub ready: bool,
     /// Whether the agent was started with the `--dev-mode` flag (Debug
@@ -171,20 +179,12 @@ pub struct AgentListResponse {
     /// sidebar sort order: newest first within each running/stopped group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_interaction_at: Option<String>,
-    /// ADR-033: Whether the agent is online per MQTT LWT (Last Will Testament).
-    /// Derived from the AgentRegistry which tracks `acowork/agents/{id}/status`.
-    /// `running` reflects the Gateway's process-level view (PID alive),
-    /// while `mqtt_online` reflects the broker's protocol-level view (TCP connected).
-    /// These can differ briefly during crash recovery (e.g. process alive but
-    /// MQTT broker hasn't detected TCP drop yet).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mqtt_online: Option<bool>,
     /// Wall-clock timestamp (RFC3339) the Runtime published the `sleeping`
     /// retained status — i.e. when the auto-sleep watcher exited the process.
     /// `None` for agents that are not currently sleeping. Lets the Desktop
     /// distinguish "auto-slept at HH:MM" from "manually stopped" /
-    /// "crashed" — both of which would otherwise look identical (running=false,
-    /// mqtt_online=false).
+    /// "crashed" — both of which would otherwise look identical
+    /// (`alive=false`, no `sleeping_at`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sleeping_at: Option<String>,
 }
@@ -208,10 +208,15 @@ pub struct AgentDetailResponse {
     pub description: String,
     pub author: String,
     pub install_path: String,
-    pub running: bool,
-    pub connected: bool,
+    /// Distributed liveness verdict — same semantics as
+    /// [`AgentListResponse::alive`]: the Runtime's MQTT session is
+    /// reachable. Never a process/PID probe (see `alive` doc above).
+    pub alive: bool,
     /// Whether the agent's SessionTask is initialized and ready to receive messages
     pub ready: bool,
+    /// Local process id (diagnostic only — meaningful only when the
+    /// Gateway spawned the Runtime on this machine; node-hosted
+    /// Runtimes report `0`). NEVER used for liveness.
     pub pid: Option<u32>,
     pub started_at: Option<String>,
     /// Whether the agent was started with the `--dev-mode` flag.
@@ -274,14 +279,20 @@ pub async fn list_agents(
 ) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
 
-    // ADR-033: Read MQTT-based online status from AgentRegistry as a sub-status.
-    // Must use .read().await — blocking_read() panics inside tokio runtime.
-    let mqtt_online_set: std::collections::HashSet<String> = if let Some(ref reg) = state.agent_registry {
-        let reg = reg.read().await;
-        reg.online_agents().into_iter().collect()
-    } else {
-        std::collections::HashSet::new()
-    };
+    // Distributed liveness: the AgentRegistry (MQTT retained status +
+    // LWT) is the single authoritative source for "is this agent alive".
+    // Take one snapshot for the whole list so every entry sees the same
+    // consistent view without per-agent lock contention. `online=true`
+    // covers the `online` / `sleeping` / `degraded` payloads — all mean
+    // the Runtime's MQTT session is reachable, which is the same truth
+    // for local, remote and node-hosted Runtimes. No process/PID probing
+    // happens here: PID liveness is meaningless across host boundaries.
+    let registry_snapshot: std::collections::HashMap<String, crate::mqtt::agent_registry::AgentOnlineState> =
+        if let Some(ref reg) = state.agent_registry {
+            reg.read().await.snapshot().into_iter().collect()
+        } else {
+            std::collections::HashMap::new()
+        };
 
     let mut agents: Vec<AgentListResponse> = gw
         .installed_agents
@@ -291,26 +302,14 @@ pub async fn list_agents(
             // reads are impossible by construction (each instance has
             // its own row in installed_agents and running_agents).
             let running_info = gw.running(&info.instance_id);
-            // Verify the process is actually alive (not just in running_agents).
-            // pid=0 marks an ADR-055 node-hosted Runtime auto-tracked from its
-            // MQTT ready signal — there is no local Gateway-side process to
-            // probe, and `is_process_alive(0)` is false on Linux (/proc/0
-            // does not exist), so it must be exempted: liveness is guaranteed
-            // by the MQTT LWT registry (`acowork/agents/{id}/status`), and a
-            // dead Runtime flips to `offline`, which clears the entry via
-            // `remove_running` in dispatch.rs.
-            let actually_running = running_info
-                .map(|r| r.pid == 0 || is_process_alive(r.pid))
-                .unwrap_or(false);
-            // `connected` is the broker-level "Runtime's MQTT client is
-            // reachable" signal. Pull it from the AgentRegistry (which
-            // observes `acowork/agents/{id}/status` retained messages)
-            // rather than the per-PID `running_agents[id].connected` field
-            // — the latter is leftover from the gRPC `handle_agent_hello`
-            // path that ADR-040 removed, and is never updated. Fall back to
-            // the legacy field when the registry is unavailable (tests).
-            let connected = running_info.map(|r| r.connected).unwrap_or(false)
-                || mqtt_online_set.contains(&info.instance_id);
+            let reg_state = registry_snapshot.get(&info.instance_id);
+            // `alive` is the network-level liveness verdict (see
+            // `AgentListResponse.alive` doc). It intentionally ignores
+            // `running_agents` — that table only tracks process-managed
+            // metadata (pid/ready/dev_mode) and is populated by MQTT
+            // events anyway.
+            let alive = reg_state.map(|s| s.online).unwrap_or(false);
+            let sleeping = reg_state.map(|s| s.sleeping).unwrap_or(false);
             let ready = running_info.map(|r| r.ready).unwrap_or(false);
             let last_interaction_at = gw
                 .get_interaction(&info.instance_id)
@@ -330,26 +329,12 @@ pub async fn list_agents(
             let eff_display_name = overrides
                 .and_then(|ov| ov.display_name.clone())
                 .or_else(|| info.manifest.display_name.clone());
-            let mqtt_online = if state.agent_registry.is_some() {
-                Some(mqtt_online_set.contains(&info.instance_id))
-            } else {
-                None
-            };
-            // Read `sleeping_at` from the registry so each agent gets its own
-            // timestamp. Use `try_read()` to avoid stalling the request if
-            // another task is holding the write lock; fall back to None on
-            // contention — the Desktop just retries on the next poll.
-            let sleeping_at = state
-                .agent_registry
-                .as_ref()
-                .and_then(|reg| {
-                    match reg.try_read() {
-                        Ok(guard) => guard.sleeping_at(&info.instance_id).map(|t| {
-                            t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                        }),
-                        Err(_) => None,
-                    }
-                });
+            // `sleeping_at` comes from the same snapshot; `sleeping` and
+            // `sleeping_at` are mutually informative (a sleeping agent
+            // always carries the timestamp of its self-reported sleep).
+            let sleeping_at = reg_state
+                .and_then(|s| if s.sleeping { s.sleeping_at } else { None })
+                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
             AgentListResponse {
                 instance_id: info.instance_id.clone(),
                 agent_id: info.agent_id.clone(),
@@ -360,8 +345,8 @@ pub async fn list_agents(
                 avatar: eff_avatar,
                 builtin_avatar: eff_builtin,
                 version: info.version.clone(),
-                running: actually_running,
-                connected,
+                alive,
+                sleeping,
                 ready,
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
                 debug_state: running_info
@@ -369,7 +354,6 @@ pub async fn list_agents(
                     .unwrap_or(crate::gateway::state::DebugState::Disabled),
                 debug_port: running_info.and_then(|r| r.debug_port),
                 last_interaction_at,
-                mqtt_online,
                 sleeping_at,
             }
         })
@@ -388,13 +372,12 @@ pub async fn list_agents(
             pkg_ok && node_ok
         });
     }
-    // Diagnostic: if senior-engineer is running, log its ready state
-    // to help trace why frontend polls may not see ready=true promptly.
+    // Diagnostic: if senior-engineer is present, log its state to help
+    // trace why frontend polls may not see ready=true promptly.
     if let Some(sr) = gw.running("com.acowork.senior-engineer") {
         tracing::info!(
-            "[DIAG] list_agents: senior-engineer running=true ready={} connected={}",
-            sr.ready,
-            sr.connected
+            "[DIAG] list_agents: senior-engineer running_agents entry present ready={}",
+            sr.ready
         );
     }
     drop(gw);
@@ -415,9 +398,10 @@ fn sort_agent_list(agents: &mut [AgentListResponse]) {
                 std::cmp::Ordering::Greater
             };
         }
-        // 2) Running group above stopped group.
-        if a.running != b.running {
-            return if a.running {
+        // 2) Alive group above dead group (alive = MQTT network signal,
+        //    same contract as the sidebar's per-agent dot / name styling).
+        if a.alive != b.alive {
+            return if a.alive {
                 std::cmp::Ordering::Less
             } else {
                 std::cmp::Ordering::Greater
@@ -447,14 +431,14 @@ pub async fn get_agent_detail(
         .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
 
     let running_info = gw.running(&agent_id);
-    // Verify the process is actually alive. pid=0 marks an ADR-055
-    // node-hosted Runtime whose liveness is guaranteed by the MQTT LWT
-    // registry, not a local process probe.
-    let actually_running = running_info
-        .as_ref()
-        .map(|r| r.pid == 0 || is_process_alive(r.pid))
-        .unwrap_or(false);
-    let connected = running_info.map(|r| r.connected).unwrap_or(false);
+    // Liveness = MQTT network signal (AgentRegistry), identical to the
+    // list view. `running_agents` is process-managed metadata only —
+    // never a liveness probe.
+    let alive = if let Some(ref reg) = state.agent_registry {
+        reg.read().await.is_online(&info.instance_id)
+    } else {
+        false
+    };
     let ready = running_info.map(|r| r.ready).unwrap_or(false);
     // ADR-009 §5: same override-first resolution as `list_agents` — the
     // detail panel and the sidebar must not disagree about the name.
@@ -481,8 +465,7 @@ pub async fn get_agent_detail(
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
         install_path: info.install_path.clone(),
-        running: actually_running,
-        connected,
+        alive,
         ready,
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
@@ -1289,7 +1272,6 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
         started_at: chrono::Utc::now(),
         workspace,
         node_id,
-        connected: false,
         ready: false,
         dev_mode,
         debug_state: if dev_mode {
@@ -2435,13 +2417,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_agents_reports_node_hosted_runtime_as_running() {
+    async fn list_agents_reports_node_hosted_runtime_alive_from_mqtt() {
         // ADR-055: a node-hosted Runtime auto-tracked from its MQTT ready
-        // signal has pid=0 (no local Gateway-side process). The list
-        // serializer must NOT consult `is_process_alive(0)` — on Linux
-        // /proc/0 does not exist and would report the Runtime as stopped
-        // even though the MQTT LWT registry says it is online. Liveness
-        // for pid=0 is guaranteed by the registry instead.
+        // signal has pid=0 (no local Gateway-side process). Liveness must
+        // come from the MQTT LWT registry (`acowork/agents/{id}/status`
+        // online), never from a process probe — the Gateway may be on a
+        // different host entirely. This test pins that `alive` is the
+        // registry verdict and is independent of `running_agents.pid`.
         let state =
             state_with_registry_status("com.acowork.senior-engineer", INSTANCE_SENIOR_ENG, b"online")
                 .await;
@@ -2455,7 +2437,6 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
@@ -2479,14 +2460,10 @@ mod tests {
             .find(|a| a.agent_id == "com.acowork.senior-engineer")
             .expect("senior-engineer must be listed");
         assert!(
-            entry.running,
-            "pid=0 node-hosted Runtime must report running=true"
+            entry.alive,
+            "pid=0 node-hosted Runtime must report alive=true from the MQTT registry"
         );
         assert!(entry.ready, "ready must mirror the tracked state");
-        assert!(
-            entry.connected,
-            "connected must mirror the tracked state"
-        );
     }
 
     /// ADR-073: a single package may be installed as MULTIPLE instances
@@ -2594,14 +2571,13 @@ mod tests {
             avatar: None,
             builtin_avatar: Some("icon-05".to_string()),
             version: "1.0.0".to_string(),
-            running: false,
-            connected: false,
+            alive: false,
+            sleeping: false,
             ready: false,
             dev_mode: false,
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: None,
-            mqtt_online: None,
             sleeping_at: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -2657,7 +2633,7 @@ mod tests {
         assert!(json.contains("Agent started"));
     }
 
-    fn entry(id: &str, name: &str, running: bool, ts: Option<&str>) -> AgentListResponse {
+    fn entry(id: &str, name: &str, alive: bool, ts: Option<&str>) -> AgentListResponse {
         AgentListResponse {
             // ADR-073: legacy identity shape (instance == package) — the
             // sort contract keys off `agent_id`, so keep both equal here.
@@ -2670,14 +2646,13 @@ mod tests {
             avatar: None,
             builtin_avatar: None,
             version: "1.0.0".to_string(),
-            running,
-            connected: false,
+            alive,
+            sleeping: false,
             ready: false,
             dev_mode: false,
             debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
-            mqtt_online: None,
             sleeping_at: None,
         }
     }
@@ -2694,7 +2669,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_groups_running_before_stopped() {
+    fn sort_groups_alive_before_dead() {
         let mut list = vec![
             entry("com.acowork.stopped1", "Stopped 1", false, Some("2026-06-18T10:00:00Z")),
             entry("com.acowork.running1", "Running 1", true, None),
@@ -2703,15 +2678,15 @@ mod tests {
         ];
         sort_agent_list(&mut list);
         let order: Vec<&str> = list.iter().map(|a| a.agent_id.as_str()).collect();
-        // Running group first, within group time-bearing agents come before None ones;
-        // same rule for the stopped group.
+        // Alive group first, within group time-bearing agents come before None ones;
+        // same rule for the dead group.
         assert_eq!(
             order,
             vec![
-                "com.acowork.running2",  // running, has time
-                "com.acowork.running1",  // running, no time (last in running group)
-                "com.acowork.stopped1",  // stopped, has time
-                "com.acowork.stopped2",  // stopped, no time (last overall)
+                "com.acowork.running2",  // alive, has time
+                "com.acowork.running1",  // alive, no time (last in alive group)
+                "com.acowork.stopped1",  // dead, has time
+                "com.acowork.stopped2",  // dead, no time (last overall)
             ]
         );
     }
@@ -2746,7 +2721,7 @@ mod tests {
         ];
         sort_agent_list(&mut list);
         let order: Vec<&str> = list.iter().map(|a| a.agent_id.as_str()).collect();
-        // running group first (alphabetical), then stopped group
+        // alive group first (alphabetical), then dead group
         assert_eq!(
             order,
             vec![
@@ -3007,7 +2982,6 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,

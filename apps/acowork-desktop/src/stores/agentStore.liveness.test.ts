@@ -1,25 +1,21 @@
 /**
- * Regression coverage for the distributed-liveness fix in `fetchAgents`.
+ * Regression coverage for distributed agent liveness.
  *
- * Background (2026-09-02 09:12 incident):
- *   The Runtime may run on a remote Node Agent (ADR-055) — its process
- *   is not on the same machine as the desktop. The Gateway's
- *   `/api/agents` endpoint exposes a process-based `running` flag
- *   (Gateway checks the PID it spawned). For REMOTE runtimes that
- *   flag is always false because the Gateway can't see the remote PID.
+ * Background (2026-09-xx refactor):
+ *   `running`/`connected` (process/PID-flavoured signals) are gone.
+ *   The Gateway's `/api/agents` now exposes `alive` — the MQTT
+ *   registry verdict (Runtime's broker-level session reachable:
+ *   `online` / `sleeping` / `degraded`). It is topology independent:
+ *   the same answer for local, remote and node-hosted Runtimes, and
+ *   never consults a PID on the Gateway's machine.
  *
- *   The fix: `running` OR `connected` is the authoritative liveness
- *   signal. `connected` already merges the MQTT online view (Gateway
- *   `list_agents` reflects MQTT status), so a remote Runtime that is
- *   reachable over MQTT is correctly reported as alive even though
- *   its `running` (PID) flag is false.
+ *   The Desktop's contract:
+ *   - `fetchAgents` adopts the Gateway's `meta.alive` verbatim
+ *     (authoritative reconcile path).
+ *   - `updateAgentLiveness` is the realtime MQTT path — it patches
+ *     `meta.alive` / `meta.sleeping` immediately on `agent_status`.
  *
- *   Only when BOTH `running=false` AND `connected=false` do we force
- *   `online=false, sleeping=false` on the agent's storage. The
- *   `agent_status` MQTT handler further double-checks offline
- *   transitions against `/health`.
- *
- *   These tests pin that `running || connected` semantics.
+ * These tests pin that contract.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -80,9 +76,9 @@ function makeMeta(overrides: Partial<AgentInfo>): AgentInfo {
         builtin_avatar: null,
         display_name: null,
         role: null,
-        running: false,
+        alive: false,
+        sleeping: false,
         ready: false,
-        connected: false,
         debug_state: "disabled",
         debug_port: null,
         workspace: "",
@@ -93,6 +89,28 @@ function makeMeta(overrides: Partial<AgentInfo>): AgentInfo {
         last_interaction_at: "2026-01-01T00:00:00Z",
         ...overrides,
     };
+}
+
+function seedAgent(meta: Partial<AgentInfo>) {
+    useAgentStore.setState({
+        agents: {
+            [INSTANCE_ID]: {
+                meta: makeMeta(meta),
+                profile: {} as never,
+                sessions: [],
+                sessionTitle: undefined,
+                pagination: {
+                    currentPage: 1,
+                    totalPages: 1,
+                    totalCount: 0,
+                    pageSize: 20,
+                },
+                isLoading: false,
+                agentTokenTotals: null,
+            },
+        },
+        selectedAgentId: INSTANCE_ID,
+    });
 }
 
 beforeEach(() => {
@@ -110,262 +128,109 @@ afterEach(() => {
     vi.useRealTimers();
 });
 
-describe("fetchAgents — distributed liveness (`running || connected`)", () => {
-    it("keeps an existing agent online when Gateway says `running=true` (local process alive)", async () => {
-        // Pre-condition: agent exists, online=true, sleeping=false
-        // (some previous MQTT/agent_status event).
-        useAgentStore.setState({
-            agents: {
-                [INSTANCE_ID]: {
-                    meta: makeMeta({ running: true }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: true,
-                    sleeping: false,
-                },
-            },
-            selectedAgentId: INSTANCE_ID,
-        });
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: true, connected: false }),
-        ]);
+describe("fetchAgents — adopts the Gateway's `alive` verdict verbatim", () => {
+    it("adopts alive=true when the Gateway reports the agent alive (local runtime)", async () => {
+        seedAgent({ alive: false });
+        mockListAgents.mockResolvedValue([makeMeta({ alive: true })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        expect(storage.online).toBe(true);
-        expect(storage.sleeping).toBe(false);
+        expect(storage.meta.alive).toBe(true);
+        expect(storage.meta.sleeping).toBe(false);
     });
 
-    it("keeps an existing agent online when Gateway says `connected=true` even with `running=false` (REMOTE runtime)", async () => {
-        // The whole point of the fix: a remote Runtime's PID is not
-        // visible to the Gateway, so `running=false`. But MQTT shows
-        // it connected, so the desktop must NOT render it as offline.
-        useAgentStore.setState({
-            agents: {
-                [INSTANCE_ID]: {
-                    meta: makeMeta({ running: false }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: true,
-                    sleeping: false,
-                },
-            },
-            selectedAgentId: INSTANCE_ID,
-        });
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: false, connected: true }),
-        ]);
+    it("adopts alive=true for a REMOTE runtime — no local PID probing involved", async () => {
+        // A remote / node-hosted Runtime's PID is invisible from this
+        // desktop and from a remote Gateway. The only trustworthy
+        // signal is the MQTT registry verdict the Gateway already
+        // computed — the desktop must adopt it without second-guessing.
+        seedAgent({ alive: false });
+        mockListAgents.mockResolvedValue([makeMeta({ alive: true })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        expect(storage.online).toBe(true);
-        expect(storage.sleeping).toBe(false);
-        expect(storage.meta.running).toBe(false);
-        expect(storage.meta.connected).toBe(true);
+        expect(storage.meta.alive).toBe(true);
     });
 
-    it("forces offline when BOTH `running=false` AND `connected=false` (genuine shutdown)", async () => {
-        // Even if the in-memory MQTT view still says online=true
-        // (stale), the Gateway's authoritative answer is "gone". This
-        // prevents the stale-online window where the ChatPanel keeps
-        // showing the input after the Runtime actually died.
-        useAgentStore.setState({
-            agents: {
-                [INSTANCE_ID]: {
-                    meta: makeMeta({ running: true }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: true,
-                    sleeping: false,
-                },
-            },
-            selectedAgentId: INSTANCE_ID,
-        });
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: false, connected: false }),
-        ]);
+    it("adopts alive=false + sleeping=false when the Gateway says the agent is gone", async () => {
+        // Genuine shutdown (manual stop / crash / LWT offline): the
+        // Gateway is authoritative, so the desktop converges to
+        // alive=false even if a stale MQTT event left sleeping=true.
+        seedAgent({ alive: true, sleeping: true });
+        mockListAgents.mockResolvedValue([makeMeta({ alive: false, sleeping: false })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        expect(storage.online).toBe(false);
-        expect(storage.sleeping).toBe(false);
+        expect(storage.meta.alive).toBe(false);
+        expect(storage.meta.sleeping).toBe(false);
     });
 
-    it("keeps an existing agent offline when Gateway still says alive (preserves offline state across polls)", async () => {
-        // Once the desktop has decided the agent is offline, a subsequent
-        // fetchAgents that returns `running=true` must NOT flip it back
-        // to online — the `agent_status` handler (with HTTP /health
-        // double-check) is the only path that can revive an offline
-        // agent. This keeps the offline state stable until an explicit
-        // MQTT-online or HTTP-alive signal arrives.
-        useAgentStore.setState({
-            agents: {
-                [INSTANCE_ID]: {
-                    meta: makeMeta({ running: false }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: false,
-                    sleeping: false,
-                },
-            },
-            selectedAgentId: INSTANCE_ID,
-        });
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: true, connected: true }),
-        ]);
+    it("adopts sleeping=true when the Gateway reports auto-sleep (retained `sleeping` status)", async () => {
+        // Auto-sleep: alive=true (retained status still cached) +
+        // sleeping=true → the UI renders the Start button + "auto-slept"
+        // badge instead of a live session.
+        seedAgent({ alive: true, sleeping: false });
+        mockListAgents.mockResolvedValue([makeMeta({ alive: true, sleeping: true })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        // fetchAgents keeps `existing.online` when alive — so the offline
-        // state stays preserved (not flipped back to online without an
-        // explicit MQTT/HTTP revival).
-        expect(storage.online).toBe(false);
-        expect(storage.sleeping).toBe(false);
+        expect(storage.meta.alive).toBe(true);
+        expect(storage.meta.sleeping).toBe(true);
     });
 
-    it("forces `sleeping=false` along with `online=false` on shutdown (no zombie sleeping animation)", async () => {
-        // Pre-condition: agent was in some odd state with sleeping=true
-        // (e.g. a stale MQTT message). When the Gateway definitively
-        // reports both signals gone, BOTH must reset.
-        useAgentStore.setState({
-            agents: {
-                [INSTANCE_ID]: {
-                    meta: makeMeta({ running: false }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: true,
-                    sleeping: true,
-                },
-            },
-            selectedAgentId: INSTANCE_ID,
-        });
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: false, connected: false }),
-        ]);
-
-        await useAgentStore.getState().fetchAgents();
-
-        const storage = useAgentStore.getState().agents[INSTANCE_ID];
-        expect(storage.online).toBe(false);
-        expect(storage.sleeping).toBe(false);
-    });
-
-    it("creates a brand-new agent with default `online=true` when not previously known", async () => {
-        // No existing entry → createStorage defaults to online=true,
-        // sleeping=false. This is the first-paint optimisation so the
-        // user doesn't see an empty/disabled UI for a moment.
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: true, connected: true }),
-        ]);
+    it("creates a brand-new agent with the Gateway's verdict when not previously known", async () => {
+        mockListAgents.mockResolvedValue([makeMeta({ alive: true })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage).toBeDefined();
-        expect(storage.online).toBe(true);
-        expect(storage.sleeping).toBe(false);
-        expect(storage.meta.running).toBe(true);
+        expect(storage.meta.alive).toBe(true);
+        expect(storage.meta.sleeping).toBe(false);
     });
 
     it("removes agents that are no longer in the Gateway's list", async () => {
-        useAgentStore.setState({
-            agents: {
-                [INSTANCE_ID]: {
-                    meta: makeMeta({ running: true }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: true,
-                    sleeping: false,
-                },
-                "com.acowork.removed": {
-                    meta: makeMeta({
-                        agent_id: "com.acowork.removed",
-                        running: true,
-                    }),
-                    profile: {} as never,
-                    sessions: [],
-                    sessionTitle: undefined,
-                    pagination: {
-                        currentPage: 1,
-                        totalPages: 1,
-                        totalCount: 0,
-                        pageSize: 20,
-                    },
-                    isLoading: false,
-                    agentTokenTotals: null,
-                    online: true,
-                    sleeping: false,
-                },
-            },
-            selectedAgentId: INSTANCE_ID,
-        });
+        seedAgent({ alive: true });
         // Gateway only reports the architect agent now.
-        mockListAgents.mockResolvedValue([
-            makeMeta({ running: true, connected: true }),
-        ]);
+        mockListAgents.mockResolvedValue([makeMeta({ alive: true })]);
 
         await useAgentStore.getState().fetchAgents();
 
         const agents = useAgentStore.getState().agents;
         expect(agents[INSTANCE_ID]).toBeDefined();
         expect(agents[REMOVED_INSTANCE_ID]).toBeUndefined();
+    });
+});
+
+describe("updateAgentLiveness — realtime MQTT path patches meta", () => {
+    it("flips meta.alive=false on MQTT `offline`", () => {
+        seedAgent({ alive: true, sleeping: false });
+        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, false, false);
+
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
+        expect(storage.meta.alive).toBe(false);
+        expect(storage.meta.sleeping).toBe(false);
+    });
+
+    it("carries the sleeping flag on MQTT `sleeping`", () => {
+        seedAgent({ alive: false, sleeping: false });
+        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true, true);
+
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
+        expect(storage.meta.alive).toBe(true);
+        expect(storage.meta.sleeping).toBe(true);
+    });
+
+    it("defaults sleeping=false for statuses that omit it (legacy Runtimes)", () => {
+        seedAgent({ alive: true, sleeping: true });
+        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true);
+
+        const storage = useAgentStore.getState().agents[INSTANCE_ID];
+        expect(storage.meta.alive).toBe(true);
+        expect(storage.meta.sleeping).toBe(false);
     });
 });

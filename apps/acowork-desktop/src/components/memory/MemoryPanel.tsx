@@ -27,10 +27,10 @@ export function MemoryPanel() {
   // (`memoryStore.fetchNodes` / `fetchStats`) now own the 503 retry
   // loop via `with503Retry`, so a transient 503 recovers
   // transparently.
-  // Stopped agents (`meta.running === false`) are still skipped —
+  // Dead agents (`meta.alive === false`) are still skipped —
   // their Runtime process is not even alive, so retrying buys nothing.
   const isAgentRunning = useAgentStore((s) =>
-    selectedAgentId ? !!s.agents[selectedAgentId]?.meta.running : false
+    selectedAgentId ? !!s.agents[selectedAgentId]?.meta.alive : false
   );
   const {
     nodes,
