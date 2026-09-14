@@ -4520,6 +4520,8 @@ mod tests {
             work_dir: temp_dir.clone(),
             username: None,
             password: None,
+            http_advertise_endpoint: None,
+            http_port: None,
         })
         .await
         .expect("RuntimeMqttClient connect");

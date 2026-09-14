@@ -23,6 +23,7 @@ pub mod pm_proxy;
 pub mod publish_api;
 pub mod routes;
 pub mod server;
+pub mod services_api;
 pub mod settings_api;
 pub mod skills_api;
 pub mod users_api;

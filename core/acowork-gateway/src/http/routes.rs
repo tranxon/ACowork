@@ -229,6 +229,12 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         .merge(crate::http::nodes_api::nodes_routes())
+        // Plan §3.3 P2-2: Gateway-perspective service diagnostics
+        // (`GET /api/services/diagnose`) — one-fetch aggregate of
+        // gateway / mqtt / embed / pm / doc / nodes for the Desktop
+        // diagnostic panel. Remote Desktops reach this over the same
+        // HTTP surface as everything else (P2-1).
+        .merge(crate::http::services_api::services_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::embedding_providers::embedding_providers_routes())

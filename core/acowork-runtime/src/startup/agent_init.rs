@@ -372,6 +372,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 work_dir: std::path::PathBuf::from(&config.work_dir),
                 username: config.mqtt_username.as_deref(),
                 password: config.mqtt_password.as_deref(),
+                http_advertise_endpoint: config.http_advertise_endpoint.as_deref(),
+                http_port: runtime_http_port,
             },
         ).await {
             Ok(client) => {

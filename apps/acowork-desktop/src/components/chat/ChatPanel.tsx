@@ -2,7 +2,7 @@ import React, { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentStore } from "../../stores/agentStore";
-import { useChatStore } from "../../stores/chatStore";
+import { useChatStore, type ConnectionStatus, STUCK_FORCE_RECONNECT_MS } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -170,6 +170,203 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/**
+ * Pick the input-box placeholder from (gatewayStatus, effectiveConnection,
+ * activeSkill). P0 of unified-diagnostics plan §3.1.2.
+ *
+ * The previous implementation only distinguished `connected` vs
+ * `!mqttConnected`. The watchdog's 6-state `effectiveConnection` lets us
+ * show a more accurate hint per state:
+ *
+ *   - gateway disconnected → "Gateway 未连接"
+ *   - connecting          → "正在连接 Agent..."
+ *   - reconnecting        → "正在重新连接..."
+ *   - stale               → "连接状态异常，正在恢复..."
+ *   - disconnected / idle → "Gateway 未连接"
+ *   - connected           → normal "输入消息..." / "输入参数..."
+ *
+ * Note: `stale` is a transient verdict (≤ STALE_GRACE_MS by definition),
+ * so users normally see "正在连接 Agent..." / "正在重新连接..." and only
+ * briefly "连接状态异常，正在恢复..." before the watchdog auto-recovers.
+ * The stale placeholder exists so users aren't left wondering during the
+ * recovery window.
+ */
+type InputPlaceholderKey =
+  | "inputParams"
+  | "inputMessage"
+  | "inputParamsConnecting"
+  | "inputMessageConnecting"
+  | "inputParamsReconnecting"
+  | "inputMessageReconnecting"
+  | "inputParamsStale"
+  | "inputMessageStale"
+  | "inputGatewayDisconnected";
+
+function getInputPlaceholderKey(
+  gatewayStatus: string,
+  effective: ConnectionStatus,
+  activeSkill: boolean,
+): InputPlaceholderKey {
+  if (gatewayStatus !== "connected") return "inputGatewayDisconnected";
+  switch (effective) {
+    case "connecting":
+      return activeSkill ? "inputParamsConnecting" : "inputMessageConnecting";
+    case "reconnecting":
+      return activeSkill ? "inputParamsReconnecting" : "inputMessageReconnecting";
+    case "stale":
+      return activeSkill ? "inputParamsStale" : "inputMessageStale";
+    case "disconnected":
+    case "idle":
+      return "inputGatewayDisconnected";
+    case "connected":
+    default:
+      return activeSkill ? "inputParams" : "inputMessage";
+  }
+}
+
+/**
+ * P0-7: Live status banner above the input area. Shows the current
+ * `effectiveConnection` and a real-time countdown ("X seconds until
+ * auto-reconnect") so the user has a visible signal that the system is
+ * working — not just a static "Connecting..." label that could mean
+ * anything from "about to finish" to "stuck forever".
+ *
+ * Renders ONLY when:
+ *   - gateway is connected (the banner is about the agent-side liveness,
+ *     not the gateway HTTP side), AND
+ *   - effectiveConnection is one of connecting / reconnecting / stale /
+ *     disconnected (no banner for idle or connected).
+ *
+ * The countdown is driven by the connecting-episode clock
+ * (`staleSince`, see chatStore): it counts down to
+ * `staleSince + STUCK_FORCE_RECONNECT_MS` — the moment the watchdog
+ * fires `force_reconnect_mqtt`. It therefore exists ONLY while a
+ * connecting episode is in flight. `disconnected` is a terminal state
+ * (the Rust session will not reconnect on its own), so instead of a
+ * bogus "0s until auto-reconnect" it offers the one meaningful action:
+ * a manual reconnect (H-2 of the review). We tick at 1 Hz, which is
+ * enough resolution for a human-friendly display and avoids sub-second
+ * re-renders that would trigger Zustand churn.
+ */
+function ConnectionStatusBanner({
+  gatewayStatus,
+  effectiveConnection,
+  staleSince,
+}: {
+  gatewayStatus: string;
+  effectiveConnection: ConnectionStatus;
+  staleSince: number | null;
+}): React.ReactElement | null {
+  const { t } = useTranslation();
+  // H-2: `disconnected` never auto-recovers — offer the manual action
+  // (the button is disabled while the invoke is in flight).
+  const [reconnecting, setReconnecting] = useState(false);
+  const handleReconnect = useCallback(async () => {
+    setReconnecting(true);
+    try {
+      await invoke("force_reconnect_mqtt");
+    } catch (err) {
+      log.warn("[connection-banner] force_reconnect_mqtt failed:", err);
+    } finally {
+      setReconnecting(false);
+    }
+  }, []);
+  // Show banner only when the gateway itself is reachable. If gateway is
+  // down, the placeholder already says "Gateway 未连接" — showing a
+  // second banner above would just be noise.
+  const isBannerWorthy =
+    gatewayStatus === "connected" &&
+    (effectiveConnection === "connecting" ||
+      effectiveConnection === "reconnecting" ||
+      effectiveConnection === "stale" ||
+      effectiveConnection === "disconnected");
+
+  // Tick once per second so the countdown animates. Cheap (single
+  // setState/ChatPanel re-render, no global store updates).
+  const [now, setNow] = useState<number>(Date.now());
+  useEffect(() => {
+    if (!isBannerWorthy) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isBannerWorthy]);
+
+  if (!isBannerWorthy) return null;
+
+  const deadlineAt = staleSince !== null ? staleSince + STUCK_FORCE_RECONNECT_MS : null;
+  const secondsRemaining =
+    deadlineAt !== null ? Math.max(0, Math.ceil((deadlineAt - now) / 1000)) : null;
+
+  // Per-state label + icon.
+  const stateLabel: Record<"connecting" | "reconnecting" | "stale" | "disconnected", string> = {
+    connecting: t("chatPanel.connectionBanner.connecting"),
+    reconnecting: t("chatPanel.connectionBanner.reconnecting"),
+    stale: t("chatPanel.connectionBanner.stale"),
+    disconnected: t("chatPanel.connectionBanner.disconnected"),
+  };
+  const label = stateLabel[effectiveConnection as keyof typeof stateLabel] ?? "";
+
+  // Visual severity drives the colour. stale is amber (warning), the
+  // rest are sky/blue (info).
+  const isWarn = effectiveConnection === "stale" || effectiveConnection === "disconnected";
+  const containerCls = isWarn
+    ? "border-amber-300/60 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-100"
+    : "border-sky-300/60 bg-sky-50 text-sky-900 dark:border-sky-700/60 dark:bg-sky-950/40 dark:text-sky-100";
+  const iconCls = isWarn ? "text-amber-500 dark:text-amber-300" : "text-sky-500 dark:text-sky-300";
+  const retryCls = isWarn
+    ? "text-amber-700 dark:text-amber-200 tabular-nums"
+    : "text-sky-700 dark:text-sky-200 tabular-nums";
+
+  const retryText =
+    secondsRemaining === null
+      ? null
+      : secondsRemaining === 1
+        ? t("chatPanel.connectionBanner.retryInOneSecond")
+        : t("chatPanel.connectionBanner.retryIn", { seconds: secondsRemaining });
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="chat-connection-banner"
+      className={cn(
+        "mx-3 mt-2 flex items-center gap-2 rounded-md border px-3 py-2 text-xs",
+        containerCls,
+      )}
+    >
+      {isWarn ? (
+        <AlertTriangle className={cn("h-3.5 w-3.5 flex-shrink-0", iconCls)} aria-hidden="true" />
+      ) : (
+        <Loader className={cn("h-3.5 w-3.5 flex-shrink-0 animate-spin", iconCls)} aria-hidden="true" />
+      )}
+      <span className="flex-1 truncate">{label}</span>
+      {effectiveConnection === "disconnected" ? (
+        <button
+          type="button"
+          data-testid="chat-connection-banner-reconnect"
+          onClick={handleReconnect}
+          disabled={reconnecting}
+          className={cn(
+            "flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium transition-colors",
+            "border-amber-400/70 text-amber-800 hover:bg-amber-100",
+            "dark:border-amber-600/70 dark:text-amber-200 dark:hover:bg-amber-900/40",
+            reconnecting && "opacity-60",
+          )}
+        >
+          {t("chatPanel.connectionBanner.reconnectNow")}
+        </button>
+      ) : retryText !== null ? (
+        <span className={retryCls} data-testid="chat-connection-banner-countdown">
+          {retryText}
+        </span>
+      ) : (
+        <span className="text-zinc-500 dark:text-zinc-400">
+          {t("chatPanel.connectionBanner.recoveringHint")}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export function ChatPanel() {
@@ -506,7 +703,22 @@ export function ChatPanel() {
   const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
 
   // Global state and actions — selectors to avoid full-store re-render
-  const mqttConnected = useChatStore((s) => s.mqttConnected);
+  // `effectiveConnection` is the watchdog's 6-state summary (see
+  // chatStore.ts §MQTT connection watchdog). It collapses the raw
+  // {known, connected, connecting, reconnecting, reason} snapshot into a
+  // single value the UI can act on, and self-heals from the
+  // Rust-vs-frontend inconsistency that historically left the input box
+  // stuck on "正在连接 Agent..." after a wake-recovery webview reload.
+  //
+  // Note: the legacy `mqttConnected` boolean is still kept on the store
+  // for AppLayout.tsx banner logic (see AppLayout.tsx line ~311), but
+  // ChatPanel no longer reads it directly — `effectiveConnection` is the
+  // single source of truth for the input box state.
+  const effectiveConnection = useChatStore((s) => s.effectiveConnection);
+  // Watchdog's "since" timestamp for the current non-connected state. The
+  // status banner (ConnectionStatusBanner, P0-7) reads this to compute
+  // the "X seconds until auto-reconnect" countdown.
+  const mqttStaleSince = useChatStore((s) => s.staleSince);
   const availableModels = useChatStore((s) => s.availableModels);
   // Mirrored from `SessionConfig.llm_availability` retained MQTT topic.
   // Drives the three-state banner; the previous boolean check caused a
@@ -1358,7 +1570,15 @@ export function ChatPanel() {
   // Disabled-flag for the chat input — mirrors the same condition used
   // by the JSX below. Pulled out so both the input and the right-click
   // context-menu items can read it without re-deriving.
-  const inputDisabled = gatewayStatus !== "connected" || !mqttConnected;
+  //
+  // Uses `effectiveConnection` (the watchdog's 6-state summary) instead
+  // of the raw `mqttConnected` boolean: the watchdog now flips
+  // `effectiveConnection` back to "connected" within ~5s of the Rust
+  // eventloop reporting connected, even if the `mqtt-status` event was
+  // missed (wake-recovery webview reload, listener registration race).
+  // The previous `!mqttConnected` check stayed false forever in that
+  // case, locking the input box.
+  const inputDisabled = gatewayStatus !== "connected" || effectiveConnection !== "connected";
 
   // ── Cross-platform paste handling ──────────────────────────────────
   // Three entry points — keyboard (Ctrl+V / ⌘+V), context-menu "Paste",
@@ -2350,22 +2570,25 @@ export function ChatPanel() {
           )}
           {/* Attached context chips (from right-click "Add to Chat") */}
           <AttachedContextChips />
+          {/* P0-7: live connection-status banner with auto-reconnect countdown.
+              Renders nothing when the connection is healthy — only shows when
+              the watchdog is actively trying to recover (connecting / stale /
+              disconnected). The placeholder below is the fallback for the
+              rare case where the banner isn't mounted (e.g. while the
+              watchdog is still in its initial idle state). */}
+          <ConnectionStatusBanner
+            gatewayStatus={gatewayStatus}
+            effectiveConnection={effectiveConnection}
+            staleSince={mqttStaleSince}
+          />
           {/* Textarea area — borderless, transparent background */}
           <textarea
             ref={textareaRef}
             value={session.inputValue}
             onChange={(e) => session.setInputValue(e.target.value)}
-            placeholder={
-              gatewayStatus !== "connected"
-                ? t("chatPanel.inputGatewayDisconnected")
-                : !mqttConnected
-                  ? activeSkill
-                    ? t("chatPanel.inputParamsConnecting")
-                    : t("chatPanel.inputMessageConnecting")
-                  : activeSkill
-                    ? t("chatPanel.inputParams")
-                    : t("chatPanel.inputMessage")
-            }
+            placeholder={t(
+              `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill)}`,
+            )}
             disabled={inputDisabled}
             className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
