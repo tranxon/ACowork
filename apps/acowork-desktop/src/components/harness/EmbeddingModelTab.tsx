@@ -10,7 +10,7 @@ import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fet
 import { fetchCloudEmbeddingProviders, selectCloudEmbeddingModel, setCloudEmbeddingApiKey, deleteCloudEmbeddingApiKey, testCloudEmbeddingProvider, addCloudEmbeddingProvider } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw } from "lucide-react";
-import { ExpandableRow, ListBox } from "../common/list";
+import { Badge, EmptyState, ExpandableRow, ListBox } from "../common/list";
 import { Tooltip } from "../common/Tooltip";
 
 export function EmbeddingModelTab() {
@@ -39,6 +39,8 @@ export function EmbeddingModelTab() {
     // Tools-tab level-1 collapsible group shells for Local / Cloud, default open.
     const [localOpen, setLocalOpen] = useState(true);
     const [cloudOpen, setCloudOpen] = useState(true);
+    // Service status card — collapsible, default open.
+    const [serviceStatusOpen, setServiceStatusOpen] = useState(true);
 
     // ── Cloud embedding providers (S1-7) ─────────────────────────────
     const [cloudProviders, setCloudProviders] = useState<CloudEmbeddingProvider[]>([]);
@@ -496,69 +498,82 @@ export function EmbeddingModelTab() {
 
     return (
         <div className="max-w-2xl space-y-4">
-            {/* Service status */}
-            <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
-                <h2 className="mb-3 text-xs font-medium">{t("embedding.serviceStatus")}</h2>
-                <div className="flex items-center gap-2 text-xs">
-                    <span className="text-zinc-500">{t("embedding.status")}</span>
-                    <span
-                        className={cn(
-                            "h-2 w-2 rounded-full",
-                            serviceRunning ? "bg-[var(--color-accent)]" : "bg-zinc-400",
-                        )}
-                    />
-                    <span className={cn(
-                        serviceRunning ? "text-[var(--color-accent)]" : "text-zinc-500"
-                    )}>
-                        {serviceRunning ? t("embedding.running") : t("embedding.stopped")}
-                    </span>
-                </div>
-                {activeModelId && serviceRunning && (
-                    <div className="mt-2 flex items-center gap-2 text-xs">
-                        <span className="text-zinc-500">{t("embedding.activeModel")}</span>
-                        <span className="font-medium">{activeModelId}</span>
-                    </div>
-                )}
-                {/* Test button — only when service is running and has active model */}
-                {serviceRunning && activeModelId && (
-                    <div className="mt-3 flex items-center gap-2">
-                        <button
-                            onClick={handleTest}
-                            disabled={testing}
-                            className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
-                        >
-                            {testing ? (
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : (
-                                <Zap className="h-3 w-3" />
-                            )}
-                            {testing ? t("embedding.testing") : t("embedding.test")}
-                        </button>
-                        {/* Test result inline */}
-                        {testResult && (
-                            <span className="flex items-center gap-1 text-[11px]">
-                                {testResult.success ? (
-                                    <>
-                                        <CheckCircle2 className="h-3 w-3 text-green-500" />
-                                        <span className="text-green-600 dark:text-green-400">
-                                            {t("embedding.testPassed")}
-                                            {testResult.dimension && ` (${testResult.dimension}d)`}
-                                            {testResult.latency_ms != null && ` ${testResult.latency_ms}ms`}
-                                        </span>
-                                    </>
-                                ) : (
-                                    <>
-                                        <XCircle className="h-3 w-3 text-red-500" />
-                                        <span className="text-red-600 dark:text-red-400">
-                                            {testResult.error ?? t("embedding.testFailed")}
-                                        </span>
-                                    </>
+            {/* Service status — Tools-tab level-1 collapsible card.
+                Header holds the title only; status / active model / test
+                action all live in the fold body to keep the header
+                chrome consistent with sibling cards. */}
+            <ListBox dividers={false}>
+                <ExpandableRow
+                    open={serviceStatusOpen}
+                    onToggle={() => setServiceStatusOpen((v) => !v)}
+                    title={t("embedding.serviceStatus")}
+                    ariaLabel={t("embedding.serviceStatus")}
+                    bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+                >
+                    <div className="space-y-2">
+                        <div className="flex items-center gap-2 text-xs">
+                            <span className="text-zinc-500 dark:text-zinc-400">{t("embedding.status")}</span>
+                            <span
+                                className={cn(
+                                    "h-2 w-2 rounded-full",
+                                    serviceRunning ? "bg-[var(--color-accent)]" : "bg-zinc-400",
                                 )}
+                            />
+                            <span className={cn(
+                                serviceRunning
+                                    ? "text-[var(--color-accent)]"
+                                    : "text-zinc-500 dark:text-zinc-400"
+                            )}>
+                                {serviceRunning ? t("embedding.running") : t("embedding.stopped")}
                             </span>
+                        </div>
+                        {activeModelId && serviceRunning && (
+                            <div className="flex items-center gap-2 text-xs">
+                                <span className="text-zinc-500 dark:text-zinc-400">{t("embedding.activeModel")}</span>
+                                <span className="font-medium">{activeModelId}</span>
+                            </div>
+                        )}
+                        {serviceRunning && activeModelId && (
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleTest}
+                                    disabled={testing}
+                                    className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium disabled:opacity-50"
+                                >
+                                    {testing ? (
+                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                        <Zap className="h-3 w-3" />
+                                    )}
+                                    {testing ? t("embedding.testing") : t("embedding.test")}
+                                </button>
+                                {/* Test result inline */}
+                                {testResult && (
+                                    <span className="flex items-center gap-1 text-[11px]">
+                                        {testResult.success ? (
+                                            <>
+                                                <CheckCircle2 className="h-3 w-3 text-green-500" />
+                                                <span className="text-green-600 dark:text-green-400">
+                                                    {t("embedding.testPassed")}
+                                                    {testResult.dimension && ` (${testResult.dimension}d)`}
+                                                    {testResult.latency_ms != null && ` ${testResult.latency_ms}ms`}
+                                                </span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <XCircle className="h-3 w-3 text-red-500" />
+                                                <span className="text-red-600 dark:text-red-400">
+                                                    {testResult.error ?? t("embedding.testFailed")}
+                                                </span>
+                                            </>
+                                        )}
+                                    </span>
+                                )}
+                            </div>
                         )}
                     </div>
-                )}
-            </div>
+                </ExpandableRow>
+            </ListBox>
 
             {/* Error message */}
             {error && (
@@ -582,9 +597,10 @@ export function EmbeddingModelTab() {
                 />
             )}
 
-            {/* Local models — Tools-tab level-1 collapsible card: chevron +
-                title + count badge; the interactive ModelCards stay intact
-                inside the fold body. */}
+            {/* Local models — Tools-tab level-1 collapsible card: title
+                only in the header (count is in the title's t() call).
+                Refresh action lives in the body toolbar so the header
+                stays as lean as the other collapsible cards. */}
             <ListBox dividers={false}>
                 <ExpandableRow
                     open={localOpen}
@@ -596,58 +612,62 @@ export function EmbeddingModelTab() {
                         </span>
                     }
                     ariaLabel={t("embedding.localModels", { count: models.length })}
-                    trailing={
-                        <span onClick={(e) => e.stopPropagation()}>
-                            <Tooltip
-                                content={loading ? t("embedding.loading") : t("embedding.refresh")}
-                                variant="plain"
-                            >
-                                <button
-                                    aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
-                                    onClick={loadModels}
-                                    disabled={loading}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-                                >
-                                    {loading ? (
-                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                        <RefreshCw className="h-3.5 w-3.5" />
-                                    )}
-                                </button>
-                            </Tooltip>
-                        </span>
-                    }
                     bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
                 >
                     {loading && models.length === 0 ? (
-                        <div className="px-3 py-3 text-xs text-zinc-400">{t("embedding.loading")}</div>
-                    ) : models.length === 0 ? (
-                        <div className="px-3 py-3 text-xs text-zinc-400">{t("embedding.noModels")}</div>
+                        <EmptyState message={t("embedding.loading")} />
                     ) : (
-                        <div className="space-y-2 p-3">
-                            {models.map((model) => (
-                                <ModelCard
-                                    key={model.id}
-                                    model={model}
-                                    isActive={model.id === activeModelId}
-                                    isDownloading={downloadingIds.has(model.id)}
-                                    isSelecting={selectingId === model.id}
-                                    isDeleting={deletingId === model.id}
-                                    progress={downloadProgress[model.id]}
-                                    onDownload={handleDownload}
-                                    onSelect={() => handleSelect(model.id)}
-                                    onDelete={() => setDeleteConfirm({ modelId: model.id, modelName: model.name })}
-                                />
-                            ))}
-                        </div>
+                        // Plain ListBox — the panel-inset body hands each
+                        // model its own row with a hairline divider, and
+                        // ModelCard drops its old nested-card chrome.
+                        // The body toolbar (refresh) lives as a hairline-
+                        // separated first row.
+                        <ListBox variant="plain">
+                            <div className="flex justify-end border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
+                                <Tooltip
+                                    content={loading ? t("embedding.loading") : t("embedding.refresh")}
+                                    variant="plain"
+                                >
+                                    <button
+                                        aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
+                                        onClick={loadModels}
+                                        disabled={loading}
+                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                    >
+                                        {loading ? (
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        ) : (
+                                            <RefreshCw className="h-3.5 w-3.5" />
+                                        )}
+                                    </button>
+                                </Tooltip>
+                            </div>
+                            {models.length === 0 ? (
+                                <EmptyState message={t("embedding.noModels")} />
+                            ) : (
+                                models.map((model) => (
+                                    <ModelCard
+                                        key={model.id}
+                                        model={model}
+                                        isActive={model.id === activeModelId}
+                                        isDownloading={downloadingIds.has(model.id)}
+                                        isSelecting={selectingId === model.id}
+                                        isDeleting={deletingId === model.id}
+                                        progress={downloadProgress[model.id]}
+                                        onDownload={handleDownload}
+                                        onSelect={() => handleSelect(model.id)}
+                                        onDelete={() => setDeleteConfirm({ modelId: model.id, modelName: model.name })}
+                                    />
+                                ))
+                            )}
+                        </ListBox>
                     )}
                 </ExpandableRow>
             </ListBox>
 
             {/* Cloud Embedding Providers (S1-7) — Tools-tab level-1
-                collapsible card; add-custom / refresh actions live in the
-                header trailing slot (stopPropagation so they never toggle
-                the fold). CloudProviderCard bodies stay intact. */}
+                collapsible card; add / refresh actions live in the body
+                toolbar (not the header) to keep the header chrome lean. */}
             <ListBox dividers={false}>
                 <ExpandableRow
                     open={cloudOpen}
@@ -659,66 +679,28 @@ export function EmbeddingModelTab() {
                         </span>
                     }
                     ariaLabel={t("embedding.cloudProviders", { count: cloudProviders.length })}
-                    trailing={
-                        <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                            <Tooltip content={t("embedding.addCustomProvider")} variant="plain">
-                                <button
-                                    aria-label={t("embedding.addCustomProvider")}
-                                    onClick={() => setCustomDialogOpen(true)}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-                                >
-                                    <Plus className="h-3.5 w-3.5" />
-                                </button>
-                            </Tooltip>
-                            <Tooltip
-                                content={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
-                                variant="plain"
-                            >
-                                <button
-                                    aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
-                                    onClick={loadCloudProviders}
-                                    disabled={cloudLoading}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
-                                >
-                                    {cloudLoading ? (
-                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                        <RefreshCw className="h-3.5 w-3.5" />
-                                    )}
-                                </button>
-                            </Tooltip>
-                        </span>
-                    }
                     bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
                 >
-                    {/* Active cloud selection summary */}
+                    {/* Active cloud selection summary — inline status row
+                        (no nested card box; the surrounding ExpandableRow
+                        body is the only surface here). */}
                     {cloudActive && (
-                        <div className="mx-3 mt-3 flex items-center justify-between rounded border border-zinc-200 bg-zinc-50 px-2 py-1.5 text-[11px] dark:border-zinc-700 dark:bg-zinc-800">
-                            <div className="flex items-center gap-2">
-                                <span
-                                    className="rounded px-1.5 py-0.5 text-[10px] font-medium"
-                                    style={{
-                                        backgroundColor:
-                                            "color-mix(in srgb, var(--color-accent) 15%, transparent)",
-                                        color: "var(--color-accent)",
-                                    }}
-                                >
-                                    {t("embedding.cloudActive")}
+                        <div className="mx-3 mt-3 flex items-center gap-2 text-[11px]">
+                            <Badge tone="accent">{t("embedding.cloudActive")}</Badge>
+                            <span className="font-medium">
+                                {cloudActive.provider_id}/{cloudActive.model_id}
+                            </span>
+                            <span className="text-zinc-500">· {cloudActive.dimension}d</span>
+                            {!cloudActive.has_api_key && (
+                                <span className="text-amber-600 dark:text-amber-400">
+                                    · {t("embedding.apiKeyMissing")}
                                 </span>
-                                <span className="font-medium">
-                                    {cloudActive.provider_id}/{cloudActive.model_id}
-                                </span>
-                                <span className="text-zinc-500">· {cloudActive.dimension}d</span>
-                                {!cloudActive.has_api_key && (
-                                    <span className="text-amber-600 dark:text-amber-400">
-                                        · {t("embedding.apiKeyMissing")}
-                                    </span>
-                                )}
-                            </div>
+                            )}
                         </div>
                     )}
 
-                    {/* Cloud error inline */}
+                    {/* Cloud error inline (kept as an emphasised box —
+                        errors need to read at a glance). */}
                     {cloudError && (
                         <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
                             {cloudError}
@@ -726,9 +708,42 @@ export function EmbeddingModelTab() {
                     )}
 
                     {cloudProviders.length === 0 ? (
-                        <div className="px-3 py-3 text-xs text-zinc-400">{t("embedding.cloudNoProviders")}</div>
+                        <EmptyState message={t("embedding.cloudNoProviders")} />
                     ) : (
-                        <div className="space-y-3 p-3">
+                        // Plain ListBox — the parent ExpandableRow's
+                        // panel-inset body hands each provider a row, and
+                        // CloudProviderCard drops its old nested-card
+                        // chrome. The body toolbar (add / refresh) lives
+                        // as a hairline-separated first row.
+                        <ListBox variant="plain">
+                            <div className="flex justify-end gap-1 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
+                                <Tooltip content={t("embedding.addCustomProvider")} variant="plain">
+                                    <button
+                                        aria-label={t("embedding.addCustomProvider")}
+                                        onClick={() => setCustomDialogOpen(true)}
+                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                    >
+                                        <Plus className="h-3.5 w-3.5" />
+                                    </button>
+                                </Tooltip>
+                                <Tooltip
+                                    content={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
+                                    variant="plain"
+                                >
+                                    <button
+                                        aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
+                                        onClick={loadCloudProviders}
+                                        disabled={cloudLoading}
+                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                    >
+                                        {cloudLoading ? (
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        ) : (
+                                            <RefreshCw className="h-3.5 w-3.5" />
+                                        )}
+                                    </button>
+                                </Tooltip>
+                            </div>
                             {cloudProviders.map((provider) => (
                                 <CloudProviderCard
                                     key={provider.id}
@@ -772,7 +787,7 @@ export function EmbeddingModelTab() {
                                     onSelectModel={(modelId) => handleCloudSelect(provider.id, modelId)}
                                 />
                             ))}
-                        </div>
+                        </ListBox>
                     )}
                 </ExpandableRow>
             </ListBox>
@@ -1015,11 +1030,13 @@ function ModelCard({
 
     return (
         <div
+            // Row inside a plain ListBox (parent ExpandableRow's inset
+            // body) — no own border/bg; the ListBox hairline divider
+            // separates rows. Active state keeps an accent wash so the
+            // currently selected model still pops.
             className={cn(
-                "rounded-md border p-3 transition-colors",
-                isActive
-                    ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5 dark:border-[var(--color-accent)]/20 dark:bg-[var(--color-accent)]/5"
-                    : "border-zinc-200 bg-modal-surface dark:border-zinc-700",
+                "px-3 py-3 transition-colors",
+                isActive && "bg-[var(--color-accent)]/5",
             )}
         >
             {/* Header: name + badges */}
@@ -1198,7 +1215,9 @@ function CloudProviderCard({
     const isActiveProvider = active?.provider_id === provider.id;
 
     return (
-        <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900">
+        // Row inside a plain ListBox (parent ExpandableRow's inset body)
+        // — no own border/bg; the ListBox hairline divider separates rows.
+        <div className="px-3 py-3">
             {/* Header: name + api + key state */}
             <div className="mb-2 flex items-center justify-between gap-2">
                 <div className="min-w-0">
