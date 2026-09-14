@@ -265,6 +265,7 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
         workspace_query,
         workspace_mutation,
         agent_tools,
+        Arc::new(tokio::sync::Mutex::new(None)),
         agent_config,
         attachment,
         session_config,

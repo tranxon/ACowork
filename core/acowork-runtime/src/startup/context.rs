@@ -276,6 +276,10 @@ pub(crate) struct AgentBootContext {
     /// ADR-040: Late-bind slot for workspace mutation service
     /// (workspace CRUD + file/dir mutation).
     pub workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+    /// ADR-078: Late-bind slot for the git query service (read-only
+    /// `/git/status` `/git/diff` `/git/log`). Same sync-work_dir
+    /// pattern as the workspace services — populated in Phase B.
+    pub git_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
     /// ADR-040 follow-up: Late-bind slot for Tools-panel persistence
     /// (the four `/agents/{id}/mcp-servers` and
     /// `/agents/{id}/search-config` HTTP handlers). Populated in

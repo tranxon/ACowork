@@ -232,7 +232,7 @@ fn deepest_existing_ancestor(path: &Path) -> PathBuf {
     current
 }
 
-fn resolve_workspace_root(
+pub(crate) fn resolve_workspace_root(
     work_dir: &Path,
     workspace_id: Option<&str>,
 ) -> Result<PathBuf, WorkspaceError> {
@@ -263,7 +263,10 @@ fn resolve_workspace_root(
     Err(WorkspaceError::WorkspaceNotFound(ws_id.to_string()))
 }
 
-fn resolve_within_static(
+/// Canonicalize + `starts_with` workspace-root traversal guard. Shared by
+/// the workspace mutation handlers and the git query service (ADR-078
+/// decision 3): `../`, absolute paths and symlink escapes are rejected.
+pub(crate) fn resolve_within_static(
     work_dir: &Path,
     workspace_id: Option<&str>,
     requested_path: &str,

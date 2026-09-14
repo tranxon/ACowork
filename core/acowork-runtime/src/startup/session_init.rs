@@ -546,6 +546,21 @@ pub(crate) async fn phase_b_init_session(
             let mut slot = ctx.workspace_mutation_slot.lock().await;
             *slot = Some(mutation_svc);
         }
+        {
+            // ADR-078: git query service — same sync-work_dir pattern as
+            // the workspace services above. Executes read-only git CLI
+            // commands inside the Runtime (workspace owner); the Gateway
+            // only reverse-proxies `/git/*`. Must be published before the
+            // git HTTP handlers can serve a real response.
+            let git_svc: Arc<dyn crate::usecases::GitQueryService> = Arc::new(
+                crate::usecases::RuntimeGitQueryService::new(
+                    work_dir_path.to_path_buf(),
+                    ctx.agent_id.clone(),
+                ),
+            );
+            let mut slot = ctx.git_query_slot.lock().await;
+            *slot = Some(git_svc);
+        }
 
         // ADR-040 follow-up: Publish Tools-panel persistence service.
         // The four `/agents/{id}/mcp-servers` and `/agents/{id}/search-config`
