@@ -139,7 +139,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
         const text = log.commits
           .map(
             (cm) =>
-              `${cm.short_hash}  ${cm.author}  ${cm.date}\n    ${cm.subject}`,
+              `${cm.shortHash}  ${cm.author}  ${cm.date}\n    ${cm.subject}`,
           )
           .join("\n\n");
         editor.openVirtualFile({
@@ -207,7 +207,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       );
     }
     if (!data) return null;
-    if (!data.is_repo) {
+    if (!data.isRepo) {
       return (
         <div className="flex h-full items-center justify-center text-xs text-zinc-400">
           {data.error === "git_unavailable"

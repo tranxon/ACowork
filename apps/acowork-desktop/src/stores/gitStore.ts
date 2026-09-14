@@ -44,7 +44,7 @@ export interface GitChangeDto {
 }
 
 export interface GitStatusResponse {
-  is_repo: boolean;
+  isRepo: boolean;
   branch: string | null;
   error: string | null; // "not_a_repo" | "git_unavailable" | null
   truncated: boolean;
@@ -59,7 +59,7 @@ export interface GitDiffResponse {
 
 export interface GitCommitDto {
   hash: string;
-  short_hash: string;
+  shortHash: string;
   author: string;
   date: string;
   subject: string;

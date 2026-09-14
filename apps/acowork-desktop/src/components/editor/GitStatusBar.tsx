@@ -24,7 +24,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
 
   const data = entry?.data;
   const loading = entry?.loading ?? false;
-  const isRepo = data?.is_repo ?? true; // optimistically interactive pre-load
+  const isRepo = data?.isRepo ?? true; // optimistically interactive pre-load
   const branch = data?.branch;
   const changes = data?.changes.length ?? 0;
 

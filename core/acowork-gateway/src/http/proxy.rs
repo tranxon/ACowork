@@ -2095,14 +2095,22 @@ fn build_query_string(params: &HashMap<String, String>) -> String {
 }
 
 fn urlencoding(s: &str) -> String {
-    // Simple percent-encoding for query params
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u8),
-        })
-        .collect()
+    // Percent-encode per UTF-8 BYTE (RFC 3986 §2.1). Iterating `char`s and
+    // casting `c as u8` would truncate non-ASCII code points (e.g. 中 U+4E2D
+    // → 0x2D) and corrupt multi-byte paths — caught by git_proxy_e2e.rs
+    // utf8_path_is_percent_encoded_when_forwarded. `s.bytes()` preserves the
+    // exact UTF-8 sequence the upstream needs to decode.
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Percent-encode a single URL **path segment** (RFC 3986 §3.3) so it cannot
