@@ -1501,6 +1501,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * The Runtime will publish `session_opened` once the connection is healthy.
    */
   openSession: async (agentId: string, sessionId: string) => {
+    // ponytail: diagnostic — anchor for when "Loading session..." clears.
+    console.warn(
+      `[chatStore] openSession start ${agentId} ${sessionId} @${performance.now().toFixed(0)}ms`,
+    );
     // 1. UI: open the tab + activate + ensure session cache slot.
     set((state) => {
       const agent = getAgentState(state, agentId);
@@ -3457,6 +3461,9 @@ export function handleMessageEvent(
       if (sid) {
         const status = data.status as SessionStatus | undefined;
         if (status) {
+          // ponytail: diagnostic — time the reducer to see if session_state
+          // handling is what stalls the main thread on agent start.
+          const __t0 = performance.now();
           const prev = getSessionState(get(), agentId, sid!);
           log.debug(
             `[ChatStore:DEBUG] session_state for ${agentId}/${sid}: ` +
@@ -3510,6 +3517,14 @@ export function handleMessageEvent(
 
             const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);
             let agentStates = sessionResult.agentStates;
+            // ponytail: diagnostic
+            const __t1 = performance.now();
+            if (__t1 - __t0 > 100) {
+              console.warn(
+                `[chatStore] session_state reducer took ${Math.round(__t1 - __t0)}ms ` +
+                  `session=${sid} status=${status.status}`,
+              );
+            }
             return { agentStates };
           });
         }

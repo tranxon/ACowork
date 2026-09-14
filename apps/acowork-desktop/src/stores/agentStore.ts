@@ -14,6 +14,20 @@ import { with503Retry } from "../lib/httpRetry";
 /** System Agent ID — always auto-started by Gateway */
 export const SYSTEM_AGENT_ID = "com.acowork.system";
 
+// ── One-shot "agent came online" waiters (event-driven, no polling) ──────
+// startAgent 等待 Runtime 上线：MQTT `agent_status online` → chatStore →
+// `updateAgentLiveness(alive=true)` → 触发这里注册的回调。超时由调用方
+// (startAgent) 负责 reject。key 为 instance id。
+const onlineWaiters = new Map<string, Array<() => void>>();
+
+function notifyAgentOnline(agentId: string): void {
+  const waiters = onlineWaiters.get(agentId);
+  if (waiters) {
+    onlineWaiters.delete(agentId);
+    for (const fn of waiters) fn();
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // AgentProfile types (moved from agentProfileStore.ts)
 // ══════════════════════════════════════════════════════════════════════════
@@ -567,7 +581,32 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   startAgent: async (agentId, devMode) => {
     try {
       await invoke("start_agent", { agentId, devMode: devMode ?? false });
-      await get().fetchAgents();
+      // Gateway /start 只等到 Node 接受控制命令就返回（node_control
+      // start_agent + check_reply）；Runtime 真正上线（MQTT online →
+      // updateAgentLiveness(alive=true)）还要 1-3s。这里等"上线事件"
+      // 而不是轮询状态：`notifyAgentOnline` 由 agent_status 事件触发，
+      // 15s 内没等到即启动失败。若事件先到（invoke 返回时已上线），
+      // 直接通过。
+      const WAIT_ONLINE_MS = 15_000;
+      if (get().agents[agentId]?.meta.alive) return;
+      await new Promise<void>((resolve, reject) => {
+        const onOnline = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          const list = onlineWaiters.get(agentId);
+          if (list) {
+            const idx = list.indexOf(onOnline);
+            if (idx >= 0) list.splice(idx, 1);
+            if (list.length === 0) onlineWaiters.delete(agentId);
+          }
+          reject(new Error(`Agent ${agentId} did not come online within ${WAIT_ONLINE_MS / 1000}s of start`));
+        }, WAIT_ONLINE_MS);
+        const list = onlineWaiters.get(agentId);
+        if (list) list.push(onOnline);
+        else onlineWaiters.set(agentId, [onOnline]);
+      });
     } catch (e) {
       set({ error: String(e) });
       throw e;
@@ -600,8 +639,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   waitForAgentReady: async (agentId) => {
     for (let attempt = 0; attempt < 30; attempt++) {
+      // ponytail: diagnostic
+      const __w0 = performance.now();
       await get().fetchAgents();
       const storage = get().agents[agentId];
+      // ponytail: diagnostic
+      console.warn(
+        `[agentStore] waitForAgentReady attempt=${attempt} ` +
+          `after ${Math.round(performance.now() - __w0)}ms ` +
+          `alive=${storage?.meta.alive} ready=${storage?.meta.ready}`,
+      );
       if (storage?.meta.ready) return;
       if (!storage?.meta.alive) {
         throw new Error("Agent is no longer alive before becoming ready");
@@ -741,7 +788,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/latest-session`),
         { tag: `AgentStore.fetchLatestSession(${agentId})`, logger: log },
       );
-      if (!resp.ok) return null;
+      if (!resp.ok) {
+        // ponytail: diagnostic — 404 here is the startup-window race.
+        console.warn(
+          `[AgentStore] fetchLatestSession(${agentId}) HTTP ${resp.status} @${performance.now().toFixed(0)}ms`,
+        );
+        return null;
+      }
       const data = (await resp.json()) as {
         session_id: string;
         title: string | null;
@@ -1004,6 +1057,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         meta: { ...existing.meta, alive, sleeping },
       });
     });
+    // One-shot online event for startAgent's waiter (no polling).
+    if (alive) notifyAgentOnline(agentId);
   },
 
   patchAgentMeta: (agentId: string, meta) => {

@@ -1934,7 +1934,22 @@ export function ChatPanel() {
                 // ADR-073: start is instance-scoped — use the instance key,
                 // not the package `agent_id` (ambiguous in multi-instance).
                 if (!selectedAgentId) return;
-                await startAgentAndSyncUI(selectedAgentId);
+                try {
+                  await startAgentAndSyncUI(selectedAgentId);
+                } catch (e) {
+                  // Start failure must surface to the user, not leak as an
+                  // unhandled rejection (2026-09-14: waitForAgentReady
+                  // raced the async /start and the rejection was swallowed).
+                  addToast({
+                    type: "error",
+                    message:
+                      typeof e === "string"
+                        ? e
+                        : e instanceof Error
+                          ? e.message
+                          : String(e),
+                  });
+                }
               }}
               className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
             >

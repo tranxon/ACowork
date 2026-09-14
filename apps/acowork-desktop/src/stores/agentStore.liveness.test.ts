@@ -23,10 +23,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // ── Mock Tauri invoke: fetchAgents drives list_agents through this ──────
 
 const mockListAgents = vi.fn<[], Promise<unknown[]>>();
+const mockStartAgent = vi.fn<[], Promise<unknown>>();
 
 vi.mock("@tauri-apps/api/core", () => ({
     invoke: (cmd: string) => {
         if (cmd === "list_agents") return mockListAgents();
+        if (cmd === "start_agent") return mockStartAgent();
         return Promise.reject(new Error(`Unexpected invoke: ${cmd}`));
     },
 }));
@@ -122,6 +124,7 @@ beforeEach(() => {
         error: null,
     });
     mockListAgents.mockReset();
+    mockStartAgent.mockReset();
 });
 
 afterEach(() => {
@@ -232,5 +235,46 @@ describe("updateAgentLiveness — realtime MQTT path patches meta", () => {
         const storage = useAgentStore.getState().agents[INSTANCE_ID];
         expect(storage.meta.alive).toBe(true);
         expect(storage.meta.sleeping).toBe(false);
+    });
+});
+
+describe("startAgent — waits for the MQTT online EVENT (no polling)", () => {
+    it("resolves only when the online event arrives after start", async () => {
+        seedAgent({ alive: false, ready: false });
+        mockStartAgent.mockResolvedValue({}); // Gateway /start ack (async)
+
+        const p = useAgentStore.getState().startAgent(INSTANCE_ID, false);
+        // Give the invoke microtask time to reach the waiter registration.
+        await new Promise((r) => setTimeout(r, 0));
+        let settled = false;
+        p.then(() => (settled = true)).catch(() => (settled = true));
+        expect(settled).toBe(false); // still waiting — no polling, no state read
+
+        // MQTT `agent_status online` event arrives.
+        useAgentStore.getState().updateAgentLiveness(INSTANCE_ID, true, false);
+        await expect(p).resolves.toBeUndefined();
+    });
+
+    it("rejects when the online event never arrives (15s timeout)", async () => {
+        seedAgent({ alive: false, ready: false });
+        mockStartAgent.mockResolvedValue({});
+        vi.useFakeTimers();
+
+        const p = useAgentStore.getState().startAgent(INSTANCE_ID, false);
+        // Attach the assertion BEFORE advancing so the rejection is handled
+        // as it fires (no unhandled-rejection noise).
+        const expectation = expect(p).rejects.toThrow(/did not come online within 15s/);
+        // Async advance drains the invoke microtask (waiter registration)
+        // and then the 15s timer.
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expectation;
+    });
+
+    it("resolves immediately when the agent is already online", async () => {
+        seedAgent({ alive: true, ready: false });
+        mockStartAgent.mockResolvedValue({});
+        await expect(
+            useAgentStore.getState().startAgent(INSTANCE_ID, false),
+        ).resolves.toBeUndefined();
     });
 });
