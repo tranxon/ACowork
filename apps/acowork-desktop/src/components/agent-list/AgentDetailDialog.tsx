@@ -101,10 +101,10 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                   <span
                     className={cn(
                       "inline-block h-2 w-2 rounded-full",
-                      detail.running ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
+                      detail.alive ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
                     )}
                   />
-                  {detail.running ? t("agentDetailDialog.statusRunning") : t("agentDetailDialog.statusStopped")}
+                  {detail.alive ? t("agentDetailDialog.statusRunning") : t("agentDetailDialog.statusStopped")}
                 </span>
               }
             />

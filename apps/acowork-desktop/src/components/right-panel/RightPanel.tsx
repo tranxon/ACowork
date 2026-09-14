@@ -297,7 +297,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     // ADR-048 follow-up: `debug_state === "enabled"` covers both
     // startup `--dev-mode` and runtime enable (dev_mode stays false
     // after POST /api/agents/{id}/debug/enable).
-    if (selectedAgent?.debug_state === "enabled" && selectedAgent.running) {
+    if (selectedAgent?.debug_state === "enabled" && selectedAgent.alive) {
       if (agentChanged || !connected || debugAgentId !== selectedAgentId) {
         connect(selectedAgentId);
       }
@@ -307,15 +307,15 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     if (agentChanged) {
       prevAgentId.current = selectedAgentId;
     }
-  }, [isDebugMode, selectedAgentId, selectedAgent?.debug_state, selectedAgent?.running, connected, debugAgentId, connect]);
+  }, [isDebugMode, selectedAgentId, selectedAgent?.debug_state, selectedAgent?.alive, connected, debugAgentId, connect]);
 
   // ── Debug disconnect effect ──────────────────────────────────────
   useEffect(() => {
     if (!isDebugMode) return;
-    if (connected && selectedAgent && (selectedAgent.debug_state !== "enabled" || !selectedAgent.running)) {
+    if (connected && selectedAgent && (selectedAgent.debug_state !== "enabled" || !selectedAgent.alive)) {
       disconnect();
     }
-  }, [isDebugMode, selectedAgent?.debug_state, selectedAgent?.running, connected, disconnect]);
+  }, [isDebugMode, selectedAgent?.debug_state, selectedAgent?.alive, connected, disconnect]);
 
   // ── Debug toggle section callback ────────────────────────────────
   const toggleSection = useCallback(
@@ -354,14 +354,14 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
   // agent, this selector re-fires the effect.
   useEffect(() => {
     if (!selectedAgentId) return;
-    if (!selectedAgent?.running || !selectedAgent?.ready) return;
+    if (!selectedAgent?.alive || !selectedAgent?.ready) return;
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/status`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data) log.debug("[RightPanel] Agent status:", data);
       })
       .catch(() => {/* ignore */});
-  }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
+  }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.ready]);
 
   // Context-snapshots level-1 collapse (whole card body toggles from the
   // card header — same interaction as the PROMPT card). Default open.
@@ -453,7 +453,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               the workspace/memory panel divider style. */}
           <div className="my-2 border-t border-right-panel-border" />
 
-          {!selectedAgent?.running ? (
+          {!selectedAgent?.alive ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
               <Bug className="h-5 w-5" />
               <span className="text-center">
@@ -900,11 +900,11 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       <span
                         className={cn(
                           "inline-block h-2 w-2 rounded-full",
-                          selectedAgent.running ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
+                          selectedAgent.alive ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
                         )}
                       />
                       <span className="text-zinc-700 dark:text-zinc-300">
-                        {selectedAgent.running ? t("rightPanel.running") : t("rightPanel.stopped")}
+                        {selectedAgent.alive ? t("rightPanel.running") : t("rightPanel.stopped")}
                       </span>
                     </span>
                   </div>

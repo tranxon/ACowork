@@ -1438,7 +1438,7 @@ fn extract_instance_id_from_topic(topic: &str) -> Option<String> {
 /// Returns:
 /// - `Some(...)` when the topic matches the status shape and the
 ///   payload is one of the known status values (`online` / `sleeping` /
-///   `offline`).
+///   `degraded` / `offline`).
 /// - `None` when the topic is not a status topic (caller should fall
 ///   through to the protobuf decoder). When the topic *is* a status
 ///   topic but the payload is non-UTF-8 binary (the Gateway's
@@ -1461,8 +1461,13 @@ fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAge
         return None;
     };
     match payload_str.trim() {
+        // `online` / `sleeping` / `degraded` all mean the MQTT session is
+        // alive (alive=true). `degraded` additionally implies the bootstrap
+        // is still in flight — the UI shows the agent as alive but not yet
+        // ready (mirrors the Gateway `AgentRegistry` mapping).
         "online" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: false }),
         "sleeping" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: true }),
+        "degraded" => Some(ParsedAgentStatus { instance_id, online: true, sleeping: false }),
         "offline" => Some(ParsedAgentStatus { instance_id, online: false, sleeping: false }),
         unknown => {
             tracing::warn!(
@@ -1532,6 +1537,20 @@ mod tests {
         let p = parse_plaintext_agent_status(
             "acowork/agents/com.example.weather/status",
             b"online",
+        )
+        .unwrap();
+        assert_eq!(p.instance_id, "com.example.weather");
+        assert!(p.online);
+        assert!(!p.sleeping);
+    }
+
+    #[test]
+    fn parse_plaintext_degraded_payload() {
+        // The Gateway AgentRegistry emits "degraded" as an alive status;
+        // the Desktop must treat it as online (alive), not sleeping.
+        let p = parse_plaintext_agent_status(
+            "acowork/agents/com.example.weather/status",
+            b"degraded",
         )
         .unwrap();
         assert_eq!(p.instance_id, "com.example.weather");

@@ -3521,18 +3521,18 @@ export function handleMessageEvent(
       const aid = data.instance_id as string | undefined;
       const online = data.online as boolean | undefined;
       if (aid && online !== undefined) {
-        // `sleeping` is included by the plain-text branch (Desktop
-        // `parse_plaintext_agent_status`) and by the protobuf branch
-        // (newer Runtimes / Gateway republish). Older agents may omit
-        // it; `updateAgentOnlineStatus` defaults `sleeping` to false.
+        // `alive` mirrors `online` — the MQTT payload is the network-level
+        // liveness verdict (`online`/`sleeping`/`degraded` → alive;
+        // `offline` → dead). `sleeping` rides along from the `sleeping`
+        // payload and is optional for legacy Runtimes that omit it.
         const sleeping = (data as { sleeping?: boolean }).sleeping ?? false;
-        useAgentStore.getState().updateAgentOnlineStatus(aid, online, sleeping);
+        useAgentStore.getState().updateAgentLiveness(aid, online, sleeping);
         // HTTP health double-check on MQTT disconnect (distributed liveness):
         // the Runtime may run on a remote node, and its MQTT connection can
         // drop (e.g. system sleep → KeepAlive timeout → Gateway marks the
         // agent offline) while the Runtime process itself stays alive.
         // Probe `/health` through the Gateway reverse-proxy; if the Runtime
-        // answers 2xx it is alive, so override back to online instead of
+        // answers 2xx it is alive, so override back to alive instead of
         // rendering it offline/sleeping.
         if (!online) {
           // The trailing `.catch(() => {})` is defensive: in production
@@ -3545,7 +3545,7 @@ export function handleMessageEvent(
               if (alive) {
                 useAgentStore
                   .getState()
-                  .updateAgentOnlineStatus(aid, true, false);
+                  .updateAgentLiveness(aid, true, false);
               }
             })
             .catch(() => {

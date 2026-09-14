@@ -50,8 +50,10 @@ export interface AgentListResponse {
   avatar: string | null;
   builtin_avatar?: string;
   version: string;
-  running: boolean;
-  connected: boolean;
+  /** Distributed liveness verdict (MQTT network signal, topology independent). */
+  alive: boolean;
+  /** Runtime self-reported auto-sleep (idle watcher fired). */
+  sleeping?: boolean;
   dev_mode: boolean;
   /** Whether DevMode is live right now (ADR-048 follow-up; can be enabled at runtime). */
   debug_state?: "enabled" | "disabled";
@@ -186,8 +188,21 @@ export interface AgentInfo {
    */
   builtin_avatar?: string;
   version: string;
-  running: boolean;
-  connected: boolean;
+  /**
+   * Distributed liveness verdict — whether the Runtime's MQTT session is
+   * reachable at the broker level (`online` / `sleeping` / `degraded`
+   * payloads). Topology independent: the same answer for local, remote
+   * and node-hosted Runtimes. NEVER a process/PID probe. This is the
+   * single field the UI gates "agent is alive" on.
+   */
+  alive: boolean;
+  /**
+   * Whether the Runtime self-reported auto-sleep (idle watcher fired)
+   * before exiting. `alive=true, sleeping=true` means the retained
+   * `sleeping` status is still cached — render an "auto-slept at HH:MM"
+   * badge + Start button, not a live session.
+   */
+  sleeping: boolean;
   ready: boolean;
   dev_mode: boolean;
   /**
@@ -243,9 +258,16 @@ export interface AgentDetail {
   description: string;
   author: string;
   install_path: string;
-  running: boolean;
-  connected: boolean;
+  /**
+   * Distributed liveness verdict — same semantics as `AgentInfo.alive`
+   * (MQTT network signal, topology independent, never a PID probe).
+   */
+  alive: boolean;
   ready: boolean;
+  /**
+   * Local process id (diagnostic only — node-hosted Runtimes report 0).
+   * NEVER used for liveness.
+   */
   pid: number | null;
   started_at: string | null;
   /** Whether the agent was started with the `--dev-mode` flag (startup intent). */

@@ -759,7 +759,7 @@ export function WorkspaceExplorer() {
         }
     }, [selectedAgentId, currentWorkspaceId, copyItem, refreshTree, setCopiedEntry, requestRenameFor, addToast]);
 
-    if (!selectedAgent?.running) {
+    if (!selectedAgent?.alive) {
         return (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-right-panel p-6 text-xs text-zinc-500 dark:text-zinc-400">
                 <FolderOpen className="h-6 w-6" />
