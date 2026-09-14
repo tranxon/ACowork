@@ -128,17 +128,22 @@ fn root_entries() -> Vec<FsBrowseEntry> {
         }
     }
 
-    // On Unix: add root "/" and common paths
+    // On Unix: add common sibling paths (home and /tmp are above).
+    //
+    // Don't list `/` itself: this function returns the listing for the
+    // `/` path, so `/` is the current path, not a child. Including it
+    // made the frontend's tree flatten (Desktop `RemoteFolderPicker`)
+    // infinite-loop when the user expanded `/`: the chevron fetch hit
+    // this same listing, which contains `/`, which then expanded again
+    // to the same listing…
+    //
+    // `/tmp` is already added by the "Temp directory" block above;
+    // listing it again here would emit two entries with the same
+    // `path`, which the Desktop frontend rejects as a duplicate React
+    // key.
     #[cfg(unix)]
     {
-        entries.push(FsBrowseEntry {
-            name: "/".to_string(),
-            entry_type: "directory".to_string(),
-            path: "/".to_string(),
-            size: None,
-            children_count: Some(count_visible_children(Path::new("/"))),
-        });
-        for (label, path) in [("/var", "/var"), ("/tmp", "/tmp"), ("/opt", "/opt")] {
+        for (label, path) in [("/var", "/var"), ("/opt", "/opt")] {
             let p = Path::new(path);
             if p.is_dir() {
                 entries.push(FsBrowseEntry {
@@ -395,5 +400,39 @@ mod tests {
         // Don't create it — count should silently return 0.
         let _ = fs::remove_dir_all(&p);
         assert_eq!(count_visible_children(&p), 0);
+    }
+
+    #[test]
+    fn root_entries_paths_are_unique() {
+        // Regression for the macOS crash: `/tmp` was pushed twice (once
+        // by the temp-dir block, once by the /var /tmp /opt loop), so
+        // the Desktop frontend saw two entries with the same `path` and
+        // crashed on a duplicate React key. Every path must be unique.
+        let entries = root_entries();
+        let mut seen = std::collections::HashSet::new();
+        for entry in &entries {
+            assert!(
+                seen.insert(entry.path.as_str()),
+                "duplicate path in root_entries: {}",
+                entry.path
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_entries_excludes_self_path() {
+        // Regression for the macOS stack overflow: `/` was listed as
+        // one of its own children, so the Desktop's tree flatten walker
+        // (RemoteFolderPicker) recursed `/` → children=[…, `/`, …] →
+        // `/` → … forever on a single click. The listing for `/` must
+        // never contain `/` itself; that path is the current dir, not
+        // a child of it.
+        for entry in root_entries() {
+            assert_ne!(
+                entry.path, "/",
+                "root_entries() must not list `/` as its own child"
+            );
+        }
     }
 }

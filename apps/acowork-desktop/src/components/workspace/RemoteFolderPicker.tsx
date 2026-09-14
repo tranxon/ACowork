@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { ChevronRight, ChevronDown, Folder, FolderOpen, HardDrive } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -158,8 +158,42 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
         }
     };
 
-    // Render a directory entry row
-    const renderEntry = (entry: FsBrowseEntry, depth: number = 0) => {
+    // Flatten the visible tree into a flat list respecting expandedDirs.
+    //
+    // ponytail: recursive rendering (renderEntry → renderEntry) makes
+    // the fiber tree depth equal to the user's expanded level count.
+    // macOS WKWebView's JSCore stack overflows under deep
+    // `commitLayoutEffectOnFiber` traversal even for shallow user
+    // input, so we render a flat list instead. Matches the pattern
+    // already used in FileTree.tsx (see walk() there).
+    //
+    // Defense in depth: skip any child whose `path` equals the
+    // parent's `path`. The backend's `/` listing was once returning
+    // `/` itself as a child (root_entries() quirk), and that looped
+    // this walker forever — the backend no longer does that, but if
+    // any future symlink/cross-mount case sends us back the parent
+    // path, we'd rather render one stray row than stack-overflow.
+    const flatEntries = useMemo(() => {
+        const out: Array<{ entry: FsBrowseEntry; depth: number }> = [];
+        const walk = (entry: FsBrowseEntry, depth: number): void => {
+            out.push({ entry, depth });
+            if (expandedDirs.has(entry.path)) {
+                const children = expandedEntries.get(entry.path);
+                if (children) {
+                    for (const child of children) {
+                        if (child.path === entry.path) continue;
+                        walk(child, depth + 1);
+                    }
+                }
+            }
+        };
+        for (const entry of entries) walk(entry, 0);
+        return out;
+    }, [entries, expandedDirs, expandedEntries]);
+
+    // Render a single directory entry row. Now non-recursive — the
+    // caller flattens the tree first, so this just emits one row.
+    const renderEntry = ({ entry, depth }: { entry: FsBrowseEntry; depth: number }) => {
         const isExpanded = expandedDirs.has(entry.path);
         const isSelected = selectedPath === entry.path;
         const isDir = entry.type === "directory";
@@ -204,10 +238,6 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                         </span>
                     )}
                 </div>
-                {/* Expanded children */}
-                {isExpanded && expandedEntries.has(entry.path) && (
-                    expandedEntries.get(entry.path)?.map((child) => renderEntry(child, depth + 1))
-                )}
             </div>
         );
     };
@@ -272,7 +302,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                             {t("workspace.remoteBrowseEmpty")}
                         </div>
                     ) : (
-                        entries.map((entry) => renderEntry(entry))
+                        flatEntries.map((node) => renderEntry(node))
                     )}
                 </div>
 
