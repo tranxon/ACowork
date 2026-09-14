@@ -1139,6 +1139,27 @@
     "ariaLabelResizeSidebar": "사이드바 크기 조정",
     "ariaLabelResizeFileEditor": "파일 편집기 크기 조정"
   },
+  "gitStatusBar": {
+    "title": "Git",
+    "notRepo": "Git 저장소가 아닙니다",
+    "changes": "개 변경"
+  },
+  "gitStatus": {
+    "loading": "불러오는 중…",
+    "notRepo": "Git 저장소가 아닙니다",
+    "gitUnavailable": "git을 사용할 수 없습니다",
+    "clean": "커밋되지 않은 변경 없음",
+    "showDiff": "차이 보기",
+    "showLog": "커밋 기록 보기",
+    "openInEditor": "편집기에서 열기",
+    "staged": "스테이징됨",
+    "noCommits": "아직 커밋이 없습니다",
+    "modified": "수정됨",
+    "untracked": "추적 안 됨",
+    "deleted": "삭제됨",
+    "renamed": "이름 변경됨",
+    "added": "추가됨"
+  },
   "fileTree": {
     "deleteConfirmOk": "삭제",
     "deleteConfirmCancel": "취소"

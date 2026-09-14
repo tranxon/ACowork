@@ -27,6 +27,7 @@ import { useLayoutStore } from "../stores/layoutStore";
 import { useChatStore } from "../stores/chatStore";
 import { useAgentStore } from "../stores/agentStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
+import { useGitStore } from "../stores/gitStore";
 import { getGatewayUrl } from "./config";
 import { log } from "./logger";
 
@@ -80,6 +81,22 @@ function deriveWatchGroups(): Map<GroupKey, string[]> {
                     if (p) addPath(agentId, workspaceId, p);
                 }
             }
+        }
+    }
+
+    // 3. Git Status panel expanded → watch the workspace root, OUTSIDE the
+    //    workspace-panel visibility guard (ADR-078 decision 8): the
+    //    GitStatusBar sits at the bottom of the editor panel, so the root
+    //    must be watched even when the file tree panel is collapsed.
+    const git = useGitStore.getState();
+    if (git.expandedKey) {
+        const sep = git.expandedKey.indexOf("\u0000");
+        if (sep !== -1) {
+            addPath(
+                git.expandedKey.slice(0, sep),
+                git.expandedKey.slice(sep + 1),
+                "",
+            );
         }
     }
 
@@ -170,6 +187,9 @@ function subscribeStores(): void {
     _unsubscribers.push(useChatStore.subscribe(() => scheduleWatchReport()));
     _unsubscribers.push(useAgentStore.subscribe(() => scheduleWatchReport()));
     _unsubscribers.push(useWorkspaceStore.subscribe(() => scheduleWatchReport()));
+    // ADR-078 decision 8: expanding/collapsing the Git Status panel adds /
+    // removes the workspace root from the derived watch set.
+    _unsubscribers.push(useGitStore.subscribe(() => scheduleWatchReport()));
 }
 
 /**

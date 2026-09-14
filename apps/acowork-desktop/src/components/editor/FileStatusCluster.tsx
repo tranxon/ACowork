@@ -15,7 +15,7 @@ export interface FileStatusClusterActiveFile {
     language?: string;
     mimeType?: string;
     mode: "edit" | "preview";
-    kind: "file" | "url";
+    kind: "file" | "url" | "diff" | "log";
     url?: string;
     relPath: string;
     loading?: boolean;
@@ -77,7 +77,7 @@ export function FileStatusCluster({
         return null;
     }
 
-    const isEdit = activeFile.mode === "edit";
+    const isEdit = activeFile.mode === "edit" && activeFile.kind === "file";
     const isUrl = activeFile.kind === "url";
 
     return (

@@ -13,7 +13,7 @@ import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
-import Editor, { type OnMount } from "@monaco-editor/react";
+import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import { initMonaco } from "../../lib/monacoBootstrap";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -33,6 +33,9 @@ import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
 import { SymbolSearchPanel } from "./SymbolSearchPanel";
+import { GitStatusBar } from "./GitStatusBar";
+import { GitStatusPanel } from "./GitStatusPanel";
+import { useGitStore } from "../../stores/gitStore";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
@@ -164,6 +167,22 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     const activeFile = openFiles.find((f) => f.id === activeFileId) ?? null;
 
+    // ADR-078 — git strip context: the active file's agent + workspace when
+    // it is a real (non-home) workspace file. Virtual diff/log tabs reuse the
+    // same workspace they were opened from, so the strip stays stable while
+    // paging through a diff.
+    const gitContext = useMemo(() => {
+        if (!activeFile) return null;
+        const wid = activeFile.workspaceId;
+        if (!wid || wid === "__agent_home__") return null;
+        return { agentId: activeFile.agentId, workspaceId: wid };
+    }, [activeFile]);
+    const gitAgentId = gitContext?.agentId;
+    const gitWorkspaceId = gitContext?.workspaceId;
+    const gitExpanded = useGitStore((s) =>
+        gitAgentId && gitWorkspaceId ? s.isExpanded(gitAgentId, gitWorkspaceId) : false,
+    );
+
     // ── Locate-in-tree eligibility ──────────────────────────────────
     // The button is only enabled when the active file lives in the currently
     // selected agent AND the currently active session's workspace. Otherwise
@@ -228,15 +247,20 @@ export function FileEditorPanel({ width }: { width: number }) {
         return isReadyNode(node) ? node.root : undefined;
     }, [activeFile]);
 
-    // Determine the active language for LSP — preview-mode files don't need LSP.
-    const lspLanguage = activeFile && activeFile.mode === "edit" ? activeFile.language : null;
+    // Determine the active language for LSP — preview-mode and virtual
+    // diff/log tabs don't need LSP.
+    const lspLanguage =
+        activeFile && activeFile.mode === "edit" && activeFile.kind === "file"
+            ? activeFile.language
+            : null;
 
     // Compute the set of all languages open in EDIT tabs (for pool lifecycle).
     // Preview-mode tabs are excluded — they are read-only and don't need LSP.
     const openLanguages = useMemo(() => {
         const langs = new Set<string>();
         for (const file of openFiles) {
-            if (file.mode === "edit" && file.language && !file.loading) langs.add(file.language);
+            if (file.mode === "edit" && file.kind === "file" && file.language && !file.loading)
+                langs.add(file.language);
         }
         return langs;
     }, [openFiles]);
@@ -1424,6 +1448,46 @@ export function FileEditorPanel({ width }: { width: number }) {
                     </div>
                 ) : activeFile.kind === "url" ? (
                     <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
+                ) : activeFile.kind === "diff" ? (
+                    // ADR-078 decision 7 — read-only side-by-side diff of the
+                    // original (HEAD) vs. working-tree content. GitDiffKind
+                    // "deleted" arrives with empty `modified`, which Monaco
+                    // renders as an empty right pane.
+                    <DiffEditor
+                        original={activeFile.originalContent}
+                        modified={activeFile.content}
+                        language={activeFile.language}
+                        theme={resolvedMonacoTheme}
+                        options={{
+                            minimap: { enabled: false },
+                            fontSize: editorFontSize,
+                            lineNumbers: "on",
+                            scrollBeyondLastLine: false,
+                            readOnly: true,
+                            renderSideBySide: true,
+                            automaticLayout: true,
+                            padding: { top: 8 },
+                        }}
+                    />
+                ) : activeFile.kind === "log" ? (
+                    // ADR-078 decision 7 — read-only single-pane commit log.
+                    <Editor
+                        path={activeFile.relPath}
+                        value={activeFile.content}
+                        language={activeFile.language}
+                        theme={resolvedMonacoTheme}
+                        keepCurrentModel={false}
+                        options={{
+                            minimap: { enabled: false },
+                            fontSize: editorFontSize,
+                            lineNumbers: "off",
+                            scrollBeyondLastLine: false,
+                            readOnly: true,
+                            wordWrap: "on",
+                            automaticLayout: true,
+                            padding: { top: 8 },
+                        }}
+                    />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
                     // SVG preview branch. Raster images (png/jpg/gif/webp) never
                     // reach here because `canPreview` in the tab context menu only
@@ -1533,6 +1597,20 @@ export function FileEditorPanel({ width }: { width: number }) {
                     </div>
                 )}
             </div>
+
+            {/* ADR-078 decision 6 — version-control strip at the bottom of the
+                editor. Shown only when the active file lives in a real session
+                workspace (virtual/home files have no meaningful repo context).
+                `gitContext` derives from the active file so the bar tracks
+                whatever the user is editing. */}
+            {gitContext && (
+                <>
+                    <GitStatusBar agentId={gitContext.agentId} workspaceId={gitContext.workspaceId} />
+                    {gitExpanded && (
+                        <GitStatusPanel agentId={gitContext.agentId} workspaceId={gitContext.workspaceId} />
+                    )}
+                </>
+            )}
 
             {/* Close confirmation dialog */}
             {closingFileId && (

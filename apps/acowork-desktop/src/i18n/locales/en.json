@@ -372,6 +372,27 @@
     "noMatchingWorkspaces": "No matching workspaces",
     "noWorkspacesConfigured": "No workspaces configured"
   },
+  "gitStatusBar": {
+    "title": "Git",
+    "notRepo": "Not a Git repository",
+    "changes": "changes"
+  },
+  "gitStatus": {
+    "loading": "Loading…",
+    "notRepo": "Not a Git repository",
+    "gitUnavailable": "git not available",
+    "clean": "No uncommitted changes",
+    "showDiff": "Show Diff",
+    "showLog": "Show Log",
+    "openInEditor": "Open in Editor",
+    "staged": "staged",
+    "noCommits": "No commits yet",
+    "modified": "modified",
+    "untracked": "untracked",
+    "deleted": "deleted",
+    "renamed": "renamed",
+    "added": "added"
+  },
   "fileTree": {
     "deleteConfirmOk": "Delete",
     "deleteConfirmCancel": "Cancel"

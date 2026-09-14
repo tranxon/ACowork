@@ -139,6 +139,22 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/workspaces/search",
             get(proxy_search_files),
         )
+        // ADR-078: workspace Git Status Bar. Git executes in the Runtime
+        // (workspace owner, ADR-009 v2) via the system git CLI with
+        // `GIT_OPTIONAL_LOCKS=0`; the Gateway only forwards — no .git
+        // bytes ever cross this process (run_gateway_fs_redline).
+        .route(
+            "/api/agents/{id}/git/status",
+            get(proxy_git_status),
+        )
+        .route(
+            "/api/agents/{id}/git/diff",
+            get(proxy_git_diff),
+        )
+        .route(
+            "/api/agents/{id}/git/log",
+            get(proxy_git_log),
+        )
         .route(
             "/api/agents/{id}/sessions",
             get(proxy_list_sessions),
@@ -505,6 +521,44 @@ async fn proxy_search_files(
 ) -> Response {
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, "/workspaces/search", &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/git/status` to Runtime's
+/// `GET /git/status`. Querystring key: `workspace_id` (optional).
+async fn proxy_git_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/git/status", &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/git/diff` to Runtime's
+/// `GET /git/diff`. Querystring keys: `workspace_id` (optional), `path`
+/// (required), `cached` (0|1).
+async fn proxy_git_diff(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/git/diff", &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/git/log` to Runtime's
+/// `GET /git/log`. Querystring keys: `workspace_id` (optional), `path`
+/// (optional), `limit` (optional).
+async fn proxy_git_log(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/git/log", &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.

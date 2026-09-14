@@ -1138,6 +1138,27 @@
     "ariaLabelResizeSidebar": "サイドバーのサイズを変更",
     "ariaLabelResizeFileEditor": "ファイルエディタのサイズを変更"
   },
+  "gitStatusBar": {
+    "title": "Git",
+    "notRepo": "Git リポジトリではありません",
+    "changes": "件の変更"
+  },
+  "gitStatus": {
+    "loading": "読み込み中…",
+    "notRepo": "Git リポジトリではありません",
+    "gitUnavailable": "git を利用できません",
+    "clean": "未コミットの変更はありません",
+    "showDiff": "差分を表示",
+    "showLog": "コミット履歴を表示",
+    "openInEditor": "エディタで開く",
+    "staged": "ステージ済み",
+    "noCommits": "コミットはまだありません",
+    "modified": "変更",
+    "untracked": "未追跡",
+    "deleted": "削除",
+    "renamed": "名前変更",
+    "added": "追加"
+  },
   "fileTree": {
     "deleteConfirmOk": "削除",
     "deleteConfirmCancel": "キャンセル"
