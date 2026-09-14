@@ -1272,7 +1272,6 @@ async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
         started_at: chrono::Utc::now(),
         workspace,
         node_id,
-        connected: false,
         ready: false,
         dev_mode,
         debug_state: if dev_mode {
@@ -2438,7 +2437,6 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
@@ -2984,7 +2982,6 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,

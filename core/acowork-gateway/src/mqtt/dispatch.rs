@@ -361,8 +361,8 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             //    broker's authoritative view. `offline` removes the
             //    entry (broker knows the process is gone); every other
             //    payload keeps / re-installs a node-hosted entry with
-            //    `connected=true` and the latest ready value (last
-            //    known; the `ready` topic handler will refine it).
+            //    the latest ready value (last known; the `ready`
+            //    topic handler will refine it).
             if let Some(agent_id) = extract_agent_id_from_status_topic(&topic_owned) {
                 let payload_trim = String::from_utf8_lossy(&payload_owned).trim().to_string();
                 match payload_trim.as_str() {
@@ -560,7 +560,6 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                     started_at: chrono::Utc::now(),
                     workspace,
                     node_id: hosting_node_id,
-                    connected: true,
                     ready,
                     dev_mode: false,
                     debug_state: crate::gateway::state::DebugState::Disabled,
@@ -1519,17 +1518,13 @@ async fn track_running_agent_for_status(
     let mut gw = state.write().await;
     if gw.running_agents.contains_key(agent_id) {
         // Already tracked — keep the existing rich fields (ready,
-        // dev_mode, debug_state). Just refresh `connected` so the
-        // post-wake UI flips back to `connected=true` immediately,
-        // without waiting for the next `ready` topic message.
-        if let Some(info) = gw.running_agents.get_mut(agent_id) {
-            info.connected = true;
-            tracing::debug!(
-                agent_id,
-                sleeping,
-                "running_agents: refreshed connected=true on status transition"
-            );
-        }
+        // dev_mode, debug_state, started_at) and just return. Liveness
+        // is read from the AgentRegistry (MQTT), never re-derived here.
+        tracing::debug!(
+            agent_id,
+            sleeping,
+            "running_agents: entry already tracked; keeping rich fields"
+        );
         return;
     }
     // The status topic (`acowork/agents/{id}/status`) carries no node
@@ -1566,7 +1561,6 @@ async fn track_running_agent_for_status(
         // Hosting node from the install record, `"local"` only when the
         // record is missing (ADR-075 D6).
         node_id,
-        connected: true,
         // `ready` defaults to false; the ready topic handler upgrades
         // it the moment `ready=true` is observed. The Desktop's
         // `running && ready` gate stays closed for ~1s after this
@@ -1651,7 +1645,6 @@ pub async fn reconcile_running_agents(state: &SharedState, agent_registry: &Shar
                 workspace,
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: false,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
@@ -2051,10 +2044,6 @@ mod tests {
             .expect("node-hosted Runtime must be auto-tracked from its ready signal");
         assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
         assert!(entry.ready, "tracked ready must mirror the MQTT payload");
-        assert!(
-            entry.connected,
-            "auto-tracked Runtime is connected per the ready signal"
-        );
     }
 
     #[tokio::test]
@@ -2714,7 +2703,7 @@ mod tests {
         // Dispatch the online-class status.
         track_running_agent_for_status(&state, INSTANCE_ARCHITECT, false).await;
 
-        // Post-condition: entry installed, pid=0 (node-hosted), connected=true.
+        // Post-condition: entry installed, pid=0 (node-hosted).
         let entry = state
             .read()
             .await
@@ -2723,7 +2712,6 @@ mod tests {
             .cloned()
             .expect("entry must be installed after status=online");
         assert_eq!(entry.pid, 0, "node-hosted Runtime is tracked with pid=0");
-        assert!(entry.connected, "entry must report connected after a live online signal");
     }
 
     /// Minimal install record for `node_id` attribution tests.
@@ -2861,7 +2849,6 @@ mod tests {
             .get(INSTANCE_ARCHITECT)
             .cloned()
             .expect("sleeping must install a node-hosted entry too");
-        assert!(entry.connected, "sleeping entry is still connected");
         assert_eq!(entry.pid, 0, "sleeping entry is node-hosted (pid=0)");
     }
 
@@ -2940,7 +2927,6 @@ mod tests {
             .get(INSTANCE_ARCHITECT)
             .cloned()
             .expect("reconcile must install the missing entry from broker online view");
-        assert!(entry.connected, "reconciled entry must be connected");
         assert_eq!(entry.pid, 0, "reconciled entry is node-hosted");
     }
 
@@ -2966,7 +2952,6 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
@@ -3009,7 +2994,6 @@ mod tests {
                 workspace: String::new(),
                 // ADR-075 D6: fallback anchor for the local node.
                 node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                connected: true,
                 ready: false,
                 dev_mode: false,
                 debug_state: crate::gateway::state::DebugState::Disabled,
@@ -3064,6 +3048,5 @@ mod tests {
             entry.started_at, started_at,
             "consistent entries must NOT be re-installed (started_at preserved)"
         );
-        assert!(entry.connected);
     }
 }
