@@ -33,9 +33,6 @@ import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
 import { SymbolSearchPanel } from "./SymbolSearchPanel";
-import { GitStatusBar } from "./GitStatusBar";
-import { GitStatusPanel } from "./GitStatusPanel";
-import { useGitStore } from "../../stores/gitStore";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
@@ -166,22 +163,6 @@ export function FileEditorPanel({ width }: { width: number }) {
     const codeEditorOverriddenRef = useRef(false);
 
     const activeFile = openFiles.find((f) => f.id === activeFileId) ?? null;
-
-    // ADR-078 — git strip context: the active file's agent + workspace when
-    // it is a real (non-home) workspace file. Virtual diff/log tabs reuse the
-    // same workspace they were opened from, so the strip stays stable while
-    // paging through a diff.
-    const gitContext = useMemo(() => {
-        if (!activeFile) return null;
-        const wid = activeFile.workspaceId;
-        if (!wid || wid === "__agent_home__") return null;
-        return { agentId: activeFile.agentId, workspaceId: wid };
-    }, [activeFile]);
-    const gitAgentId = gitContext?.agentId;
-    const gitWorkspaceId = gitContext?.workspaceId;
-    const gitExpanded = useGitStore((s) =>
-        gitAgentId && gitWorkspaceId ? s.isExpanded(gitAgentId, gitWorkspaceId) : false,
-    );
 
     // ── Locate-in-tree eligibility ──────────────────────────────────
     // The button is only enabled when the active file lives in the currently
@@ -1608,19 +1589,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                 )}
             </div>
 
-            {/* ADR-078 decision 6 — version-control strip at the bottom of the
-                editor. Shown only when the active file lives in a real session
-                workspace (virtual/home files have no meaningful repo context).
-                `gitContext` derives from the active file so the bar tracks
-                whatever the user is editing. */}
-            {gitContext && (
-                <>
-                    <GitStatusBar agentId={gitContext.agentId} workspaceId={gitContext.workspaceId} />
-                    {gitExpanded && (
-                        <GitStatusPanel agentId={gitContext.agentId} workspaceId={gitContext.workspaceId} />
-                    )}
-                </>
-            )}
+            {/* ADR-078 decision 6 — GitStatusBar moved to WorkspaceExplorer
+                (workspace-panel bottom) per 2026-XX revision. The editor only
+                still owns the *virtual diff/log* render branches (DiffEditor /
+                readonly single-pane Monaco) which read `OpenFile.virtual` and
+                are independent of gitStore. */}
 
             {/* Close confirmation dialog */}
             {closingFileId && (

@@ -124,10 +124,6 @@ vi.mock("../../stores/settingsStore", () => ({
   useSettingsStore: selectorStore(h.settingsState),
 }));
 
-vi.mock("../../stores/gitStore", () => ({
-  useGitStore: selectorStore(h.gitState),
-}));
-
 vi.mock("../../stores/editorStatusStore", () => ({
   useEditorStatusStore: { getState: () => h.editorStatusState },
 }));
@@ -160,8 +156,6 @@ vi.mock("./HtmlPreviewView", () => ({ HtmlPreviewView: () => null }));
 vi.mock("./GoToFilePalette", () => ({ GoToFilePalette: () => null }));
 vi.mock("./GlobalSearchPanel", () => ({ GlobalSearchPanel: () => null }));
 vi.mock("./SymbolSearchPanel", () => ({ SymbolSearchPanel: () => null }));
-vi.mock("./GitStatusBar", () => ({ GitStatusBar: () => null }));
-vi.mock("./GitStatusPanel", () => ({ GitStatusPanel: () => null }));
 vi.mock("../common/ScrollableTabBar", () => ({ ScrollableTabBar: () => null }));
 vi.mock("../common/tab", () => ({ TabItem: () => null }));
 vi.mock("../common/SetiIcon", () => ({ SetiIcon: () => null }));

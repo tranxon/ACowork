@@ -15,6 +15,9 @@ import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
 import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
+import { GitStatusBar } from "./git/GitStatusBar";
+import { GitStatusPanel } from "./git/GitStatusPanel";
+import { useGitStore } from "../../stores/gitStore";
 
 /** Abbreviate a file path from the left: "…parent/filename.ext" */
 function abbreviatePath(path: string): string {
@@ -62,6 +65,18 @@ export function WorkspaceExplorer() {
     const currentWorkspaceId = activeSessionId
         ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
         : "__agent_home__";
+
+    // ADR-078 (2026-XX revision) — git strip source: (agent, workspace) of
+    // the currently selected session workspace. Independent of whether any
+    // file is open in the editor (git is a workspace-level property).
+    // `__agent_home__` is a virtual home workspace with no repo context.
+    const gitContext =
+        selectedAgentId && currentWorkspaceId !== "__agent_home__"
+            ? { agentId: selectedAgentId, workspaceId: currentWorkspaceId }
+            : null;
+    const gitExpanded = useGitStore((s) =>
+        gitContext ? s.isExpanded(gitContext.agentId, gitContext.workspaceId) : false,
+    );
 
     // Parent-controlled inline rename — when `renameTarget` matches a
     // tree node's relPath, that node swaps its name span for an input
@@ -900,6 +915,27 @@ export function WorkspaceExplorer() {
                     dropTarget={dropTarget}
                     onPointerDownTreeEntry={onPointerDownTreeEntry}
                 />
+            )}
+
+            {/* ADR-078 decision 6 (2026-XX revision) — GitStatusBar lives at the
+                bottom of the workspace panel. Source = currently selected
+                session workspace (independent of any open editor file). Hidden
+                when: agent not running (above early-return), workspace is
+                __agent_home__ (no repo context), or this panel itself is not
+                the active right-panel tab (parent RightPanel handles that). */}
+            {gitContext && (
+                <>
+                    <GitStatusBar
+                        agentId={gitContext.agentId}
+                        workspaceId={gitContext.workspaceId}
+                    />
+                    {gitExpanded && (
+                        <GitStatusPanel
+                            agentId={gitContext.agentId}
+                            workspaceId={gitContext.workspaceId}
+                        />
+                    )}
+                </>
             )}
         </div>
     );

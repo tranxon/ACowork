@@ -7,9 +7,9 @@
 
 import { useEffect } from "react";
 import { ChevronRight, GitBranch, Loader2, RefreshCw } from "lucide-react";
-import { gitGroupKey, useGitStore } from "../../stores/gitStore";
-import { useTranslation } from "../../i18n/useTranslation";
-import { cn } from "../../lib/utils";
+import { gitGroupKey, useGitStore } from "../../../stores/gitStore";
+import { useTranslation } from "../../../i18n/useTranslation";
+import { cn } from "../../../lib/utils";
 
 interface GitStatusBarProps {
   agentId: string;
@@ -29,9 +29,9 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
   //     switched groups without collapsing) is cleared so the demand-driven
   //     fs-watch subscription (workspaceFsWatch deriveWatchGroups) is
   //     released instead of watching the old group in the background.
-  //   - Cleanup: when this bar unmounts or switches groups (active file
-  //     closed / agent or workspace changed) and THIS group is expanded,
-  //     collapse it — the panel is no longer visible.
+  //   - Cleanup: when this bar unmounts (right panel collapsed / switched
+  //     to another tab) or the (agent, workspace) group changes, collapse
+  //     this group if expanded — the panel is no longer visible.
   useEffect(() => {
     const s = useGitStore.getState();
     if (s.expandedKey && !s.isExpanded(agentId, workspaceId)) {

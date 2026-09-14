@@ -20,7 +20,7 @@ const translations: Record<string, string> = {
   "gitStatusBar.changes": "changes",
 };
 
-vi.mock("../../i18n/useTranslation", () => ({
+vi.mock("../../../i18n/useTranslation", () => ({
   useTranslation: () => ({
     t: (key: string) => translations[key] ?? key,
   }),
@@ -35,7 +35,7 @@ const mocks = {
   refresh: vi.fn(),
 };
 
-vi.mock("../../stores/gitStore", () => ({
+vi.mock("../../../stores/gitStore", () => ({
   gitGroupKey: (a: string, w: string) => `${a}\u0000${w}`,
   useGitStore: Object.assign(
     (selector: (s: Record<string, unknown>) => unknown) =>

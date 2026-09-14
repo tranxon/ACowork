@@ -3,10 +3,13 @@
  *
  * ADR-078 decision 8 (Major-1 revision): the Git Status panel must be
  * watched even when the right-side workspace panel is hidden — the
- * GitStatusBar sits at the bottom of the editor panel, so its fs-watch
- * subscription is INDEPENDENT of `activePanelTab === "workspace"` and
- * `rightPanelCollapsed`. The git root (`""`) derivation lives OUTSIDE
- * the workspace-panel visibility guard in `deriveWatchGroups`.
+ * GitStatusBar lives at the bottom of the WorkspaceExplorer (workspace
+ * panel), so its fs-watch subscription is INDEPENDENT of whether the
+ * file tree's root is expanded and INDEPENDENT of which right-panel
+ * tab is active. The git root (`""`) derivation lives OUTSIDE the
+ * workspace-panel visibility guard in `deriveWatchGroups`. (2026-XX
+ * revision: moved from FileEditorPanel to WorkspaceExplorer; the
+ * orthogonality invariant is preserved.)
  *
  * Covers:
  *   1. Expanded git group → root path even with the workspace panel

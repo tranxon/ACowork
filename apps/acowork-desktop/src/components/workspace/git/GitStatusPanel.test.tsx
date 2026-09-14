@@ -32,7 +32,7 @@ const translations: Record<string, string> = {
   "gitStatus.noCommits": "No commits yet",
 };
 
-vi.mock("../../i18n/useTranslation", () => ({
+vi.mock("../../../i18n/useTranslation", () => ({
   useTranslation: () => ({
     t: (key: string) => translations[key] ?? key,
   }),
@@ -45,7 +45,7 @@ const gitStoreMocks = {
   fetchLog: vi.fn(),
 };
 
-vi.mock("../../stores/gitStore", () => ({
+vi.mock("../../../stores/gitStore", () => ({
   gitGroupKey: (a: string, w: string) => `${a}\u0000${w}`,
   useGitStore: Object.assign(
     (selector: (s: typeof gitStoreMocks) => unknown) => selector(gitStoreMocks),
@@ -58,14 +58,14 @@ const fileEditorMocks = {
   openVirtualFile: vi.fn(),
 };
 
-vi.mock("../../stores/fileEditorStore", () => ({
+vi.mock("../../../stores/fileEditorStore", () => ({
   useFileEditorStore: { getState: () => fileEditorMocks },
 }));
 
 // ── SUT ──────────────────────────────────────────────────────────────────
 
 import { GitStatusPanel } from "./GitStatusPanel";
-import type { GitStatusResponse } from "../../stores/gitStore";
+import type { GitStatusResponse } from "../../../stores/gitStore";
 
 const KEY = "a1\u0000ws1";
 

@@ -18,7 +18,9 @@
 
 ### 1.1 一句话
 
-**在右侧工作区（FileEditorPanel）底部加一条"版本控制条"**：显示当前 workspace 的 git 分支与变更计数，点击折叠展开（视觉沿用 AgentList 的 NodeGroupHeader 风格）；展开后以**平铺列表**（不分目录、行样式与工作树文件列表一致）展示 `git status` 的本地未 commit 文件；行右键菜单提供 **Show Diff / Show Log / 在编辑器中打开**。Show Diff 用 **Monaco DiffEditor 双栏**（HEAD ↔ 工作树），Show Log 用只读文本，两者均以**只读虚拟文件**形式进 filetab。git 执行在 **Runtime**（新 `/git/*` HTTP API，Gateway 反代）；状态刷新**复用 ADR-058 fs-watch 的 demand-driven 订阅**（面板展开时订阅、折叠时取消）。v1 **只读**，不做 stage / commit / push。
+**在 WorkspaceExplorer（右侧 workspace 面板）底部加一条"版本控制条"**：显示当前选中 workspace 的 git 分支与变更计数，点击折叠展开（视觉沿用 AgentList 的 NodeGroupHeader 风格）；展开后以**平铺列表**（不分目录、行样式与工作树文件列表一致）展示 `git status` 的本地未 commit 文件；行右键菜单提供 **Show Diff / Show Log / 在编辑器中打开**。Show Diff 用 **Monaco DiffEditor 双栏**（HEAD ↔ 工作树），Show Log 用只读文本，两者均以**只读虚拟文件**形式进 filetab。git 执行在 **Runtime**（新 `/git/*` HTTP API，Gateway 反代）；状态刷新**复用 ADR-058 fs-watch 的 demand-driven 订阅**（面板展开时订阅、折叠时取消）。v1 **只读**，不做 stage / commit / push。
+
+> **2026-XX 修订**：原决策把 `GitStatusBar` 挂在 `FileEditorPanel` 底部，与"打开文件"耦合——粒度错配（git 是 workspace 级属性、editor 是 file 级属性），"想看 git 必须先打开文件"违反最小惊讶。修订为挂在 `WorkspaceExplorer` 底部，与当前选中 workspace 共生、editor 完全脱钩；workspace 面板折叠时连同隐藏。展开态 fs-watch 规则的正交性约束依然成立（见决策 8），但触发条件从"editor 开着"放宽为"git 面板可见"。
 
 ### 1.2 关键决策表（详细理由见 §4）
 
@@ -28,7 +30,7 @@
 | 2 | git 引擎 | **系统 git CLI**（`git status --porcelain=v1 -z` / `git show HEAD:<path>` / `git log`），不引入 git2 / gix 编译依赖；`std::process::Command` + `spawn_blocking` + 超时 + 输出上限 + **`GIT_OPTIONAL_LOCKS=0`**（真·只读）；git 缺失时显式报错 |
 | 3 | repo root 定位与安全边界 | 从 workspace root 向上**最多 6 层**发现最近 `.git`；**展示范围 = workspace root ∩ repo 变更集**（status 只列 workspace 内变化，绝不暴露 workspace 外文件）；diff/log 的 path 复用现有 canonicalize + `starts_with` 防穿越 |
 | 4 | Desktop 数据层 | 新 `gitStore.ts`（仿 [stores/fileTree/treeClient.ts](apps/acowork-desktop/src/stores/fileTree/treeClient.ts)：SWR 缓存 + agent/workspace 切换失效 + `with503Retry`），并订阅 fs-changed 事件做自动刷新 |
-| 5 | Desktop UI 布局 | `GitStatusBar`（FileEditorPanel 底部，h-6，视觉沿用 NodeGroupHeader）+ 展开后 `GitStatusPanel`（平铺列表，行样式沿用 FileTreeNode） |
+| 5 | Desktop UI 布局 | `GitStatusBar`（`WorkspaceExplorer` 底部，h-6，视觉沿用 NodeGroupHeader）+ 展开后 `GitStatusPanel`（平铺列表，行样式沿用 FileTreeNode） |
 | 6 | diff/log 呈现 | **只读虚拟文件进 filetab**（`OpenFile` 增加 `readonly` + `virtual` 字段）：diff 用 **Monaco DiffEditor 双栏**（original=HEAD / modified=工作树，双栏均只读），log 用只读单栏 Monaco；不落盘、不接 LSP、可关闭 |
 | 7 | 刷新策略 | **demand-driven 订阅 ADR-058 fs-watch**：面板展开时把 workspace 根路径加入可见集（Runtime watch 根目录），折叠时移除（停止 watch）；fs-changed → 去抖 refresh；手动刷新按钮兜底 |
 | 8 | 范围裁剪 | v1 **只读**：不做 stage / unstage / commit / push / branch 切换 / blame / stash |
@@ -70,7 +72,8 @@ Desktop 已有完整的工作树文件浏览（`WorkspaceExplorer` → `GET /wor
 
 - **在 Gateway 侧跑 git / 读 .git**：直接违反 ADR-009 红线，单机可用、多机必 5xx——与工作树文件操作迁移到 Runtime 的历史教训相同（proxy.rs 注释 "ADR-009 v2: the Runtime is the authoritative workspace API owner"），**拒绝**。
 - **前端直接用 git2 的 WASM / JS 实现**：引入大依赖且无法复用 Runtime 的路径边界，**拒绝**。
-- **版本控制做成独立侧栏 / 全屏视图**：用户明确要"底部一条 + 点击展开"，且文件要在 filetab 里打开——独立视图割裂交互，**拒绝**。
+- **版本控制做成独立侧栏 / 全屏视图**：早期考虑过，但与当前"workspace 面板内嵌"相比，多一个顶级面板入口维护成本更高，且用户已接受"workspace 面板底部一条"的位置，**拒绝**。
+- **挂在 `FileEditorPanel` 底部**：2026-XX 评审时识别为粒度错配——git 是 workspace 级属性，editor 是 file 级属性；"想看 git 必须先打开文件"违反最小惊讶，**修订为挂在 `WorkspaceExplorer` 底部**（见决策 6）。
 - **status 用单栏合并 diff 文本**：作为 DiffEditor 的轻量备选考虑过，但用户要求**双栏**；且双栏需要 original/modified 两个**全文**而非解析后的 diff 文本（从统一 diff 反解全文不可靠），因此 API 直接返回两段内容，**采纳双栏**。
 
 ---
@@ -79,7 +82,7 @@ Desktop 已有完整的工作树文件浏览（`WorkspaceExplorer` → `GET /wor
 
 ### 3.1 功能需求
 
-1. 底部版本控制条：显示 branch 名 + 变更计数（modified / untracked / staged / deleted），点击展开/折叠。
+1. workspace 面板底部版本控制条：显示 branch 名 + 变更计数（modified / untracked / staged / deleted），点击展开/折叠。
 2. 展开面板：平铺列出 `git status` 的本地未 commit 文件，**不分目录**，行样式与工作树文件列表一致；每行带状态徽标（M / U / D / A / R）与文件图标。
 3. 行点击：在 Monaco + filetab 打开该文件（复用 `openFile`）。
 4. 行右键菜单：`Show Diff`、`Show Log`、`在编辑器中打开`、`复制路径`。
@@ -223,13 +226,14 @@ Runtime :random
 
 ### 决策 6：UI — GitStatusBar + GitStatusPanel
 
-**布局**（FileEditorPanel 根容器底部，编辑器/tab 之下）：
+**布局**（`WorkspaceExplorer` 根容器底部，文件树之下）：
 
 ```mermaid
 graph TD
-    subgraph FileEditorPanel
-        Tabs["TabBar (filetab)"]
-        Editor["Monaco 编辑器区 flex-1"]
+    subgraph WorkspaceExplorer
+        Selector["WorkspaceSelector + 操作按钮"]
+        Search["Ctrl+P 搜索框"]
+        Tree["FileTree（flex-1，可滚动）"]
         GitBar["GitStatusBar h-6 折叠条"]
         subgraph 展开态
             GitPanel["GitStatusPanel 平铺列表（高 ~200px，可滚动）"]
@@ -238,10 +242,12 @@ graph TD
     GitBar -- 点击展开/折叠 --> GitPanel
 ```
 
+**派生源**：`(agentId, workspaceId)` 取自当前选中 agent 的当前 session 的当前 workspace——与 `FileTree` 同源（`WorkspaceExplorer` 第 59-64 行已有的 `currentWorkspaceId`），**不依赖**是否打开了文件。`__agent_home__`（虚拟家目录，无 repo 上下文）跳过渲染。workspace 面板折叠（`rightPanelCollapsed` 或切换到非 workspace tab）时整个组件随父容器消失，**不另设逃生位置**（与"右栏不可见时连分支名也看不到"的权衡一致；用户主动选此布局）。
+
 - **GitStatusBar**：视觉规格**沿用 NodeGroupHeader**（[AgentList.tsx](apps/acowork-desktop/src/components/agent-list/AgentList.tsx#L838) `NodeGroupHeader`）：`h-6`、`text-[10px] font-medium uppercase tracking-wide`、`zinc-400/zinc-500`、`border-y border-nav-divider/40`、hover 变色、ChevronRight 展开时 `rotate-90`。左侧 Git 图标 + branch 名 + 变更计数 pill（`M×n U×m D×k`），右侧刷新按钮（RefreshCw）。无 repo / git 缺失显示对应文案。
 - **GitStatusPanel**：**平铺列表、不分目录**；行样式沿用 FileTreeNode：行高 `fontSize×16×1.9`（虚拟滚动 `estimateSize` 一致）、`var(--ui-font-size)`、SetiIcon/getFileIcon 文件图标、文件名 + 右侧状态徽标（M 黄 / U 绿 / D 红 / A 青，参照 VSCode 惯例色）。虚拟列表复用 `@tanstack/react-virtual`（工作树同款）。
 - 行点击 → `fileEditorStore.openFile(agentId, workspaceId, path)`；**worktree == "deleted" 的文件行点击重定向到 Show Diff**（openFile 读已删除文件必 404，直接给用户看 HEAD↔空 的删除视图）；行右键 → `ContextMenu`（tab 右键同款组件），菜单项：Show Diff / Show Log / 在编辑器中打开 / 复制路径（deleted 文件隐藏"在编辑器中打开"）。
-- 折叠状态组件本地 state（`useState`），与 AgentList 的 `collapsedNodes` 同范式；agent/workspace 切换时收起、失效缓存并**取消订阅**。
+- 折叠状态由 `gitStore` 按 `(agent, workspace)` 分组持有；切 agent/workspace 时旧组自然失活，组件 `useEffect` 显式收起并清 `expandedKey`（**不变量 6**：订阅 == 可见性），fs-watch 同步取消。
 
 ### 决策 7：diff / log 以只读虚拟文件进 filetab（diff 用 DiffEditor 双栏）
 
@@ -279,7 +285,7 @@ graph LR
 ```
 
 - **展开才订阅**：`GitStatusPanel` 展开时，`workspaceFsWatch.deriveWatchGroups()` 增加一条派生规则——若当前 (agent, workspace) 的 git 面板展开，则向该组添加根路径 `""`（工作树自身可见时根路径已含，去重即可）。
-  **规则位置**：此派生规则必须放在 workspace 面板可见性守卫（`activePanelTab === "workspace" && !rightPanelCollapsed`）**之外**——GitStatusBar 挂在 FileEditorPanel 底部，与工作树面板可见性正交，"编辑器开着但工作树面板折叠"时也要订阅。
+  **规则位置**：此派生规则必须放在 workspace 面板可见性守卫（`activePanelTab === "workspace" && !rightPanelCollapsed`）**之外**——GitStatusPanel 与工作树**目录展开**可见性正交（"文件树根目录折叠但 git 面板展开"时仍要订阅根路径），决策 6 修订后该约束依然成立，只是触发条件从"editor 开着"放宽为"git 面板可见"，实现路径从 FileEditorPanel 迁移到 WorkspaceExplorer。
 - **折叠即取消**：折叠时该派生规则不再贡献根路径，`PUT /fs-watch` 上报后 Runtime 停 watch——与工作树"折叠目录即取消 watch"同一机制，无泄漏（不变量 6）。
 - **自动刷新（真实覆盖范围）**：gitStore 注册 `workspaceFsEvents` 的 fs-changed 处理器，命中当前 (agent, workspace) 的**任意可见路径**事件去抖后 `refreshStatus()`。
   **注意：Runtime fs-watcher 是 NonRecursive 逐级 watch**（[fs_watcher.rs](core/acowork-runtime/src/workspace/fs_watcher.rs)——open tab 按文件、展开目录按一层），根路径 `""` 入可见集只 watch 工作区**顶层**。因此刷新信号的实际来源是"open tab 保存 / 文件树展开目录的变化 / 顶层条目变化"；任一可见事件都会触发**全量** status 刷新（每次 refresh 都是全量 status，一次事件即可拉平全部状态）。
@@ -339,9 +345,9 @@ graph LR
 | apps/acowork-desktop | `src/stores/gitStore.ts` | 新增 SWR store（status/diff/log + invalidate/refresh）+ fs-changed 订阅处理器 |
 | apps/acowork-desktop | `src/lib/workspaceFsWatch.ts` | `deriveWatchGroups` 增加"git 面板展开 → 组内加根路径 ''"派生规则（**放在 workspace 面板可见性守卫之外**，决策 8） |
 | apps/acowork-desktop | `src/lib/workspaceFsEvents.ts` | 暴露可注册的 fs-changed 处理器（gitStore 订阅，去抖 refresh） |
-| apps/acowork-desktop | `src/components/editor/git/GitStatusBar.tsx` | 底部折叠条（视觉沿用 NodeGroupHeader） |
-| apps/acowork-desktop | `src/components/editor/git/GitStatusPanel.tsx` / `GitFileRow.tsx` | 平铺列表（行样式沿用 FileTreeNode）+ 右键菜单 + 展开/折叠订阅开关 |
-| apps/acowork-desktop | `src/components/editor/FileEditorPanel.tsx` | 挂载 GitStatusBar；`virtual.kind === "diff"` 渲染 DiffEditor、`"log"` 渲染只读单栏；虚拟文件打开/关闭接线 |
+| apps/acowork-desktop | `src/components/workspace/git/GitStatusBar.tsx` | workspace 面板底部折叠条（视觉沿用 NodeGroupHeader） |
+| apps/acowork-desktop | `src/components/workspace/git/GitStatusPanel.tsx` | 平铺列表（行样式沿用 FileTreeNode）+ 右键菜单 + 展开/折叠订阅开关 |
+| apps/acowork-desktop | `src/components/workspace/WorkspaceExplorer.tsx` | 挂载 GitStatusBar/GitStatusPanel；派生源 = 当前选中 workspace（与 FileTree 同源）；`virtual.kind === "diff"` 渲染 DiffEditor 仍由 `FileEditorPanel` 承担（虚拟文件生命周期归属 editor） |
 | apps/acowork-desktop | `src/stores/fileEditorStore.ts` | `OpenFile` 增加 `readonly?` / `virtual?`；save/dirty 逻辑对虚拟文件短路 |
 | apps/acowork-desktop | `src/i18n/locales/{zh,en}.json` | `git.*` 词条 |
 | dev/ci.sh | — | 无需新红线（不碰 Gateway fs 红线） |

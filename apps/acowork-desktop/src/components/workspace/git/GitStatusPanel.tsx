@@ -20,11 +20,11 @@ import {
   type GitLogResponse,
   gitGroupKey,
   useGitStore,
-} from "../../stores/gitStore";
-import { useFileEditorStore } from "../../stores/fileEditorStore";
-import { useTranslation } from "../../i18n/useTranslation";
-import { useContextMenu, ContextMenu } from "../common/ContextMenu";
-import { cn } from "../../lib/utils";
+} from "../../../stores/gitStore";
+import { useFileEditorStore } from "../../../stores/fileEditorStore";
+import { useTranslation } from "../../../i18n/useTranslation";
+import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
+import { cn } from "../../../lib/utils";
 
 interface GitStatusPanelProps {
   agentId: string;

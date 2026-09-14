@@ -88,8 +88,13 @@ export function deriveWatchGroups(): Map<GroupKey, string[]> {
 
     // 3. Git Status panel expanded → watch the workspace root, OUTSIDE the
     //    workspace-panel visibility guard (ADR-078 decision 8): the
-    //    GitStatusBar sits at the bottom of the editor panel, so the root
-    //    must be watched even when the file tree panel is collapsed.
+    //    GitStatusBar/Panel lives at the bottom of the WorkspaceExplorer, so
+    //    its root watch must be independent of whether the file tree's root
+    //    is expanded or the file tree is even visible — only "git panel
+    //    expanded" matters. (2026-XX revision: the panel moved from
+    //    FileEditorPanel to WorkspaceExplorer; the orthogonality invariant
+    //    remains, the trigger is now "git panel visible" rather than
+    //    "editor open".)
     const git = useGitStore.getState();
     if (git.expandedKey) {
         const sep = git.expandedKey.indexOf("\u0000");
