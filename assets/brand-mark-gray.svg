@@ -56,7 +56,7 @@
   <path d="M32 68 L56 20 L80 68"
         fill="none"
         class="letter-a-stroke"
-        stroke-width="11"
+        stroke-width="10"
         stroke-linecap="round"
         stroke-linejoin="round"/>
   <circle cx="56" cy="56" r="8.5" class="letter-a" mask="url(#bite)"/>
