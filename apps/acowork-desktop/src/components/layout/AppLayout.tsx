@@ -19,8 +19,10 @@ import { RightNavBar } from "./RightNavBar";
 const loadFileEditorPanel = () =>
     import("../editor/FileEditorPanel").then((m) => ({ default: m.FileEditorPanel }));
 import { GatewayBanner } from "./GatewayBanner";import { useGatewayStore } from "../../stores/gatewayStore";
+import { applyGatewayTransition, onMqttConnectionEdge } from "./gatewayTransition";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useServicesStore } from "../../stores/servicesStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
 import { useEditorStatusStore } from "../../stores/editorStatusStore";
@@ -561,6 +563,56 @@ export function AppLayout() {
       clearStatus();
     }
   }, [gatewayStatus, setStatus, clearStatus]);
+
+  // ── Gateway disconnect/reconnect: drive agent liveness ─────────────
+  // The MQTT broker lives inside the Gateway, so when the Gateway goes
+  // away we stop receiving `agent_status` events — without this effect
+  // `agent.alive` would stay `true` and the chat panel would keep
+  // showing the previous session's content (eventually flagged with a
+  // red `loadError`). On reconnect, agent state must also be refreshed
+  // because a Gateway restart re-spawns the system agent and clears the
+  // previous agent-registry state.
+  //
+  // The edge-detection logic lives in `gatewayTransition.ts` so it is
+  // unit-testable without rendering React. The effect here is a one-liner
+  // that wires store actions into the pure helper.
+  // ponytail: prev is tracked via ref so a transient flicker
+  // (`connected → connecting → connected` during a quick Gateway restart)
+  // does NOT trip a false "drop" — the helper treats `connecting` and
+  // `disconnected` as the same non-`connected` bucket.
+  const prevGatewayStatusRef = useRef<typeof gatewayStatus | null>(null);
+  useEffect(() => {
+    const prev = prevGatewayStatusRef.current;
+    prevGatewayStatusRef.current = gatewayStatus;
+    applyGatewayTransition(prev, gatewayStatus, {
+      getAgentIds: () => Object.keys(useAgentStore.getState().agents),
+      setAgentOffline: (id) => useAgentStore.getState().updateAgentLiveness(id, false, false),
+      clearAgentSessions: (id) => useChatStore.getState().clearAgentSessions(id),
+      refreshServices: () => {
+        void useServicesStore.getState().diagnose();
+      },
+      markNodesOffline: () => useAgentStore.getState().markNodesOffline(),
+      fetchAgents: () => useAgentStore.getState().fetchAgents(),
+      fetchNodes: () => useAgentStore.getState().fetchNodes(),
+    });
+  }, [gatewayStatus]);
+
+  // ── MQTT edge → HTTP probe ─────────────────────────────────────────
+  // `gatewayStatus` is NOT polled during steady state — when the Gateway
+  // is killed externally (CLI stop / crash), the first signal we get is
+  // the MQTT disconnect (the broker lives inside the Gateway). Re-probe
+  // HTTP on every MQTT edge so `gatewayStatus` converges to the real
+  // state; `applyGatewayTransition` above then fires drop/rise from that
+  // authoritative signal. See `onMqttConnectionEdge` doc for the
+  // "agents just auto-slept" (probe succeeds → correctly no-op) case.
+  const prevMqttConnectedRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    const prev = prevMqttConnectedRef.current;
+    prevMqttConnectedRef.current = mqttConnected;
+    onMqttConnectionEdge(prev, mqttConnected, () => {
+      void checkHealth();
+    });
+  }, [mqttConnected, checkHealth]);
 
   // ADR-036: surface MQTT connection liveness in the status bar.
   //

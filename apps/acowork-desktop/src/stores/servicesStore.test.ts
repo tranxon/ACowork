@@ -267,3 +267,33 @@ describe("servicesStore.reset", () => {
     expect(s.probing.mqtt).toBeUndefined();
   });
 });
+
+describe("servicesStore lifecycle on Gateway death (diagnose is the one probe path)", () => {
+  it("a diagnose() pass while the Gateway is dead lands the honest all-offline report", async () => {
+    // Gateway killed → every probe target unreachable. The probe API
+    // never throws; it resolves per-row offline health. This is the
+    // lifecycle the Gateway-drop edge drives automatically.
+    mockedProbeAll.mockResolvedValueOnce({
+      services: {
+        gateway: mkRow({ service_type: "gateway", online: false }),
+        mqtt: mkRow({ service_type: "mqtt", online: false }),
+        node: mkRow({ service_type: "node", online: false }),
+        embed: mkRow({ service_type: "embed", online: false }),
+        pm: mkRow({ service_type: "pm", online: false }),
+        doc: mkRow({ service_type: "doc", online: false }),
+        "lsp-relay": mkRow({ service_type: "lsp-relay", online: false }),
+      } as never,
+      source: "direct",
+    });
+
+    await useServicesStore.getState().diagnose();
+
+    const report = useServicesStore.getState().report;
+    expect(report).not.toBeNull();
+    expect(report!.gateway_reachable).toBe(false);
+    for (const type of Object.keys(report!.services) as (keyof typeof report.services)[]) {
+      expect(report!.services[type].online, `${String(type)} should be offline`).toBe(false);
+    }
+    expect(useServicesStore.getState().loading).toBe(false);
+  });
+});

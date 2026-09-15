@@ -2,9 +2,10 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
 import { clearAgentAvatarCache } from "../lib/avatar";
-import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus } from "../lib/types";
+import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo } from "../lib/types";
 import { instanceIdOf, isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
+import { fetchNodes as fetchNodesApi } from "../lib/gateway-api";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
@@ -256,12 +257,28 @@ interface AgentStoreState {
   loading: boolean;
   /** Master list fetch error */
   error: string | null;
+  /** Remote-mode node topology snapshot (ADR-073 §4 sidebar groups,
+   *  ADR-059 §6.3 bootstrap refetch). Owned here — not in a component —
+   *  so the Gateway-connection lifecycle (drop → `markNodesOffline`,
+   *  rise → `fetchNodes`) can drive it from one place. */
+  nodes: NodeInfo[];
   /** Global UI state: whether the SessionPanel dropdown is open. (display-only, cleared on agent switch) */
   isSessionPanelOpen: boolean;
 
   // ── Agent meta actions ──
 
   fetchAgents: () => Promise<void>;
+  /** Refetch the node topology from the Gateway. Failure keeps the
+   *  previous snapshot (a transient Gateway blip shouldn't empty the
+   *  remote-mode sidebar groups); the rise edge / `bootstrapVersion`
+   *  resyncs it. */
+  fetchNodes: () => Promise<void>;
+  /** Mark every known node offline. Gateway drop edge: the snapshot is
+   *  stale the moment the Gateway dies, and no new `bootstrap-state`
+   *  snapshot will arrive to bump `bootstrapVersion` (the broker lived
+   *  in the Gateway) — without this the sidebar group header keeps
+   *  showing a dead node as online. */
+  markNodesOffline: () => void;
   selectAgent: (id: string | null) => void;
   installAgent: (packagePath: string, nodeId?: string) => Promise<void>;
   uninstallAgent: (agentId: string) => Promise<void>;
@@ -343,6 +360,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   selectedAgentId: null,
   loading: false,
   error: null,
+  nodes: [],
   isSessionPanelOpen: false,
 
   // ════════════════════════════════════════════════════════════════════════
@@ -365,6 +383,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 // Merge with existing agents map
       const storedProfiles = loadAllProfiles();
       set((state) => {
+        // ADR-073: the storage map is keyed by INSTANCE identity —
+        // the Gateway always supplies `instance_id` on AgentInfo.
+        //
+        // Empty-list guard: right after a Gateway restart the agent
+        // registry may not be populated yet and `list_agents` returns
+        // `[]`. That is NOT "all agents uninstalled" — wiping the
+        // sidebar here would blank the agent list until the next
+        // successful poll (and every rise-edge fetchAgents hits this
+        // window). Keep existing entries as-is on an empty list.
+        if (list.length === 0 && Object.keys(state.agents).length > 0) {
+          return { loading: false };
+        }
         const next: Record<string, AgentStorage> = {};
         for (const raw of list) {
           // ADR-048 follow-up: normalise `debug_state` — a Gateway that
@@ -436,6 +466,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       set({ error: String(e), loading: false });
     }
   },
+
+  fetchNodes: async () => {
+    try {
+      set({ nodes: await fetchNodesApi() });
+    } catch {
+      // Gateway unreachable — keep the previous snapshot; the rise edge
+      // / `bootstrapVersion` refetch will resync when it's back.
+    }
+  },
+
+  markNodesOffline: () =>
+    set((s) => ({ nodes: s.nodes.map((n) => ({ ...n, online: false })) })),
 
   selectAgent: (id) => {
     if (!id) return;
@@ -616,6 +658,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   stopAgent: async (agentId) => {
     try {
       await invoke("stop_agent", { agentId });
+      // Drop the cached session runtime state for this agent so the
+      // attachment blobs / pending approvals / tool progress lose
+      // their refs and can be GC'd. Same cleanup the Gateway-disconnect
+      // path uses; without it, stop leaves a stale chat-store footprint
+      // behind even though the Runtime is gone.
+      useChatStore.getState().clearAgentSessions(agentId);
       await get().fetchAgents();
     } catch (e) {
       set({ error: String(e) });

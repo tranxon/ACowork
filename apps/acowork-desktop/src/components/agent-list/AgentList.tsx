@@ -71,20 +71,11 @@ export function AgentList({ width }: AgentListProps) {
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
   const isRemoteMode = gatewayMode === "remote";
 
-  // Node list — only used when `isRemoteMode`. Refreshed alongside the
-  // agent list so group headers and counts stay in sync with the network
-  // view, and to gracefully degrade (empty `nodes`) when the Gateway
-  // briefly can't answer.
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
-  const refreshNodes = useCallback(async () => {
-    if (!isRemoteMode) return;
-    try {
-      setNodes(await fetchNodes());
-    } catch {
-      // Gateway unreachable — keep the previous snapshot; the next refresh
-      // tick (or the agent fetch's own error) will surface the problem.
-    }
-  }, [isRemoteMode]);
+  // Node topology snapshot — owned by `agentStore` so the Gateway
+  // connection lifecycle (drop → markNodesOffline, rise → fetchNodes)
+  // drives it from one place; the ADR-059 `bootstrapVersion` realtime
+  // path below refetches it on per-node online/offline transitions.
+  const nodes = useAgentStore((s) => s.nodes);
 
   // ADR-073 §4: collapsible per-node groups. Default = all expanded (empty
   // Set = nothing collapsed). State is component-local — switching modes
@@ -159,11 +150,13 @@ export function AgentList({ width }: AgentListProps) {
   }, [fetchAgents]);
 
   // Refetch the node topology on mount and on every bootstrap snapshot
-  // transition. `bootstrapVersion` increments drive the realtime path;
-  // `refreshNodes` recreates whenever `isRemoteMode` flips.
+  // transition. `bootstrapVersion` increments drive the realtime path
+  // (ADR-059: per-node online/offline transitions republish the
+  // snapshot); the Gateway drop/rise edges are handled globally by
+  // `applyGatewayTransition` → `markNodesOffline` / `fetchNodes`.
   useEffect(() => {
-    void refreshNodes();
-  }, [bootstrapVersion, refreshNodes]);
+    void useAgentStore.getState().fetchNodes();
+  }, [bootstrapVersion]);
 
   // Ensure every ready agent's latest session title is loaded so the
   // sidebar shows it without requiring the user to click the agent.

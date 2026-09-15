@@ -1166,7 +1166,11 @@
     "renamed": "已重新命名",
     "added": "新增",
     "conflicted": "衝突",
-    "binaryDiff": "二進位檔案 — 不顯示差異"
+    "binaryDiff": "二進位檔案 — 不顯示差異",
+    "prevChange": "上一處修改",
+    "nextChange": "下一處修改",
+    "prevCommits": "較新的提交",
+    "nextCommits": "較舊的提交"
   },
   "fileTree": {
     "deleteConfirmOk": "刪除",

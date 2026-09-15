@@ -756,6 +756,13 @@ interface ChatStore {
   clearMessages: (agentId: string) => void;
   /** Clear a specific session's state */
   clearSessionState: (agentId: string, sessionId: string) => void;
+  /** Clear every cached session's runtime state for an agent (used on
+   *  agent stop / Gateway disconnect so the messages / pending approvals /
+   *  tool progress / abort controllers release their object refs and can
+   *  be GC'd). Selection (`activeSessionId`, `openSessionIds`) is NOT
+   *  touched so the next `fetchLatestSession → openSession` can re-hydrate
+   *  the user's place. */
+  clearAgentSessions: (agentId: string) => void;
   /** Remove a session's cached state (e.g. on session delete) */
   removeSessionState: (agentId: string, sessionId: string) => void;
   trimMessagesTo: (agentId: string, count: number) => void;
@@ -1648,21 +1655,52 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     clearAllOptimisticEntries(agentId, sessionId);
     set((state) => ({
       ...updateSessionState(state, agentId, sessionId, {
+        // Fully reset to DEFAULT_SESSION_STATE. Half-cleaned fields
+        // (messages: [] but attachedContext: [...], toolProgress: {...})
+        // would leave references alive in the store, preventing GC of the
+        // attachments / tool-progress objects even after the Runtime is
+        // gone. Resetting every object/array field explicitly lets the
+        // previous session's contents (and its upload-file blobs) be
+        // collected.
         messages: [],
         tokenUsage: null,
         contextUsage: null,
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
-        messagesStale: true,
+        messagesStale: false,
         pendingApproval: {},
+        pendingQuestions: [],
         loadError: null,
+        sessionStatus: null,
+        todos: [],
+        queuedMessages: [],
+        model: null,
+        provider: null,
+        ratio: null,
+        reasoningEffort: null,
+        temperature: null,
+        isCompacting: false,
+        treeExpandedPaths: [],
+        attachedContext: [],
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
+        isReasoning: false,
+        isSessionReady: false,
+        isLoadingSession: false,
+        isLoadingMore: false,
+        toolProgress: {},
         serverError: null,
       }),
     }));
+  },
+
+  clearAgentSessions: (agentId) => {
+    const agent = getAgentState(get(), agentId);
+    for (const sid of Object.keys(agent.sessionStates)) {
+      get().clearSessionState(agentId, sid);
+    }
   },
 
   removeSessionState: (agentId: string, sessionId: string) => {

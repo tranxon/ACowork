@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
 import { log } from "../lib/logger";
+import type { GitCommitDto } from "./gitStore";
 
 /**
  * Check if a string looks like a valid HTTP/HTTPS URL.
@@ -157,6 +158,29 @@ export interface OpenFile {
     /** ADR-078: git diff classification for kind === "diff" virtual
      *  tabs ("modified" | "untracked" | "deleted" | "binary" | "no_change"). */
     gitDiffKind?: string;
+    /** Pagination state for kind === "log" virtual tabs.
+     *
+     *  - `loadedCommits` is the cache of every commit we've fetched for
+     *    this tab so far (newest first). It only GROWS — backward
+     *    navigation never trims it, so the user can flip forward again
+     *    without a network round-trip. Capped at LOG_MAX_LIMIT (200,
+     *    matches Runtime's `core/.../git_query_impl.rs` LOG_MAX_LIMIT).
+     *  - `displayedLimit` is the size of the window currently visible
+     *    (= commits.slice(0, displayedLimit).length). Ranged between
+     *    LOG_STEP (50, the initial page) and LOG_MAX_LIMIT (200).
+     *
+     *  Both fields are read by GitVirtualNav's Prev / Next page buttons. */
+    loadedCommits?: GitCommitDto[];
+    /** See `loadedCommits` — current display window size. */
+    displayedLimit?: number;
+    /** Set true once a `fetchLog` call returned fewer commits than
+     *  asked for — i.e. we've reached the end of the file's history
+     *  and another "Next" click would just return the same tail. The
+     *  Next button in GitVirtualNav reads this and disables itself;
+     *  the cache (`loadedCommits`) is preserved so Prev still works.
+     *  Cleared by closeFile / workspace switch (handled by the file
+     *  being replaced wholesale). */
+    reachedEnd?: boolean;
     /** MIME type from Gateway response (e.g. "image/png", "text/html") */
     mimeType?: string;
     // ── ADR-058: external-modification conflict tracking ──
@@ -203,6 +227,16 @@ interface FileEditorState {
         original?: string;
         gitDiffKind?: string;
         language: string;
+        /** ADR-XXX: log pagination seed (kind === "log" only). Sets
+         *  the initial commit cache + displayed window so GitVirtualNav
+         *  can navigate Prev / Next without an extra fetch on first
+         *  open. Pass the array returned by the same fetchLog call
+         *  that produced `content`, plus the limit used. `reachedEnd`
+         *  is seeded true when the initial fetch returned fewer
+         *  commits than the limit (small history). */
+        loadedCommits?: GitCommitDto[];
+        displayedLimit?: number;
+        reachedEnd?: boolean;
     }) => void;
     /** Close a file tab. Returns false if dirty (caller should confirm first). */
     closeFile: (fileId: string, force?: boolean) => boolean;
@@ -213,6 +247,21 @@ interface FileEditorState {
     setActiveFile: (fileId: string) => void;
     /** Update file content (marks as dirty) */
     updateContent: (fileId: string, content: string) => void;
+    /** Replace the content of a virtual (kind === "diff" | "log") tab
+     *  WITHOUT flipping the `dirty` flag. Virtual tabs are never saved,
+     *  so dirty is meaningless there — using `updateContent` would
+     *  spuriously mark them dirty and trigger a stray save-conflict
+     *  badge. Used by GitVirtualNav's Prev / Next commit pagination
+     *  buttons on log tabs to swap the displayed window in/out. */
+    setVirtualFileContent: (
+        fileId: string,
+        content: string,
+        extras?: {
+            loadedCommits?: GitCommitDto[];
+            displayedLimit?: number;
+            reachedEnd?: boolean;
+        },
+    ) => void;
     /** Save file content to Gateway */
     saveFile: (fileId: string) => Promise<void>;
     /** Re-fetch file content from disk and replace both content and originalContent.
@@ -463,7 +512,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
     },
 
-    openVirtualFile: ({ agentId, workspaceId, kind, relPath, content, original, gitDiffKind, language }) => {
+    openVirtualFile: ({ agentId, workspaceId, kind, relPath, content, original, gitDiffKind, language, loadedCommits, displayedLimit, reachedEnd }) => {
         const fileId = `git:${agentId}:${workspaceId}:${kind}:${relPath}`;
         const existing = get().openFiles.find((f) => f.id === fileId);
         if (existing) {
@@ -488,6 +537,14 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             originalContent: original ?? content,
             loading: false,
             saving: false,
+            // Pagination seed for log tabs — caller (GitStatusPanel.openLog)
+            // passes the exact `commits` array + limit it used to build
+            // `content`, so GitVirtualNav's Prev / Next buttons can
+            // navigate without a refetch on first open. Subsequent
+            // navigations update both fields via setVirtualFileContent.
+            loadedCommits: kind === "log" ? loadedCommits : undefined,
+            displayedLimit: kind === "log" ? displayedLimit : undefined,
+            reachedEnd: kind === "log" ? reachedEnd : undefined,
             language,
             dirty: false,
             mode: "edit",
@@ -562,6 +619,36 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                     }
                     : f,
             ),
+        }));
+    },
+
+    setVirtualFileContent: (fileId: string, content: string, extras) => {
+        set((state) => ({
+            openFiles: state.openFiles.map((f) => {
+                if (f.id !== fileId) return f;
+                // Only virtual tabs may be mutated this way — callers
+                // shouldn't reach into a real file's content through here.
+                if (f.kind !== "diff" && f.kind !== "log") return f;
+                return {
+                    ...f,
+                    content,
+                    // Keep originalContent in lockstep so `dirty` stays
+                    // false (matches openVirtualFile's seed semantics —
+                    // virtual tabs are never dirty).
+                    originalContent: content,
+                    // Log pagination state — `loadedCommits` is the
+                    // ever-growing cache, `displayedLimit` is the
+                    // current window. Backward navigation only shrinks
+                    // `displayedLimit`, never `loadedCommits`, so the
+                    // user can re-flip forward without a refetch.
+                    // `reachedEnd` is set when the server returned fewer
+                    // commits than asked for — Next button then
+                    // disables itself without losing the cache.
+                    loadedCommits: extras?.loadedCommits ?? f.loadedCommits,
+                    displayedLimit: extras?.displayedLimit ?? f.displayedLimit,
+                    reachedEnd: extras?.reachedEnd ?? f.reachedEnd,
+                };
+            }),
         }));
     },
 

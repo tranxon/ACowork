@@ -1167,7 +1167,11 @@
     "renamed": "名前変更",
     "added": "追加",
     "conflicted": "競合",
-    "binaryDiff": "バイナリファイル — diff は表示されません"
+    "binaryDiff": "バイナリファイル — diff は表示されません",
+    "prevChange": "前の変更",
+    "nextChange": "次の変更",
+    "prevCommits": "新しいコミット",
+    "nextCommits": "古いコミット"
   },
   "fileTree": {
     "deleteConfirmOk": "削除",

@@ -144,15 +144,23 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     () => async (c: GitChangeDto) => {
       const editor = useFileEditorStore.getState();
       try {
+        const INITIAL_LIMIT = 50;
         const log: GitLogResponse = await useGitStore
           .getState()
-          .fetchLog(agentId, workspaceId, c.path, 50);
+          .fetchLog(agentId, workspaceId, c.path, INITIAL_LIMIT);
         const text = log.commits
           .map(
             (cm) =>
               `${cm.shortHash}  ${cm.author}  ${cm.date}\n    ${cm.subject}`,
           )
           .join("\n\n");
+        // Seed pagination from the ACTUAL fetch — not the requested
+        // limit. If the file has < INITIAL_LIMIT commits we must mark
+        // `reachedEnd` so the Next button disables itself on first
+        // open (otherwise the user clicks Next, fetch returns the
+        // same tail, and Prev would no longer be able to restore the
+        // display since the old cache would be overwritten with the
+        // empty result).
         editor.openVirtualFile({
           agentId,
           workspaceId,
@@ -160,6 +168,9 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           relPath: c.path,
           content: text || t("gitStatus.noCommits"),
           language: "plaintext",
+          loadedCommits: log.commits,
+          displayedLimit: log.commits.length,
+          reachedEnd: log.commits.length < INITIAL_LIMIT,
         });
       } catch (e) {
         console.error("[GitStatusPanel] fetchLog failed:", e);
@@ -283,7 +294,10 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
 
   return (
     <div
-      className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-right-panel-border bg-page-bg"
+      // bg-right-panel — match WorkspaceExplorer/FileTree so the
+      // expanded git list blends into the right panel instead of
+      // showing as a darker "page-bg" slab. ADR-078 decision 6.
+      className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-right-panel-border bg-right-panel"
       data-testid="git-status-panel"
     >
       {body}
