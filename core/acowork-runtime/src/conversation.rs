@@ -263,6 +263,14 @@ pub struct SessionMeta {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Per-session context window override (ADR-074).
+    ///
+    /// Field ABSENT ⟺ session inherits the per-agent resolution chain
+    /// (agent_config → manifest → DEFAULT_CONTEXT_WINDOW). `0` is an
+    /// invalid value (same as missing / null) — the write path normalizes
+    /// it to `None` so the field disappears from disk on clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 
     // ── ADR-060: todo snapshot (Block C source) ──
     /// Current task list snapshot, persisted so a session restart restores
@@ -563,6 +571,9 @@ pub struct ConversationSession {
     reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Per-session temperature override, persisted in meta file.
     temperature: std::sync::Mutex<Option<f32>>,
+    /// Per-session context window override (ADR-074), persisted in meta
+    /// file. `None` = no override (inherit the per-agent chain).
+    context_window: std::sync::Mutex<Option<u64>>,
     /// ADR-060: todo snapshot mirror (Block C source).
     ///
     /// The single persistence owner is [`ConversationSession`] — the
@@ -705,6 +716,7 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            context_window: self.context_window.lock().ok().and_then(|c| *c),
             todos: self.todos.lock().ok().and_then(|t| t.clone()),
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
@@ -744,6 +756,7 @@ impl ConversationSession {
             temperature: full.temperature.unwrap_or(f32::NAN),
             workspace_id: full.workspace_id.unwrap_or_default(),
             llm_availability: llm_availability as i32,
+            context_window: full.context_window,
         }
     }
 
@@ -961,6 +974,7 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(config.provider),
             reasoning_effort: std::sync::Mutex::new(None),
             temperature: std::sync::Mutex::new(None),
+            context_window: std::sync::Mutex::new(None),
             todos: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
@@ -1057,6 +1071,7 @@ impl ConversationSession {
                 provider: std::sync::Mutex::new(meta.provider),
                 reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
                 temperature: std::sync::Mutex::new(meta.temperature),
+                context_window: std::sync::Mutex::new(meta.context_window),
                 todos: std::sync::Mutex::new(meta.todos),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
@@ -1422,6 +1437,32 @@ impl ConversationSession {
         );
     }
 
+    /// Return the persisted per-session context window override (ADR-074),
+    /// if any. `None` = no override — the session inherits the per-agent
+    /// resolution chain (Layer 1+ in ADR-026).
+    pub fn context_window(&self) -> Option<u64> {
+        self.context_window.lock().ok().and_then(|c| *c)
+    }
+
+    /// Persist the per-session context window override to meta file
+    /// (ADR-074). `None` (or an invalid value such as `0` / out-of-range)
+    /// clears the override: the field is normalized to `None` and omitted
+    /// from disk, so "cleared" and "never set" are the same state.
+    pub fn update_context_window(&self, context_window: Option<u64>) {
+        let normalized = context_window
+            .filter(|n| crate::agent::session_config::is_valid_context_window(*n));
+        if let Ok(mut c) = self.context_window.lock() {
+            *c = normalized;
+        }
+        self.write_meta();
+        self.notify_config_change();
+        tracing::info!(
+            session_id = %self.session_id,
+            has_override = normalized.is_some(),
+            "Session context_window persisted to meta file"
+        );
+    }
+
     /// Return the persisted todo list, if any (ADR-060 §6.1).
     pub fn todos(&self) -> Option<Vec<TodoItem>> {
         self.todos.lock().ok().and_then(|t| t.clone())
@@ -1524,6 +1565,28 @@ impl ConversationSession {
             }
             changed = true;
         }
+        // ADR-074: context_window override. Write-path normalization:
+        // the HTTP layer already rejects out-of-range values with 400,
+        // so this branch only guards against hand-edited meta / stale
+        // callers — `Some(0)` or any out-of-range value means "clear"
+        // (fall back to the per-agent chain) and is normalized to `None`
+        // so the field disappears from disk (D4 / §1.3).
+        if let Some(cw) = delta.context_window {
+            let normalized = if crate::agent::session_config::is_valid_context_window(cw) {
+                Some(cw)
+            } else {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    context_window = cw,
+                    "Session context_window invalid, clearing override"
+                );
+                None
+            };
+            if let Ok(mut c) = self.context_window.lock() {
+                *c = normalized;
+            }
+            changed = true;
+        }
         if let Some(ref title) = delta.title {
             let truncated = crate::prompt::truncate_title_for_display(title);
             if let Ok(mut current) = self.current_title.lock() {
@@ -1559,6 +1622,7 @@ impl ConversationSession {
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            context_window: self.context_window.lock().ok().and_then(|c| *c),
             title: self.current_title.lock().ok().and_then(|t| t.clone()),
         }
     }
@@ -1865,6 +1929,9 @@ impl Clone for ConversationSession {
                 self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             ),
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
+            context_window: std::sync::Mutex::new(
+                self.context_window.lock().ok().and_then(|c| *c),
+            ),
             todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             llm_call_counter: std::sync::Mutex::new(
@@ -2967,6 +3034,7 @@ mod tests {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                context_window: None,
                 todos: None,
                 message_count: 0,
                 last_active_at: ts.clone(),
@@ -3171,6 +3239,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            context_window: None,
             todos: None,
             message_count: 0,
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -3677,6 +3746,7 @@ mod tests {
             provider: Some("openai".to_string()),
             reasoning_effort: None,
             temperature: Some(0.7),
+            context_window: None,
             todos: None,
             message_count: 5,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),

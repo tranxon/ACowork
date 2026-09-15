@@ -400,6 +400,14 @@ interface SessionChatState {
   reasoningEffort: string | null;
   /** Per-session temperature override (from Runtime, persisted in JSONL metadata) */
   temperature: number | null;
+  /**
+   * ADR-074: per-session context window override (mirror of the backend
+   * `ConversationSession.context_window`). `null` = no override — the
+   * session inherits the per-agent chain. Named distinctly from
+   * `agentStore.contextWindow` (the agent-level setting) on purpose.
+   * Presence ⟺ override exists; cleared via `0` / `null` on PUT.
+   */
+  sessionContextWindow: number | null;
   /** Context compaction in progress (both manual and auto triggers) */
   isCompacting: boolean;
   /** File tree expanded directory paths (persisted per-session) */
@@ -472,6 +480,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   ratio: null,
   reasoningEffort: null,
   temperature: null,
+  sessionContextWindow: null,
   isCompacting: false,
   treeExpandedPaths: [],
   attachedContext: [],
@@ -756,6 +765,13 @@ interface ChatStore {
   setAvailableModels: (models: ModelEntry[]) => void;
   /** Set per-session reasoning effort override (auto/off/low/medium/high) */
   setReasoningEffort: (effort: string, agentId: string) => void;
+  /**
+   * ADR-074: set / clear the per-session context window override.
+   * `null` (or 0) = clear → session inherits the per-agent chain.
+   * Written via HTTP `PUT /sessions/{sid}/config` (the Gateway-proxied
+   * `SessionConfigDelta` path) — no new MQTT control command (D3).
+   */
+  setSessionContextWindow: (window: number | null, agentId: string) => void;
   continueExecution: (agentId: string) => Promise<void>;
   resolveApproval: (agentId: string) => void;
   /** Resolve a specific approval by tool_call_id, removing it from the pending map. */
@@ -1956,6 +1972,40 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       command: "reasoning_effort",
       payloadJson: { effort, session_id: sessionId },
     }).catch((err: unknown) => log.warn("[ChatStore] reasoning_effort via MQTT failed:", err));
+  },
+  setSessionContextWindow: (window: number | null, agentId: string) => {
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
+    if (!sessionId) return;
+
+    const previous = getAgentState(get(), agentId).sessionStates[sessionId]?.sessionContextWindow ?? null;
+
+    // Optimistically update frontend state. `null` = no override.
+    set((state) => updateSessionState(state, agentId, sessionId, { sessionContextWindow: window }));
+
+    // ADR-074 D3: write through the existing HTTP `PUT /sessions/{sid}/config`
+    // (Gateway transparently proxies to Runtime) using `SessionConfigDelta`.
+    // `0` (not `null`) is sent to CLEAR so the backend can distinguish
+    // "clear" from "unchanged" (both deserialize to `None` on the wire).
+    const body = window == null ? { context_window: 0 } : { context_window: window };
+    const target = `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/config`;
+    fetch(target, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(async (resp) => {
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => "");
+          log.warn(`[ChatStore] setSessionContextWindow HTTP ${resp.status}: ${detail}`);
+          // Roll back the optimistic update on failure (the MQTT retained
+          // snapshot never arrives for a rejected PUT).
+          set((state) => updateSessionState(state, agentId, sessionId, { sessionContextWindow: previous }));
+        }
+      })
+      .catch((err: unknown) => {
+        log.warn("[ChatStore] setSessionContextWindow failed:", err);
+        set((state) => updateSessionState(state, agentId, sessionId, { sessionContextWindow: previous }));
+      });
   },
   setAvailableModels: (models: ModelEntry[]) => {
     set({ availableModels: models });
@@ -3419,6 +3469,9 @@ export function handleMessageEvent(
         provider: typeof data.provider_id === "string" && data.provider_id ? data.provider_id : null,
         reasoning_effort: typeof data.reasoning_effort === "string" && data.reasoning_effort ? data.reasoning_effort : null,
         temperature: typeof data.temperature === "number" && !Number.isNaN(data.temperature) ? data.temperature : null,
+        // ADR-074: prost `optional uint64` presence → `number | null`.
+        // `0` is invalid and never emitted; a missing field is null.
+        context_window: typeof data.context_window === "number" && data.context_window > 0 ? data.context_window : null,
       };
       const patch = sessionConfigToPatch(mqttConfig, { clearOnNull: true });
       if (Object.keys(patch).length > 0) {
@@ -3621,6 +3674,11 @@ export function handleMessageEvent(
           // The next agent-loop context_usage push will overwrite these
           // with the backend's exact computation (which accounts for model
           // capabilities and output token reservation).
+          //
+          // ADR-074 §1.4: sessions with a per-session override must be
+          // SKIPPED here — their effective window comes from the session
+          // override, not the agent window, and overwriting it would break
+          // the "agent change never overrides a set session value" invariant.
           if (typeof config.context_window === "number" && config.context_window > 0) {
             const newWindow = config.context_window;
             set((state) => {
@@ -3629,6 +3687,10 @@ export function handleMessageEvent(
               let changed = false;
               const updatedSessions = { ...agent.sessionStates };
               for (const [sid, sess] of Object.entries(updatedSessions)) {
+                // ADR-074 §1.4 (blanket-sync fix): never clobber a session
+                // that has its own override — it keeps its own window and
+                // the runtime pushes the session-effective value.
+                if (sess.sessionContextWindow != null) continue;
                 if (!sess.contextUsage) continue;
                 const cu = sess.contextUsage;
                 const total = cu.total_tokens ?? 0;

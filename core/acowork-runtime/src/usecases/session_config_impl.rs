@@ -15,7 +15,7 @@ use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
 use crate::http::SharedAgentCore;
 use crate::tools::workspace_resolver::WorkspaceResolver;
-use crate::usecases::session_config::SessionConfigService;
+use crate::usecases::session_config::{SessionConfigService, UsageRecompute};
 
 /// Shared map of session config stores, keyed by session_id.
 ///
@@ -51,6 +51,13 @@ pub struct RuntimeSessionConfigService {
     /// persisted value — the legacy behaviour, which tests for the
     /// resolver itself do not depend on.
     core_slot: SharedAgentCore,
+    /// Late-bind slot for the idle-session usage recompute callback
+    /// (ADR-074 §11.1). Empty until Phase B wires the `SessionManager`
+    /// closure. `apply_config` invokes it after a `context_window`
+    /// change so the UI context-usage total refreshes immediately —
+    /// a running loop is skipped inside the callback and the next
+    /// per-turn usage push takes over.
+    usage_recompute: std::sync::RwLock<Option<UsageRecompute>>,
 }
 
 impl RuntimeSessionConfigService {
@@ -63,6 +70,15 @@ impl RuntimeSessionConfigService {
             sessions,
             resolver,
             core_slot,
+            usage_recompute: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Inject the idle-session usage recompute callback (ADR-074 §11.1).
+    /// Called once in Phase B after `SessionManager` construction.
+    pub fn set_usage_recompute(&self, cb: UsageRecompute) {
+        if let Ok(mut slot) = self.usage_recompute.write() {
+            *slot = Some(cb);
         }
     }
 }
@@ -105,9 +121,24 @@ impl SessionConfigService for RuntimeSessionConfigService {
             has_workspace = delta.workspace_id.is_some(),
             has_effort = delta.reasoning_effort.is_some(),
             has_temperature = delta.temperature.is_some(),
+            has_context_window = delta.context_window.is_some(),
             has_title = delta.title.is_some(),
             "SessionConfigService: apply_config completed"
         );
+
+        // ADR-074 §11.1: after a context_window change, immediately
+        // recompute + re-broadcast context usage so the UI total does not
+        // sit on the stale window. Idle sessions have no per-turn push to
+        // fall back on, so this is the only chance to refresh the number;
+        // a running loop is skipped inside the callback (next per-turn
+        // push takes over). Best-effort: the slot may be empty in tests
+        // or before Phase B wiring.
+        if delta.context_window.is_some()
+            && let Ok(slot) = self.usage_recompute.read()
+            && let Some(cb) = slot.as_ref()
+        {
+            cb(session_id.to_string());
+        }
 
         Ok(())
     }

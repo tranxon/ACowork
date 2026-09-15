@@ -24,6 +24,16 @@ pub struct SessionConfigDelta {
     pub workspace_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,
+    /// ADR-074: per-session context window override.
+    ///
+    /// - `Some(0)` = clear the override (inherit the per-agent chain)
+    /// - `Some(n)` where `n` is valid (`FLOOR..=CEILING`) = set
+    /// - `None` = unchanged (field absent or `null` in the request body)
+    ///
+    /// Out-of-range values are rejected with HTTP 400 at
+    /// `put_session_config` before reaching `apply_config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     pub title: Option<String>,
 }
 
@@ -37,5 +47,11 @@ pub struct SessionConfigSnapshot {
     pub workspace_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f32>,
+    /// ADR-074: raw per-session context window override. `null` = no
+    /// override (session inherits the per-agent chain). The effective
+    /// session window is NOT exposed here — its authoritative source is
+    /// the `contextUsage.context_window` push (§11.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     pub title: Option<String>,
 }

@@ -72,11 +72,17 @@ impl super::loop_::AgentLoop {
                 input_tokens,
                 output_tokens,
                 max_output,
-                // Pass the RESOLVED cap (agent_config → manifest → default),
-                // not the raw override, so window display (250K) and the
-                // usable denominator (250K − output reserve = 218K) agree
-                // with the runtime trim/compaction thresholds.
-                self.core.resolved_context_cap(),
+                // ADR-074: pass the session-effective resolved cap (session
+                // meta → agent_config → manifest → default → min(model
+                // window)), so window display (96K) and the usable
+                // denominator (96K − output reserve) agree with the
+                // runtime trim/compaction thresholds.
+                Some(crate::agent::session_config::resolve_effective_context_window(
+                    conv.context_window(),
+                    self.core.context_window_override,
+                    self.core.manifest_context_window,
+                    Some(&caps),
+                )),
                 Some(&persisted),
                 // Per-session lifetime LLM-call count so the retained
                 // session_state snapshot carries the same "Iterations" as

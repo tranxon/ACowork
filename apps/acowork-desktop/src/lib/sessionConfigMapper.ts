@@ -41,6 +41,14 @@ export interface SessionConfigInput {
   provider?: string | null;
   reasoning_effort?: string | null;
   temperature?: number | null;
+  /**
+   * ADR-074: raw per-session context window override.
+   * `null` / absent = no override (session inherits the per-agent chain).
+   * HTTP `SessionConfigSnapshot` carries it as `number | null`;
+   * MQTT `SessionConfig` carries it as prost `optional uint64` →
+   * `number | null` (missing field → `null`, never `0` — 0 is invalid).
+   */
+  context_window?: number | null;
 }
 
 /**
@@ -57,6 +65,8 @@ export interface SessionConfigPatch {
   provider?: string | null;
   reasoningEffort?: string | null;
   temperature?: number | null;
+  /** ADR-074: `null` = no per-session override. */
+  sessionContextWindow?: number | null;
 }
 
 export interface SessionConfigPatchOptions {
@@ -113,6 +123,16 @@ export function sessionConfigToPatch(
     patch.reasoningEffort = config.reasoning_effort;
   } else if (clearOnNull) {
     patch.reasoningEffort = null;
+  }
+
+  // -- context_window (ADR-074) --
+  // Presence ⟺ override exists (no 0 sentinel — 0 is invalid, §1.3).
+  // null/absent on a full snapshot means "no override" and must clear
+  // any stale value from the UI, exactly like every other field.
+  if (typeof config.context_window === "number" && config.context_window > 0) {
+    patch.sessionContextWindow = config.context_window;
+  } else if (clearOnNull) {
+    patch.sessionContextWindow = null;
   }
 
   return patch;

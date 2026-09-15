@@ -625,12 +625,22 @@ impl SessionTask {
                 // populated in the resulting ContextUsageInfo. This lets
                 // the frontend status panel show session-level cumulative
                 // totals on resume, not just per-turn last values.
+                //
+                // ADR-074: pass the session-effective cap (Layer 0 override
+                // over the per-agent chain) — the first usage push must
+                // reflect the per-session window, not the agent window.
+                let resolved = crate::agent::session_config::resolve_effective_context_window(
+                    conv.context_window(),
+                    agent_loop.core.context_window_override,
+                    agent_loop.core.manifest_context_window,
+                    Some(&caps),
+                );
                 let ctx = crate::agent::context::build_context_usage_from_persisted(
                     &caps,
                     persisted.last_input,
                     persisted.last_output,
                     max_output,
-                    agent_loop.core.context_window_override,
+                    Some(resolved),
                     Some(&persisted),
                     conv.llm_call_counter(),
                 );

@@ -426,6 +426,10 @@ mqtt_client.publish(
 > - `payload`: oneof for various data resources (`GlobalProviderList`, `AgentMeta`, `SessionMeta`, `SessionConfig`, `ControlCommand`, `SessionMessage`, etc.)
 >
 > This allows extending oneof for new topics without breaking existing messages. Note: No `ProviderUpdate` / `SessionMetaUpdate` "increment+snapshot" dual messages appear here—the entire chain uniformly adopts "single topic + Retained," with payload always being the latest full value (see §3.5 Principle 3).
+>
+> **`SessionConfig` message (`agents/{id}/sessions/{sid}/config` retained, the persisted projection of `SessionConfigDelta`; field numbers in `core/acowork-core/proto/mqtt_payload.proto`)**:
+> - `title = 3` / `provider_id = 4` / `model_id = 5` / `reasoning_effort = 6` / `temperature = 7` / `workspace_id = 8` / `llm_availability = 9`: per-session override; `null` / missing field = inherit the per-agent chain.
+> - `context_window = 10` (`optional uint64`, ADR-074): per-session context window override, **presence semantics** — missing field = inherit; `0` = clear override (persisted normalized to absent); valid range `FLOOR=8_192 ..= CEILING=4_194_304`, out-of-range rejected with HTTP 400 by `PUT /api/agents/{id}/sessions/{sid}/config`. The override applies to that session's trim / compaction thresholds and `messages/context_usage` push; clearing falls back to the per-agent chain. See [ADR-074](../../adr/zh/ADR-074-per-session-context-window-override.md).
 
 ---
 

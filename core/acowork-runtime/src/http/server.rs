@@ -969,11 +969,35 @@ async fn get_session_config(
 /// ADR-047: accepts a `SessionConfigDelta` as JSON body. Each field is
 /// optional (null or omitted means "unchanged"). Persistence is immediate;
 /// LLM-side effects are deferred to the next inference turn.
+///
+/// ADR-074: `context_window` accepts `0` (or `null` / absent) as "clear
+/// the override" and `FLOOR..=CEILING` as "set". Out-of-range values are
+/// rejected with 400 — never silently clamped (§3.3, D6).
 async fn put_session_config(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
     Json(delta): Json<crate::agent::session_config::SessionConfigDelta>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-074 D6: out-of-range `context_window` → 400 (no silent clamp).
+    // `0` is legal (clear); validity is judged by the single
+    // `is_valid_context_window` point shared with the resolution chain.
+    if let Some(cw) = delta.context_window
+        && cw != 0
+        && !crate::agent::session_config::is_valid_context_window(cw)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "context_window out of valid range: {}. Valid: {}..={} (0 = clear override)",
+                    cw,
+                    crate::agent::session_config::CONTEXT_WINDOW_FLOOR,
+                    crate::agent::session_config::CONTEXT_WINDOW_CEILING,
+                )
+            })),
+        ));
+    }
+
     let svc = state.session_config.lock().await;
     let svc = svc.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -3874,6 +3898,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            context_window: None,
             todos: None,
             message_count: 3,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
@@ -4002,6 +4027,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            context_window: None,
             todos: None,
             message_count: 2,
             last_active_at: "2026-01-01T10:00:01Z".to_string(),
@@ -4034,6 +4060,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            context_window: None,
             todos: None,
             message_count: 1,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
@@ -7439,6 +7466,7 @@ mod tests {
             provider: Some("openai".to_string()),
             reasoning_effort: None,
             temperature: Some(0.5),
+            context_window: None,
             todos: None,
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),

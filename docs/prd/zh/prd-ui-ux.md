@@ -179,7 +179,7 @@
 | 元素 | 说明 |
 |------|------|
 | 状态药丸 | `error`（红）/ `warning`（琥珀）/ `info`（灰），点击复制全文；hover Tooltip 显示完整内容 |
-| Agent + 上下文药丸 | 选中 Agent 运行中且结果面板折叠/非 Status Tab 时显示：`Agent: {名称}` + `Context: {usage}% | {tokens}/{窗口}`（≥90% 高亮） |
+| Agent + 上下文药丸 | 选中 Agent 运行中且结果面板折叠/非 Status Tab 时显示：`Agent: {名称}` + `Context: {usage}% | {tokens}/{窗口}`（≥90% 高亮）。`{窗口}` = 该会话生效窗口（per-session 覆盖存在时为其覆盖值，否则 per-agent 链解析值，ADR-074） |
 | MQTT 调试控件 | `MqttDebugControls`（开发者用，显示 MQTT 连接状态） |
 | 文件状态簇 | 文件编辑器打开时，绝对定位在文件面板下方，显示光标位置 / LSP 状态等 |
 
@@ -376,7 +376,7 @@ MQTT 连接状态由 Rust `rumqttc` eventloop 维护并推送 `mqtt-status` 事�
 
 #### 4.4.1 Status Tab
 
-显示当前会话/Agent 统计：Token 用量（`tokenUsage`）、上下文占用（`contextUsage`，含 ADR-028 历史累计兜底）、迭代次数、模型/Provider、推理强度、温度、会话数、压缩状态等。
+显示当前会话/Agent 统计：Token 用量（`tokenUsage`）、上下文占用（`contextUsage`，含 ADR-028 历史累计兜底）、迭代次数、模型/Provider、推理强度、温度、会话数、压缩状态等。上下文数字行支持 **per-session 上下文窗口覆盖**（ADR-074）：编辑入口在 `ContextUsageIcon` 弹层内，常用档位 32K/64K/96K/128K/200K + K 单位数字输入 + "恢复为 agent 默认（继承）"；设定值超过模型窗口时实际生效取 `min(设定值, 模型窗口)` 并就地提示。
 
 #### 4.4.2 Debug Tab（DevMode）
 

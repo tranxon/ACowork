@@ -16,6 +16,7 @@ fn encode_session_config_runtime_realistic() {
         temperature: 0.1,
         workspace_id: "ws-091813bf4349".into(),
         llm_availability: avail as i32,
+        context_window: None,
     };
     
     let enc = |cfg| DataEnvelope { version: 1, payload: Some(data_envelope::Payload::SessionConfig(cfg)) };

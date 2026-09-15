@@ -192,13 +192,34 @@ impl AgentLoop {
 
     /// Get the context window budget for history trimming.
     ///
-    /// Resolves the effective budget through a per-agent cap chain
-    /// (agent_config.json → manifest → DEFAULT_CONTEXT_WINDOW) then
-    /// clamps to the model's actual context window capacity.
+    /// Resolves the effective budget through the ADR-074 chain — session
+    /// meta override (Layer 0) → agent_config (Layer 1) → manifest
+    /// (Layer 2) → DEFAULT_CONTEXT_WINDOW (Layer 3) → min(model window) —
+    /// then clamps to the model's actual context window capacity.
     /// Falls back to config.history_max_tokens when model capabilities
     /// are unavailable.
     pub(crate) fn context_trim_budget(&self, model_name: &str) -> u64 {
-        self.core.context_trim_budget(model_name)
+        let resolved = self.resolved_effective_context_window(model_name);
+        self.core.context_trim_budget_with(Some(resolved), model_name)
+    }
+
+    /// ADR-074: resolve this session's effective context window through the
+    /// single pure resolution point (§3.2). Layer 0 (session meta override)
+    /// is read from `ConversationSession` — the same in-memory mirror of the
+    /// persisted value — and computed fresh on every call (never cached), so
+    /// agent-layer changes always reach sessions without an override.
+    fn resolved_effective_context_window(&self, model_name: &str) -> u64 {
+        let session_override = self
+            .session
+            .conversation()
+            .and_then(|c| c.context_window());
+        let caps = self.core.get_model_capabilities(model_name);
+        crate::agent::session_config::resolve_effective_context_window(
+            session_override,
+            self.core.context_window_override,
+            self.core.manifest_context_window,
+            caps.as_ref(),
+        )
     }
 
     /// Resolve the effective (clamped) context budget for **display** and
@@ -208,10 +229,11 @@ impl AgentLoop {
     /// capabilities are available, otherwise `None`.
     ///
     /// `effective_window` is the user-facing **total context length** shown
-    /// in the UI: the resolved cap (agent_config → manifest →
-    /// DEFAULT_CONTEXT_WINDOW) clamped to the model window, so a 250K
-    /// setting stays 250K on screen (never 218K). It is also the display
-    /// percent denominator ("used incl. output / window total").
+    /// in the UI: the ADR-074 resolved cap (session meta → agent_config →
+    /// manifest → DEFAULT_CONTEXT_WINDOW) already clamped to the model
+    /// window, so a 250K setting stays 250K on screen (never 218K). It is
+    /// also the display percent denominator ("used incl. output / window
+    /// total").
     /// `effective_usable` is the runtime input budget from
     /// [`Self::context_trim_budget`] (resolved cap − output reserve) — the
     /// single denominator for the compaction thresholds only.
@@ -220,15 +242,15 @@ impl AgentLoop {
         model_name: &str,
     ) -> Option<(acowork_core::protocol::ModelCapabilitiesInfo, u64, u64)> {
         let caps = self.core.get_model_capabilities(model_name)?;
-        // Display window follows the SAME resolved cap chain as the trim
-        // budget (agent_config → manifest → DEFAULT_CONTEXT_WINDOW), so the
-        // frontend shows the user-configured "context length" (e.g. 250K)
-        // instead of the model's raw window (1M) when a cap is configured.
-        let effective_window = match self.core.resolved_context_cap() {
-            Some(0) | None => caps.context_window,
-            Some(cap) => cap.min(caps.context_window),
-        };
-        let effective_usable = self.core.context_trim_budget(model_name);
+        // Display window follows the SAME ADR-074 resolution chain as the
+        // trim budget (session meta → agent_config → manifest →
+        // DEFAULT_CONTEXT_WINDOW → min(model window)), so the frontend
+        // shows the session-effective "context length" (e.g. 96K) instead
+        // of the model's raw window (1M) when a cap is configured.
+        let effective_window = self.resolved_effective_context_window(model_name);
+        let effective_usable = self
+            .core
+            .context_trim_budget_with(Some(effective_window), model_name);
         Some((caps, effective_window, effective_usable))
     }
 
@@ -1521,12 +1543,16 @@ impl AgentLoop {
                 "ContextUsage: checking preconditions"
             );
             if let Some(caps) = model_caps {
+                // ADR-074: pass the session-effective window (Layer 0
+                // override over the per-agent chain, min model window) —
+                // the usage push now reflects the per-session cap.
+                let resolved = self.resolved_effective_context_window(current_model);
                 let ctx_usage = if prompt_tokens_reliable {
                     crate::agent::context::compute_context_usage(
                         &caps,
                         usage,
                         max_output_limit,
-                        self.core.resolved_context_cap(),
+                        Some(resolved),
                     )
                 } else {
                     // Re-resolve via the helper: model_caps in scope and the

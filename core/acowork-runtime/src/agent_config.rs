@@ -149,7 +149,10 @@ pub struct AgentConfig {
     /// 3. `crate::config::DEFAULT_CONTEXT_WINDOW` — hardcoded final fallback (200K)
     ///
     /// `None` means "I don't have an opinion" — fall through to the next level.
-    /// `Some(0)` means "no limit" — use model's full context window.
+    /// `Some(0)` is invalid under ADR-074 §6 (the old "no limit" sentinel is
+    /// abolished) — the resolution chain skips this layer. Existing `0` in a
+    /// config file is tolerated on load (not repaired, see ADR-074 §9) but
+    /// never treated as an effective value.
     /// The user can clear this value in the UI to revert to the manifest default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
@@ -2015,7 +2018,9 @@ mod tests {
 
     #[test]
     fn agent_config_context_window_zero_preserved() {
-        // 0 = "no limit" — must be preserved, not treated as None
+        // 0 is invalid at resolution (ADR-074 §6 → layer skipped) but must
+        // still round-trip on disk: existing files are not repaired (ADR-074
+        // §9), only the chain ignores them.
         let cfg = AgentConfig {
             context_window: Some(0),
             ..AgentConfig::default()

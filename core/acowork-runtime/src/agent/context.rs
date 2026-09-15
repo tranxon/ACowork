@@ -1342,7 +1342,9 @@ mod tests {
 
     #[test]
     fn test_context_usage_with_zero_override_uses_model_window() {
-        // Some(0) = "no limit" → use model's full window
+        // Defensive path only: the resolution chain never emits Some(0)
+        // (ADR-074 §6 — 0 invalid → skip layer), but the low-level function
+        // still treats Some(0) like None → model's full window.
         let caps = test_caps(128_000, 8_192);
         let usage = acowork_core::providers::traits::UsageInfo {
             prompt_tokens: 50_000,
@@ -1674,7 +1676,8 @@ pub fn compute_section_sizes(
 ///
 /// `context_window_cap` is the per-agent context window override (ADR-026):
 /// - `None` — not set, use model's full `context_window`.
-/// - `Some(0)` — "no limit" (user explicitly chose unlimited), use model's full.
+/// - `Some(0)` — defensive only (ADR-074 §6 abolished the "0 = no limit"
+///   sentinel; the resolution chain never emits it) — treated like `None`.
 /// - `Some(n)` where `n > 0` — cap the effective window at `min(n, model_window)`.
 ///
 /// `context_window` in the output reflects the effective (capped) window for

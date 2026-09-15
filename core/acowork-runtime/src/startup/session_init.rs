@@ -614,8 +614,10 @@ pub(crate) async fn phase_b_init_session(
             let mut dirty = false;
 
             // ── context_window: manifest.llm.context_window → 200K ──
-            // Note: manifest may set Some(0) meaning "no limit" (use
-            // model's full window).  We preserve that intent.
+            // Note: manifest `Some(0)` (old "no limit") is invalid under
+            // ADR-074 §6 — the resolution chain skips it and falls to
+            // DEFAULT_CONTEXT_WINDOW. We still persist whatever the
+            // manifest says; the chain does the filtering at resolve time.
             if updated.context_window.is_none() {
                 let manifest_cw = ctx.loaded.manifest.llm.context_window;
                 updated.context_window = Some(
@@ -791,6 +793,16 @@ pub(crate) async fn phase_b_init_session(
 
     // ADR-040: Construct usecase services before `core` is moved
     // into SessionManager.
+    //
+    // ADR-074 §11.1: hoisted so Phase B (after SessionManager is built)
+    // can inject the idle-session `usage_recompute` callback into the
+    // concrete service.
+    // Assigned unconditionally inside the block below (never read as None
+    // on the production path) — declared without an initializer so the
+    // compiler can prove it is set before the Phase B use at the bottom.
+    let session_config_impl: Option<
+        Arc<crate::usecases::RuntimeSessionConfigService>,
+    >;
     {
         let core_clone = Arc::clone(&core);
         if let Ok(mut slot) = ctx.agent_core_shared.write() {
@@ -834,12 +846,18 @@ pub(crate) async fn phase_b_init_session(
         // complete), so by the time the first HTTP request lands the
         // slot is already filled. `get_config` falls back to the raw
         // persisted value if it isn't — safe during boot races.
+        //
+        // ADR-074 §11.1: keep the concrete Arc so Phase B can inject the
+        // idle-session `usage_recompute` callback once SessionManager is
+        // constructed (it owns the session snapshots + chunk channel).
+        let impl_arc = Arc::new(crate::usecases::RuntimeSessionConfigService::new(
+            ctx.session_configs.clone(),
+            Some(ctx.workspace_resolver.clone()),
+            ctx.agent_core_shared.clone(),
+        ));
+        session_config_impl = Some(impl_arc.clone());
         let session_config: Arc<dyn crate::usecases::SessionConfigService> =
-            Arc::new(crate::usecases::RuntimeSessionConfigService::new(
-                ctx.session_configs.clone(),
-                Some(ctx.workspace_resolver.clone()),
-                ctx.agent_core_shared.clone(),
-            ));
+            impl_arc;
         {
             let mut slot = ctx.session_config_slot.lock().await;
             *slot = Some(session_config);
@@ -986,6 +1004,24 @@ pub(crate) async fn phase_b_init_session(
     // (rather than later in Phase C) means both consumers can rely on
     // the slot being populated as soon as Phase B returns.
     *ctx.session_manager_slot.write().await = Some(session_manager_arc.clone());
+
+    // ADR-074 §11.1: inject the idle-session usage recompute callback into
+    // the SessionConfigService. Fire-and-forget — the callback spawns its
+    // own task so `apply_config` never blocks on the SessionManager lock.
+    // A running loop is skipped inside `usage_recompute`; the next per-turn
+    // usage push takes over.
+    {
+        let sm = session_manager_arc.clone();
+        if let Some(svc) = session_config_impl.as_ref() {
+            svc.set_usage_recompute(Arc::new(move |session_id: String| {
+                let sm = sm.clone();
+                tokio::spawn(async move {
+                    let guard = sm.lock().await;
+                    guard.usage_recompute(&session_id);
+                });
+            }));
+        }
+    }
 
     // -- Phase B epilogue: auto-sleep idle watcher ----
     //

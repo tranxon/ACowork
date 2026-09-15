@@ -182,6 +182,8 @@ pub struct SessionConfigDelta {
 }
 ```
 
+> **ADR-074 修订（2026-09-15）**：`SessionConfigDelta` / `SessionConfigSnapshot` 新增 `context_window: Option<u64>`（与 model / provider / reasoning_effort / temperature 并列）。编码语义：`Some(0)` / `null` / 字段缺失 = **清除覆盖**（无效值，落盘归一为字段不存在）；`Some(n)`（`n ∈ FLOOR..=CEILING`，`FLOOR = 8_192`、`CEILING = 4_194_304`）= 设置；越界由 HTTP `put_session_config` 返回 400。生效方式：参与 ADR-026 解析链最高优先级 Layer 0，per-session 覆盖该会话的 trim / compaction 阈值与 context_usage 推送；清除 = 继承 per-agent 链。详见 [ADR-074](ADR-074-per-session-context-window-override.md)。
+
 #### 3.2.3 ConversationSession::apply_config -- 单一写入入口
 
 ```rust

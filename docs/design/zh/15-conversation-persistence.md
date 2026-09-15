@@ -549,7 +549,7 @@ loop {
 ```
 Token 监控：
   每轮 LLM 调用后用 API 返回的 prompt_tokens 更新计数器
-  使用率 = prompt_tokens / model.context_window
+  使用率 = prompt_tokens / model.context_window   # 分母可被 per-session 覆盖（ADR-074）
 
 压缩触发：
   70%     → 日志记录，不干预
@@ -557,6 +557,8 @@ Token 监控：
   95%     → emergency_trim 安全网
   API报错 → emergency_trim + 重试
 ```
+
+> **ADR-074（per-session 上下文窗口覆盖）**：`model.context_window` 分母在会话级可被覆盖——解析链为 session 覆盖 → agent_config → manifest → DEFAULT_CONTEXT_WINDOW，最终取 `min(解析值, 模型窗口)`；覆盖值同时决定该会话 trim / compaction 阈值与 `messages/context_usage` 推送的窗口。详见 [ADR-074](../../adr/zh/ADR-074-per-session-context-window-override.md)。
 
 **不再维护 per-session BudgetGuard 配额机制**。Token 消耗由 LLM 摘要自然控制——摘要后上下文大幅缩小，后续对话 token 消耗自然降低。Episode 提炼使用成本最低的模型，不计入对话预算（后台任务）。
 

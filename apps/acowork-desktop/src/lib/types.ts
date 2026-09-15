@@ -782,7 +782,12 @@ export interface TokenUsage {
  *  rides along in the `GET /api/agents/:id/sessions` response.
  */
 export interface ContextUsageInfo {
-  /** Context window limit (from model capabilities) */
+  /**
+   * Context window limit — ALWAYS the session-effective window (ADR-074):
+   * session override → agent_config → manifest → DEFAULT → min(model).
+   * The runtime pushes this value; when an agent-level window is needed
+   * read `agentStore.contextWindow` instead.
+   */
   context_window: number;
   /** Current input tokens used (prompt_tokens from API response, last turn) */
   input_tokens: number;

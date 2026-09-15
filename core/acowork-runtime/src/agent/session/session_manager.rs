@@ -1018,7 +1018,22 @@ impl SessionManager {
             // Without this, trim_fifo would clamp history at 128K which may be
             // far below the model's actual context window, making auto compaction
             // at 80% threshold unreachable.
-            let budget = self.core.context_trim_budget(m);
+            //
+            // ADR-074: resolve the session-effective cap (Layer 0 override
+            // from ConversationSession over the per-agent chain) BEFORE
+            // set_max_tokens, or the first frame trims against the agent
+            // window instead of the session override.
+            let session_override = session_state
+                .conversation()
+                .and_then(|c| c.context_window());
+            let caps = self.core.get_model_capabilities(m);
+            let resolved = crate::agent::session_config::resolve_effective_context_window(
+                session_override,
+                self.core.context_window_override,
+                self.core.manifest_context_window,
+                caps.as_ref(),
+            );
+            let budget = self.core.context_trim_budget_with(Some(resolved), m);
             session_state.history_mut().set_max_tokens(budget);
 
             // Three-level priority chain for reasoning_effort:
@@ -1157,12 +1172,22 @@ impl SessionManager {
                 let m = model_name.as_deref().unwrap_or("unknown");
                 let caps = self.core.get_model_capabilities(m)?;
                 let max_output = self.core.max_output_tokens_limit_for_model(m);
+                // ADR-074: the initial usage snapshot reflects the
+                // session-effective cap (Layer 0 override over the agent
+                // chain) so a resumed session with an override shows its
+                // own window, not the agent window.
+                let resolved = crate::agent::session_config::resolve_effective_context_window(
+                    conv.context_window(),
+                    self.core.context_window_override,
+                    self.core.manifest_context_window,
+                    Some(&caps),
+                );
                 let ctx = crate::agent::context::build_context_usage_from_persisted(
                     &caps,
                     persisted.last_input,
                     persisted.last_output,
                     max_output,
-                    self.core.context_window_override,
+                    Some(resolved),
                     Some(&persisted),
                     conv.llm_call_counter(),
                 );
@@ -2564,6 +2589,72 @@ After installation, ask the user to re-enable the MCP server.",
         self.sessions
             .get(session_id)
             .map(|handle| handle.snapshot())
+    }
+
+    /// ADR-074 §11.1: recompute + re-broadcast context usage for an IDLE
+    /// session after a `context_window` change, so the UI total refreshes
+    /// immediately — an idle session has no per-turn usage push to fall
+    /// back on, and the number would otherwise sit on the stale window.
+    ///
+    /// Skips sessions with a running loop: their next per-turn push
+    /// already carries the fresh window (and pushing here would duplicate
+    /// it — §8-F). Reuses the "persisted tokens → snapshot
+    /// `context_usage` → chunk broadcast" path from
+    /// `build_initial_session_state`.
+    ///
+    /// Registered into `RuntimeSessionConfigService` as the late-bind
+    /// `usage_recompute` callback (see `session_init.rs` Phase B). All
+    /// reads are lock-free for the hot path; best-effort throughout.
+    pub fn usage_recompute(&self, session_id: &str) {
+        // A running loop pushes fresh usage on its own; skip to avoid
+        // duplicate/stale pushes.
+        if let Some(handle) = self.sessions.get(session_id)
+            && handle.status().is_active()
+        {
+            return;
+        }
+
+        let Ok(configs) = self.session_configs.read() else { return; };
+        let Some(conv) = configs.get(session_id) else { return; };
+        let Some(persisted) = conv.tokens() else { return; };
+        let model_name = conv.model().unwrap_or_else(|| "unknown".to_string());
+        let Some(caps) = self.core.get_model_capabilities(&model_name) else { return; };
+        let max_output = self.core.max_output_tokens_limit_for_model(&model_name);
+
+        // Session-effective window: Layer 0 override over the per-agent
+        // chain, min'd with the model window (§3.2).
+        let resolved = crate::agent::session_config::resolve_effective_context_window(
+            conv.context_window(),
+            self.core.context_window_override,
+            self.core.manifest_context_window,
+            Some(&caps),
+        );
+        let ctx = crate::agent::context::build_context_usage_from_persisted(
+            &caps,
+            persisted.last_input,
+            persisted.last_output,
+            max_output,
+            Some(resolved),
+            Some(&persisted),
+            conv.llm_call_counter(),
+        );
+
+        // (1) Write into the shared runtime snapshot (HTTP pull path).
+        if let Some(ref snapshots) = self.config.session_snapshots
+            && let Ok(map) = snapshots.read()
+            && let Some(snap) = map.get(session_id)
+            && let Ok(mut guard) = snap.write()
+        {
+            guard.context_usage = Some(serde_json::to_string(&ctx).unwrap_or_default());
+        }
+
+        // (2) Broadcast via the shared chunk channel (push path).
+        if let Some(ref tx) = self.config.chunk_tx {
+            let _ = tx.try_send(SessionChunkEvent {
+                session_id: session_id.to_string(),
+                event: crate::agent::loop_::ChunkEvent::ContextUsage(ctx),
+            });
+        }
     }
 
     /// Get the current status of all active sessions (ADR-014).
@@ -4567,6 +4658,7 @@ mod tests {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                context_window: None,
                 todos: None,
                 message_count: 0,
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),

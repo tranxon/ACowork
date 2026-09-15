@@ -427,6 +427,10 @@ mqtt_client.publish(
 > - `payload`：oneof 各种数据资源（`GlobalProviderList`、`AgentMeta`、`SessionMeta`、`SessionConfig`、`ControlCommand`、`SessionMessage` 等）
 >
 > 这样新主题新增的数据资源只需要扩展 oneof，不破坏已有消息。注：这里不出现 `ProviderUpdate` / `SessionMetaUpdate` 等 "增量+快照"双消息——全链路统一采用"单主题 + Retained"，payload 总是最新完整值（详见 §3.5 原则 3）。
+>
+> **`SessionConfig` 消息（`agents/{id}/sessions/{sid}/config` retained，即 `SessionConfigDelta` 的持久化投影，字段号见 `core/acowork-core/proto/mqtt_payload.proto`）**：
+> - `title = 3` / `provider_id = 4` / `model_id = 5` / `reasoning_effort = 6` / `temperature = 7` / `workspace_id = 8` / `llm_availability = 9`：per-session 覆盖，`null` / 字段缺失 = 继承 per-agent 链。
+> - `context_window = 10`（`optional uint64`，ADR-074）：per-session 上下文窗口覆盖，**presence 语义**——字段缺失 = 继承；`0` = 清除覆盖（落盘归一为字段不存在）；合法区间 `FLOOR=8_192 ..= CEILING=4_194_304`，越界由 HTTP `PUT /api/agents/{id}/sessions/{sid}/config` 返回 400。覆盖生效于该会话 trim / compaction 阈值与 `messages/context_usage` 推送，清除后回退 per-agent 链。详见 [ADR-074](../../adr/zh/ADR-074-per-session-context-window-override.md)。
 
 ---
 

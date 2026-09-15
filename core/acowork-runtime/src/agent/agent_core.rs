@@ -140,7 +140,8 @@ pub struct AgentCore {
     /// so the resolution chain is self-contained in AgentCore.
     pub(crate) manifest_temperature: Option<f32>,
     /// Per-agent context window cap (from agent_config.json, set via Agent Setup panel).
-    /// Layer 1 in the resolution chain. 0 means "no limit".
+    /// Layer 1 in the resolution chain. `0` is invalid (ADR-074 §6 — the old
+    /// "no limit" sentinel is abolished) and the chain skips this layer.
     pub(crate) context_window_override: Option<u64>,
     /// ADR-061: minimum compression ratio for levels 1-7 (from
     /// agent_config.json, set via Agent Setup panel). `None` = use
@@ -1640,21 +1641,12 @@ impl AgentCore {
 
 
     /// Resolve the user-configured **total context cap**:
-    /// `agent_config.json.context_window` (Layer 1) → `manifest.llm.context_window`
-    /// (Layer 2) → `DEFAULT_CONTEXT_WINDOW` (Layer 3, 200K).
-    ///
-    /// Returns `Some(0)` when the user explicitly chose "no limit"
-    /// (`context_window_override = Some(0)`); callers treat that the same
-    /// as `None` (use the model's full capacity).
-    pub(crate) fn resolved_context_cap(&self) -> Option<u64> {
-        Some(
-            self.context_window_override
-                .or(self.manifest_context_window)
-                .unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
-        )
-    }
-
     /// Resolve the effective context window budget for history trimming.
+    ///
+    /// ADR-074: `resolved_cap` is injected by the caller — per-session
+    /// `AgentLoop`s pass `resolve_effective_context_window(...)` (session
+    /// meta → agent_config → manifest → DEFAULT → min(model window)); this
+    /// method stays session-agnostic (invariant 1, §1.5).
     ///
     /// This is the single denominator for every context-usage percentage
     /// (trigger thresholds, UI usage report, HistoryManager::max_tokens).
@@ -1665,11 +1657,10 @@ impl AgentCore {
     ///
     /// So a 250K cap + 32K output reserve yields a 218K input budget — not
     /// 250K (the pre-fix behaviour, where the reserve was swallowed by the
-    /// cap). When `resolved_context_cap()` is `Some(0)`, the provider's own
-    /// input allowance (`max_input_tokens`, else `window − reserve`) is used.
-    pub fn context_trim_budget(&self, model_name: &str) -> u64 {
+    /// cap). `0` is no longer a legal "no limit" sentinel (ADR-074 §6); the
+    /// resolution chain never emits it, and `None` here is only defensive.
+    pub fn context_trim_budget_with(&self, resolved_cap: Option<u64>, model_name: &str) -> u64 {
         let max_output_limit = self.max_output_tokens_limit_for_model(model_name);
-        let resolved_cap = self.resolved_context_cap();
 
         self.get_model_capabilities(model_name)
             .map(|caps| {
@@ -1688,14 +1679,10 @@ impl AgentCore {
                 effective
             })
             .unwrap_or_else(|| {
-                let fallback = if resolved_cap == Some(0) {
-                    self.config.history_max_tokens
-                } else {
-                    std::cmp::min(
-                        resolved_cap.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
-                        self.config.history_max_tokens,
-                    )
-                };
+                let fallback = std::cmp::min(
+                    resolved_cap.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
+                    self.config.history_max_tokens,
+                );
                 tracing::debug!(
                     model = %model_name,
                     resolved_cap = resolved_cap.unwrap_or(0),
@@ -1908,6 +1895,21 @@ mod tests {
         }
     }
 
+    /// Test-only mirror of the per-session AgentLoop resolution flow
+    /// (ADR-074 §3.2): resolve the chain (no session override) then
+    /// compute the trim budget. `session_override` lets tests exercise
+    /// the per-session Layer 0 without constructing a ConversationSession.
+    fn resolved_trim_budget(core: &AgentCore, model: &str, session_override: Option<u64>) -> u64 {
+        let caps = core.get_model_capabilities(model);
+        let resolved = crate::agent::session_config::resolve_effective_context_window(
+            session_override,
+            core.context_window_override,
+            core.manifest_context_window,
+            caps.as_ref(),
+        );
+        core.context_trim_budget_with(Some(resolved), model)
+    }
+
     // ── Resolution chain tests ──────────────────────────────────────
 
     #[test]
@@ -1921,7 +1923,7 @@ mod tests {
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 83_616);
     }
 
@@ -1935,7 +1937,7 @@ mod tests {
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 47_616);
     }
 
@@ -1950,7 +1952,7 @@ mod tests {
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         // DEFAULT_CONTEXT_WINDOW=200K > model_budget=183_616 → min = 183_616
         assert_eq!(budget, 183_616);
     }
@@ -1965,37 +1967,37 @@ mod tests {
             Some(test_model_caps(1_000_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 183_616);
     }
 
-    // ── Zero = no limit tests ───────────────────────────────────────
+    // ── Zero value tests (ADR-074: 0 invalid → skip layer) ──────────
 
     #[test]
-    fn test_zero_cap_means_no_user_limit() {
-        // config=0 → no cap → use model's full budget
+    fn test_zero_cap_is_invalid_falls_to_default() {
+        // config=0 is no longer "no limit" (ADR-074 §6) — invalid → falls
+        // to DEFAULT_CONTEXT_WINDOW (200K) → min(500K, 200K) − 16_384.
         let core = make_core(
             Some(0),
             None,
             Some(test_model_caps(500_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
-        // model_budget = 500_000 - 16_384 = 483_616
-        assert_eq!(budget, 483_616);
+        let budget = resolved_trim_budget(&core, "test-model", None);
+        assert_eq!(budget, 183_616);
     }
 
     #[test]
     fn test_zero_cap_with_small_model() {
-        // config=0, small model → use model's budget (no user cap)
+        // config=0 invalid → DEFAULT 200K, but the small model window
+        // (32K) binds: 32_000 − 4_096 = 27_904.
         let core = make_core(
             Some(0),
             None,
             Some(test_model_caps(32_000, 4_096)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
-        // model_budget = 32_000 - 4_096 = 27_904
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 27_904);
     }
 
@@ -2011,7 +2013,7 @@ mod tests {
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 33_616);
     }
 
@@ -2024,7 +2026,7 @@ mod tests {
             Some(test_model_caps(128_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         // model_budget = 128_000 - 16_384 = 111_616
         assert_eq!(budget, 111_616);
     }
@@ -2040,7 +2042,7 @@ mod tests {
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 167_232);
     }
 
@@ -2055,21 +2057,22 @@ mod tests {
             None,
             64_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         // user_cap=80K, history_max_tokens=64K → min(80K, 64K) = 64K
         assert_eq!(budget, 64_000);
     }
 
     #[test]
     fn test_no_model_caps_zero_user_cap() {
-        // No model capabilities + user_cap=0 → use history_max_tokens directly
+        // No model capabilities + user_cap=0 (invalid) → DEFAULT 200K →
+        // min(200K, history 128K) = 128K.
         let core = make_core(
             Some(0),
             None,
             None,
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 128_000);
     }
 
@@ -2082,7 +2085,7 @@ mod tests {
             None,
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 128_000);
     }
 
@@ -2098,7 +2101,7 @@ mod tests {
             Some(test_model_caps(200_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 133_616);
     }
 
@@ -2111,37 +2114,38 @@ mod tests {
             Some(test_model_caps(128_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 111_616);
     }
 
     #[test]
-    fn test_manifest_zero_means_no_limit() {
-        // Config=None, Manifest=0 → manifest says "no limit" → model full capacity
-        // Model=500K → 500_000 - 16_384 = 483_616
+    fn test_manifest_zero_is_invalid_falls_to_default() {
+        // Manifest=0 is no longer "no limit" (ADR-074 §6) — invalid →
+        // DEFAULT_CONTEXT_WINDOW (200K) → min(500K, 200K) − 16_384.
         let core = make_core(
             None,
             Some(0),
             Some(test_model_caps(500_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
-        assert_eq!(budget, 483_616);
+        let budget = resolved_trim_budget(&core, "test-model", None);
+        assert_eq!(budget, 183_616);
     }
 
     // ── Edge case tests ─────────────────────────────────────────────
 
     #[test]
     fn test_user_cap_of_one_token() {
-        // Extreme: user sets 1 token (TOTAL). Reserve (16_384) exceeds the
-        // capped window → saturating_sub floors the input budget at 0.
+        // Extreme: 1 token (TOTAL). 1 is below FLOOR so the resolution
+        // chain never emits it — but the budget math must still saturate
+        // to 0 (reserve exceeds the capped window), so pin it directly.
         let core = make_core(
             Some(1),
             None,
             Some(test_model_caps(128_000, 16_384)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = core.context_trim_budget_with(Some(1), "test-model");
         assert_eq!(budget, 0);
     }
 
@@ -2154,7 +2158,7 @@ mod tests {
             Some(test_model_caps(0, 0)),
             128_000,
         );
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         // effective_input_budget: 0 - 0 = 0; min(100K, 0) = 0
         assert_eq!(budget, 0);
     }
@@ -2181,7 +2185,7 @@ mod tests {
                 }
             }
         }
-        let budget = core.context_trim_budget("test-model");
+        let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 91_808);
     }
 

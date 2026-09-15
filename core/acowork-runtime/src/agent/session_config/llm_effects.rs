@@ -188,4 +188,21 @@ pub fn apply_llm_effects(
         );
         agent_loop.session.set_reasoning_effort(parsed);
     }
+
+    // ── ContextWindow override change (ADR-074 §5.2) ───────────────
+    //
+    // The budget itself is resolved fresh on every build (never cached,
+    // §3.2), so trim / compaction thresholds converge automatically on
+    // the next build. What happens here is only the UI surface: re-emit
+    // the session state so the context-usage total reflects the new
+    // session-effective window right at the turn boundary (a running
+    // loop has no idle `usage_recompute` callback to do this for it).
+    if snapshot.context_window != prev.context_window {
+        tracing::info!(
+            old = ?prev.context_window,
+            new = ?snapshot.context_window,
+            "apply_llm_effects: context_window override changed, refreshing context usage"
+        );
+        agent_loop.emit_session_state();
+    }
 }

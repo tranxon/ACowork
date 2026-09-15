@@ -1,6 +1,6 @@
 # ADR-026：上下文窗口解析链（per-agent context window cap）
 
-**状态**：提案  
+**状态**：已接受（2026-09-15 被 ADR-074 修订，语义以 ADR-074 为准）  
 **日期**：2026-07-05  
 **决策者**：大鱼  
 **影响范围**：
@@ -17,6 +17,14 @@
 - Agent Setup 面板（context window 输入组件）
 
 ---
+
+> **⚠️ 本文档的部分语义已被 [ADR-074](ADR-074-per-session-context-window-override.md) 修订（2026-09-15）**
+>
+> - **`0 = 无限制` 已废止**：`0` / `null` / 字段缺失统一为"未设置（无效）"，解析链跳过该层；链末端 `DEFAULT_CONTEXT_WINDOW = 200_000` 兜底，**该兜底值同时是事实上限**（ADR-074 §1.2 D1、§1.3、§6）。
+> - **解析链新增最高优先级 Layer 0：per-session `context_window`**（经 ADR-047 session-config 管线），本文档"取消的功能：per-session context window override"一节作废（ADR-074 §3.1）。
+> - **有效值域**改为 `FLOOR..=CEILING`（`FLOOR = 8_192` 常量、`CEILING = 4_194_304`）；越界由 HTTP `PUT /sessions/{sid}/config` 返回 400（ADR-074 §3.3）。
+> - **解析归属层变更**：解析不再放在 `AgentCore`（per-agent 模板 clone-on-write，写 session 值会跨会话泄漏），改为无状态纯函数 `resolve_effective_context_window` + `AgentCore::context_trim_budget_with(resolved_cap, model)`（ADR-074 §1.5、§3.2）。
+> - 本文档正文保持原样以保留决策历史；**与 ADR-074 冲突时以 ADR-074 为准**。
 
 ## 背景
 
@@ -60,7 +68,7 @@ Layer 2               manifest.llm.context_window            包作者默认
 Layer 3 (最终 fallback)  DEFAULT_CONTEXT_WINDOW = 200_000    系统硬编码（200K tokens）
 ```
 
-- **值域**：`0` – `1_000_000` tokens（0 = 无限制，由模型自身决定上限）
+- **值域**：`0` – `1_000_000` tokens（0 = 无限制，由模型自身决定上限）——**已被 ADR-074 修订**：`0` = 未设置（无效值，落下一层），值域改为 `FLOOR..=CEILING`（ADR-074 §1.2 D6、§3.3）
 - **单位**：tokens，与 `ModelCapabilitiesInfo.context_window` 一致
 - **默认值**：`200_000`（200K tokens），覆盖主流模型的上下文窗口（GPT-4o 128K、Claude Sonnet 200K、DeepSeek-V3 128K）
 
@@ -71,8 +79,7 @@ Layer 3 (最终 fallback)  DEFAULT_CONTEXT_WINDOW = 200_000    系统硬编码�
 ```python
 # 伪代码
 resolved_cap = agent_config.context_window or manifest.llm.context_window or DEFAULT_CONTEXT_WINDOW
-if resolved_cap == 0:
-    resolved_cap = u64::MAX  # 无限制
+# 已被 ADR-074 修订：不再有 "0 = 无限制"；0 / None / 越界均视为无效值并落下一层
 model_budget = caps.effective_input_budget(max_output_limit)
 effective_budget = min(resolved_cap, model_budget)
 ```
@@ -85,7 +92,7 @@ effective_budget = min(resolved_cap, model_budget)
 | None | 64K | 128K | 64K → min(64K, 128K - reserve) ≈ 64K - reserve |
 | 300K | - | 128K | 300K → min(300K, 128K - reserve) ≈ 128K - reserve |
 | 100K | 200K | 1M | 100K → min(100K, 1M - reserve) ≈ 100K - reserve |
-| 0 | 0 | 128K | 无限制 → min(∞, 128K - reserve) ≈ 128K - reserve |
+| 0 | 0 | 128K | ~~无限制~~ **已废改**：0 = 未设置 → 两层均跳过 → 走 200K 兜底 → min(200K, 128K - reserve) ≈ 128K - reserve（ADR-074 §6） |
 
 ### 数据流全景
 
@@ -162,6 +169,11 @@ pub fn context_trim_budget(&self, model_name: &str) -> u64 {
 ```rust
 /// Resolve the effective context window budget for history trimming.
 ///
+/// NOTE (ADR-074): "0 = no cap" is superseded — 0 means unset/invalid and falls
+/// through to DEFAULT_CONTEXT_WINDOW (200K), which is also the de-facto ceiling.
+/// The per-session Layer 0 and the session-ownership constraint move this logic
+/// into a stateless `resolve_effective_context_window`; AgentCore only receives the
+/// resolved value via `context_trim_budget_with(resolved_cap, model)` (ADR-074 §1.5, §3.2).
 /// Resolution chain for the user-configured cap:
 ///   1. agent_config.json.context_window (Layer 1)
 ///   2. manifest.llm.context_window (Layer 2)
@@ -293,6 +305,8 @@ pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 | 1.2 | `acowork-runtime/src/config.rs` | 新增 `DEFAULT_CONTEXT_WINDOW: u64 = 200_000` 常量 | 低 |
 | 1.3 | `acowork-runtime/src/agent_config.rs` | `AgentConfig` 新增 `context_window: Option<u64>` | 低 |
 
+> **ADR-074 修订**：本 Phase 的 2.1 / 2.3，以及 Phase 3.2 的"解析链放在 `AgentCore::context_trim_budget` 内部，调用点无需修改"，已被 [ADR-074 §1.5](ADR-074-per-session-context-window-override.md) 取代——`AgentCore` 不得持有 session 维度状态（per-agent 模板 clone-on-write 会跨会话泄漏），解析改为无状态纯函数 + `context_trim_budget_with(resolved_cap, model)` 纯参数注入。
+
 ### Phase 2：AgentCore 结构改造
 
 | # | 文件 | 变更 | 风险 |
@@ -355,9 +369,11 @@ cd apps/acowork-desktop && npx tsc --noEmit
 
 ---
 
-## 取消的功能：per-session context window override
+## 取消的功能：per-session context window override（已被 ADR-074 作废）
 
 与 ADR-025 保持一致，当前提案**不包含** per-session 上下文窗口 override。所有 session 共享同一个 agent 级别的 context window cap。
+
+> **已作废**：该功能已由 [ADR-074](ADR-074-per-session-context-window-override.md) 立项并采用（作为最高优先级 Layer 0，经 ADR-047 session-config 管线读写；**不**在 `SessionState` 中缓存，`AgentCore` 也不得持有 session 值）。下列 4 条建议中，第 1 条（`SessionState` 新增字段）与第 3 条（`context_trim_budget` 读 session）已被 ADR-074 §1.5 明确否决，第 4 条（4 层解析链）与 ADR-074 §3.1 一致。
 
 如需在未来增加此功能（用户在会话中临时调整上下文窗口上限），建议作为独立功能提案，包含：
 1. `SessionState` 新增 `context_window` 字段
@@ -374,6 +390,7 @@ cd apps/acowork-desktop && npx tsc --noEmit
 | 风险 | 概率 | 影响 | 缓解措施 |
 |------|------|------|----------|
 | 默认 200K 对某些小模型（如 32K）无意义 | 中 | 低 | min 操作自动截断到模型能力，不会出错 |
-| 用户误设 0（以为是最小值）导致无限制 | 低 | 中 | UI 上明确标注 "0 = 无限制（由模型决定）" |
+| 用户误设 0（以为是最小值） | 低 | 低 | **已由 ADR-074 §6 消解**：0 语义改为"未设置/无效"，解析链直接落下一层；UI 上 0 等价于"清除覆盖"，不再存在"无限制"这一异常态 |
+| 解析链放在 `AgentCore` 内部（Phase 2.3） | — | 中 | **已被 ADR-074 §1.5 修订**：`AgentCore` 是 per-agent 模板（clone-on-write），session 维度的值写进去会跨会话泄漏 → 改为无状态纯函数 + 纯参数注入 |
 | 与 `history_max_tokens` 语义重复 | 低 | 低 | `history_max_tokens` 保留作为无模型能力时的最终 fallback；per-agent `context_window` 是用户意图的上限，两者互补 |
 | `context_trim_budget` 变复杂 | 低 | 低 | 逻辑增量小（+~10 行），保持早期返回模式 |

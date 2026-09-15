@@ -518,6 +518,12 @@ message SessionConfig {
   // Session-level LLM resource availability — see LlmAvailability enum docs.
   // Field number 9 is reserved for this enum and will not be reused.
   LlmAvailability llm_availability = 9;
+  // Per-session context window override (ADR-074). `optional` presence
+  // expresses "not set" — NO `0` sentinel (0 is an invalid value, see
+  // `is_valid_context_window` in acowork-runtime). A missing field means
+  // the session inherits the per-agent chain (agent_config → manifest →
+  // DEFAULT_CONTEXT_WINDOW).
+  optional uint64 context_window = 10;
 }
 
 /// Session runtime state (always latest complete value).
