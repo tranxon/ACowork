@@ -693,6 +693,7 @@
     "remoteBrowseEmpty": "未找到目錄",
     "remoteBrowseSelected": "已選擇",
     "remoteBrowseSelect": "選擇此資料夾",
+    "remoteBrowseShowHidden": "顯示隱藏檔案",
     "explorer": {
       "agentNotRunning": "啟動 Agent 以瀏覽工作區",
       "loading": "載入中...",

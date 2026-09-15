@@ -362,6 +362,7 @@
     "remoteBrowseEmpty": "No directories found",
     "remoteBrowseSelected": "Selected",
     "remoteBrowseSelect": "Select This Folder",
+    "remoteBrowseShowHidden": "Show hidden files",
     "explorer": {
       "agentNotRunning": "Start an agent to browse workspace",
       "loading": "Loading...",
