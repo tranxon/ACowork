@@ -107,8 +107,6 @@ pub struct RunningAgentInfo {
     /// while the Gateway spawns Runtimes directly; a remote node_id once
     /// lifecycle is delegated to the Node control plane (Phase 2b.3).
     pub node_id: String,
-    /// Whether the Agent has completed the gRPC AgentHello handshake
-    pub connected: bool,
     /// Whether the Agent has completed SessionTask initialization and is ready to receive messages
     pub ready: bool,
     /// Whether the agent was started in developer mode (Debug Protocol enabled at boot).
@@ -423,20 +421,6 @@ impl GatewayState {
         self.running_agents.get(id)
     }
 
-    /// Check if an agent is connected (gRPC AgentHello completed)
-    pub fn is_connected(&self, id: &str) -> bool {
-        self.running(id).map(|r| r.connected).unwrap_or(false)
-    }
-
-    /// Set the connected state of a running agent
-    pub fn set_agent_connected(&mut self, id: &str, connected: bool) {
-        if let Some(key) = self.resolve_running_key(id)
-            && let Some(info) = self.running_agents.get_mut(&key)
-        {
-            info.connected = connected;
-        }
-    }
-
     /// Set the ready state of a running agent
     pub fn set_agent_ready(&mut self, id: &str, ready: bool) {
         if let Some(key) = self.resolve_running_key(id)
@@ -718,7 +702,6 @@ mod tests {
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-workspace".to_string(),
             node_id: "local".to_string(),
-            connected: false,
             ready: false,
             dev_mode: false,
             debug_state: DebugState::Disabled,

@@ -8,6 +8,7 @@ import { getDefaultCompactModel, setDefaultCompactModel } from "../../lib/gatewa
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Dropdown } from "../common/Dropdown";
+import { ExpandableRow, ListBox } from "../common/list";
 import { useToast } from "../common/ToastProvider";
 
 export interface GlobalCompactModelCardProps {
@@ -42,6 +43,9 @@ export function GlobalCompactModelCard({
   const [current, setCurrent] = useState<CompactModelRef | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // Fold state — default open, same convention as the other collapsible
+  // cards on this page (Configured Providers, Embedding Service Status).
+  const [open, setOpen] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
@@ -144,34 +148,39 @@ export function GlobalCompactModelCard({
   const sep = "\u2003\u00b7\u2003";
 
   return (
-    <div className="rounded-md border border-zinc-200 bg-modal-surface px-4 py-3 dark:border-zinc-700">
-      <h2 className="text-xs font-medium">
-        {t("harness.globalCompactModel.title")}
-      </h2>
-      <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-        {t("harness.globalCompactModel.description")}
-      </p>
-      <div className="mt-2">
-        <Dropdown
-          className={cn(saving && "opacity-60")}
-          value={selectedKey}
-          onChange={(v) => handleChange(v)}
-          disabled={loading || saving}
-          placeholder={{ value: "", label: noneLabel }}
-          options={[
-            ...options.map((o) => ({
-              value: o.key,
-              label: `${o.modelId}${sep}${providerNameById.get(o.providerId) ?? o.providerId}`,
-            })),
-            ...(currentIsStale && current
-              ? [{
-                  value: selectedKey,
-                  label: `${current.model_id}${sep}${current.provider_id} (${unavailableLabel})`,
-                }]
-              : []),
-          ]}
-        />
-      </div>
-    </div>
+    <ListBox dividers={false}>
+      <ExpandableRow
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        title={t("harness.globalCompactModel.title")}
+        ariaLabel={t("harness.globalCompactModel.title")}
+        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+      >
+        <div className="space-y-2">
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            {t("harness.globalCompactModel.description")}
+          </p>
+          <Dropdown
+            className={cn(saving && "opacity-60")}
+            value={selectedKey}
+            onChange={(v) => handleChange(v)}
+            disabled={loading || saving}
+            placeholder={{ value: "", label: noneLabel }}
+            options={[
+              ...options.map((o) => ({
+                value: o.key,
+                label: `${o.modelId}${sep}${providerNameById.get(o.providerId) ?? o.providerId}`,
+              })),
+              ...(currentIsStale && current
+                ? [{
+                    value: selectedKey,
+                    label: `${current.model_id}${sep}${current.provider_id} (${unavailableLabel})`,
+                  }]
+                : []),
+            ]}
+          />
+        </div>
+      </ExpandableRow>
+    </ListBox>
   );
 }

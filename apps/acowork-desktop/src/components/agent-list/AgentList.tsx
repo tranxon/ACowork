@@ -192,7 +192,7 @@ export function AgentList({ width }: AgentListProps) {
     const ids: string[] = [];
     for (const [id, storage] of Object.entries(agentsMap)) {
       if (
-        storage.meta.running &&
+        storage.meta.alive &&
         storage.sessionTitle === undefined
       ) {
         ids.push(id);
@@ -372,7 +372,7 @@ export function AgentList({ width }: AgentListProps) {
     if (!aid) return [];
     const items: ContextMenuItem<{ agentId: string }>[] = [];
 
-    if (contextAgent && !contextAgent.running) {
+    if (contextAgent && !contextAgent.alive) {
       items.push({
         key: "start",
         icon: <Play size={14} />,
@@ -387,7 +387,7 @@ export function AgentList({ width }: AgentListProps) {
         onClick: ({ payload }) => payload && handleDebugStart(payload.agentId),
       });
     }
-    if (contextAgent && contextAgent.running) {
+    if (contextAgent && contextAgent.alive) {
       items.push({
         key: "stop",
         icon: <Square size={14} />,
@@ -485,11 +485,11 @@ export function AgentList({ width }: AgentListProps) {
         onDoubleClick={() => {
           // Convenience: double-click a stopped agent to start it.
           // Running/starting agents ignore this — use context menu for Stop.
-          if (!agent.running && !startingAgentIds.has(id)) {
+          if (!agent.alive && !startingAgentIds.has(id)) {
             void handleStart(id);
           }
         }}
-        title={agent.running ? undefined : t("agentList.doubleClickToStart")}
+        title={agent.alive ? undefined : t("agentList.doubleClickToStart")}
         onContextMenu={(e) => handleContextMenu(e, id)}
         role="listitem"
       >
@@ -520,10 +520,9 @@ export function AgentList({ width }: AgentListProps) {
                 * about to flip to offline via the Runtime's Will
                 * "offline" message; we suppress the dot to avoid
                 * one final "active" flash on its way out. */}
-            {agent.running &&
+            {agent.alive &&
               activeAgentIds.has(id) &&
-              agentsMap[id]?.online !== false &&
-              agentsMap[id]?.sleeping !== true && (
+              agentsMap[id]?.meta.sleeping !== true && (
                 <span
                   className={cn(
                     "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)]"
@@ -538,7 +537,7 @@ export function AgentList({ width }: AgentListProps) {
             {/* Top row: name */}
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex items-center gap-1.5">
-                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.running ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
+                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.alive ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
               </div>
             </div>
             {/* Bottom row: current session title.
@@ -551,7 +550,7 @@ export function AgentList({ width }: AgentListProps) {
                 fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)",
               }}
             >
-              {agent.running ? (
+              {agent.alive ? (
                 sessionTitle === undefined ? (
                   <span
                     aria-hidden

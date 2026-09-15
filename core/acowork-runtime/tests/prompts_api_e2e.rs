@@ -82,6 +82,7 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
         workspace_query,
         workspace_mutation,
         agent_tools,
+        Arc::new(tokio::sync::Mutex::new(None)),
         agent_config,
         attachment,
         session_config,

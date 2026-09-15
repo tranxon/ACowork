@@ -50,8 +50,10 @@ export interface AgentListResponse {
   avatar: string | null;
   builtin_avatar?: string;
   version: string;
-  running: boolean;
-  connected: boolean;
+  /** Distributed liveness verdict (MQTT network signal, topology independent). */
+  alive: boolean;
+  /** Runtime self-reported auto-sleep (idle watcher fired). */
+  sleeping?: boolean;
   dev_mode: boolean;
   /** Whether DevMode is live right now (ADR-048 follow-up; can be enabled at runtime). */
   debug_state?: "enabled" | "disabled";
@@ -95,6 +97,71 @@ export interface NodeInfo {
   http_endpoint?: string;
 }
 
+// ── P1: Full-stack service diagnostics (desktop-unified-diagnostics §3.2) ──
+//
+// All 6 services the Desktop can observe. Each entry carries enough
+// metadata for the panel to render a row + version + latency, plus an
+// optional `last_error` so the user knows WHY the service is unhealthy.
+// The 3-tier grouping (critical / important / optional) is mirrored in
+// `ServiceGroup` and consumed by `ServicesPanel.tsx`.
+
+export type ServiceType =
+  | "gateway"
+  | "mqtt"
+  | "node"
+  | "embed"
+  | "pm"
+  | "doc"
+  | "lsp-relay";
+
+/** How important a service is for the user-facing chat experience. */
+export type ServiceGroup = "critical" | "important" | "optional";
+
+/** A single service health snapshot returned by `diagnoseServices()`. */
+export interface ServiceHealth {
+  /** Stable service type — primary key for the row in `ServicesPanel`. */
+  service_type: ServiceType;
+  /** Grouping tier for the panel (drives which section the row lands in). */
+  group: ServiceGroup;
+  /** Whether the probe succeeded within the 1s budget. */
+  online: boolean;
+  /** Reported version (semver-ish; "unknown" if the probe never reached it). */
+  version: string;
+  /** End-to-end latency in ms (`0` when the probe never returned). */
+  latency_ms: number;
+  /** Free-text detail (e.g. "1/2 nodes online", "agents_running=3"). */
+  detail?: string;
+  /** Last error message when `online === false`; `null` when healthy. */
+  last_error: string | null;
+  /** When this row was last probed (ms epoch; used for stale-row detection). */
+  probed_at: number;
+}
+
+/** Which probe path produced a diagnostic report (P2).
+ *  - `gateway-api`: single `GET /api/services/diagnose` snapshot fetch —
+ *    the Gateway's ground truth about its own subsystems; works
+ *    identically local / remote.
+ *  - `direct`: legacy per-endpoint probes (pre-P2 Gateway build
+ *    without the snapshot endpoint).
+ *  Drives the source badge on `ServicesPanel` (P2-C). */
+export type ProbeSource = "gateway-api" | "direct";
+
+/** The full diagnostic snapshot. */
+export interface DiagnoseReport {
+  /** Per-service rows, keyed by `service_type` for O(1) lookup. */
+  services: Record<ServiceType, ServiceHealth>;
+  /** Which probe path produced this report (see `ProbeSource`). */
+  source: ProbeSource;
+  /** When the full diagnose pass started (ms epoch). */
+  started_at: number;
+  /** When the full diagnose pass finished (ms epoch). */
+  finished_at: number;
+  /** True when the local Gateway process is reachable (otherwise the
+   *  whole report is mostly noise — every entry except `gateway` will
+   *  be offline). Used by `ServicesPanel` to show a banner. */
+  gateway_reachable: boolean;
+}
+
 /** Agent list entry — matches Gateway API */
 export interface AgentInfo {
   /**
@@ -121,8 +188,21 @@ export interface AgentInfo {
    */
   builtin_avatar?: string;
   version: string;
-  running: boolean;
-  connected: boolean;
+  /**
+   * Distributed liveness verdict — whether the Runtime's MQTT session is
+   * reachable at the broker level (`online` / `sleeping` / `degraded`
+   * payloads). Topology independent: the same answer for local, remote
+   * and node-hosted Runtimes. NEVER a process/PID probe. This is the
+   * single field the UI gates "agent is alive" on.
+   */
+  alive: boolean;
+  /**
+   * Whether the Runtime self-reported auto-sleep (idle watcher fired)
+   * before exiting. `alive=true, sleeping=true` means the retained
+   * `sleeping` status is still cached — render an "auto-slept at HH:MM"
+   * badge + Start button, not a live session.
+   */
+  sleeping: boolean;
   ready: boolean;
   dev_mode: boolean;
   /**
@@ -178,9 +258,16 @@ export interface AgentDetail {
   description: string;
   author: string;
   install_path: string;
-  running: boolean;
-  connected: boolean;
+  /**
+   * Distributed liveness verdict — same semantics as `AgentInfo.alive`
+   * (MQTT network signal, topology independent, never a PID probe).
+   */
+  alive: boolean;
   ready: boolean;
+  /**
+   * Local process id (diagnostic only — node-hosted Runtimes report 0).
+   * NEVER used for liveness.
+   */
   pid: number | null;
   started_at: string | null;
   /** Whether the agent was started with the `--dev-mode` flag (startup intent). */

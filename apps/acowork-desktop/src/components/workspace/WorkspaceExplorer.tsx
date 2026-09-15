@@ -15,6 +15,9 @@ import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
 import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
+import { GitStatusBar } from "./git/GitStatusBar";
+import { GitStatusPanel } from "./git/GitStatusPanel";
+import { useGitStore } from "../../stores/gitStore";
 
 /** Abbreviate a file path from the left: "…parent/filename.ext" */
 function abbreviatePath(path: string): string {
@@ -62,6 +65,18 @@ export function WorkspaceExplorer() {
     const currentWorkspaceId = activeSessionId
         ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
         : "__agent_home__";
+
+    // ADR-078 (2026-XX revision) — git strip source: (agent, workspace) of
+    // the currently selected session workspace. Independent of whether any
+    // file is open in the editor (git is a workspace-level property).
+    // `__agent_home__` is a virtual home workspace with no repo context.
+    const gitContext =
+        selectedAgentId && currentWorkspaceId !== "__agent_home__"
+            ? { agentId: selectedAgentId, workspaceId: currentWorkspaceId }
+            : null;
+    const gitExpanded = useGitStore((s) =>
+        gitContext ? s.isExpanded(gitContext.agentId, gitContext.workspaceId) : false,
+    );
 
     // Parent-controlled inline rename — when `renameTarget` matches a
     // tree node's relPath, that node swaps its name span for an input
@@ -744,7 +759,7 @@ export function WorkspaceExplorer() {
         }
     }, [selectedAgentId, currentWorkspaceId, copyItem, refreshTree, setCopiedEntry, requestRenameFor, addToast]);
 
-    if (!selectedAgent?.running) {
+    if (!selectedAgent?.alive) {
         return (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 bg-right-panel p-6 text-xs text-zinc-500 dark:text-zinc-400">
                 <FolderOpen className="h-6 w-6" />
@@ -900,6 +915,33 @@ export function WorkspaceExplorer() {
                     dropTarget={dropTarget}
                     onPointerDownTreeEntry={onPointerDownTreeEntry}
                 />
+            )}
+
+            {/* ADR-078 decision 6 (2026-XX revision) — GitStatusBar lives at the
+                bottom of the workspace panel. Source = currently selected
+                session workspace (independent of any open editor file). Hidden
+                when: agent not running (above early-return), workspace is
+                __agent_home__ (no repo context), or this panel itself is not
+                the active right-panel tab (parent RightPanel handles that).
+                The wrapper reserves `pb-3` of empty panel-background below
+                the git strip so neither the collapsed bar nor the expanded
+                panel touches RightPanel's `rounded-xl` (12px) bottom corners
+                — matches the chat input's `mb-3` buffer (ChatPanel.tsx
+                L2467). FileTree (flex-1) is unaffected since the padding
+                lives on the wrapper, not on the panel. */}
+            {gitContext && (
+                <div className="shrink-0 pb-3">
+                    <GitStatusBar
+                        agentId={gitContext.agentId}
+                        workspaceId={gitContext.workspaceId}
+                    />
+                    {gitExpanded && (
+                        <GitStatusPanel
+                            agentId={gitContext.agentId}
+                            workspaceId={gitContext.workspaceId}
+                        />
+                    )}
+                </div>
             )}
         </div>
     );

@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useChatStore } from "../../stores/chatStore";
+import { useServicesStore } from "../../stores/servicesStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { AgentListResponse, GatewayConfig, GatewayMode, NodeInfo } from "../../lib/types";
 import { fetchNodes } from "../../lib/gateway-api";
@@ -15,6 +17,7 @@ import { inputReadonly, inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { ProfileTab } from "./ProfileTab";
+import { ServicesPanel } from "./ServicesPanel";
 import { TabButton } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
@@ -81,6 +84,9 @@ function GatewayTab() {
   const [localGatewayOpen, setLocalGatewayOpen] = useState(true);
   const [gatewayConnOpen, setGatewayConnOpen] = useState(true);
   const [nodesOpen, setNodesOpen] = useState(true);
+  // P1: collapse state for the new diagnostic cards.
+  const [servicesOpen, setServicesOpen] = useState(true);
+  const [eventsOpen, setEventsOpen] = useState(true);
   // Per-node level-1 collapse state inside the Nodes section.
   const [openNodeIds, setOpenNodeIds] = useState<Record<string, boolean>>({});
 
@@ -117,8 +123,11 @@ function GatewayTab() {
   }, [handleUrlSave]);
 
   const handleTest = useCallback(async () => {
+    // P1-5 (a): "测试连接" 按钮语义升级为"运行诊断"——
+    // 同时刷新 health (banner 用) 和跑一遍 servicesStore 的全量探针。
+    // 两者并行，避免 health 探活串行阻塞诊断。
     setTesting(true);
-    await checkHealth();
+    await Promise.all([checkHealth(), useServicesStore.getState().diagnose()]);
     setTesting(false);
   }, [checkHealth]);
 
@@ -162,7 +171,7 @@ function GatewayTab() {
       const resp = await fetch(`${getGatewayUrl()}/api/agents`);
       if (resp.ok) {
         const data: AgentListResponse[] = await resp.json();
-        setAgents(data.filter(a => a.running || a.connected));
+        setAgents(data.filter(a => a.alive));
       }
     } catch {
       // Gateway not reachable
@@ -414,7 +423,89 @@ function GatewayTab() {
           )}
         </ExpandableRow>
       </ListBox>
+
+      {/* P1-5 (b): Full-stack service diagnostics. Self-contained
+          card; `ServicesPanel` subscribes to servicesStore directly so
+          this parent stays free of probe state. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={servicesOpen}
+          onToggle={() => setServicesOpen((v) => !v)}
+          title={t("settings.servicesTitle")}
+          ariaLabel={t("settings.servicesTitle")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        >
+          <ServicesPanel />
+        </ExpandableRow>
+      </ListBox>
+
+      {/* P1-5 (d): Recent MQTT transition history (consumes
+          `chatStore.transitionLog` from P0-4). Helps the user answer
+          "why did the chat just drop?" without opening DevTools. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={eventsOpen}
+          onToggle={() => setEventsOpen((v) => !v)}
+          title={t("settings.services.eventsTitle")}
+          ariaLabel={t("settings.services.eventsTitle")}
+          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        >
+          <RecentEventsLog />
+        </ExpandableRow>
+      </ListBox>
     </div>
+  );
+}
+
+/** Recent transition log (P1-5 d). Reads `chatStore.transitionLog`
+ *  (max 20 entries, ring-buffered in P0-4) and renders them newest
+ *  first. */
+function RecentEventsLog() {
+  const { t } = useTranslation();
+  // I-1: named `entries` — a local `log` shadowed the module logger.
+  const entries = useChatStore((s) => s.transitionLog);
+  if (entries.length === 0) {
+    return (
+      <div className="px-3 py-3 text-xs text-zinc-500 dark:text-zinc-400">
+        {t("settings.services.eventsEmpty")}
+      </div>
+    );
+  }
+  return (
+    <ul className="max-h-48 overflow-y-auto divide-y divide-zinc-200 dark:divide-zinc-700">
+      {entries
+        .slice()
+        .reverse()
+        .map((entry, idx) => {
+          const ts = new Date(entry.timestamp).toLocaleTimeString();
+          const isErr = entry.to !== "connected";
+          return (
+            <li
+              key={`${entry.timestamp}-${idx}`}
+              className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-mono"
+            >
+              <span className="text-zinc-400 dark:text-zinc-500">{ts}</span>
+              <span className="text-zinc-600 dark:text-zinc-300">
+                {entry.from} → {entry.to}
+              </span>
+              {entry.reason && (
+                <span
+                  className={cn(
+                    "flex-1 truncate",
+                    isErr
+                      ? "text-red-600 dark:text-red-300"
+                      : "text-zinc-500 dark:text-zinc-400",
+                  )}
+                  title={entry.reason}
+                >
+                  {entry.reason}
+                </span>
+              )}
+              {!entry.reason && <span className="flex-1" />}
+            </li>
+          );
+        })}
+    </ul>
   );
 }
 

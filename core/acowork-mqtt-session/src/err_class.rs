@@ -210,18 +210,16 @@ mod from_rumqttc_0_25 {
                     io_kind: None,
                 },
                 ConnectionError::MqttState(state_err) => {
-                    // rumqttc wraps transient I/O errors (e.g.
-                    // ConnectionAborted, ConnectionReset — both produced
-                    // when the OS tears down the TCP socket during
-                    // sleep/wake) inside MqttState. Two shapes exist:
-                    //   StateError::Io(io::Error)                    — direct wrap
-                    //   StateError::Deserialization(mqttbytes::Error::Io)
-                    //     — the poll task read a partially-written
-                    //     packet at wake time and mqttbytes wrapped the
-                    //     same io::Error at decode time
-                    // Unwrap the inner I/O error in BOTH cases instead
-                    // of blindly classifying as ConfigError (fatal —
-                    // breaks the event loop with a 60s backoff).
+                    // Fail-open classification: explicit fatal arms,
+                    // `_` defaults to retryable. Rationale: transient
+                    // broker shapes keep multiplying (EOF alone has 3
+                    // spellings — StateError::Io / Deserialization(Io) /
+                    // ConnectionAborted — plus ping/collision timeouts
+                    // and session replay), so enumerating retryable arms
+                    // can never keep up with rumqttc upgrades — and a
+                    // transient error misjudged fatal costs 60 s
+                    // (ADR-065 §7 #3 incident). True fatal arms here are
+                    // a stable, small set of client-state bugs.
                     match state_err {
                         rumqttc::StateError::Io(io_err) => ErrorDescriptor {
                             kind: ErrorKind::Io,
@@ -234,14 +232,67 @@ mod from_rumqttc_0_25 {
                                     io_kind: Some(io_err.kind()),
                                 }
                             } else {
+                                // Protocol parse error: client or broker
+                                // sent malformed data — fatal (retry
+                                // won't fix it, soft-restart will).
                                 ErrorDescriptor {
                                     kind: ErrorKind::MqttState,
                                     io_kind: None,
                                 }
                             }
                         }
-                        _ => ErrorDescriptor {
+                        // Broker process exited → TCP FIN → EOF:
+                        // `framed.next()` returned `None`, surfaced as
+                        // `StateError::ConnectionAborted` ("Connection
+                        // closed by peer abruptly"). A restarted broker
+                        // is transient, not a client config error.
+                        rumqttc::StateError::ConnectionAborted => ErrorDescriptor {
+                            kind: ErrorKind::Io,
+                            io_kind: Some(io::ErrorKind::UnexpectedEof),
+                        },
+                        // Broker temporarily unresponsive / restarted:
+                        //   - AwaitPingResp: last PINGREQ got no
+                        //     PINGRESP within keep-alive — same class as
+                        //     NetworkTimeout.
+                        //   - CollisionTimeout: QoS collision not
+                        //     resolved in time — broker ack timeout.
+                        //   - Unsolicited(pkid): broker replayed QoS
+                        //     acks from a previous session after a
+                        //     restart; rumqttc clears stale `pending` on
+                        //     the next (re)connect
+                        //     (`if !connack.session_present`), so retry
+                        //     recovers. None is a client config error.
+                        rumqttc::StateError::AwaitPingResp
+                        | rumqttc::StateError::CollisionTimeout => ErrorDescriptor {
+                            kind: ErrorKind::Timeout,
+                            io_kind: None,
+                        },
+                        rumqttc::StateError::Unsolicited(_) => ErrorDescriptor {
+                            kind: ErrorKind::Other,
+                            io_kind: None,
+                        },
+                        // True fatal client-state bugs — explicit so the
+                        // `_` arm below stays fail-open (retryable).
+                        rumqttc::StateError::InvalidState
+                        | rumqttc::StateError::WrongPacket
+                        | rumqttc::StateError::EmptySubscription => ErrorDescriptor {
                             kind: ErrorKind::MqttState,
+                            io_kind: None,
+                        },
+                        // Unknown future rumqttc variants: default to
+                        // retryable (see the fail-open comment above).
+                        // Currently unreachable — all v4 StateError
+                        // variants are enumerated above — but activates
+                        // the moment rumqttc adds a new variant, so a
+                        // future broker-behavior shape can never fall
+                        // into the 60 s fatal backoff again.
+                        // ponytail: if a v5 build lands, its extra
+                        // variants (InvalidAlias, packet-too-large) are
+                        // client config errors that would retry forever
+                        // here — add explicit fatal arms then.
+                        #[allow(unreachable_patterns)]
+                        _ => ErrorDescriptor {
+                            kind: ErrorKind::Other,
                             io_kind: None,
                         },
                     }
@@ -300,6 +351,45 @@ mod from_rumqttc_0_25 {
             assert_eq!(desc.kind, ErrorKind::Io);
             assert_eq!(desc.io_kind, Some(io::ErrorKind::ConnectionAborted));
             assert_eq!(classify(&desc), ErrClass::Transient);
+        }
+
+        #[test]
+        fn mqtt_state_connection_aborted_is_transient() {
+            // Broker process exited → TCP FIN → `framed.next()` returns
+            // `None` → `StateError::ConnectionAborted` ("Connection
+            // closed by peer abruptly"). The gateway is usually just
+            // restarting; this must be Transient (E1, fast backoff),
+            // NOT fatal E4 ConfigError which triggers the 60 s backoff.
+            let err = rumqttc::ConnectionError::MqttState(
+                rumqttc::StateError::ConnectionAborted,
+            );
+            let desc = ErrorDescriptor::from(&err);
+            assert_eq!(desc.kind, ErrorKind::Io);
+            assert_eq!(desc.io_kind, Some(io::ErrorKind::UnexpectedEof));
+            assert_eq!(classify(&desc), ErrClass::Transient);
+            assert!(classify(&desc).is_retryable());
+        }
+
+        #[test]
+        fn mqtt_state_ping_collision_replay_errors_are_retryable() {
+            // Sibling broker-unresponsive/restart shapes must also be
+            // retryable, not fall into the 60 s fatal backoff:
+            //   - AwaitPingResp: PINGREQ unacked within keep-alive.
+            //   - CollisionTimeout: QoS collision resolution timed out.
+            //   - Unsolicited: QoS acks replayed from a pre-restart
+            //     session.
+            for state_err in [
+                rumqttc::StateError::AwaitPingResp,
+                rumqttc::StateError::CollisionTimeout,
+                rumqttc::StateError::Unsolicited(1),
+            ] {
+                let desc = ErrorDescriptor::from(&rumqttc::ConnectionError::MqttState(state_err));
+                assert!(
+                    classify(&desc).is_retryable(),
+                    "StateError variant must NOT be fatal: {desc:?}"
+                );
+                assert_ne!(classify(&desc), ErrClass::ConfigError);
+            }
         }
 
         #[test]

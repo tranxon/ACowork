@@ -13,7 +13,7 @@ import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
-import Editor, { type OnMount } from "@monaco-editor/react";
+import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import { initMonaco } from "../../lib/monacoBootstrap";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -228,15 +228,20 @@ export function FileEditorPanel({ width }: { width: number }) {
         return isReadyNode(node) ? node.root : undefined;
     }, [activeFile]);
 
-    // Determine the active language for LSP — preview-mode files don't need LSP.
-    const lspLanguage = activeFile && activeFile.mode === "edit" ? activeFile.language : null;
+    // Determine the active language for LSP — preview-mode and virtual
+    // diff/log tabs don't need LSP.
+    const lspLanguage =
+        activeFile && activeFile.mode === "edit" && activeFile.kind === "file"
+            ? activeFile.language
+            : null;
 
     // Compute the set of all languages open in EDIT tabs (for pool lifecycle).
     // Preview-mode tabs are excluded — they are read-only and don't need LSP.
     const openLanguages = useMemo(() => {
         const langs = new Set<string>();
         for (const file of openFiles) {
-            if (file.mode === "edit" && file.language && !file.loading) langs.add(file.language);
+            if (file.mode === "edit" && file.kind === "file" && file.language && !file.loading)
+                langs.add(file.language);
         }
         return langs;
     }, [openFiles]);
@@ -1424,6 +1429,80 @@ export function FileEditorPanel({ width }: { width: number }) {
                     </div>
                 ) : activeFile.kind === "url" ? (
                     <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
+                ) : activeFile.kind === "diff" ? (
+                    // ADR-078 decision 7 — read-only side-by-side diff of the
+                    // original (HEAD) vs. working-tree content. GitDiffKind
+                    // "deleted" arrives with empty `modified`, which Monaco
+                    // renders as an empty right pane.
+                    activeFile.gitDiffKind === "binary" ? (
+                        // ADR-078 decision 4/7 — binary diffs degrade to a
+                        // placeholder: /git/diff returns kind=binary with no
+                        // content, so show an explicit notice rather than two
+                        // empty panes.
+                        <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+                            {t("gitStatus.binaryDiff")}
+                        </div>
+                    ) : (
+                        <DiffEditor
+                            original={activeFile.originalContent}
+                            modified={activeFile.content}
+                            language={activeFile.language}
+                            theme={resolvedMonacoTheme}
+                            options={{
+                                minimap: { enabled: false },
+                                fontSize: editorFontSize,
+                                lineNumbers: "on",
+                                scrollBeyondLastLine: false,
+                                readOnly: true,
+                                renderSideBySide: true,
+                                // ADR-078 decision 7: side-by-side is part of
+                                // the "two-file diff" semantics — must hold at
+                                // any editor width. Monaco otherwise auto-
+                                // switches to inline mode when the container
+                                // is narrower than renderSideBySideInlineBreakpoint
+                                // (default 900 px; see
+                                // monaco-editor/.../diffEditorOptions.js L32).
+                                // Forcing it off keeps the two-pane layout
+                                // intact even when FileEditorPanel is
+                                // squeezed by a wide right panel / agent list.
+                                useInlineViewWhenSpaceIsLimited: false,
+                                // Disable Monaco's diff overview ruler. The
+                                // ruler paints a 30-px-wide marker strip on
+                                // the modified (right) pane only — see
+                                // monaco-editor/.../overviewRulerFeature.js
+                                // (ONE_OVERVIEW_WIDTH=15, ENTIRE=15*2=30) —
+                                // which stacks visually on top of the
+                                // 14-px scrollbar there. Result: the right
+                                // scrollbar looks ~2x wider than the left's
+                                // (which has no ruler). Diff markers are
+                                // still conveyed by the per-line green/red
+                                // highlights inside the panes, which is the
+                                // primary affordance.
+                                renderOverviewRuler: false,
+                                automaticLayout: true,
+                                padding: { top: 8 },
+                            }}
+                        />
+                    )
+                ) : activeFile.kind === "log" ? (
+                    // ADR-078 decision 7 — read-only single-pane commit log.
+                    <Editor
+                        path={activeFile.relPath}
+                        value={activeFile.content}
+                        language={activeFile.language}
+                        theme={resolvedMonacoTheme}
+                        keepCurrentModel={false}
+                        options={{
+                            minimap: { enabled: false },
+                            fontSize: editorFontSize,
+                            lineNumbers: "off",
+                            scrollBeyondLastLine: false,
+                            readOnly: true,
+                            wordWrap: "on",
+                            automaticLayout: true,
+                            padding: { top: 8 },
+                        }}
+                    />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
                     // SVG preview branch. Raster images (png/jpg/gif/webp) never
                     // reach here because `canPreview` in the tab context menu only
@@ -1533,6 +1612,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                     </div>
                 )}
             </div>
+
+            {/* ADR-078 decision 6 — GitStatusBar moved to WorkspaceExplorer
+                (workspace-panel bottom) per 2026-XX revision. The editor only
+                still owns the *virtual diff/log* render branches (DiffEditor /
+                readonly single-pane Monaco) which read `OpenFile.virtual` and
+                are independent of gitStore. */}
 
             {/* Close confirmation dialog */}
             {closingFileId && (

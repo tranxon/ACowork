@@ -162,6 +162,148 @@ export function mergeMessageWindow(
 // `ASSISTANT_REPLYING_LINE_THRESHOLD` constants and the per-session
 // stream bookkeeping.  chatStore no longer mutates streaming state.
 
+// ── MQTT connection watchdog (P0 of unified-diagnostics plan) ─────────
+//
+// ADR-036 + ADR-065: the Rust eventloop is the source-of-truth for
+// MQTT connection state. The frontend's `mqttConnected` boolean is the
+// consumer of that truth. But historically the consumer could fall
+// behind: the `mqtt-status` event could be emitted BEFORE the JS
+// `listen()` call resolved (wake-recovery webview reload, listener
+// registration race) and a 1s/30-attempts polling fallback was the only
+// lifeline — after 30 seconds the polling stopped, leaving the frontend
+// stuck.
+//
+// The watchdog below extends the polling fallback to:
+//   1. Run forever (5s interval, only while not connected): armed on
+//      init when not connected, re-armed by any non-connected
+//      `mqtt-status` event after a connected episode, and stopped the
+//      moment `connected` is observed.
+//   2. Detect Rust-vs-frontend state inconsistency and self-heal.
+//   3. Promote a connecting episode stuck past
+//      `STUCK_FORCE_RECONNECT_MS` to `stale` (plan §3.1.1) and
+//      auto-trigger `force_reconnect_mqtt`, restarting the episode
+//      clock so a still-stuck session retries on the next window.
+//
+// The 5-state `effectiveConnection` is the UI-facing summary that the
+// input box placeholder consumes. It collapses the raw
+// {known, connected, connecting, reconnecting, reason} snapshot into a
+// single value the user can act on: "Connected / Connecting /
+// Reconnecting / Stale (auto-recovering) / Disconnected / Idle".
+
+/** UI-facing MQTT connection state. Computed, never persisted. */
+export type ConnectionStatus =
+  | "connected"
+  | "connecting"
+  | "reconnecting"
+  | "stale"
+  | "disconnected"
+  | "idle";
+
+/** One row of the in-memory transition ring buffer (P0 of plan §3.1.2 P0-4). */
+export interface TransitionLogEntry {
+  timestamp: number;
+  from: ConnectionStatus;
+  to: ConnectionStatus;
+  reason?: string | null;
+}
+
+/**
+ * Raw MQTT liveness snapshot — the Rust eventloop is the source of
+ * truth (ADR-036 / ADR-065). `connecting` / `reconnecting` are the
+ * transient flags `mqtt_status_to_payload` attaches; every consumer
+ * must TRANSPORT them verbatim, never collapse them into the
+ * `connected` boolean (doing so renders a connecting client as
+ * `disconnected` — review finding B-2).
+ */
+export interface MqttStatusSnapshot {
+  known: boolean;
+  connected: boolean;
+  connecting?: boolean;
+  reconnecting?: boolean;
+  reason?: string | null;
+}
+
+/**
+ * Compute `effectiveConnection` from the raw MQTT snapshot the Rust
+ * side returns (or emits via `mqtt-status`).
+ *
+ * Pure function (no clock dependency) — the stale-upgrade rule lives in
+ * `applyConnectionTransition` instead, so this remains unit-testable in
+ * isolation.
+ */
+export function computeEffectiveConnection(
+  snapshot: MqttStatusSnapshot | null,
+): ConnectionStatus {
+  if (!snapshot || !snapshot.known) return "idle";
+  if (snapshot.connected) return "connected";
+  if (snapshot.connecting) return "connecting";
+  if (snapshot.reconnecting) return "reconnecting";
+  return "disconnected";
+}
+
+/** Maximum number of transition log entries retained for diagnostics UI. */
+const TRANSITION_LOG_CAPACITY = 20;
+
+/** Polling interval for the watchdog (runs only while not connected). */
+const WATCHDOG_INTERVAL_MS = 5_000;
+
+/** Deadline for the whole connecting episode (plan §3.1.1 / D-5):
+ *  `connecting` / `reconnecting` older than this is promoted to
+ *  `stale` and gets one `force_reconnect_mqtt`; the episode clock is
+ *  then restarted so a still-stuck session retries every window.
+ *  Exported so the input-area status banner (P0-7) can compute the
+ *  "X seconds until auto-recovery" countdown UI without hardcoding 30s
+ *  in two places. */
+export const STUCK_FORCE_RECONNECT_MS = 30_000;
+
+/** A `connecting` / `reconnecting` / `stale` status means a connection
+ *  attempt is in flight — the shared episode clock keeps running while
+ *  the machine stays inside this family. */
+function isConnectingFamily(status: ConnectionStatus): boolean {
+  return status === "connecting" || status === "reconnecting" || status === "stale";
+}
+
+/**
+ * Advance the shared connecting-episode clock (pure). The clock starts
+ * when the machine enters the connecting family, survives moves WITHIN
+ * the family (connecting → reconnecting → stale, or back), and resets
+ * to `null` the moment the connection settles (connected /
+ * disconnected / idle). `applyConnectionTransition` owns the module
+ * state next to `_mqttPollHandle`; exported for unit tests.
+ */
+export function updateConnectingSince(
+  prev: number | null,
+  nextEffective: ConnectionStatus,
+  now: number = Date.now(),
+): number | null {
+  if (!isConnectingFamily(nextEffective)) return null;
+  return prev ?? now;
+}
+
+/** Build a TransitionLogEntry from a status change. Caps the buffer. */
+export function appendTransition(
+  log: TransitionLogEntry[],
+  from: ConnectionStatus,
+  to: ConnectionStatus,
+  reason: string | null,
+): TransitionLogEntry[] {
+  if (from === to) return log;
+  const entry: TransitionLogEntry = { timestamp: Date.now(), from, to, reason: reason ?? null };
+  const next = [...log, entry];
+  if (next.length > TRANSITION_LOG_CAPACITY) {
+    return next.slice(next.length - TRANSITION_LOG_CAPACITY);
+  }
+  return next;
+}
+
+/** Dedupe adjacent identical error strings — prevents banner flicker on
+ *  repeated transient failures. */
+export function dedupeError(prev: string | null, next: string | null): string | null {
+  if (!next) return null;
+  if (prev === next) return prev;
+  return next;
+}
+
 // ── Sender info helpers ────────────────────────────────────────────────
 
 function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
@@ -363,6 +505,14 @@ interface AgentState {
   preferredModel: string | null;
   /** ADR-012: Agent's preferred provider */
   preferredProvider: string | null;
+  /**
+   * LLM availability for THIS agent, mirrored from its own
+   * `SessionConfig.llm_availability` retained MQTT topic. Per-agent (not
+   * global) because the Desktop subscribes to many agents at once and any
+   * one of them flashing MISSING during a reconnect race must not put a
+   * banner over every other agent's chat.
+   */
+  llmAvailability: LlmAvailability;
 }
 
 const DEFAULT_AGENT_STATE: AgentState = {
@@ -373,6 +523,7 @@ const DEFAULT_AGENT_STATE: AgentState = {
   isSessionInitLoading: false,
   preferredModel: null,
   preferredProvider: null,
+  llmAvailability: "unspecified",
 };
 
 const MAX_CACHED_SESSIONS = 32;
@@ -548,6 +699,33 @@ interface ChatStore {
    */
   lastMqttError: string | null;
   /**
+   * UI-facing summary of the raw MQTT connection snapshot, computed
+   * from the Rust eventloop's last known state + `lastMqttError`.
+   *
+   * - `connected`    — Rust is in `Connected` state, frontend in sync.
+   * - `connecting`   — Rust is in `Connecting` state (initial handshake).
+   * - `reconnecting` — Rust is in `Reconnecting` state (post-disconnect retry).
+   * - `stale`        — non-connected state has persisted past
+   *                    `STALE_GRACE_MS` without recovery, OR the Rust-vs-frontend
+   *                    state is inconsistent. Auto-recovery in progress.
+   * - `disconnected` — Rust is in a hard `Disconnected` state with a reason.
+   * - `idle`         — Rust client not yet initialized (cold start before
+   *                    `connect_mqtt`, or after `disposeMqttListener`).
+   *
+   * See `docs/plan/zh/desktop-unified-diagnostics.md` §3.1 P0 for
+   * the rationale and recovery-time contract.
+   */
+  effectiveConnection: ConnectionStatus;
+  /** Timestamp (ms) when the current connecting episode started (the
+   *  shared clock behind `updateConnectingSince`). `null` whenever the
+   *  connection is settled (`connected` / `disconnected` / `idle`).
+   *  Drives both the watchdog's stuck-detection and the banner's
+   *  "X seconds until auto-reconnect" countdown. */
+  staleSince: number | null;
+  /** Ring buffer of the last `TRANSITION_LOG_CAPACITY` connection state
+   *  transitions, for the diagnostics panel's "recent events" UI. */
+  transitionLog: TransitionLogEntry[];
+  /**
    * Monotonically incremented counter, bumped on every retained
    * `bootstrap-state` snapshot the Rust eventloop forwards from the
    * Gateway's `acowork/global/bootstrap` topic (ADR-059). The Gateway
@@ -560,17 +738,6 @@ interface ChatStore {
    */
   bootstrapVersion: number;
   availableModels: ModelEntry[];
-  /**
-   * LLM availability for the current session, mirrored from the
-   * `SessionConfig.llm_availability` retained MQTT topic. Drives the
-   * three-state banner in `ChatPanel`.
-   *
-   * - `unspecified`  — runtime hasn't published yet, render nothing
-   * - `loading`      — bootstrap not READY / vault not populated, render placeholder
-   * - `configured`   — vault has at least one usable provider, render nothing
-   * - `missing`      — vault empty or every provider unusable, render red banner
-   */
-  llmAvailability: LlmAvailability;
 
   // ---- Actions ----
   sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
@@ -793,16 +960,29 @@ let _bootstrapUnlisten: (() => void) | null = null;
 /// first and returns immediately.
 let _mqttInitPromise: Promise<void> | null = null;
 
-/// Interval handle for the background status-polling fallback.
+/// Interval handle for the background status-polling watchdog.
 ///
-/// When `get_mqtt_status` returns `connected: false` (e.g. the client
-/// is still in `Connecting` state after a wake-recovery reload), the
-/// `mqtt-status` event with `connected: true` may have been emitted
-/// *before* the listener was registered and was therefore lost.  The
-/// polling fallback calls `get_mqtt_status` every 1 s until the client
-/// reports `connected: true` or 30 attempts have been made.  This is
-/// purely a safety net - the event listener is the primary mechanism.
+/// P0 of unified-diagnostics: this is no longer a 30-attempt one-shot
+/// fallback. It runs forever at `WATCHDOG_INTERVAL_MS` while the
+/// connection is not in the `connected` state, and is responsible for:
+///
+///   1. Detecting Rust-vs-frontend state inconsistency (e.g. Rust reports
+///      `connected: true` but the frontend still shows false because the
+///      `mqtt-status` event was lost) and self-healing the frontend.
+///   2. Detecting a stuck Connecting/Reconnecting state past
+///      `STUCK_FORCE_RECONNECT_MS` and auto-triggering
+///      `force_reconnect_mqtt` to break the deadlock.
+///
+/// The watchdog is a safety net, not the primary mechanism. The event
+/// listener registered for `mqtt-status` is still authoritative; the
+/// watchdog exists to handle the rare cases where the event is lost
+/// (wake-recovery webview reload, listener registration race).
 let _mqttPollHandle: ReturnType<typeof setInterval> | null = null;
+/// Shared clock for the current connecting episode (see
+/// `updateConnectingSince`). `null` while the connection is settled.
+/// The watchdog resets it after each `force_reconnect_mqtt` so the
+/// next episode gets a fresh `STUCK_FORCE_RECONNECT_MS` window.
+let _connectingSince: number | null = null;
 
 function stopMqttPoll(): void {
   if (_mqttPollHandle) {
@@ -811,32 +991,150 @@ function stopMqttPoll(): void {
   }
 }
 
+/**
+ * Apply a status transition to the store. Centralizes the invariant:
+ * any time `effectiveConnection` flips, the `transitionLog` is
+ * appended to and the shared connecting-episode clock is advanced.
+ * `mqttConnected` (the legacy boolean) is kept in sync for
+ * backwards-compatible consumers.
+ *
+ * `fromWatchdog` is true when the call originates from the 5s polling
+ * loop — the watchdog uses it to distinguish a Rust-driven transition
+ * from a frontend-driven self-heal in the transition log.
+ *
+ * Stale-upgrade rule (plan §3.1.1 / D-5): if the freshly-computed
+ * nextEffective is still "connecting" / "reconnecting" after
+ * `STUCK_FORCE_RECONNECT_MS` on the connecting-episode clock, the
+ * verdict is promoted to "stale" — the UI surfaces "we've been
+ * waiting too long" and the watchdog fires `force_reconnect_mqtt` in
+ * the same pass.
+ */
+function applyConnectionTransition(
+  raw: MqttStatusSnapshot,
+  options: { fromWatchdog?: boolean } = {},
+): void {
+  const state = useChatStore.getState();
+  const prevEffective = state.effectiveConnection;
+  const now = Date.now();
+  let nextEffective = computeEffectiveConnection(raw);
+  if (
+    (nextEffective === "connecting" || nextEffective === "reconnecting") &&
+    _connectingSince !== null &&
+    now - _connectingSince >= STUCK_FORCE_RECONNECT_MS
+  ) {
+    nextEffective = "stale";
+  }
+  if (prevEffective === nextEffective) return;
+
+  const nextError = dedupeError(
+    state.lastMqttError,
+    raw.connected ? null : raw.reason ?? null,
+  );
+  _connectingSince = updateConnectingSince(_connectingSince, nextEffective, now);
+  const nextLog = appendTransition(
+    state.transitionLog,
+    prevEffective,
+    nextEffective,
+    raw.reason ?? null,
+  );
+  log.debug?.(
+    `[mqtt-status] ${prevEffective} → ${nextEffective}` +
+      (raw.reason ? ` (reason: ${raw.reason})` : "") +
+      (options.fromWatchdog ? " [via watchdog]" : ""),
+  );
+  useChatStore.setState({
+    mqttConnected: raw.connected,
+    lastMqttError: nextError,
+    effectiveConnection: nextEffective,
+    staleSince: _connectingSince,
+    transitionLog: nextLog,
+  });
+}
+
+/**
+ * Apply a transition derived from a Rust snapshot polled via
+ * `get_mqtt_status` (the watchdog path). Same effect as
+ * `applyConnectionTransition` but tagged `fromWatchdog: true` so the
+ * transition log surfaces "who" caused the change.
+ *
+ * F-3 fix: returns `recovered` when Rust reports `connected: true`
+ * while the frontend still thinks otherwise — the caller stops the
+ * watchdog on that signal.
+ *
+ * The snapshot is passed through VERBATIM (`{ ...snapshot }`): the
+ * `connecting` / `reconnecting` transient flags must survive, because
+ * collapsing them made a genuinely-connecting client render as
+ * `disconnected` (frontend downgrade — review finding B-2).
+ */
+function applyWatchdogSnapshot(snapshot: MqttStatusSnapshot): { recovered: boolean } {
+  const state = useChatStore.getState();
+  const recovered =
+    snapshot.connected === true && state.mqttConnected !== true;
+  applyConnectionTransition({ ...snapshot }, { fromWatchdog: true });
+  return { recovered };
+}
+
 function startMqttPoll(): void {
   stopMqttPoll();
-  let attempts = 0;
   _mqttPollHandle = setInterval(async () => {
-    attempts++;
-    if (attempts > 30) {
+    // Stop the watchdog as soon as we're back to `connected` — it's a
+    // safety net, not a permanent feature.
+    const cur = useChatStore.getState();
+    if (cur.effectiveConnection === "connected") {
+      log.debug("[mqtt-watchdog] connected; stopping watchdog");
       stopMqttPoll();
-      log.debug("MQTT status polling exhausted 30 attempts; relying on events only");
       return;
     }
+
+    // 1. Poll the Rust snapshot and apply it. This self-heals a
+    //    Rust-vs-frontend inconsistency (F-3) and may promote a stuck
+    //    `connecting` / `reconnecting` to `stale` (plan §3.1.1).
     try {
-      const snap = await invoke<{ known: boolean; connected: boolean; reason?: string | null }>(
-        "get_mqtt_status",
-      );
-      if (attempts <= 3 || attempts % 10 === 0) {
-        log.debug("[mqtt-poll] attempt", attempts, "snapshot:", JSON.stringify(snap));
-      }
-      if (snap.known && snap.connected) {
-        useChatStore.setState({ mqttConnected: true, lastMqttError: null });
-        stopMqttPoll();
-        log.debug("[mqtt-poll] connected confirmed after", attempts, "poll(s)");
+      const snap = await invoke<MqttStatusSnapshot>("get_mqtt_status");
+      log.debug?.("[mqtt-watchdog] snapshot:", JSON.stringify(snap));
+      if (snap.known) {
+        const { recovered } = applyWatchdogSnapshot(snap);
+        if (recovered) {
+          log.debug?.(
+            "[mqtt-watchdog] recovered Rust-vs-frontend inconsistency; stopping watchdog",
+          );
+          stopMqttPoll();
+          return;
+        }
       }
     } catch {
       // Transient IPC failure - keep polling.
     }
-  }, 1000);
+
+    // 2. D-5: a `stale` verdict past the force-reconnect deadline gets
+    //    a hard `force_reconnect_mqtt`. The stale-upgrade above runs on
+    //    the SAME connecting-episode clock, so this branch is reached
+    //    with no threshold race (`stale` also matches if a previous
+    //    pass already promoted it). The clock is then reset so the next
+    //    episode gets a fresh 30s window — periodic retry, not a
+    //    single shot.
+    const after = useChatStore.getState();
+    if (
+      after.effectiveConnection === "stale" &&
+      _connectingSince !== null &&
+      Date.now() - _connectingSince >= STUCK_FORCE_RECONNECT_MS
+    ) {
+      log.warn(
+        "[mqtt-watchdog] connecting episode stuck for " +
+          `${Math.round((Date.now() - _connectingSince) / 1000)}s; ` +
+          "auto force_reconnect_mqtt",
+      );
+      try {
+        await invoke("force_reconnect_mqtt");
+      } catch (err) {
+        log.warn("[mqtt-watchdog] force_reconnect_mqtt failed:", err);
+      }
+      // Reset the episode clock (and its store mirror) so the banner
+      // countdown restarts and we don't double-fire within this window.
+      _connectingSince = Date.now();
+      useChatStore.setState({ staleSince: _connectingSince });
+    }
+  }, WATCHDOG_INTERVAL_MS);
 }
 
 export async function initMqttListener(): Promise<void> {
@@ -885,6 +1183,11 @@ async function doInitMqttListener(): Promise<void> {
   // consume `mqtt-status` events for real-time updates.  The payload
   // may include `connecting: true` or `reconnecting: true` for
   // transient states that should NOT trigger the disconnected banner.
+  //
+  // P0 of unified-diagnostics: every event now flows through
+  // `applyConnectionTransition` so the transition log + effective
+  // status stay in sync. When we transition to `connected`, the
+  // watchdog (if running) stops itself on the next tick.
   _mqttStatusUnlisten = await listen<{
     connected: boolean;
     reason?: string;
@@ -892,18 +1195,22 @@ async function doInitMqttListener(): Promise<void> {
     reconnecting?: boolean;
   }>("mqtt-status", (event) => {
     const { connected, reason, connecting, reconnecting } = event.payload;
+    applyConnectionTransition({
+      known: true,
+      connected,
+      connecting: connecting || undefined,
+      reconnecting: reconnecting || undefined,
+      reason: reason ?? null,
+    });
     if (connected) {
-      useChatStore.setState({ mqttConnected: true, lastMqttError: null });
       stopMqttPoll();
-    } else if (connecting) {
-      // Client is attempting to connect - don't flash the error banner.
-      useChatStore.setState({ mqttConnected: false, lastMqttError: null });
-    } else if (reconnecting) {
-      // Client lost connection and is retrying - show a warning.
-      useChatStore.setState({ mqttConnected: false, lastMqttError: reason ?? "reconnecting" });
-    } else {
-      // Hard disconnect with a reason.
-      useChatStore.setState({ mqttConnected: false, lastMqttError: reason ?? null });
+    } else if (_mqttPollHandle === null) {
+      // H-1 fix: a non-connected status arriving after a connected
+      // episode means the session degraded at runtime — re-arm the
+      // watchdog so a FOLLOW-UP lost event still gets self-healed.
+      // Guarded so re-delivered transient events can't restart the
+      // 5s tick phase mid-episode.
+      startMqttPoll();
     }
   });
 
@@ -926,33 +1233,31 @@ async function doInitMqttListener(): Promise<void> {
   // eventual `Connected` transition - the `mqtt-status` event for that
   // transition may have been emitted before this listener registered.
     try {
-      const snapshot = await invoke<{
-        known: boolean;
-        connected: boolean;
-        reason?: string | null;
-      }>("get_mqtt_status");
+      const snapshot = await invoke<MqttStatusSnapshot>("get_mqtt_status");
       log.debug("[initMqttListener] snapshot:", snapshot);
       if (snapshot.known) {
-      useChatStore.setState({
-        mqttConnected: snapshot.connected,
-        lastMqttError: snapshot.connected ? null : snapshot.reason ?? null,
-      });
+        // Pass the snapshot through verbatim so the transient
+        // `connecting` / `reconnecting` flags survive the init path
+        // too (B-2: collapsing them rendered a connecting client as
+        // `disconnected`).
+        applyConnectionTransition({ ...snapshot, known: true });
+      }
+      // Start the watchdog whenever we are not yet connected.
+      // It is harmless when the event stream is working and is a
+      // lifeline when the initial event was lost during webview reload.
+      if (!snapshot.connected) {
+        startMqttPoll();
+      }
+    } catch (err) {
+      // Tauri command not registered (older binary) or other transient
+      // failure - fall back to the event stream alone.
+      log.warn("get_mqtt_status failed; relying on mqtt-status events:", err);
     }
-    // Start the polling fallback whenever we are not yet connected.
-    // It is harmless when the event stream is working and is a
-    // lifeline when the initial event was lost during webview reload.
-    if (!snapshot.connected) {
-      startMqttPoll();
-    }
-  } catch (err) {
-    // Tauri command not registered (older binary) or other transient
-    // failure - fall back to the event stream alone.
-    log.warn("get_mqtt_status failed; relying on mqtt-status events:", err);
-  }
 }
 
 export function disposeMqttListener(): void {
   stopMqttPoll();
+  _connectingSince = null;
   _mqttInitPromise = null;
   if (_mqttAgentEventUnlisten) {
     _mqttAgentEventUnlisten();
@@ -966,16 +1271,23 @@ export function disposeMqttListener(): void {
     _bootstrapUnlisten();
     _bootstrapUnlisten = null;
   }
-  useChatStore.setState({ mqttConnected: false, lastMqttError: null });
+  useChatStore.setState({
+    mqttConnected: false,
+    lastMqttError: null,
+    effectiveConnection: "idle",
+    staleSince: null,
+  });
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
   mqttConnected: false,
   lastMqttError: null,
+  effectiveConnection: "idle",
+  staleSince: null,
+  transitionLog: [],
   bootstrapVersion: 0,
   availableModels: [],
-  llmAvailability: "unspecified",
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -1189,6 +1501,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * The Runtime will publish `session_opened` once the connection is healthy.
    */
   openSession: async (agentId: string, sessionId: string) => {
+    // ponytail: diagnostic — anchor for when "Loading session..." clears.
+    console.warn(
+      `[chatStore] openSession start ${agentId} ${sessionId} @${performance.now().toFixed(0)}ms`,
+    );
     // 1. UI: open the tab + activate + ensure session cache slot.
     set((state) => {
       const agent = getAgentState(state, agentId);
@@ -3109,19 +3425,23 @@ export function handleMessageEvent(
         log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
       }
-      // LLM availability is a global-runtime signal; store at the top
-      // level (not per-session) since every session of the same agent
-      // sees the same value. `data.llm_availability` is the protobuf
-      // wire field (i32 / enum string from JSON conversion).
+      // LLM availability is an agent-level (instance-level) signal, NOT
+      // global: the Desktop subscribes to many agents on the same broker
+      // and each Runtime publishes its own retained SessionConfig. A
+      // per-agent field keeps one agent's reconnect race (see the
+      // runtime `compute()` comment) from putting a misconfig banner
+      // over every other agent's chat. `data.llm_availability` is the
+      // protobuf wire field (i32 / enum string from JSON conversion).
       const nextAvail = llmAvailabilityFromWire(data.llm_availability);
+      const curAvail = getAgentState(get(), agentId).llmAvailability;
       // `unspecified` means "this message carries no availability info"
       // (old runtime without the field, or a per-session config
       // re-publish that wasn't tagged). Never downgrade a known state
       // back to unspecified — that would hide the banner until the next
       // availability transition fires.
-      if (nextAvail !== "unspecified" || get().llmAvailability === "unspecified") {
-        if (nextAvail !== get().llmAvailability) {
-          set({ llmAvailability: nextAvail });
+      if (nextAvail !== "unspecified" || curAvail === "unspecified") {
+        if (nextAvail !== curAvail) {
+          set((state) => updateAgentState(state, agentId, { llmAvailability: nextAvail }));
         }
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.
@@ -3141,6 +3461,9 @@ export function handleMessageEvent(
       if (sid) {
         const status = data.status as SessionStatus | undefined;
         if (status) {
+          // ponytail: diagnostic — time the reducer to see if session_state
+          // handling is what stalls the main thread on agent start.
+          const __t0 = performance.now();
           const prev = getSessionState(get(), agentId, sid!);
           log.debug(
             `[ChatStore:DEBUG] session_state for ${agentId}/${sid}: ` +
@@ -3194,6 +3517,14 @@ export function handleMessageEvent(
 
             const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);
             let agentStates = sessionResult.agentStates;
+            // ponytail: diagnostic
+            const __t1 = performance.now();
+            if (__t1 - __t0 > 100) {
+              console.warn(
+                `[chatStore] session_state reducer took ${Math.round(__t1 - __t0)}ms ` +
+                  `session=${sid} status=${status.status}`,
+              );
+            }
             return { agentStates };
           });
         }
@@ -3206,18 +3537,18 @@ export function handleMessageEvent(
       const aid = data.instance_id as string | undefined;
       const online = data.online as boolean | undefined;
       if (aid && online !== undefined) {
-        // `sleeping` is included by the plain-text branch (Desktop
-        // `parse_plaintext_agent_status`) and by the protobuf branch
-        // (newer Runtimes / Gateway republish). Older agents may omit
-        // it; `updateAgentOnlineStatus` defaults `sleeping` to false.
+        // `alive` mirrors `online` — the MQTT payload is the network-level
+        // liveness verdict (`online`/`sleeping`/`degraded` → alive;
+        // `offline` → dead). `sleeping` rides along from the `sleeping`
+        // payload and is optional for legacy Runtimes that omit it.
         const sleeping = (data as { sleeping?: boolean }).sleeping ?? false;
-        useAgentStore.getState().updateAgentOnlineStatus(aid, online, sleeping);
+        useAgentStore.getState().updateAgentLiveness(aid, online, sleeping);
         // HTTP health double-check on MQTT disconnect (distributed liveness):
         // the Runtime may run on a remote node, and its MQTT connection can
         // drop (e.g. system sleep → KeepAlive timeout → Gateway marks the
         // agent offline) while the Runtime process itself stays alive.
         // Probe `/health` through the Gateway reverse-proxy; if the Runtime
-        // answers 2xx it is alive, so override back to online instead of
+        // answers 2xx it is alive, so override back to alive instead of
         // rendering it offline/sleeping.
         if (!online) {
           // The trailing `.catch(() => {})` is defensive: in production
@@ -3230,7 +3561,7 @@ export function handleMessageEvent(
               if (alive) {
                 useAgentStore
                   .getState()
-                  .updateAgentOnlineStatus(aid, true, false);
+                  .updateAgentLiveness(aid, true, false);
               }
             })
             .catch(() => {

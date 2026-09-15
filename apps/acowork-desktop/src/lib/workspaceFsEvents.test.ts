@@ -441,3 +441,63 @@ describe("ADR-058 review M-3: fs-triggered reload never clobbers in-flight edits
         expect(f.dirty).toBe(false);
     });
 });
+
+// ── ADR-078: git status refresh wiring ───────────────────────────────────
+
+import { useGitStore, gitGroupKey } from "../stores/gitStore";
+
+describe("ADR-078: fs-changed → git status refresh wiring", () => {
+    beforeEach(() => {
+        useGitStore.setState({
+            expandedKey: null,
+            status: {},
+            _inflight: {},
+            _fsTimer: {},
+        });
+    });
+
+    it("debounced-refreshes status when the event hits the expanded group", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-1") });
+        await handleFsChanged(
+            fsEvent([{ kind: "modified", path: "src/a.ts" }]),
+        );
+        // No immediate refresh — it is debounced.
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+        await flushRefreshDebounce();
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(true);
+    });
+
+    it("coalesces a burst of fs-changed events into ONE status refresh", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-1") });
+        await handleFsChanged(
+            fsEvent([{ kind: "modified", path: "src/a.ts" }]),
+        );
+        await handleFsChanged(
+            fsEvent([{ kind: "modified", path: "src/b.ts" }]),
+        );
+        await flushRefreshDebounce();
+
+        const statusFetches = fetchUrls.filter((u) =>
+            u.includes("/git/status"),
+        );
+        expect(statusFetches).toHaveLength(1);
+    });
+
+    it("ignores fs-changed events while the panel is collapsed", async () => {
+        // expandedKey is null (collapsed) — no refresh triggered.
+        await handleFsChanged(
+            fsEvent([{ kind: "modified", path: "src/a.ts" }]),
+        );
+        await flushRefreshDebounce();
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+    });
+
+    it("ignores events for a different workspace than the expanded group", async () => {
+        useGitStore.setState({ expandedKey: gitGroupKey("agent-1", "ws-2") });
+        await handleFsChanged(
+            fsEvent([{ kind: "modified", path: "src/a.ts" }]),
+        );
+        await flushRefreshDebounce();
+        expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+    });
+});

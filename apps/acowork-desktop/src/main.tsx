@@ -4,6 +4,10 @@ import App from "./App";
 import "./i18n"; // i18n initialization (must run before any useTranslation call)
 import "./styles/globals.css";
 import { initMonaco } from "./lib/monacoBootstrap";
+import { installMainThreadProbe, installLongTaskObserver } from "./lib/mainThreadProbe";
+// ponytail: diagnostic — remove once the slow-start report is root-caused.
+installMainThreadProbe();
+installLongTaskObserver();
 
 // ═══ Bundled fonts (macOS uses -apple-system → SF Pro natively;
 // Win/Linux fall through to Inter / Noto Sans SC below) ═══

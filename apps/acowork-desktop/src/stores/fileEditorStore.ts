@@ -148,10 +148,15 @@ export interface OpenFile {
     cursorLine?: number;
     /** "edit" = Monaco editor; "preview" = read-only Markdown render. */
     mode: "edit" | "preview";
-    /** "file" = workspace file; "url" = external URL loaded in an iframe */
-    kind: "file" | "url";
+    /** "file" = workspace file; "url" = external URL loaded in an iframe;
+     *  "diff" / "log" = read-only virtual files from the Git Status Bar
+     *  (ADR-078 decision 7) — never saved, never dirty, no fs-watch. */
+    kind: "file" | "url" | "diff" | "log";
     /** The URL to load (only for kind === "url") */
     url?: string;
+    /** ADR-078: git diff classification for kind === "diff" virtual
+     *  tabs ("modified" | "untracked" | "deleted" | "binary" | "no_change"). */
+    gitDiffKind?: string;
     /** MIME type from Gateway response (e.g. "image/png", "text/html") */
     mimeType?: string;
     // ── ADR-058: external-modification conflict tracking ──
@@ -184,6 +189,21 @@ interface FileEditorState {
     openFileWithContent: (agentId: string, workspaceId: string, relPath: string, content: string, language: string) => void;
     /** Open a URL in a new tab (rendered in an iframe). Does nothing if the URL is invalid. */
     openUrl: (agentId: string, url: string) => void;
+    /** ADR-078: open a read-only virtual diff/log tab (Monaco DiffEditor
+     *  or plaintext). Content is supplied directly — no Gateway fetch,
+     *  no disk, never dirty. Tabs are addressed as
+     *  `git:${agentId}:${workspaceId}:${kind}:${relPath}` so switching
+     *  agent/workspace never collides with a real file tab. */
+    openVirtualFile: (opts: {
+        agentId: string;
+        workspaceId: string;
+        kind: "diff" | "log";
+        relPath: string;
+        content: string;
+        original?: string;
+        gitDiffKind?: string;
+        language: string;
+    }) => void;
     /** Close a file tab. Returns false if dirty (caller should confirm first). */
     closeFile: (fileId: string, force?: boolean) => boolean;
     /** Close all tabs except the one with `keepFileId`.
@@ -443,6 +463,44 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
     },
 
+    openVirtualFile: ({ agentId, workspaceId, kind, relPath, content, original, gitDiffKind, language }) => {
+        const fileId = `git:${agentId}:${workspaceId}:${kind}:${relPath}`;
+        const existing = get().openFiles.find((f) => f.id === fileId);
+        if (existing) {
+            // Already open, just activate
+            set({ activeFileId: fileId });
+            return;
+        }
+
+        const fileName = relPath.split("/").pop() || relPath;
+        // Monaco addresses the model by `relPath` — for virtual tabs we prefix
+        // it with a URI-safe scheme (`diff:src/foo.ts` parses as scheme "diff")
+        // so the model never collides with the real file's model. The human
+        // readable prefix lives in the tab title too.
+        const monacoRelPath = `${kind}:${relPath}`;
+        const newFile: OpenFile = {
+            id: fileId,
+            agentId,
+            workspaceId,
+            relPath: monacoRelPath,
+            fileName: kind === "diff" ? `diff: ${fileName}` : `log: ${fileName}`,
+            content,
+            originalContent: original ?? content,
+            loading: false,
+            saving: false,
+            language,
+            dirty: false,
+            mode: "edit",
+            kind,
+            gitDiffKind,
+        };
+
+        set((state) => ({
+            openFiles: [...state.openFiles, newFile],
+            activeFileId: fileId,
+        }));
+    },
+
     closeFile: (fileId: string, force?: boolean) => {
         const file = get().openFiles.find((f) => f.id === fileId);
         if (!file) return true;
@@ -509,7 +567,8 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
 
     saveFile: async (fileId: string) => {
         const file = get().openFiles.find((f) => f.id === fileId);
-        if (!file || file.saving) return;
+        // ADR-078: virtual diff/log tabs are never saved (no disk target).
+        if (!file || file.saving || file.kind !== "file") return;
 
         set((state) => ({
             openFiles: state.openFiles.map((f) =>

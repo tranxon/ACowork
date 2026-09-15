@@ -159,7 +159,7 @@ cd apps/acowork-desktop
 npm install
 
 # Browser-only dev server
-npm run dev                # → http://localhost:5173
+npm run dev               # → http://localhost:5173
 
 # Or full Tauri desktop window
 npm run tauri dev

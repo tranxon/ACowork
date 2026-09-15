@@ -143,6 +143,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // ADR-078: Late-bind slot for the git query service (read-only
+    // `/git/*` endpoints). Same sync-work_dir pattern — populated
+    // alongside the workspace services in session_init.rs.
+    let git_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // ADR-040 follow-up: Late-bind slot for the Tools-panel persistence
     // service (the four `/agents/{id}/mcp-servers` and
     // `/agents/{id}/search-config` HTTP handlers). The service holds
@@ -262,6 +268,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             memory_query_slot.clone(),
             workspace_query_slot.clone(),
             workspace_mutation_slot.clone(),
+            git_query_slot.clone(),
             agent_tools_slot.clone(),
             agent_config_slot.clone(),
             attachment_slot.clone(),
@@ -372,6 +379,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 work_dir: std::path::PathBuf::from(&config.work_dir),
                 username: config.mqtt_username.as_deref(),
                 password: config.mqtt_password.as_deref(),
+                http_advertise_endpoint: config.http_advertise_endpoint.as_deref(),
+                http_port: runtime_http_port,
             },
         ).await {
             Ok(client) => {
@@ -1306,6 +1315,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         memory_query_slot,
         workspace_query_slot,
         workspace_mutation_slot,
+        git_query_slot,
         agent_tools_slot,
         agent_config_slot,
         attachment_slot,

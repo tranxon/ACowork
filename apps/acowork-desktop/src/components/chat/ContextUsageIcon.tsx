@@ -88,7 +88,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   // `running`), so the extra diagnostic row appears exactly when the
   // Debug Panel is live — and disappears when DevMode is torn down.
   const agentDebugEnabled = useAgentStore(
-    (s) => s.agents[agentId]?.meta?.debug_state === "enabled" && !!s.agents[agentId]?.meta?.running,
+    (s) => s.agents[agentId]?.meta?.debug_state === "enabled" && !!s.agents[agentId]?.meta?.alive,
   );
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
   // ADR-067: section byte sizes are emitted by the runtime's always-on

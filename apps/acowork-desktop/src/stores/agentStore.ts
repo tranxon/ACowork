@@ -14,6 +14,20 @@ import { with503Retry } from "../lib/httpRetry";
 /** System Agent ID — always auto-started by Gateway */
 export const SYSTEM_AGENT_ID = "com.acowork.system";
 
+// ── One-shot "agent came online" waiters (event-driven, no polling) ──────
+// startAgent 等待 Runtime 上线：MQTT `agent_status online` → chatStore →
+// `updateAgentLiveness(alive=true)` → 触发这里注册的回调。超时由调用方
+// (startAgent) 负责 reject。key 为 instance id。
+const onlineWaiters = new Map<string, Array<() => void>>();
+
+function notifyAgentOnline(agentId: string): void {
+  const waiters = onlineWaiters.get(agentId);
+  if (waiters) {
+    onlineWaiters.delete(agentId);
+    for (const fn of waiters) fn();
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // AgentProfile types (moved from agentProfileStore.ts)
 // ══════════════════════════════════════════════════════════════════════════
@@ -188,18 +202,6 @@ export interface AgentStorage {
     cacheRead: number;
     cacheWrite: number;
   } | null;
-  /** Agent online/offline status — updated by agent_status MQTT event.
-   *  Defaults to `true` so the first paint shows a "running" agent
-   *  rather than a blank/inactive state — the Gateway's `/api/agents`
-   *  and the Runtime's first `"online"` retained message will overwrite
-   *  this within the first 1-2 s. */
-  online: boolean;
-  /** Runtime self-reported auto-sleep (idle_watcher fired). True after
-   *  the Runtime published `"sleeping"` to the status retained topic
-   *  but before the process actually exits (the retained message stays
-   *  cached until the Will "offline" overwrites it). Lets the UI render
-   *  the sleeping empty state without waiting for a full polling cycle. */
-  sleeping: boolean;
 }
 
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
@@ -213,8 +215,6 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     pagination: { ...DEFAULT_PAGINATION },
     isLoading: false,
     agentTokenTotals: null,
-    online: true,
-    sleeping: false,
   };
 }
 
@@ -302,11 +302,13 @@ interface AgentStoreState {
 
   // ── Agent lifecycle (MQTT-driven) ──
 
-  /** Update agent's online/offline status (from MQTT agent_status event).
-   *  `sleeping` is optional for backward compatibility with older callers. */
-  updateAgentOnlineStatus: (
+  /** Update agent liveness from the MQTT `agent_status` event
+   *  (`online` / `sleeping` / `degraded` / `offline`). Writes the
+   *  authoritative `alive` / `sleeping` verdict into `meta` — the single
+   *  field every UI consumer gates on. */
+  updateAgentLiveness: (
     agentId: string,
-    online: boolean,
+    alive: boolean,
     sleeping?: boolean,
   ) => void;
   /** Patch specific meta fields without a full state reload.
@@ -356,7 +358,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const sr = list.find((a: AgentInfo) => a.agent_id === "com.acowork.senior-engineer");
       if (sr) {
         log.debug(
-          `[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: running=${sr.running} ready=${sr.ready} connected=${sr.connected}`,
+          `[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: alive=${sr.alive} ready=${sr.ready}`,
         );
       }
 
@@ -378,31 +380,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const id = instanceIdOf(meta);
           const existing = state.agents[id];
           if (existing) {
-            // Fold in `running` from the latest snapshot — if the
-            // Runtime auto-slept (or crashed) between MQTT events, the
-            // Gateway's `/api/agents` is the only source of truth for
-            // `running=false` + `sleeping_at`. We also normalise
-            // `online`/`sleeping` here: if the Gateway says
-            // `running=false`, force `online=false, sleeping=false`
-            // even if the in-memory MQTT event hasn't propagated yet.
-            // This prevents the stale "online=true" window where the
-            // ChatPanel keeps showing the session input after the
-            // Runtime is gone.
-            // Distributed liveness: the Runtime may run on a remote node, so
-            // the process-based `running` flag is not always observable from
-            // this desktop (the Gateway's PID check only sees local agents).
-            // Treat the network signal too — `connected` already merges the
-            // MQTT online view (see Gateway `list_agents`). Only force
-            // offline when BOTH the process signal and the network signal
-            // say the agent is gone; the MQTT `agent_status` handler further
-            // double-checks offline transitions against `/health`.
-            const gateway_says_alive = !!meta.running || !!meta.connected;
-            next[id] = {
-              ...existing,
-              meta,
-              online: gateway_says_alive ? existing.online : false,
-              sleeping: gateway_says_alive ? existing.sleeping : false,
-            };
+            // `alive` / `sleeping` / `ready` come from the Gateway's
+            // authoritative MQTT-registry snapshot — no client-side
+            // reconciliation needed. The MQTT `agent_status` handler
+            // (updateAgentLiveness) provides the realtime path; this
+            // poll is the reconcile fallback that converges any gap.
+            next[id] = { ...existing, meta };
           } else {
             // ADR-073: profiles persisted pre-multi-instance are keyed by
             // package id — fall back so existing customisations survive
@@ -494,11 +477,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // now flows through `chatStore.openSession`, which sends the
     // `open_session` MQTT command and reloads messages atomically.
     //
-    // Same gate used by ChatPanel's mount effect ("if (!running) return")
+    // Same gate used by ChatPanel's mount effect ("if (!alive) return")
     // — ready is no longer required because the with503Retry loop in
     // the data fetchers handles transient 503s during the boot window.
     const meta = get().agents[id]?.meta;
-    if (!meta?.running) return;
+    if (!meta?.alive) return;
 
     // 原子化：选 agent 时加载 latest session 并激活。
     // openSession 内部会调后端 open_session (拉起 Closed 状态到 Active)、
@@ -598,7 +581,32 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   startAgent: async (agentId, devMode) => {
     try {
       await invoke("start_agent", { agentId, devMode: devMode ?? false });
-      await get().fetchAgents();
+      // Gateway /start 只等到 Node 接受控制命令就返回（node_control
+      // start_agent + check_reply）；Runtime 真正上线（MQTT online →
+      // updateAgentLiveness(alive=true)）还要 1-3s。这里等"上线事件"
+      // 而不是轮询状态：`notifyAgentOnline` 由 agent_status 事件触发，
+      // 15s 内没等到即启动失败。若事件先到（invoke 返回时已上线），
+      // 直接通过。
+      const WAIT_ONLINE_MS = 15_000;
+      if (get().agents[agentId]?.meta.alive) return;
+      await new Promise<void>((resolve, reject) => {
+        const onOnline = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          const list = onlineWaiters.get(agentId);
+          if (list) {
+            const idx = list.indexOf(onOnline);
+            if (idx >= 0) list.splice(idx, 1);
+            if (list.length === 0) onlineWaiters.delete(agentId);
+          }
+          reject(new Error(`Agent ${agentId} did not come online within ${WAIT_ONLINE_MS / 1000}s of start`));
+        }, WAIT_ONLINE_MS);
+        const list = onlineWaiters.get(agentId);
+        if (list) list.push(onOnline);
+        else onlineWaiters.set(agentId, [onOnline]);
+      });
     } catch (e) {
       set({ error: String(e) });
       throw e;
@@ -631,11 +639,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   waitForAgentReady: async (agentId) => {
     for (let attempt = 0; attempt < 30; attempt++) {
+      // ponytail: diagnostic
+      const __w0 = performance.now();
       await get().fetchAgents();
       const storage = get().agents[agentId];
+      // ponytail: diagnostic
+      console.warn(
+        `[agentStore] waitForAgentReady attempt=${attempt} ` +
+          `after ${Math.round(performance.now() - __w0)}ms ` +
+          `alive=${storage?.meta.alive} ready=${storage?.meta.ready}`,
+      );
       if (storage?.meta.ready) return;
-      if (!storage?.meta.running) {
-        throw new Error("Agent process exited before becoming ready");
+      if (!storage?.meta.alive) {
+        throw new Error("Agent is no longer alive before becoming ready");
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -772,7 +788,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/latest-session`),
         { tag: `AgentStore.fetchLatestSession(${agentId})`, logger: log },
       );
-      if (!resp.ok) return null;
+      if (!resp.ok) {
+        // ponytail: diagnostic — 404 here is the startup-window race.
+        console.warn(
+          `[AgentStore] fetchLatestSession(${agentId}) HTTP ${resp.status} @${performance.now().toFixed(0)}ms`,
+        );
+        return null;
+      }
       const data = (await resp.json()) as {
         session_id: string;
         title: string | null;
@@ -1019,16 +1041,24 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   // ── Agent lifecycle (MQTT-driven) ──
 
-  updateAgentOnlineStatus: (
+  updateAgentLiveness: (
     agentId: string,
-    online: boolean,
+    alive: boolean,
     sleeping = false,
   ) => {
-    // `sleeping` is optional for backward compatibility with callers
-    // that only have `online`. The plain-text MQTT status branch
-    // (acowork/agents/+/status "online"/"sleeping"/"offline") always
-    // passes it; the protobuf branch may omit it in older Runtimes.
-    set((state) => patchAgent(state, agentId, { online, sleeping }));
+    // `alive` is the network-level verdict from `acowork/agents/{id}/status`
+    // (`online` / `sleeping` / `degraded` → alive; `offline` → not).
+    // `sleeping` rides along from the `sleeping` payload. Patch `meta`
+    // because that is the single field every UI consumer reads.
+    set((state) => {
+      const existing = state.agents[agentId];
+      if (!existing) return state;
+      return patchAgent(state, agentId, {
+        meta: { ...existing.meta, alive, sleeping },
+      });
+    });
+    // One-shot online event for startAgent's waiter (no polling).
+    if (alive) notifyAgentOnline(agentId);
   },
 
   patchAgentMeta: (agentId: string, meta) => {

@@ -27,6 +27,7 @@ import { useLayoutStore } from "../stores/layoutStore";
 import { useChatStore } from "../stores/chatStore";
 import { useAgentStore } from "../stores/agentStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
+import { useGitStore } from "../stores/gitStore";
 import { getGatewayUrl } from "./config";
 import { log } from "./logger";
 
@@ -43,8 +44,10 @@ let _lastReported = new Map<GroupKey, string[]>();
 /**
  * Derive the current "visible" watch set from frontend state, grouped by
  * (agent, workspace). Empty string represents the workspace root.
+ *
+ * @internal Exported for tests — production entry is `initWorkspaceWatchReporter`.
  */
-function deriveWatchGroups(): Map<GroupKey, string[]> {
+export function deriveWatchGroups(): Map<GroupKey, string[]> {
     const groups = new Map<GroupKey, Set<string>>();
 
     const addPath = (agentId: string, workspaceId: string, relPath: string) => {
@@ -80,6 +83,27 @@ function deriveWatchGroups(): Map<GroupKey, string[]> {
                     if (p) addPath(agentId, workspaceId, p);
                 }
             }
+        }
+    }
+
+    // 3. Git Status panel expanded → watch the workspace root, OUTSIDE the
+    //    workspace-panel visibility guard (ADR-078 decision 8): the
+    //    GitStatusBar/Panel lives at the bottom of the WorkspaceExplorer, so
+    //    its root watch must be independent of whether the file tree's root
+    //    is expanded or the file tree is even visible — only "git panel
+    //    expanded" matters. (2026-XX revision: the panel moved from
+    //    FileEditorPanel to WorkspaceExplorer; the orthogonality invariant
+    //    remains, the trigger is now "git panel visible" rather than
+    //    "editor open".)
+    const git = useGitStore.getState();
+    if (git.expandedKey) {
+        const sep = git.expandedKey.indexOf("\u0000");
+        if (sep !== -1) {
+            addPath(
+                git.expandedKey.slice(0, sep),
+                git.expandedKey.slice(sep + 1),
+                "",
+            );
         }
     }
 
@@ -170,6 +194,9 @@ function subscribeStores(): void {
     _unsubscribers.push(useChatStore.subscribe(() => scheduleWatchReport()));
     _unsubscribers.push(useAgentStore.subscribe(() => scheduleWatchReport()));
     _unsubscribers.push(useWorkspaceStore.subscribe(() => scheduleWatchReport()));
+    // ADR-078 decision 8: expanding/collapsing the Git Status panel adds /
+    // removes the workspace root from the derived watch set.
+    _unsubscribers.push(useGitStore.subscribe(() => scheduleWatchReport()));
 }
 
 /**

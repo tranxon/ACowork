@@ -32,6 +32,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useFileTreeStore, treeKey, isReadyNode } from "../stores/fileTree";
 import { useFileEditorStore } from "../stores/fileEditorStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useGitStore } from "../stores/gitStore";
 import { DEFAULT_GATEWAY_URL } from "./config";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "./logger";
@@ -268,6 +269,10 @@ export function disposeWorkspaceFsListener(): void {
  */
 export async function handleFsChanged(ev: WorkspaceFsChangeEvent): Promise<void> {
     if (!ev.changes?.length) return;
+    // ADR-078 decision 8: a fs-changed event that hits the currently
+    // expanded Git Status group triggers a debounced status refresh
+    // (any visible path event → full status refresh — see decision 8).
+    useGitStore.getState().notifyFsChanged(ev.instance_id, ev.workspace_id);
     refreshTreesForChanges(ev);
     await handleEditorConflicts(ev);
 }

@@ -60,6 +60,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         workspace_query,
         workspace_mutation,
         agent_tools,
+        Arc::new(tokio::sync::Mutex::new(None)),
         agent_config,
         attachment,
         session_config,

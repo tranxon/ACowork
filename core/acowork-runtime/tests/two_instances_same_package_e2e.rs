@@ -136,6 +136,8 @@ fn runtime_connect_cfg<'a>(
         node_id: None,
         lsps_update_tx: None,
         node_proxy_update_tx: None,
+        http_advertise_endpoint: None,
+        http_port: None,
         work_dir: std::env::temp_dir().join(format!("acowork-two-instances-{}", uuid::Uuid::new_v4())),
         username: None,
         password: None,

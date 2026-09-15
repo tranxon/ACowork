@@ -276,6 +276,11 @@ pub(crate) struct HttpState {
     memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
     workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
     workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+    /// ADR-078: Late-bind slot for the git query service (read-only
+    /// `/git/status` `/git/diff` `/git/log`). Git execution happens in
+    /// the Runtime (the workspace owner, ADR-009 v2) — the Gateway only
+    /// reverse-proxies these endpoints. Populated in Phase B.
+    git_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
     /// ADR-040 follow-up: Tools-panel persistence (MCP + search active
     /// state). The 4 new `/agents/{id}/mcp-servers` and
     /// `/agents/{id}/search-config` HTTP handlers route through this
@@ -418,6 +423,7 @@ impl RuntimeHttpServer {
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
         workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
         workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        git_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
         agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
         agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
         attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
@@ -446,6 +452,7 @@ impl RuntimeHttpServer {
             memory_query,
             workspace_query,
             workspace_mutation,
+            git_query,
             agent_tools,
             agent_config,
             attachment,
@@ -488,6 +495,7 @@ impl RuntimeHttpServer {
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
         workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
         workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        git_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::GitQueryService>>>>,
         agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
         agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
         attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
@@ -537,6 +545,7 @@ impl RuntimeHttpServer {
             memory_query,
             workspace_query,
             workspace_mutation,
+            git_query,
             agent_tools,
             agent_config,
             attachment,
@@ -627,6 +636,15 @@ impl RuntimeHttpServer {
             .route("/workspaces/tree", get(list_tree))
             .route("/workspaces/find", get(find_files))
             .route("/workspaces/search", get(search_files))
+            // ADR-078: read-only git endpoints for the Desktop Git Status
+            // Bar. Git executes in the Runtime (workspace owner, ADR-009
+            // v2) via the system git CLI with `GIT_OPTIONAL_LOCKS=0` —
+            // the Gateway reverse-proxies `/api/agents/{id}/git/*` here
+            // and never touches the filesystem. All three handlers are
+            // thin protocol converters over the GitQueryService trait.
+            .route("/git/status", get(git_status))
+            .route("/git/diff", get(git_diff))
+            .route("/git/log", get(git_log))
             // 2 NEW workspace file/dir resources, REST-style (ADR-034 §11.2 #6-9).
             // One path per resource; HTTP method dispatches the operation:
             //   GET    /workspaces/file — read  → JSON {content,size,mimeType}
@@ -1494,6 +1512,75 @@ async fn search_files(
         .await
         .map(Json)
         .map_err(workspace_error_to_response)
+}
+
+// ── Git Query Handlers (ADR-078) ───────────────────────────────────────────
+//
+// Read-only git operations for the Desktop Git Status Bar. All three
+// handlers route through the `GitQueryService` UseCase trait (ADR-040)
+// — the Runtime executes git with `GIT_OPTIONAL_LOCKS=0` so the
+// endpoints are strictly read-only (ADR-078 §1.3 invariant 1). The
+// Gateway reverse-proxies `/api/agents/{id}/git/*` to these routes and
+// never touches the filesystem (ADR-009 / ADR-055 red line).
+//
+// Pre-Phase-B HTTP probes receive 503 from the slot-first pattern,
+// matching every other `*Service` handler in this crate.
+
+/// Convert a [`GitError`] into the `(status, json)` tuple used by every
+/// git handler. Mirrors `workspace_error_to_response`.
+fn git_error_to_response(e: crate::usecases::GitError) -> (StatusCode, Json<serde_json::Value>) {
+    let status = StatusCode::from_u16(e.http_status())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, Json(serde_json::json!({"error": e.to_string()})))
+}
+
+/// `GET /git/status?workspace_id=…` — branch + changed-file list.
+/// Non-repo workspaces return 200 with `{is_repo:false, error:"not_a_repo"}`
+/// (explicit state, never silent degradation — ADR-078 §1.3 invariant 5).
+async fn git_status(
+    State(state): State<HttpState>,
+    Query(params): Query<crate::usecases::git_query::GitStatusParams>,
+) -> Result<Json<crate::usecases::git_query::GitStatusResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.git_query.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "git service not ready"}))))?;
+    svc.status(&params)
+        .await
+        .map(Json)
+        .map_err(git_error_to_response)
+}
+
+/// `GET /git/diff?workspace_id=…&path=…&cached=0|1` — two full texts for
+/// the Monaco DiffEditor (original = HEAD, modified = worktree/index).
+async fn git_diff(
+    State(state): State<HttpState>,
+    Query(params): Query<crate::usecases::git_query::GitDiffParams>,
+) -> Result<Json<crate::usecases::git_query::GitDiffResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.git_query.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "git service not ready"}))))?;
+    svc.diff(&params)
+        .await
+        .map(Json)
+        .map_err(git_error_to_response)
+}
+
+/// `GET /git/log?workspace_id=…&path=…&limit=…` — commit history
+/// (path-scoped when `path` is given, repository-wide otherwise).
+async fn git_log(
+    State(state): State<HttpState>,
+    Query(params): Query<crate::usecases::git_query::GitLogParams>,
+) -> Result<Json<crate::usecases::git_query::GitLogResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.git_query.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "git service not ready"}))))?;
+    svc.log(&params)
+        .await
+        .map(Json)
+        .map_err(git_error_to_response)
 }
 
 // ── Workspace Mutation Handlers (ADR-040) ──────────────────────────────────
@@ -3677,6 +3764,18 @@ mod tests {
         Arc::new(crate::usecases::RuntimeAttachmentService::new(temp_dir))
     }
 
+    /// Build a git query service backed by the test temp dir (ADR-078).
+    /// The `/git/*` handlers route through this trait; tests that never
+    /// touch git pass an empty slot instead.
+    fn new_test_git_query(
+        temp_dir: std::path::PathBuf,
+    ) -> Arc<dyn crate::usecases::GitQueryService> {
+        Arc::new(crate::usecases::RuntimeGitQueryService::new(
+            temp_dir,
+            "test-agent".to_string(),
+        ))
+    }
+
     #[tokio::test]
     async fn test_http_server_starts_and_responds() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http");
@@ -3715,6 +3814,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -3827,6 +3927,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -4003,6 +4104,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -4071,6 +4173,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -4204,6 +4307,7 @@ mod tests {
             embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4355,6 +4459,7 @@ mod tests {
             embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4520,6 +4625,8 @@ mod tests {
             work_dir: temp_dir.clone(),
             username: None,
             password: None,
+            http_advertise_endpoint: None,
+            http_port: None,
         })
         .await
         .expect("RuntimeMqttClient connect");
@@ -4577,6 +4684,7 @@ mod tests {
                 )),
                 std::sync::Arc::new(std::sync::RwLock::new(None)),
             )))),
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4777,6 +4885,7 @@ mod tests {
             embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -4987,6 +5096,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
             agent_tools_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5163,6 +5273,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
             agent_tools_slot,
             agent_config_slot,
             attachment_slot,
@@ -5271,6 +5382,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5362,6 +5474,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_mutation_slot,
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5540,6 +5653,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6036,6 +6150,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6165,6 +6280,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6325,6 +6441,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6392,6 +6509,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6450,6 +6568,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6534,6 +6653,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6597,6 +6717,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6691,6 +6812,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6773,6 +6895,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -6849,6 +6972,7 @@ mod tests {
             embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -7032,6 +7156,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -7154,6 +7279,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
@@ -7235,6 +7361,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(0)),
             Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7343,6 +7470,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -7467,6 +7595,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
@@ -7587,6 +7716,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),

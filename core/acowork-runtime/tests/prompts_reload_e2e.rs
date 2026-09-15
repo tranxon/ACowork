@@ -121,6 +121,7 @@ async fn spawn_server(
         workspace_query,
         workspace_mutation,
         agent_tools,
+        Arc::new(tokio::sync::Mutex::new(None)),
         agent_config,
         attachment,
         session_config,

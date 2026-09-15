@@ -1137,6 +1137,29 @@
     "ariaLabelResizeSidebar": "調整側欄大小",
     "ariaLabelResizeFileEditor": "調整檔案編輯器大小"
   },
+  "gitStatusBar": {
+    "title": "Git",
+    "notRepo": "不是 Git 儲存庫",
+    "changes": "處變更"
+  },
+  "gitStatus": {
+    "loading": "載入中…",
+    "notRepo": "不是 Git 儲存庫",
+    "gitUnavailable": "git 無法使用",
+    "clean": "沒有未提交的變更",
+    "showDiff": "檢視差異",
+    "showLog": "檢視提交歷史",
+    "openInEditor": "在編輯器中開啟",
+    "staged": "已暫存",
+    "noCommits": "尚無提交",
+    "modified": "已修改",
+    "untracked": "未追蹤",
+    "deleted": "已刪除",
+    "renamed": "已重新命名",
+    "added": "新增",
+    "conflicted": "衝突",
+    "binaryDiff": "二進位檔案 — 不顯示差異"
+  },
   "fileTree": {
     "deleteConfirmOk": "刪除",
     "deleteConfirmCancel": "取消"
