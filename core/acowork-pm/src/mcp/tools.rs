@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{PmError, Result};
-use crate::mcp::McpState;
+use crate::mcp::{AgentDirectory, AgentInfo, McpState};
 use crate::store::tree::{PmStore, TreePmStore};
 use crate::types::{
     CreateProject, CreateTask, Dependency, Priority, ProjectId, ProjectStatus, ReparentTask,
@@ -127,12 +127,89 @@ fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────
 
-/// 任务 → 精简 JSON（复用 REST `TaskResponse` 形状，含派生字段）。
-async fn task_to_value(store: &Arc<TreePmStore>, task: Task) -> Result<Value> {
+/// 保留创建者哨兵值（`types::Project::created_by` / `types::Task::created_by`
+/// 的合法取值之一，见 `types.rs` 文档：`human` 或 agent instance UUID）。
+/// 非 instance_id，不应发起 Gateway 查询。
+const HUMAN_CREATOR: &str = "human";
+
+/// 查 `instance_id` 对应的 Agent 元信息。
+///
+/// 宽松目录（`NoopAgentDirectory`）返回 `None`；HTTP 目录缓存命中返回
+/// `Some`，缓存 miss 时走即时兜底（见 [`AgentDirectory::agent_info`]）。
+///
+/// `"human"`（保留创建者哨兵）直接短路返回 `None`——否则每次
+/// `pm_list_tasks` / `pm_list_projects` 都会对 Gateway 发起一次无谓的
+/// `/api/agents/human` 查询（404）。
+async fn lookup_agent_meta(
+    agent_dir: &dyn AgentDirectory,
+    instance_id: Option<&str>,
+) -> Option<AgentInfo> {
+    let id = instance_id?;
+    if id == HUMAN_CREATOR {
+        return None;
+    }
+    agent_dir.agent_info(id).await
+}
+
+/// 把 `instance_id` 字符串 + 元信息投影成 `{instance_id, agent_id, name}`。
+///
+/// `instance_id` 为 `None` 或元信息为 `None`（Agent 已卸载 / Noop 目录）
+/// 时返回 `Value::Null`，让 LLM 拿到清晰的 null 而不是空字符串。
+fn agent_ref_value(instance_id: Option<&str>, info: Option<&AgentInfo>) -> Value {
+    match (instance_id, info) {
+        (Some(id), Some(info)) => json!({
+            "instance_id": id,
+            "agent_id": info.agent_id,
+            "name": info.name,
+        }),
+        _ => Value::Null,
+    }
+}
+
+/// 任务 → 精简 JSON（复用 REST `TaskResponse` 形状，含派生字段 + Agent 元信息）。
+///
+/// **MCP 专属**附加字段（不在 REST `TaskResponse` 里）：
+/// - `assignee_meta`：assignee 的 `{instance_id, agent_id, name}`，LLM 据此反查
+///   显示名 / 派任务时取 `instance_id`
+/// - `created_by_meta`：创建者同上（`"human"` 时为 `null`）
+///
+/// `assignee` / `created_by` 原字段保留为 `String`（前端 join agentStore 显示）。
+///
+/// 单条场景（get / create / claim / submit / update）直接查 meta；列表场景
+/// 请走 [`tasks_to_values`]（先批量去重查询，再复用 [`task_to_value_with_meta`]）。
+async fn task_to_value(
+    store: &Arc<TreePmStore>,
+    agent_dir: &dyn AgentDirectory,
+    task: Task,
+) -> Result<Value> {
+    // 单条任务至多 2 个 agent 字段（assignee + created_by），`tokio::join!`
+    // 并发查即可，无需批量层。
+    let (assignee_meta, created_by_meta) = tokio::join!(
+        lookup_agent_meta(agent_dir, task.assignee.as_deref()),
+        lookup_agent_meta(agent_dir, Some(&task.created_by)),
+    );
+    task_to_value_with_meta(store, task, assignee_meta.as_ref(), created_by_meta.as_ref()).await
+}
+
+/// [`task_to_value`] 的查表变体：`assignee_meta` / `created_by_meta` 已由
+/// 调用方（如 [`tasks_to_values`] 的批量查询）解析好，此处只做派生字段
+/// 计算 + 序列化 + 附加，不再访问 `agent_dir`。
+async fn task_to_value_with_meta(
+    store: &Arc<TreePmStore>,
+    task: Task,
+    assignee_meta: Option<&AgentInfo>,
+    created_by_meta: Option<&AgentInfo>,
+) -> Result<Value> {
     let tid = task.id.clone();
     let depth = store.index_entry(&tid).map(|e| e.depth).unwrap_or(0);
     let parent_id = store.parent_of(&tid);
     let blocked_by = store.compute_blocked_by(&tid).await?;
+
+    // 在 `task` move 进 `TaskResponse` 前取出原始字符串，避免从序列化结果
+    // 反读（`v["assignee"]` / `v["created_by"]`）带来的格式耦合。
+    let assignee = task.assignee.clone();
+    let created_by = task.created_by.clone();
+
     let resp = TaskResponse {
         task,
         is_blocked: !blocked_by.is_empty(),
@@ -140,17 +217,106 @@ async fn task_to_value(store: &Arc<TreePmStore>, task: Task) -> Result<Value> {
         depth,
         parent_id,
     };
-    serde_json::to_value(resp).map_err(PmError::from)
+    let mut v = serde_json::to_value(resp).map_err(PmError::from)?;
+    v["assignee_meta"] = agent_ref_value(assignee.as_deref(), assignee_meta);
+    v["created_by_meta"] = agent_ref_value(Some(&created_by), created_by_meta);
+    Ok(v)
 }
 
+/// 批量查 `instance_id` 元信息（过滤哨兵 + 去重 + 限流并发）。
+///
+/// `list_*` 接口一次返回 N 条任务 / 项目，每条至多 2 个 agent 字段
+/// （assignee + created_by）。不去重会产生 N×2 次 HTTP 调用；本函数
+/// 去重后按 [`MAX_META_LOOKUP_CONCURRENCY`] 限流并发，避免冷缓存下
+/// 一次大列表把 Gateway `/api/agents/{id}` 打爆（ADR-055 多机部署时
+/// Gateway 在远端，无上限并发会放大延迟与压力）。
+///
+/// `"human"`（保留创建者哨兵）与空串直接跳过，不走 Gateway 查询——
+/// 人类创建的项目/任务越多，省下的无谓 HTTP 越多。
+const MAX_META_LOOKUP_CONCURRENCY: usize = 8;
+
+async fn batch_lookup_agent_meta(
+    agent_dir: &dyn AgentDirectory,
+    ids: Vec<String>,
+) -> std::collections::HashMap<String, AgentInfo> {
+    let unique: std::collections::HashSet<String> = ids
+        .into_iter()
+        .filter(|id| !id.is_empty() && id != HUMAN_CREATOR)
+        .collect();
+    if unique.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let futures = unique.into_iter().map(|id| {
+        let agent_dir: &dyn AgentDirectory = agent_dir;
+        async move { (id.clone(), agent_dir.agent_info(&id).await) }
+    });
+    use futures_util::StreamExt;
+    let resolved: Vec<_> = futures_util::stream::iter(futures)
+        .buffer_unordered(MAX_META_LOOKUP_CONCURRENCY)
+        .collect()
+        .await;
+    resolved
+        .into_iter()
+        .filter_map(|(id, info)| info.map(|i| (id, i)))
+        .collect()
+}
+
+/// 任务列表 → JSON 值列表（应用 limit + 先批量查 meta 再组装）。
+///
+/// 关键点：**先**把全部任务的 assignee + created_by 收集、去重、一次性查
+/// `agent_dir`（单次列表至多一次批量查询），**再**逐条序列化查表组装。
+/// 避免每条任务独立查 `agent_info`，在冷缓存下退化成 N×2 次 HTTP。
+async fn tasks_to_values(
+    store: &Arc<TreePmStore>,
+    agent_dir: &dyn AgentDirectory,
+    tasks: Vec<Task>,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let tasks: Vec<Task> = tasks.into_iter().take(limit).collect();
+    // 收集全部 agent 字段 id：assignee（Option）+ created_by（必填）。
+    // `flat_map` 把 Option 迭代器 + 单元素链平铺成 `Iterator<Item = String>`。
+    let ids: Vec<String> = tasks
+        .iter()
+        .flat_map(|t| {
+            t.assignee
+                .iter()
+                .chain(std::iter::once(&t.created_by))
+                .cloned()
+        })
+        .collect();
+    let meta = batch_lookup_agent_meta(agent_dir, ids).await;
+
+    let mut out = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let assignee_meta = task.assignee.as_deref().and_then(|id| meta.get(id));
+        let created_by_meta = meta.get(&task.created_by);
+        out.push(
+            task_to_value_with_meta(store, task, assignee_meta, created_by_meta).await?,
+        );
+    }
+    Ok(out)
+}
+
+
 /// 项目 → 精简 JSON。
-fn project_to_value(p: crate::types::Project, task_count: usize) -> Value {
+///
+/// 成员元信息（`agent_id` / `name`）从 `agent_dir` 反查后单独附加，
+/// 不混入此函数 — `pm_list_projects` 列表展示时不带成员（避免一次拉全量
+/// agent 目录塞回列表响应，撑爆 LLM 上下文）。
+///
+/// `created_by_meta`（MCP 专属）见 [`task_to_value`]。
+fn project_to_value(
+    p: crate::types::Project,
+    task_count: usize,
+    created_by_meta: Option<&AgentInfo>,
+) -> Value {
     json!({
         "id": p.id,
         "title": p.title,
         "description": p.description,
         "status": p.status,
         "created_by": p.created_by,
+        "created_by_meta": agent_ref_value(Some(&p.created_by), created_by_meta),
         "created_at": p.created_at,
         "updated_at": p.updated_at,
         "task_count": task_count,
@@ -169,21 +335,34 @@ async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
     let a: Args = parse_args("pm_list_projects", args)?;
 
     let projects = state.store.list_projects().await?;
-    let out: Vec<Value> = projects
+    // 先过滤可见项目，再一次性批量查 created_by 的 agent 元信息
+    // （去重 + 限流并发；"human" 哨兵在 batch 内跳过）。
+    let visible: Vec<_> = projects
         .into_iter()
         .filter(|p| {
             a.include_archived
                 || !matches!(p.status, ProjectStatus::Archived | ProjectStatus::Completed)
         })
+        .collect();
+    let created_by_ids: Vec<String> = visible.iter().map(|p| p.created_by.clone()).collect();
+    let meta = batch_lookup_agent_meta(state.agent_dir.as_ref(), created_by_ids).await;
+
+    let out: Vec<Value> = visible
+        .into_iter()
         .map(|p| {
             let count = state.store.project_task_count(&p.id);
-            project_to_value(p, count)
+            let cb_meta = meta.get(&p.created_by);
+            project_to_value(p, count, cb_meta)
         })
         .collect();
     Ok(Value::Array(out))
 }
 
-/// `pm_get_project` — 项目详情（含任务数分拆）。
+/// `pm_get_project` — 项目详情（含任务数分拆 + 成员元信息）。
+///
+/// 成员元信息（`agent_id` / `name`）从 `agent_dir` 反查，让 LLM 拿到项目
+/// 成员列表后能用 agent name 反查到 `instance_id` 用于 `pm_create_task` 指派。
+/// `NoopAgentDirectory`（宽松模式）下所有 `agent_id` / `name` 字段为 `null`。
 async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
     #[derive(Deserialize)]
     struct Args {
@@ -197,7 +376,27 @@ async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
         .await?
         .ok_or_else(|| PmError::ProjectNotFound(a.project_id.to_string()))?;
     let count = state.store.project_task_count(&a.project_id);
-    Ok(project_to_value(p, count))
+
+    // 批量查：created_by + 全部 members（去重 + 限流并发；"human" 哨兵跳过）。
+    let mut ids: Vec<String> = Vec::with_capacity(1 + p.members.len());
+    ids.push(p.created_by.clone());
+    ids.extend(p.members.iter().map(|m| m.instance_id.clone()));
+    let meta = batch_lookup_agent_meta(state.agent_dir.as_ref(), ids).await;
+    let cb_meta = meta.get(&p.created_by);
+
+    let mut v = project_to_value(p.clone(), count, cb_meta);
+    let mut members = Vec::with_capacity(p.members.len());
+    for m in &p.members {
+        let info = meta.get(&m.instance_id);
+        members.push(json!({
+            "instance_id": m.instance_id,
+            "agent_id": info.map(|i| &i.agent_id),
+            "name": info.map(|i| &i.name),
+            "added_at": m.added_at,
+        }));
+    }
+    v["members"] = Value::Array(members);
+    Ok(v)
 }
 
 /// `pm_list_tasks` — 项目内任务列表（支持过滤 + limit）。
@@ -227,10 +426,8 @@ async fn pm_list_tasks(state: &McpState, args: Value) -> Result<Value> {
         sort: Some(TaskSort::CreatedAt),
     };
     let tasks = state.store.find_tasks(&filter).await?;
-    let mut out = Vec::new();
-    for task in tasks.into_iter().take(a.limit.max(1)) {
-        out.push(task_to_value(&state.store, task).await?);
-    }
+    let agent_dir: &dyn AgentDirectory = state.agent_dir.as_ref();
+    let out = tasks_to_values(&state.store, agent_dir, tasks, a.limit.max(1)).await?;
     Ok(Value::Array(out))
 }
 
@@ -247,7 +444,7 @@ async fn pm_get_task(state: &McpState, args: Value) -> Result<Value> {
         .get_task(&a.task_id)
         .await?
         .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
-    task_to_value(&state.store, task).await
+    task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
 /// `pm_list_my_tasks` — Agent 自查：指派给当前调用者的任务。
@@ -270,10 +467,8 @@ async fn pm_list_my_tasks(state: &McpState, actor: &str, args: Value) -> Result<
         ..Default::default()
     };
     let tasks = state.store.find_tasks(&filter).await?;
-    let mut out = Vec::new();
-    for task in tasks.into_iter().take(a.limit.max(1)) {
-        out.push(task_to_value(&state.store, task).await?);
-    }
+    let agent_dir: &dyn AgentDirectory = state.agent_dir.as_ref();
+    let out = tasks_to_values(&state.store, agent_dir, tasks, a.limit.max(1)).await?;
     Ok(Value::Array(out))
 }
 
@@ -297,6 +492,7 @@ async fn pm_check_task(state: &McpState, actor: &str, args: Value) -> Result<Val
             task.id, task.created_by, actor
         )));
     }
+    let created_by_info = lookup_agent_meta(state.agent_dir.as_ref(), Some(&task.created_by)).await;
     Ok(json!({
         "id": task.id,
         "project_id": task.project_id,
@@ -305,6 +501,7 @@ async fn pm_check_task(state: &McpState, actor: &str, args: Value) -> Result<Val
         "review_status": task.review_status,
         "approved": matches!(task.review_status, ReviewStatus::Approved),
         "created_by": task.created_by,
+        "created_by_meta": agent_ref_value(Some(&task.created_by), created_by_info.as_ref()),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }))
@@ -328,7 +525,10 @@ async fn pm_create_project(state: &McpState, actor: &str, args: Value) -> Result
         metadata: Default::default(),
     };
     let p = state.store.create_project(input, actor).await?;
-    Ok(project_to_value(p, 0))
+    // creator 通常是 "human"（人类手动创建项目）→ lookup 短路返回 None，
+    // meta 会是 null；agent 创建项目（罕见）则拿到对应 agent 元信息。
+    let cb_meta = lookup_agent_meta(state.agent_dir.as_ref(), Some(&p.created_by)).await;
+    Ok(project_to_value(p, 0, cb_meta.as_ref()))
 }
 
 /// `pm_create_task` — 创建任务（Agent 创建 → `review_status=pending`，待人类审核）。
@@ -377,7 +577,7 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         due_at: a.due_at,
     };
     let task = state.store.create_task(&a.project_id, input, actor).await?;
-    task_to_value(&state.store, task).await
+    task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
 /// `pm_update_task` — 更新任务（仅 assignee 本人，设计 §9.2）。
@@ -422,7 +622,7 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         depends_on: a.depends_on,
     };
     let task = state.store.update_task(&a.task_id, input).await?;
-    task_to_value(&state.store, task).await
+    task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
 /// `pm_claim_task` — 自领（pending → in_progress），仅限 assignee；依赖未满足 409。
@@ -441,7 +641,7 @@ async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Val
     ensure_assignee(&task, actor)?;
 
     let task = state.store.claim_task(&a.task_id, actor).await?;
-    task_to_value(&state.store, task).await
+    task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
 /// `pm_submit_task` — 提交结果（in_progress → submitted），仅限 assignee。
@@ -466,7 +666,7 @@ async fn pm_submit_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         .store
         .submit_task(&a.task_id, &a.text, a.attachment_ids, actor)
         .await?;
-    task_to_value(&state.store, task).await
+    task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
 /// `pm_reparent_task` — 移动任务到新父下（new_parent=null 提升为根），DFS 防环。
