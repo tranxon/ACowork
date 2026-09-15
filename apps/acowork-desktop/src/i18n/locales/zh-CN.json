@@ -748,6 +748,7 @@
     "remoteBrowseEmpty": "未找到目录",
     "remoteBrowseSelected": "已选择",
     "remoteBrowseSelect": "选择此文件夹",
+    "remoteBrowseShowHidden": "显示隐藏文件",
     "explorer": {
       "agentNotRunning": "启动 Agent 以浏览工作区",
       "loading": "加载中...",

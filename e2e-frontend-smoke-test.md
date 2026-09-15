@@ -481,6 +481,22 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 - **期望**：响应 `200`；`/workspaces` 列表（条目字段为 `id`）不再含该 id；
   物理目录已清理。
 
+#### TC-FSB-01 `GET /api/fs/browse` 默认隐藏点文件
+
+- **前置**：TC-WS-02 已创建 `ws_path`；本用例向其中写入 `regular.txt` 与
+  `.dotfile` 两个文件（幂等，TC-FSB-02 共用同一组 fixtures）。
+- **步骤**：`GET /api/fs/browse?path=<ws_path>`（不带 `show_hidden`）
+- **期望**：响应 `200`；`entries[*].name` 包含 `regular.txt`，**不**包含
+  `.dotfile`。这是 `RemoteFolderPicker` 历来默认行为，必须不被破坏。
+
+#### TC-FSB-02 `GET /api/fs/browse?show_hidden=true` 暴露点文件
+
+- **前置**：与 TC-FSB-01 共享同一份 fixtures。
+- **步骤**：`GET /api/fs/browse?path=<ws_path>&show_hidden=true`
+- **期望**：响应 `200`；`entries[*].name` **同时**包含 `regular.txt` 与
+  `.dotfile`。这是 Desktop `RemoteFolderPicker` 底部新增"显示隐藏文件"
+  开关对应的后端契约。
+
 ### 5.7 Harness 视图（全局资源）
 
 #### TC-HARNESS-01 列出全局 Provider

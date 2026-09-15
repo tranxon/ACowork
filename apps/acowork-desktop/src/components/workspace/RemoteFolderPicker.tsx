@@ -3,6 +3,7 @@ import { ChevronRight, ChevronDown, Folder, FolderOpen, HardDrive } from "lucide
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
+import { Switch } from "../common/Switch";
 import { cn } from "../../lib/utils";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 
@@ -49,16 +50,24 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
     const [expandedEntries, setExpandedEntries] = useState<Map<string, FsBrowseEntry[]>>(new Map());
 
+    // Opt-in toggle for hidden entries (names starting with '.'). Off
+    // by default to preserve the historical behaviour; on, the backend
+    // returns every direct child so users can pick a `.config` / dotfile
+    // workspace that the default filter used to silently hide.
+    const [showHidden, setShowHidden] = useState(false);
+
     // Build a `/api/fs/browse` URL with `target` forwarded when set, so
     // the Gateway reverse-proxies to the node that actually owns the
-    // filesystem instead of returning its own machine's tree.
+    // filesystem instead of returning its own machine's tree. The
+    // `show_hidden` flag is appended when the picker has it on.
     const browseUrl = useCallback(
         (path: string) => {
             const qs = new URLSearchParams({ path });
             if (target) qs.set("target", target);
+            if (showHidden) qs.set("show_hidden", "true");
             return `${baseUrl}/api/fs/browse?${qs.toString()}`;
         },
-        [baseUrl, target],
+        [baseUrl, target, showHidden],
     );
 
     const fetchEntries = useCallback(async (path: string) => {
@@ -144,6 +153,19 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
         if (selectedPath) {
             onSelect(selectedPath);
         }
+    };
+
+    // Toggling `showHidden` flips the query string, but the inline
+    // expansion cache (expandedEntries) is keyed by `path` and holds
+    // the previous listing — drop it so the next expand re-fetches
+    // with the new flag and the chevron count agrees with what's on
+    // screen. We also clear the selection since the previous pick
+    // may not exist in the new listing.
+    const handleToggleHidden = (next: boolean) => {
+        setShowHidden(next);
+        setExpandedDirs(new Set());
+        setExpandedEntries(new Map());
+        setSelectedPath(null);
     };
 
     const handleSelectDir = (entry: FsBrowseEntry) => {
@@ -313,21 +335,34 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                             {t("workspace.remoteBrowseSelected")}: <span className="font-mono text-zinc-700 dark:text-zinc-300">{selectedPath}</span>
                         </div>
                     )}
-                    <div className="flex items-center justify-end gap-2">
-                        <button
-                            onClick={onCancel}
-                            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
-                        >
-                            {t("common.cancel")}
-                        </button>
-                        <button
-                            onClick={handleConfirm}
-                            disabled={!selectedPath}
-                            className="rounded-md px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                            style={{ backgroundColor: "var(--color-accent)" }}
-                        >
-                            {t("workspace.remoteBrowseSelect")}
-                        </button>
+                    <div className="flex items-center justify-between gap-2">
+                        <Switch
+                            checked={showHidden}
+                            onChange={handleToggleHidden}
+                            size="sm"
+                            label={t("workspace.remoteBrowseShowHidden")}
+                            // Material layout so the switch doesn't try to
+                            // stretch to the full footer width (the default
+                            // `labelPosition="left"` applies `w-full` and
+                            // would shove the action buttons off-screen).
+                            labelPosition="right"
+                        />
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={onCancel}
+                                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                            >
+                                {t("common.cancel")}
+                            </button>
+                            <button
+                                onClick={handleConfirm}
+                                disabled={!selectedPath}
+                                className="rounded-md px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                                style={{ backgroundColor: "var(--color-accent)" }}
+                            >
+                                {t("workspace.remoteBrowseSelect")}
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>

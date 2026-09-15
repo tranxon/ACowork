@@ -1531,6 +1531,57 @@ def test_tc_ws_09_delete_workspace(http, base, ctx):
     ctx.pop("ws_id", None)
 
 
+def test_tc_fsb_01_default_hides_dotfiles(http, base, ctx):
+    """TC-FSB-01: `GET /api/fs/browse` default hides `.`-prefixed entries.
+
+    Reuses the empty `ws_path` directory created by TC-WS-02 and seeds
+    one regular + one hidden fixture. The default filter (no
+    `show_hidden` query) must surface `regular.txt` and silently drop
+    `.dotfile` — matching the historical RemoteFolderPicker behaviour.
+    """
+    print("\n── TC-FSB-01: fs/browse default (hide hidden) ──")
+    ws_path = ctx.get("ws_path")
+    if not ws_path:
+        skip("no test workspace")
+        return
+    # Idempotent seed — FSB-02 also reads these.
+    Path(ws_path, "regular.txt").write_text("visible", encoding="utf-8")
+    Path(ws_path, ".dotfile").write_text("hidden", encoding="utf-8")
+
+    r = http.get(f"{base}/api/fs/browse", params={"path": ws_path})
+    if not assert_status(r, 200, "browse default"):
+        return
+    names = {e["name"] for e in r.json().get("entries", [])}
+    if "regular.txt" in names and ".dotfile" not in names:
+        ok("default listing includes regular.txt, excludes .dotfile")
+    else:
+        fail(f"default listing wrong: {sorted(names)}")
+
+
+def test_tc_fsb_02_show_hidden_includes_dotfiles(http, base, ctx):
+    """TC-FSB-02: `GET /api/fs/browse?show_hidden=true` surfaces dotfiles.
+
+    Same fixtures as TC-FSB-01; the opt-in flag is what the Desktop
+    `RemoteFolderPicker` toggles when the user flips the new "show
+    hidden files" switch. Both `.dotfile` and `regular.txt` must be
+    in the response.
+    """
+    print("\n── TC-FSB-02: fs/browse?show_hidden=true ──")
+    ws_path = ctx.get("ws_path")
+    if not ws_path:
+        skip("no test workspace")
+        return
+    r = http.get(f"{base}/api/fs/browse",
+                 params={"path": ws_path, "show_hidden": "true"})
+    if not assert_status(r, 200, "browse show_hidden"):
+        return
+    names = {e["name"] for e in r.json().get("entries", [])}
+    if ".dotfile" in names and "regular.txt" in names:
+        ok("show_hidden listing includes both .dotfile and regular.txt")
+    else:
+        fail(f"show_hidden listing wrong: {sorted(names)}")
+
+
 def test_tc_mem_03_consolidate(http, base):
     """TC-MEM-03: trigger consolidate (downgraded to 200 check per doc)."""
     print("\n── TC-MEM-03: Memory consolidate (trigger only) ──")
@@ -2238,6 +2289,8 @@ def main():
             test_tc_ws_03_tree(http, base, ctx)
             test_tc_ws_04_07_file_crud(http, base, ctx)
             test_tc_ws_08_find(http, base, ctx)
+            test_tc_fsb_01_default_hides_dotfiles(http, base, ctx)
+            test_tc_fsb_02_show_hidden_includes_dotfiles(http, base, ctx)
             test_tc_ws_09_delete_workspace(http, base, ctx)
             test_tc_mem_03_consolidate(http, base)
             test_tc_mem_04_create_delete_node(http, base)
