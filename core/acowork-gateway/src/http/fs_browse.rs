@@ -33,6 +33,12 @@ pub struct FsBrowseQuery {
     /// filesystem (reverse-proxied to that node's `/fs/browse`).
     #[serde(default)]
     pub target: Option<String>,
+    /// When true, include hidden entries (names starting with '.').
+    /// Default is false (matches the historical behavior the Desktop
+    /// `RemoteFolderPicker` was written against). Forwarded to the
+    /// node-side handler when this call is reverse-proxied.
+    #[serde(default)]
+    pub show_hidden: Option<bool>,
 }
 
 /// A single entry in a directory listing
@@ -64,19 +70,20 @@ pub struct FsBrowseResponse {
     pub entries: Vec<FsBrowseEntry>,
 }
 
-/// Count non-hidden direct children of a directory; 0 on any error.
+/// Count direct children of a directory (excluding hidden ones unless
+/// `show_hidden` is true); 0 on any error.
 ///
 /// ponytail: reads the directory at request time, so slow / network drives
 /// block the handler. Acceptable here because the sibling listing path does
 /// the same enumeration per entry. If this becomes a hotspot, switch to a
 /// cached dirent handle or an async stream.
-fn count_visible_children(path: &Path) -> usize {
+fn count_visible_children(path: &Path, show_hidden: bool) -> usize {
     std::fs::read_dir(path)
         .ok()
         .map(|rd| {
             rd.filter(|e| {
                 e.as_ref()
-                    .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .map(|e| show_hidden || !e.file_name().to_string_lossy().starts_with('.'))
                     .unwrap_or(false)
             })
             .count()
@@ -84,8 +91,11 @@ fn count_visible_children(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Common root directories to show when browsing "" or empty path
-fn root_entries() -> Vec<FsBrowseEntry> {
+/// Common root directories to show when browsing "" or empty path.
+/// `show_hidden` matches the caller's listing flag so the per-row
+/// `childrenCount` reported in the root view stays consistent with what
+/// the user sees when they expand a row.
+fn root_entries(show_hidden: bool) -> Vec<FsBrowseEntry> {
     let mut entries = Vec::new();
 
     // User home directory (cross-platform)
@@ -108,7 +118,7 @@ fn root_entries() -> Vec<FsBrowseEntry> {
             entry_type: "directory".to_string(),
             path: home_str.replace('\\', "/"),
             size: None,
-            children_count: Some(count_visible_children(home_path)),
+            children_count: Some(count_visible_children(home_path, show_hidden)),
         });
     }
 
@@ -123,7 +133,7 @@ fn root_entries() -> Vec<FsBrowseEntry> {
                 entry_type: "directory".to_string(),
                 path: tmp.to_string(),
                 size: None,
-                children_count: Some(count_visible_children(tmp_path)),
+                children_count: Some(count_visible_children(tmp_path, show_hidden)),
             });
         }
     }
@@ -151,7 +161,7 @@ fn root_entries() -> Vec<FsBrowseEntry> {
                     entry_type: "directory".to_string(),
                     path: path.to_string(),
                     size: None,
-                    children_count: Some(count_visible_children(p)),
+                    children_count: Some(count_visible_children(p, show_hidden)),
                 });
             }
         }
@@ -165,7 +175,7 @@ fn root_entries() -> Vec<FsBrowseEntry> {
             let drive = format!("{}:/", letter);
             let drive_path = std::path::Path::new(&drive);
             if drive_path.is_dir() {
-                let children_count = count_visible_children(drive_path);
+                let children_count = count_visible_children(drive_path, show_hidden);
                 entries.push(FsBrowseEntry {
                     name: format!("{}:", letter),
                     entry_type: "directory".to_string(),
@@ -205,10 +215,18 @@ pub async fn browse_fs(
     State(state): State<AppState>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<FsBrowseResponse>, ApiError> {
+    let show_hidden = query.show_hidden.unwrap_or(false);
+
     // Remote target → reverse-proxy to the node's node-local fs browser.
     let target = query.target.as_deref().unwrap_or("").trim();
     if !target.is_empty() && target != "local" {
-        return proxy_fs_browse_to_node(&state, target, query.path.as_deref().unwrap_or("")).await;
+        return proxy_fs_browse_to_node(
+            &state,
+            target,
+            query.path.as_deref().unwrap_or(""),
+            show_hidden,
+        )
+        .await;
     }
 
     let requested_path = query.path.as_deref().unwrap_or("").trim();
@@ -217,7 +235,7 @@ pub async fn browse_fs(
     if requested_path.is_empty() || requested_path == "/" {
         return Ok(Json(FsBrowseResponse {
             path: requested_path.to_string(),
-            entries: root_entries(),
+            entries: root_entries(show_hidden),
         }));
     }
 
@@ -263,8 +281,9 @@ pub async fn browse_fs(
 
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip hidden files/dirs (starting with '.')
-        if name.starts_with('.') {
+        // Skip hidden files/dirs (starting with '.') unless the caller
+        // opted in via `?show_hidden=true`.
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
 
@@ -279,7 +298,7 @@ pub async fn browse_fs(
                 entry_type: "directory".to_string(),
                 path: abs_path,
                 size: None,
-                children_count: Some(count_visible_children(&entry.path())),
+                children_count: Some(count_visible_children(&entry.path(), show_hidden)),
             });
         } else {
             files.push(FsBrowseEntry {
@@ -316,10 +335,18 @@ async fn proxy_fs_browse_to_node(
     state: &AppState,
     target: &str,
     path: &str,
+    show_hidden: bool,
 ) -> Result<Json<FsBrowseResponse>, ApiError> {
     let endpoint = crate::http::proxy::node_http_endpoint(state, target).await?;
 
-    let url = format!("{}/fs/browse?path={}", endpoint, urlencoding::encode(path));
+    // Build the node URL conditionally so the default (?show_hidden
+    // absent) matches what the node's own FsBrowseQuery treats as
+    // "hide hidden", and a non-default request keeps the flag visible
+    // to operators inspecting the proxy call.
+    let mut url = format!("{}/fs/browse?path={}", endpoint, urlencoding::encode(path));
+    if show_hidden {
+        url.push_str("&show_hidden=true");
+    }
 
     let client = crate::http::proxy::runtime_http_client();
     let resp = client.get(&url).send().await.map_err(|e| {
@@ -389,7 +416,7 @@ mod tests {
         fs::write(dir.join(".hidden"), "x").unwrap();
         fs::create_dir(dir.join("subdir")).unwrap();
 
-        assert_eq!(count_visible_children(&dir), 3, "expected 3 visible entries");
+        assert_eq!(count_visible_children(&dir, false), 3, "expected 3 visible entries");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -399,7 +426,22 @@ mod tests {
         let p = fresh_dir("missing");
         // Don't create it — count should silently return 0.
         let _ = fs::remove_dir_all(&p);
-        assert_eq!(count_visible_children(&p), 0);
+        assert_eq!(count_visible_children(&p, false), 0);
+    }
+
+    #[test]
+    fn count_visible_children_includes_hidden_when_opted_in() {
+        // Regression for the `?show_hidden=true` plumbing on
+        // `count_visible_children`: default keeps the `.`-prefixed
+        // entry out, the opt-in flag brings it back in.
+        let dir = fresh_dir("show_hidden");
+        fs::write(dir.join("a.txt"), "x").unwrap();
+        fs::write(dir.join(".hidden"), "x").unwrap();
+
+        assert_eq!(count_visible_children(&dir, false), 1);
+        assert_eq!(count_visible_children(&dir, true), 2);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -408,7 +450,7 @@ mod tests {
         // by the temp-dir block, once by the /var /tmp /opt loop), so
         // the Desktop frontend saw two entries with the same `path` and
         // crashed on a duplicate React key. Every path must be unique.
-        let entries = root_entries();
+        let entries = root_entries(false);
         let mut seen = std::collections::HashSet::new();
         for entry in &entries {
             assert!(
@@ -428,7 +470,7 @@ mod tests {
         // `/` → … forever on a single click. The listing for `/` must
         // never contain `/` itself; that path is the current dir, not
         // a child of it.
-        for entry in root_entries() {
+        for entry in root_entries(false) {
             assert_ne!(
                 entry.path, "/",
                 "root_entries() must not list `/` as its own child"

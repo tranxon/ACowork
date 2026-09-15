@@ -8,6 +8,7 @@
 
 import { getGatewayUrl } from "./config";
 import type {
+  AddProjectMemberInput,
   CreateProjectInput,
   CreateTaskInput,
   PmAttachmentMeta,
@@ -74,32 +75,58 @@ async function request<T>(
 
 // ── Projects ──────────────────────────────────────────────────────────
 
+/**
+ * 规范化项目响应：旧服务端可能缺 `members` 字段（契约演进前），
+ * 统一补 `[]`，避免 UI 运行时 undefined 崩溃。
+ */
+function normalizeProject(p: PmProject): PmProject {
+  return { ...p, members: p.members ?? [] };
+}
+
 export function listProjects() {
-  return request<PmProject[]>("/projects");
+  return request<PmProject[]>("/projects").then((list) => list.map(normalizeProject));
 }
 
 export function createProject(input: CreateProjectInput) {
   return request<PmProject>("/projects", {
     method: "POST",
     body: JSON.stringify(input),
-  });
+  }).then(normalizeProject);
 }
 
 export function getProject(pid: string) {
-  return request<PmProject>(`/projects/${encodeURIComponent(pid)}`);
+  return request<PmProject>(`/projects/${encodeURIComponent(pid)}`).then(normalizeProject);
 }
 
 export function updateProject(pid: string, input: UpdateProjectInput) {
   return request<PmProject>(`/projects/${encodeURIComponent(pid)}`, {
     method: "PATCH",
     body: JSON.stringify(input),
-  });
+  }).then(normalizeProject);
 }
 
 export function deleteProject(pid: string) {
   return request<void>(`/projects/${encodeURIComponent(pid)}`, {
     method: "DELETE",
   });
+}
+
+// ── Project Members ───────────────────────────────────────────────────
+
+/** 添加项目成员（Agent 实例）。重复添加 → 409 member_already_exists */
+export function addProjectMember(pid: string, input: AddProjectMemberInput) {
+  return request<PmProject>(`/projects/${encodeURIComponent(pid)}/members`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }).then(normalizeProject);
+}
+
+/** 移除项目成员。成员名下仍有未完成任务 → 409 member_has_open_tasks */
+export function removeProjectMember(pid: string, instanceId: string) {
+  return request<PmProject>(
+    `/projects/${encodeURIComponent(pid)}/members/${encodeURIComponent(instanceId)}`,
+    { method: "DELETE" },
+  ).then(normalizeProject);
 }
 
 // ── Tasks ─────────────────────────────────────────────────────────────

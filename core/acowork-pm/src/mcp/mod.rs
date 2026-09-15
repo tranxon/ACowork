@@ -897,7 +897,7 @@ mod tests {
     /// e2e：pm_list_my_tasks —— Agent 自查指派给自己的任务 + status 过滤。
     #[tokio::test]
     async fn e2e_list_my_tasks_happy_path() {
-        let router = test_router().await;
+        let (router, store) = test_router_and_store().await;
         let agent = "agent-self";
         let other = "agent-other";
 
@@ -910,6 +910,12 @@ mod tests {
         )
         .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // 联动指派：agent-other 也要是成员才能被指派
+        store
+            .add_project_member(&pid.parse().unwrap(), other)
+            .await
+            .unwrap();
 
         // 两个给自己的任务 + 一个给别人的任务
         for i in 0..3 {
@@ -1182,6 +1188,11 @@ mod tests {
         )
         .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        // 联动指派：agent-other 也要是成员才能被指派
+        store
+            .add_project_member(&pid.parse().unwrap(), other)
+            .await
+            .unwrap();
         for (i, (title, a)) in [("T1", agent), ("T2", other)].into_iter().enumerate() {
             let v = call_tool(
                 &router,

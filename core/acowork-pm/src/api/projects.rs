@@ -4,7 +4,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 
-use crate::types::{CreateProject, Project, ProjectId, UpdateProject};
+use crate::types::{AddProjectMember, CreateProject, Project, ProjectId, UpdateProject};
 
 use super::ApiState;
 use crate::store::tree::PmStore;
@@ -98,4 +98,54 @@ pub async fn delete(
 pub struct DeleteProjectQuery {
     #[serde(default)]
     pub cascade: bool,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// POST /projects/:pid/members
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 添加项目成员（Agent 实例）。
+///
+/// 按 `AgentDirectory::agent_exists`（设计 §9.1 / ADR-073，instance_id 维度）
+/// 校验 Agent 存在；重复添加 → 409 `member_already_exists`。
+#[tracing::instrument(skip(state, input))]
+pub async fn add_member(
+    State(state): State<ApiState>,
+    Path(pid): Path<String>,
+    Json(input): Json<AddProjectMember>,
+) -> Result<Json<Project>, crate::error::PmError> {
+    let pid = pid.parse::<ProjectId>()?;
+    // 校验 Agent 存在（宽松目录跳过）。成员必须是真实存在的 Agent 实例。
+    if !state.agent_dir.agent_exists(&input.instance_id).await {
+        return Err(crate::error::PmError::BadRequest(format!(
+            "agent instance not found in agent directory: {}",
+            input.instance_id
+        )));
+    }
+    let project = state
+        .store
+        .add_project_member(&pid, &input.instance_id)
+        .await?;
+    Ok(Json(project))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// DELETE /projects/:pid/members/:instance_id
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 移除项目成员。
+///
+/// 成员名下仍有未完成任务 → 409 `member_has_open_tasks`（显式失败，
+/// 任务要先转走或完成）。成员不存在 → 404 `member_not_found`。
+#[tracing::instrument(skip(state))]
+pub async fn remove_member(
+    State(state): State<ApiState>,
+    Path((pid, instance_id)): Path<(String, String)>,
+) -> Result<Json<Project>, crate::error::PmError> {
+    let pid = pid.parse::<ProjectId>()?;
+    let project = state
+        .store
+        .remove_project_member(&pid, &instance_id)
+        .await?;
+    Ok(Json(project))
 }

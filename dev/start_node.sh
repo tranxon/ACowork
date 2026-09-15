@@ -10,17 +10,20 @@
 #   ./dev/start_node.sh 10.0.0.5:19875 --addr 10.0.0.5:19900 --debug
 #   ./dev/start_node.sh 192.168.1.10:19875 --no-build
 #
-# Auto-builds acowork-node on first run (default profile: release). On
-# subsequent runs it skips the build unless --force-build is given.
-# Forwards `acowork-node start --gateway HOST:PORT --addr HOST:PORT`. The
-# node auto-enrolls on first boot — one command = deployed (ADR-055 §6.13.2).
+# Stops an existing local Node / Runtimes / LSP relay, builds
+# acowork-node + runtime + lsp-relay (incremental; default profile:
+# release), then forwards `acowork-node start --gateway HOST:PORT
+# --addr HOST:PORT`. The node auto-enrolls on first boot — one command
+# = deployed (ADR-055 §6.13.2).
 #
 # Options:
 #   --addr HOST:PORT     This node's public reverse-proxy address.
 #                        Default: auto (live-detect LAN IP, ADR-055 §6.3.3).
-#   --debug              Build debug profile (default: release).
-#   --release            Build release profile (explicit).
-#   --force-build        Rebuild even if the binary already exists.
+#   --debug              Build/run the debug profile (default: release).
+#   --release            Build/run the release profile (explicit).
+#   --no-stop            Do NOT stop a running Node / Runtimes / LSP relay
+#                        (diagnostics only — a second Node fights the first
+#                        one over the broker session).
 #   --no-build           Fail if the binary is missing instead of building.
 #   -h, --help           Show this help.
 #
@@ -70,7 +73,7 @@ if [ $# -eq 0 ]; then usage; fi
 GATEWAY_HOST=""
 ADDR="auto"
 PROFILE="release"
-FORCE_BUILD=0
+NO_STOP=0
 NO_BUILD=0
 
 while [ $# -gt 0 ]; do
@@ -91,8 +94,8 @@ while [ $# -gt 0 ]; do
         --release)
             PROFILE="release"; shift
             ;;
-        --force-build)
-            FORCE_BUILD=1; shift
+        --no-stop)
+            NO_STOP=1; shift
             ;;
         --no-build)
             NO_BUILD=1; shift
@@ -116,7 +119,7 @@ case "$GATEWAY_HOST" in
     *) die "GATEWAY_HOST must include a port (e.g. 192.168.1.10:19875)" ;;
 esac
 
-# ── Resolve binary path ──────────────���──────────────────────────────
+# ── Resolve binary path ─────────────────────────────────────────────
 
 EXE_NAME="acowork-node"
 SUFFIX=""
@@ -124,45 +127,79 @@ if [ "$OS" = "windows" ]; then EXE_NAME="acowork-node.exe"; SUFFIX=".exe"; fi
 TARGET_DIR="$PROJECT_ROOT/target/$PROFILE"
 BIN="$TARGET_DIR/$EXE_NAME"
 
-# ── Build if needed ─────────────────────────────────────────────────
+# ── Stop (default) ──────────────────────────────────────────────────
 
-# Node spawns its agent Runtimes and LSP sidecars from sibling binaries
-# (current_exe().parent()), so all three must live in the same target dir:
-#   acowork-runtime   — spawn_agent_process (ADR-055)
-#   acowork-lsp-relay — spawn_lsp_relay (sidecar)
-missing_siblings=""
+# Stop the Node BEFORE building: a running binary may be file-locked
+# (notably on Windows). This sweeps every acowork-* process on the
+# machine, matching build_core.sh's stop step:
+#   - acowork-runtime: the Node keeps Runtimes alive across its own death
+#     by design (ADR-055 §6.10), and a Node killed abruptly never ran its
+#     graceful shutdown — the survivors would otherwise race the new
+#     Node's Runtimes over the broker (same instance identity => mutual
+#     MQTT takeover).
+#   - acowork-lsp-relay: sidecar on port 19878; a stale relay makes the
+#     next Node's relay spawn fail on the port.
+# `pgrep -f` instead of `pgrep -x`: the kernel truncates process names
+# (comm) to 15 chars, so exact-name matching misses "acowork-lsp-relay"
+# entirely (build_core.sh uses -f for the same reason).
+stop_process() {
+    local proc_name="$1"
+    local display_name="$2"
+    local pids
+    if [ "$OS" = "windows" ]; then
+        pids=$(powershell -Command "Get-Process -Name '$proc_name' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id" 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            echo -e "${GRAY}  Found $display_name processes: $pids${NC}"
+            powershell -Command "Stop-Process -Name '$proc_name' -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+        else
+            echo -e "${GRAY}  No $display_name process running.${NC}"
+        fi
+    else
+        pids=$(pgrep -f "$proc_name" 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            echo -e "${GRAY}  Found $display_name processes: $pids${NC}"
+            pkill -f "$proc_name" 2>/dev/null || true
+        else
+            echo -e "${GRAY}  No $display_name process running.${NC}"
+        fi
+    fi
+}
+
+if [ "$NO_STOP" != "1" ]; then
+    log "stopping existing Node / Runtimes / LSP relay (if any)"
+    stop_process "acowork-node"      "Node Agent"
+    stop_process "acowork-runtime"   "Runtime"
+    stop_process "acowork-lsp-relay" "LSP Relay"
+    # Give the OS a moment to release the proxy (19900) / relay (19878)
+    # listeners before the new Node binds them.
+    sleep 1
+    ok "stop step done"
+fi
+
+# ── Build (incremental, on by default) ──────────────────────────────
+
+# Always invoke cargo: cargo is the only reliable arbiter of "needs a
+# rebuild" (source freshness, profile, features). With an up-to-date
+# target dir this takes a few seconds; --no-build skips it entirely.
+if [ "$NO_BUILD" != "1" ]; then
+    log "building acowork-node + runtime + lsp-relay ($PROFILE, incremental)"
+    if [ "$PROFILE" = "release" ]; then
+        cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node -p acowork-runtime -p acowork-lsp-relay --release
+    else
+        cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node -p acowork-runtime -p acowork-lsp-relay
+    fi
+fi
+
+# Fail loudly when a required binary is still missing (e.g. --no-build on
+# a fresh checkout).
+[ -f "$BIN" ] || die "binary not found at $BIN — run dev/build_core.sh first (or drop --no-build)"
 for s in acowork-runtime acowork-lsp-relay; do
-    if [ ! -f "$TARGET_DIR/$s$SUFFIX" ]; then
-        missing_siblings="$missing_siblings $s"
-    fi
+    [ -f "$TARGET_DIR/$s$SUFFIX" ] || die "sibling binary not found at $TARGET_DIR/$s$SUFFIX — run dev/build_core.sh first (or drop --no-build)"
 done
-
-if [ ! -f "$BIN" ] || [ -n "$missing_siblings" ]; then
-    if [ "$NO_BUILD" = "1" ]; then
-        die "binary not found at $BIN (missing siblings:$missing_siblings) and --no-build was given; run dev/build_core.sh first"
-    fi
-    warn "binary not found (node + siblings), building acowork-node + runtime + lsp-relay ($PROFILE) — first run takes a few minutes"
-    cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node -p acowork-runtime -p acowork-lsp-relay --profile "$PROFILE"
-fi
-
-if [ "$FORCE_BUILD" = "1" ] && [ "$NO_BUILD" != "1" ]; then
-    cargo build --manifest-path "$CORE_DIR/Cargo.toml" -p acowork-node -p acowork-runtime -p acowork-lsp-relay --profile "$PROFILE"
-fi
-
-[ -f "$BIN" ] || die "binary still not found at $BIN after build"
 
 # ── Start ───────────────────────────────────────────────────────────
 
 log "starting acowork-node -> gateway $GATEWAY_HOST  (profile=$PROFILE)"
-case "$OS" in
-    windows)
-        # Git Bash: log dir follows the user's $HOME. Mirror what the .ps1
-        # script prints so users on either shell see the same line.
-        log "Ctrl+C to stop. Logs: $HOME/.acowork/acowork-node/data/logs"
-        ;;
-    *)
-        log "Ctrl+C to stop. Logs: $HOME/.acowork/acowork-node/data/logs"
-        ;;
-esac
+log "Ctrl+C to stop. Logs: $HOME/.acowork/acowork-node/logs"
 
 exec "$BIN" start --gateway "$GATEWAY_HOST" --addr "$ADDR"

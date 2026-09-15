@@ -32,6 +32,8 @@
 | 7 | Sidebar User 折叠分组 | 在 AgentList 同级渲染 `partitionAccountsByAccountType` 折叠项——单独 item "Users (N)" 默认折叠，点击展开列出全部账号；admin 视图下点击账号名进入该 user 的 session 列表过滤模式 |
 | 8 | 用户-用户聊天 | Gateway 侧新增 `data_dir/users/{user_a_id}/chats/{user_b_id}/conversation.json` + 同名 `.jsonl`（按字典序排 `(min(a,b), max(a,b))` 避免重复）；参考 ADR-024 meta/jsonl 拆分；不支持 group chat |
 | 9 | 存储归属 | 用户聊天数据完全归属 Gateway 所在机器（`data_dir/users/...`），**不**走 Runtime HTTP 反代；明确写入 ADR-009 §5.4 例外条款 |
+| 10 | 反代身份注入（PM/Doc） | REST 反代 `X-Actor` 从硬编码 `"human"` 改为 `AuthContext.effective_user_id`（决策 3 的 token 身份）；MCP 路径 `X-MCP-Actor` 校验不变（agent 身份与 user 正交，见 §决策 10） |
+| 11 | PM 成员模型多用户化 | `ProjectMember` 新增 `kind`（`Agent`/`User`），人类操作者与 agent 成员对称；移除 `assignee = "human"` 特例，不变式收紧为 `assignee ∈ ∅ ∪ members`（见 §决策 11） |
 
 ### 1.3 不变量（必须满足）
 
@@ -521,6 +523,73 @@ GET    /api/users/{self}/chats/{other_user_id}/files/{aid} → 下载附件
 - ❌ admin 不能 POST 消息冒充他人（消息 `from` 字段强制 = token.sub）
 - ❌ admin 不能修改 unread_count（只能读）
 
+### 决策 10：PM / Doc 反代身份注入 — `X-Actor` 从硬编码 `human` 改为真实 `user_id`
+
+**现状**（单一用户假设下引入的常量，[pm_proxy.rs](core/acowork-gateway/src/http/pm_proxy.rs#L145)，[doc_proxy.rs](core/acowork-gateway/src/http/doc_proxy.rs#L145) 同构）：
+
+| 路径 | 策略 | 注入值 |
+|---|---|---|
+| `/api/pm/*`、`/api/doc/*`（REST，Desktop） | 丢弃客户端自报 `X-Actor`，注入可信值 | 恒为 `"human"` |
+| `/api/pm/mcp`、`/api/doc/mcp`（MCP，Agent） | 校验 `X-MCP-Actor` ∈ Gateway `installed_agents` 后透传；否则剥离（→ 匿名，仅只读工具） | agent instance_id |
+
+**决策**："REST 面 = 人类操作面"这一安全语义**保留**，但"人类"的表示从全局单例常量升级为账号身份——反代注入值从 `"human"` 改为 `AuthContext.effective_user_id`（决策 3 的 token 身份，经 auth_middleware 注入）：
+
+```text
+POST /api/pm/projects  →  auth_middleware 解析 token → AuthContext
+                       →  反代注入 X-Actor: <effective_user_id>   （不再硬编码 "human"）
+```
+
+**PM 消费端语义联动**（acowork-pm，值来自 header）：
+
+| 消费点 | 现状（`"human"` 常量） | 多用户后（user_id） |
+|---|---|---|
+| `create_project.created_by` | `"human"` | 真实 user_id |
+| `create_project` 自举（[tree.rs:505](core/acowork-pm/src/store/tree.rs#L505)） | `created_by != "human"` → 自动加入 members | User / Agent 创建者都自动加入 members（见决策 11） |
+| `create_task` review_status（[tree.rs:762](core/acowork-pm/src/store/tree.rs#L762)） | `created_by == "human"` → NotRequired | 已登录用户创建 → NotRequired（判定按 `kind`，见决策 11） |
+| `ensure_assignee_is_member`（联动指派） | `assignee ∈ ∅ ∪ members ∪ {"human"}` | `assignee ∈ ∅ ∪ members`，无 `"human"` 特例（见决策 11） |
+
+**MCP 路径不变**：`X-MCP-Actor` 校验对象是 agent instance_id（ADR-073 身份），与用户账号正交，multi-user 不改变该校验语义。
+
+**安全检查点**：
+- `build_trusted_headers` 的 REST 分支必须从 `Extension(auth).effective_user_id` 取值，**不得**回退到常量、也不得接受客户端自报值；auth_middleware 未生效时 PM/Doc REST 反代应 401（与决策 3 的全局强制一致）。
+- `X-Actor` 值域从 `"human" \| instance_id` 变为 `user_id \| instance_id`——PM 侧按值域区分，不应再出现 `"human"` 字面量；迁移期可保留兼容解析（收到 `"human"` 视为旧版 Gateway）。
+
+### 决策 11：PM 成员模型多用户化 — 人类操作者成员化（§9 开放问题 8 决议：选 B）
+
+**决策**：`ProjectMember` 扩展为可承载两类身份，人类操作者与 agent 成员**对称**管理，移除 `assignee = "human"` 任意人类特例。
+
+**数据模型**（[types.rs:210](core/acowork-pm/src/types.rs#L210)）：
+
+```rust
+pub enum MemberKind { Agent, User }
+
+pub struct ProjectMember {
+    pub instance_id: String,  // 字段名兼容保留：Agent → instance_id; User → user_id
+    pub kind: MemberKind,     // 新增；#[serde(default)] = Agent → 旧 project.json 零迁移
+    pub added_at: DateTime<Utc>,
+}
+```
+
+- **保留 `instance_id` 字段名 + 新增 `kind`**：JSON 契约不变（前端 `pm-types.ts` / `normalizeProject` 无需改字段名），`kind` 默认 `Agent` 使旧数据读出即 Agent，零迁移；语义扩展写入注释与本文档。
+- **为什么显式 `kind` 而非前缀编码（`user:` / `agent:`）**：避免 user_id 与 instance_id 语义混淆；schema 迁移意图明确；与 ADR-073 三层身份 / ADR-076 user_id 维度对齐。前缀编码把类型塞进值域，破坏 UUID 可读性且无法用 serde 默认表达。
+
+**联动指派不变式更新**：
+
+```text
+旧: task.assignee ∈ ∅ ∪ project.members ∪ {"human"}     （任意人类特例）
+新: task.assignee ∈ ∅ ∪ project.members                  （人类与 agent 同构，无特例）
+```
+
+- `claim` / `submit` / `review`：actor 值域 = user_id（REST `X-Actor`）∪ instance_id（MCP `X-MCP-Actor`），必须 ∈ members——校验逻辑同一，无分支。
+- `create_project` 自举（[tree.rs:505](core/acowork-pm/src/store/tree.rs#L505)）：`created_by` 无论 User 还是 Agent **都**自动加入 members。人类创建者入 members 是"人类成员化"的自洽前提（否则创建者自己无法被指派 / 认领）。
+- `review_status`（[tree.rs:762](core/acowork-pm/src/store/tree.rs#L762)）：判定从 `created_by == "human"` 改为 `kind(created_by) == User` → NotRequired；Agent → Pending。
+
+**迁移**（multi-user 上线时一次性执行）：
+- 现有 `members[]` 全为 agent instance_id → `kind: Agent`（serde default 自动成立，无需数据改写）。
+- `task.assignee == "human"`（旧"任意人类"指派）→ 迁移为创建者自己的 user_id；迁移期 PM 侧保留 `"human"` 兼容解析（视为旧版 Gateway，见决策 10 安全检查点）。
+
+**与决策 10 的关系**：决策 10 解决"Gateway 注入真实身份"（`X-Actor` = user_id）；本决策解决"PM 侧消费端对称化"。配套实施、缺一不可——只做 10 不做 11，"任意人类"仍靠 `"human"` 特例兜底；只做 11 不做 10，人类成员身份无法从 header 区分。
+
 ---
 
 ## 5. 后果
@@ -553,6 +622,8 @@ GET    /api/users/{self}/chats/{other_user_id}/files/{aid} → 下载附件
 - session.user_id 字段可选，删除后过滤失效（回到所有人共享）。
 - auth middleware 可选：保留 `HttpAuth` bearer token 兜底路径，环境变量 `AUTH_MODE = legacy | multi_user`。
 - 聊天数据独立目录，删除 `data_dir/users/*/chats/` 即视为"未启用用户聊天"。
+- PM/Doc 反代身份（决策 10）：`AUTH_MODE = legacy` 时 `build_trusted_headers` 保留 `X-Actor: human` 注入，回滚只影响 PM/Doc 的 `created_by` / reviewer 值，不影响数据文件 schema。
+- PM 成员模型（决策 11）：`ProjectMember.kind` 带 `#[serde(default)]`，回滚仅丢弃 kind 字段、数据文件 schema 兼容；`"human"` 兼容解析保留到迁移完成后再移除。
 
 ### 5.5 已知技术债
 
@@ -599,6 +670,7 @@ GET    /api/users/{self}/chats/{other_user_id}/files/{aid} → 下载附件
 **修改**：
 - `src/http/routes.rs`：`AppState` 加 `auth_middleware`，所有 router 套上 `Router::layer(...)`；`AppState` 加 `auth_state: Arc<AuthState>`
 - `src/http/proxy.rs`：所有 `proxy_*_sessions*` 函数加 `Extension(auth)`，把 `effective_user_id` 注入 query / header；新增 `?as_user=` 处理（仅 admin + 仅 GET）
+- `src/http/pm_proxy.rs` / `src/http/doc_proxy.rs`（决策 10）：`build_trusted_headers` 签名加 `auth: &AuthContext` 参数，REST 分支从注入常量 `"human"` 改为 `auth.effective_user_id`；MCP 分支 `X-MCP-Actor` 校验逻辑不变
 - `src/http/users_api.rs`：**废弃**，合并到 `account_api.rs`（保留兼容路径 → `account_api` 的 alias）
 - `src/resource_cache.rs`：`UserProfileListFile` 改名或保留——保留 `user_profiles.json` 作为公开视图，新增 `accounts_meta.json` 不必要（account 信息全在 `accounts.enc` 解密后产出）
 - `src/bootstrap/orchestrator.rs`：启动时检查 `bootstrap_admin` 配置，若 accounts 为空则强制创建
@@ -628,6 +700,14 @@ grep -rn "Extension(auth)" core/acowork-gateway/src/http/ | wc -l
 # 防止 proxy 反代遗漏 user_id 注入
 grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core/acowork-gateway/src/http/proxy.rs
 ```
+
+### 6.7 core/acowork-pm（决策 10 + 11 联动）
+
+- `src/types.rs`：`ProjectMember` 新增 `kind: MemberKind`（`Agent`/`User`，`#[serde(default)] = Agent`）
+- `src/store/tree.rs`：`ensure_assignee_is_member` 移除 `"human"` 特例；`create_project` 自举改为 User / Agent 创建者都自动加入 members；`create_task` 的 `review_status` 判定从 `== "human"` 改为按 `kind`
+- `src/api/tasks.rs` / `src/api/projects.rs`：actor 解析统一支持 user_id（REST `X-Actor`）与 instance_id（MCP `X-MCP-Actor`）双值域
+- `src/mcp/agent_dir.rs`：成员校验沿用 `agent_exists` 兜底；User 成员不做 MCP 校验（agent 工具面不面向人类成员）
+- 测试：`tests/handlers_e2e.rs` 的 "human 建项目 members 为空" 断言改为 "人类创建者入 members"（行为契约随决策 11 变更）
 
 ---
 
@@ -691,6 +771,7 @@ grep -rn "proxy_list_sessions\|proxy_get_messages\|proxy_get_session_state" core
 5. **`as_user` 是否需要写操作**？当前设计是"只读视图"。如果运营场景需要"admin 代用户发消息给 agent"，需要新增 `X-On-Behalf-Of` header + 单独的写权限策略。
 6. **Desktop 账号切换的原子性**：清空 + 重连流程若中途失败（MQTT 重连不上），是否回滚到旧账号？还是允许"已登出新账号 + 旧账号 token 已失效"的尴尬中间态？建议：保留失败时的"已登出但未登入"状态，引导用户重新登录。
 7. **多设备并发**：alice 在两台 Desktop 登录，token 是否独立？本期允许（无并发限制）；后续是否需要 device_id 概念？
+8. **~~PM `"human"` 特例的演化~~ ✅ 已决议（选 B）**：人类操作者成员化——`ProjectMember` 新增 `kind`（`Agent`/`User`），人类与 agent 成员对称，`assignee ∈ ∅ ∪ members` 无特例。完整设计见 **§决策 11**。~~选项 A（放宽为"任意已登录用户可被指派"）~~ 已拒绝：语义模糊（A 指派的活 B 可认领），且与 ADR-073 三层身份范式不对齐。
 
 ---
 

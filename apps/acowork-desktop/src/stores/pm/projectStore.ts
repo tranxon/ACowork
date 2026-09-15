@@ -43,6 +43,10 @@ interface PmProjectState {
   selectProject: (pid: string | null) => void;
   createProject: (title: string, description?: string) => Promise<PmProject | null>;
   updateProjectMeta: (pid: string, patch: UpdateProjectInput) => Promise<boolean>;
+  /** 添加项目成员（Agent 实例 ID）。成功返回 true，失败设置 error */
+  addMember: (pid: string, instanceId: string) => Promise<boolean>;
+  /** 移除项目成员。成员名下有未完成任务时服务端返回 409 */
+  removeMember: (pid: string, instanceId: string) => Promise<boolean>;
   deleteProject: (pid: string) => Promise<boolean>;
   refreshCounts: () => Promise<void>;
   clear: () => void;
@@ -123,6 +127,40 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
       log.warn("[pm:project] updateProjectMeta failed:", e);
       set({ error: e instanceof Error ? e.message : String(e) });
       return false;
+    }
+  },
+
+  addMember: async (pid, instanceId) => {
+    try {
+      const updated = await pmApi.addProjectMember(pid, { instance_id: instanceId });
+      set((s) => ({
+        projects: s.projects.map((p) => (p.id === pid ? updated : p)),
+        selected: s.selected?.id === pid ? updated : s.selected,
+        updatedAt: Date.now(),
+      }));
+      return true;
+    } catch (e) {
+      log.warn("[pm:project] addMember failed:", e);
+      set({ error: e instanceof Error ? e.message : String(e) });
+      // re-throw：调用方（MemberManagerDialog）据此拿到 PmApiError 并映射本地化文案
+      throw e;
+    }
+  },
+
+  removeMember: async (pid, instanceId) => {
+    try {
+      const updated = await pmApi.removeProjectMember(pid, instanceId);
+      set((s) => ({
+        projects: s.projects.map((p) => (p.id === pid ? updated : p)),
+        selected: s.selected?.id === pid ? updated : s.selected,
+        updatedAt: Date.now(),
+      }));
+      return true;
+    } catch (e) {
+      log.warn("[pm:project] removeMember failed:", e);
+      set({ error: e instanceof Error ? e.message : String(e) });
+      // re-throw：调用方据此区分 409 member_has_open_tasks 等场景
+      throw e;
     }
   },
 

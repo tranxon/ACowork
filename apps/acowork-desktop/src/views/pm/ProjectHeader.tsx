@@ -9,14 +9,20 @@
  * - [⋯] 菜单（编辑项目、删除项目——含级联语义确认）
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { AgentAvatar } from "../../components/common/AgentAvatar";
 import { showToast } from "../../components/common/ToastProvider";
+import { MemberManagerDialog } from "./MemberManagerDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmProject } from "../../lib/pm-types";
+
+/** 成员头像组最多展示个数，超出以 "+N" 折叠 */
+const MAX_AVATARS = 5;
 
 interface ProjectHeaderProps {
   project: PmProject;
@@ -29,6 +35,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const deleteProject = usePmProjectStore((s) => s.deleteProject);
   const tasks = usePmBoardStore((s) => s.tasks);
   const healthy = usePmHealthStore((s) => s.healthy);
+  const agents = useAgentStore((s) => s.agents);
   const offline = healthy === false;
 
   const [editingTitle, setEditingTitle] = useState(false);
@@ -37,6 +44,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const [descDraft, setDescDraft] = useState(project.description);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   // 统计：从看板任务计算
@@ -44,6 +52,16 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const inProgress = tasks.filter((t) => t.status === "in_progress").length;
   const submitted = tasks.filter((t) => t.status === "submitted").length;
   const done = tasks.filter((t) => t.status === "done").length;
+
+  // 成员头像：join agentStore 实时解析（不存快照）。已卸载 Agent 的头像
+  // 显示为占位圆点，计数不受影响。
+  const memberMetas = useMemo(
+    () =>
+      project.members
+        .map((m) => agents[m.instance_id]?.meta)
+        .filter((meta): meta is NonNullable<typeof meta> => Boolean(meta)),
+    [project.members, agents],
+  );
 
   useEffect(() => {
     if (editingTitle) titleInputRef.current?.focus();
@@ -165,6 +183,37 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
               {t("pm.board.done")}: <strong className="tabular-nums">{done}</strong>
             </span>
           </div>
+
+          {/* 成员区 — 点击打开成员管理 */}
+          <div className="mt-2 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setMembersOpen(true)}
+              className="group flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300 px-2 py-0.5 text-[11px] text-zinc-500 hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-zinc-400 dark:hover:text-zinc-200"
+              aria-label={t("pm.manageMembers")}
+            >
+              {project.members.length === 0 ? (
+                <span>+ {t("pm.addMember")}</span>
+              ) : (
+                <>
+                  <span className="flex -space-x-1.5">
+                    {memberMetas.slice(0, MAX_AVATARS).map((meta) => (
+                      <AgentAvatar
+                        key={meta.instance_id}
+                        agentId={meta.instance_id}
+                        displayName={meta.display_name ?? meta.name}
+                        avatarUrl={meta.avatar ?? null}
+                        builtinAvatarId={meta.builtin_avatar ?? null}
+                        size={18}
+                        className="ring-[var(--color-modal-surface)]"
+                      />
+                    ))}
+                  </span>
+                  <span className="tabular-nums">{project.members.length}</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -223,6 +272,11 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
         onConfirm={handleDelete}
         onCancel={() => setConfirmDelete(false)}
       />
+
+      {/* 成员管理 */}
+      {membersOpen && (
+        <MemberManagerDialog project={project} onClose={() => setMembersOpen(false)} />
+      )}
     </header>
   );
 }

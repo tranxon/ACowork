@@ -5,6 +5,12 @@ Covers every test case in docs/plan/zh/e2e-frontend-smoke-test.md (§5.1–5.13)
 driving a real Gateway (embedded rumqttd) + Agent Runtime through their
 public HTTP and MQTT surfaces, exactly like the Desktop App would.
 
+Also covers the PM member feature end-to-end (cross-process): the Gateway
+reverse-proxies `/api/pm/*` to a SEPARATE `acowork-pm` process that
+persists to disk; REST paths run as human (X-Actor injected), the MCP path
+as the assigned agent (X-MCP-Actor). Requires `target/debug/acowork-pm`
+(CI builds it via `cargo build --workspace --bins`). See `run_pm_suite`.
+
 Requires (installed once):
     pip install paho-mqtt httpx        # or: pip install -r requirements.txt
 
@@ -1525,6 +1531,57 @@ def test_tc_ws_09_delete_workspace(http, base, ctx):
     ctx.pop("ws_id", None)
 
 
+def test_tc_fsb_01_default_hides_dotfiles(http, base, ctx):
+    """TC-FSB-01: `GET /api/fs/browse` default hides `.`-prefixed entries.
+
+    Reuses the empty `ws_path` directory created by TC-WS-02 and seeds
+    one regular + one hidden fixture. The default filter (no
+    `show_hidden` query) must surface `regular.txt` and silently drop
+    `.dotfile` — matching the historical RemoteFolderPicker behaviour.
+    """
+    print("\n── TC-FSB-01: fs/browse default (hide hidden) ──")
+    ws_path = ctx.get("ws_path")
+    if not ws_path:
+        skip("no test workspace")
+        return
+    # Idempotent seed — FSB-02 also reads these.
+    Path(ws_path, "regular.txt").write_text("visible", encoding="utf-8")
+    Path(ws_path, ".dotfile").write_text("hidden", encoding="utf-8")
+
+    r = http.get(f"{base}/api/fs/browse", params={"path": ws_path})
+    if not assert_status(r, 200, "browse default"):
+        return
+    names = {e["name"] for e in r.json().get("entries", [])}
+    if "regular.txt" in names and ".dotfile" not in names:
+        ok("default listing includes regular.txt, excludes .dotfile")
+    else:
+        fail(f"default listing wrong: {sorted(names)}")
+
+
+def test_tc_fsb_02_show_hidden_includes_dotfiles(http, base, ctx):
+    """TC-FSB-02: `GET /api/fs/browse?show_hidden=true` surfaces dotfiles.
+
+    Same fixtures as TC-FSB-01; the opt-in flag is what the Desktop
+    `RemoteFolderPicker` toggles when the user flips the new "show
+    hidden files" switch. Both `.dotfile` and `regular.txt` must be
+    in the response.
+    """
+    print("\n── TC-FSB-02: fs/browse?show_hidden=true ──")
+    ws_path = ctx.get("ws_path")
+    if not ws_path:
+        skip("no test workspace")
+        return
+    r = http.get(f"{base}/api/fs/browse",
+                 params={"path": ws_path, "show_hidden": "true"})
+    if not assert_status(r, 200, "browse show_hidden"):
+        return
+    names = {e["name"] for e in r.json().get("entries", [])}
+    if ".dotfile" in names and "regular.txt" in names:
+        ok("show_hidden listing includes both .dotfile and regular.txt")
+    else:
+        fail(f"show_hidden listing wrong: {sorted(names)}")
+
+
 def test_tc_mem_03_consolidate(http, base):
     """TC-MEM-03: trigger consolidate (downgraded to 200 check per doc)."""
     print("\n── TC-MEM-03: Memory consolidate (trigger only) ──")
@@ -1883,6 +1940,251 @@ def run_recovery_suite(gw_bin, node_bin, http):
         gw.stop()
 
 
+# ── PM suite (cross-process: Gateway proxy → standalone acowork-pm) ─────
+# Covers the PM member feature end-to-end: the Desktop talks to
+# `GET/POST /api/pm/*`, the Gateway reverse-proxies to a SEPARATE
+# `acowork-pm` process (ADR-064 Phase 3), which persists to its own
+# projects dir on disk. REST paths get `X-Actor: human` injected by the
+# proxy (human = project owner / reviewer); the MCP path (`/api/pm/mcp`)
+# forwards a trusted `X-MCP-Actor` (agent instance_id, ADR-073) so the
+# assigned agent can claim/submit its own tasks.
+
+def pm_wait_ready(http, base, timeout=TIMEOUT):
+    """Poll `GET /api/pm/projects` until the standalone PM process answers.
+
+    The Gateway proxy answers 503 until pm_supervisor reports the spawned
+    `acowork-pm` process ready (its port is discovered via --port-file).
+    Returns the first non-503 status, or None on timeout.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = http.get(f"{base}/api/pm/projects")
+            if r.status_code != 503:
+                return r.status_code
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return None
+
+
+def pm_agent_instance_id(http, base):
+    """Resolve the smoke agent's `instance_id` (ADR-073 identity key).
+
+    The PM member store keys members by instance_id and the AgentDirectory
+    validates against `GET /api/agents` — so a real installed instance id
+    is required for a cross-process add_member to succeed.
+    """
+    r = http.get(f"{base}/api/agents")
+    if r.status_code != 200:
+        return None
+    for a in r.json():
+        if a.get("agent_id") == AGENT_ID:
+            return a.get("instance_id")
+    return None
+
+
+def pm_error_code(body):
+    """Extract the machine-readable code from a PM REST error body
+    (`{"error": {"code": ..., "message": ...}}`)."""
+    try:
+        data = body.json()
+    except Exception:
+        return None
+    err = data.get("error")
+    if isinstance(err, dict) and isinstance(err.get("code"), str):
+        return err["code"]
+    return None
+
+
+def pm_mcp_call(http, base, actor, tool, args, rpc_id=1):
+    """Call a PM MCP tool through the Gateway proxy (`/api/pm/mcp`).
+
+    `actor` = agent instance_id sent as `X-MCP-Actor` (the proxy forwards
+    it only when the instance is installed, ADR-073). Returns
+    (http_status, response_json_dict).
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args},
+    }
+    headers = {"content-type": "application/json"}
+    if actor:
+        headers["x-mcp-actor"] = actor
+    r = http.post(f"{base}/api/pm/mcp", json=payload, headers=headers)
+    try:
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, {}
+
+
+def pm_mcp_task(body):
+    """Unpack a successful MCP tools/call result into the task dict.
+
+    MCP envelopes tool output as `result.content[0].text` = JSON string
+    (see acowork-pm mcp/mod.rs). Returns the parsed dict or None.
+    """
+    try:
+        content = body.get("result", {}).get("content", [])
+        return json.loads(content[0]["text"])
+    except Exception:
+        return None
+
+
+def run_pm_suite(http, base):
+    """PM member + linked-assignment e2e against the real Gateway proxy.
+
+    Chain: human creates project → adds member → assigns task → agent
+    claims/submits via MCP → human reviews → member removed (no open
+    tasks) → state re-read to prove disk persistence.
+    """
+    print("\n" + "=" * 60)
+    print("PM Suite (cross-process: Gateway proxy → standalone acowork-pm)")
+    print("=" * 60)
+
+    # ── TC-PM-01: service reachable ──
+    print("\n── TC-PM-01: /api/pm/* reachable (standalone PM process) ──")
+    status = pm_wait_ready(http, base)
+    if status is None:
+        fail("PM process never became ready via /api/pm/* (503 persisted)")
+        return
+    ok(f"PM REST ready (GET /api/pm/projects -> {status})")
+    r = http.get(f"{base}/api/pm/projects")
+    if r.status_code == 200 and isinstance(r.json(), list):
+        ok("project list is a JSON array")
+    else:
+        fail(f"project list: HTTP {r.status_code} {r.text[:200]}")
+        return
+
+    # ── TC-PM-02: project create + member add ──
+    print("\n── TC-PM-02: Project create + member add (REST, human) ──")
+    member = pm_agent_instance_id(http, base)
+    if not member:
+        fail("cannot resolve smoke agent instance_id from /api/agents")
+        return
+    ok(f"smoke agent instance_id: {member[:8]}…")
+    pid = None
+    r = http.post(f"{base}/api/pm/projects",
+                  json={"title": f"smoke-pm-{random_suffix()}",
+                        "description": "e2e member flow"})
+    if r.status_code == 200:
+        pid = r.json().get("id")
+        if r.json().get("members") == []:
+            ok("human-created project starts with empty members")
+        else:
+            fail(f"members should be [] for human create, got {r.json().get('members')}")
+    else:
+        fail(f"project create: HTTP {r.status_code} {r.text[:200]}")
+        return
+    if not pid:
+        fail(f"no project id in create response: {r.text[:200]}")
+        return
+    ok(f"project created: {pid}")
+
+    r = http.post(f"{base}/api/pm/projects/{pid}/members",
+                  json={"instance_id": member})
+    if r.status_code == 200 and any(
+        m.get("instance_id") == member for m in r.json().get("members", [])
+    ):
+        ok(f"member added: {member[:8]}…")
+    else:
+        fail(f"add member: HTTP {r.status_code} {r.text[:200]}")
+        return
+
+    r = http.post(f"{base}/api/pm/projects/{pid}/members",
+                  json={"instance_id": member})
+    if r.status_code == 409 and pm_error_code(r) == "member_already_exists":
+        ok("duplicate member → 409 member_already_exists")
+    else:
+        fail(f"duplicate member: HTTP {r.status_code} code={pm_error_code(r)}")
+
+    r = http.post(f"{base}/api/pm/projects/{pid}/members",
+                  json={"instance_id": str(uuid.uuid4())})
+    if r.status_code == 400 and pm_error_code(r) == "bad_request":
+        ok("unknown agent instance → 400 bad_request (AgentDirectory)")
+    else:
+        fail(f"unknown member: HTTP {r.status_code} code={pm_error_code(r)}")
+
+    # ── TC-PM-03: linked assignment ──
+    print("\n── TC-PM-03: Linked assignment (assignee ∈ project.members) ──")
+    r = http.post(f"{base}/api/pm/projects/{pid}/tasks",
+                  json={"title": "assigned task", "assignee": member})
+    tid = r.json().get("id") if r.status_code == 200 else None
+    if r.status_code == 200 and tid and r.json().get("assignee") == member:
+        ok(f"task assigned to member: {tid}")
+    else:
+        fail(f"assign task: HTTP {r.status_code} {r.text[:200]}")
+        return
+
+    r = http.post(f"{base}/api/pm/projects/{pid}/tasks",
+                  json={"title": "outsider task",
+                        "assignee": str(uuid.uuid4())})
+    if r.status_code == 400 and pm_error_code(r) == "assignee_not_project_member":
+        ok("non-member assignee → 400 assignee_not_project_member")
+    else:
+        fail(f"outsider assignee: HTTP {r.status_code} code={pm_error_code(r)}")
+
+    r = http.delete(f"{base}/api/pm/projects/{pid}/members/{member}")
+    if r.status_code == 409 and pm_error_code(r) == "member_has_open_tasks":
+        ok("remove member with open task → 409 member_has_open_tasks")
+    else:
+        fail(f"remove busy member: HTTP {r.status_code} code={pm_error_code(r)}")
+
+    # ── TC-PM-04: agent claim/submit via MCP path ──
+    print("\n── TC-PM-04: Agent claim/submit (MCP path, X-MCP-Actor) ──")
+    status, body = pm_mcp_call(http, base, member, "pm_claim_task",
+                               {"task_id": tid})
+    task = pm_mcp_task(body) if status == 200 else None
+    if task and task.get("status") == "in_progress":
+        ok(f"pm_claim_task → in_progress ({tid})")
+    else:
+        fail(f"pm_claim_task: HTTP {status} {body}")
+        return
+
+    status, body = pm_mcp_call(http, base, member, "pm_submit_task",
+                               {"task_id": tid, "text": "done via smoke e2e"})
+    task = pm_mcp_task(body) if status == 200 else None
+    if task and task.get("status") == "submitted":
+        ok("pm_submit_task → submitted")
+    else:
+        fail(f"pm_submit_task: HTTP {status} {body}")
+        return
+
+    # ── TC-PM-05: human review → member removal → persistence ──
+    print("\n── TC-PM-05: Review + member removal + persistence ──")
+    r = http.post(f"{base}/api/pm/tasks/{tid}/review",
+                  json={"approved": True})
+    if r.status_code == 200 and r.json().get("status") == "done":
+        ok("human review → done")
+    else:
+        fail(f"review: HTTP {r.status_code} {r.text[:200]}")
+        return
+
+    r = http.delete(f"{base}/api/pm/projects/{pid}/members/{member}")
+    if r.status_code == 200 and not any(
+        m.get("instance_id") == member for m in r.json().get("members", [])
+    ):
+        ok("member removed after task done")
+    else:
+        fail(f"remove member: HTTP {r.status_code} {r.text[:200]}")
+        return
+
+    # 独立 PM 进程磁盘持久化：跨请求重新读，状态必须一致
+    r = http.get(f"{base}/api/pm/projects/{pid}")
+    if r.status_code == 200 and r.json().get("members") == []:
+        ok("project persisted with empty members (cross-request re-read)")
+    else:
+        fail(f"persisted project: HTTP {r.status_code} {r.text[:200]}")
+
+    r = http.delete(f"{base}/api/pm/projects/{pid}/members/{member}")
+    if r.status_code == 404 and pm_error_code(r) == "member_not_found":
+        ok("remove absent member → 404 member_not_found")
+    else:
+        fail(f"remove absent member: HTTP {r.status_code} code={pm_error_code(r)}")
+
+
 # ── Main ────────────────────────────────────────────────────────────────
 
 def main():
@@ -1893,6 +2195,8 @@ def main():
     parser.add_argument("--no-start", action="store_true",
                         help="reuse a running Gateway on default ports (main suite only)")
     parser.add_argument("--skip-auth", action="store_true", help="skip the Phase 5a auth suite")
+    parser.add_argument("--skip-pm", action="store_true",
+                        help="skip the cross-process PM suite (needs target/debug/acowork-pm)")
     args = parser.parse_args()
 
     root = REPO_ROOT / "target" / "debug"
@@ -1985,6 +2289,8 @@ def main():
             test_tc_ws_03_tree(http, base, ctx)
             test_tc_ws_04_07_file_crud(http, base, ctx)
             test_tc_ws_08_find(http, base, ctx)
+            test_tc_fsb_01_default_hides_dotfiles(http, base, ctx)
+            test_tc_fsb_02_show_hidden_includes_dotfiles(http, base, ctx)
             test_tc_ws_09_delete_workspace(http, base, ctx)
             test_tc_mem_03_consolidate(http, base)
             test_tc_mem_04_create_delete_node(http, base)
@@ -2009,6 +2315,10 @@ def main():
                 fail("MQTT broker refused — session cases skipped")
 
             test_tc_chat_11_stop_agent(http, base, DEFAULT_MQTT_PORT)
+
+        # ── PM suite: cross-process (Gateway proxy → standalone acowork-pm) ──
+        if not args.skip_pm:
+            run_pm_suite(http, base)
 
         # ── Phase 5a auth suite (isolated instance) ──
         if not args.skip_auth and not args.no_start:

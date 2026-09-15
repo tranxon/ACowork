@@ -49,7 +49,11 @@ impl TestApp {
             ..Default::default()
         };
         let store = Arc::new(TreePmStore::new(cfg.clone()).await.unwrap());
-        let router = acowork_pm::pm_router(store, cfg);
+        let router = acowork_pm::pm_router(
+            store,
+            cfg,
+            Arc::new(acowork_pm::NoopAgentDirectory),
+        );
         Self { router, _tmp: tmp }
     }
 
@@ -383,6 +387,16 @@ async fn claim_submit_review_full_lifecycle() {
     let app = TestApp::new().await;
     let router = app.router();
     let pid = create_project(&app, "P").await;
+    // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员（agent）
+    let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+    let add = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/members"),
+        serde_json::json!({ "instance_id": agent }),
+    );
+    let (status, _) = body_json(router.clone().oneshot(add).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
     let create = TestApp::json_request(
         Method::POST,
         &format!("/projects/{pid}/tasks"),
@@ -391,22 +405,26 @@ async fn claim_submit_review_full_lifecycle() {
     let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
     let tid = body["id"].as_str().unwrap().to_string();
 
-    // claim
-    let claim = TestApp::request_with_actor(
-        Method::POST,
-        &format!("/tasks/{tid}/claim"),
-        serde_json::json!({}),
-    );
+    // claim（agent 成员）
+    let claim = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/claim"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", agent)
+        .body(Body::from("{}"))
+        .unwrap();
     let (status, body) = body_json(router.clone().oneshot(claim).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "in_progress");
 
-    // submit
-    let submit = TestApp::request_with_actor(
-        Method::POST,
-        &format!("/tasks/{tid}/submit"),
-        serde_json::json!({"text": "finished"}),
-    );
+    // submit（agent）
+    let submit = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/submit"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", agent)
+        .body(Body::from(r#"{"text":"finished"}"#))
+        .unwrap();
     let (status, body) = body_json(router.clone().oneshot(submit).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "submitted");
@@ -421,6 +439,86 @@ async fn claim_submit_review_full_lifecycle() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "done");
     assert_eq!(body["review_status"], "approved");
+}
+
+// ── project members（联动指派前置）────────────────────────────────────
+
+/// 成员 CRUD 错误路径 e2e：
+/// 重复添加 409 / 移除不存在 404 / 指派非成员 400 / 成员有未完成任务移除 409。
+/// （happy path 由 `claim_submit_review_full_lifecycle` + `remote_e2e` 覆盖；
+///  本测试补 HTTP 层的错误契约断言。）
+#[tokio::test]
+async fn members_crud_error_paths() {
+    let app = TestApp::new().await;
+    let router = app.router();
+    let pid = create_project(&app, "P").await;
+
+    let alice = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+    let outsider = "99999999-9999-9999-9999-999999999999";
+
+    // 添加成员 → 200，响应含 members
+    let add = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/members"),
+        serde_json::json!({ "instance_id": alice }),
+    );
+    let (status, body) = body_json(router.clone().oneshot(add).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    // 注意：create_project 无 X-Actor → created_by 兜底 "unknown"，被自动
+    // 加入 members（既有契约，handlers_e2e 有断言）；真实 Gateway 恒注入
+    // "human" 或 instance_id，此处只断言 alice 在成员列表中。
+    let member_ids: Vec<&str> = body["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["instance_id"].as_str().unwrap())
+        .collect();
+    assert!(member_ids.contains(&alice), "members = {member_ids:?}");
+
+    // 重复添加 → 409 member_already_exists
+    let dup = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/members"),
+        serde_json::json!({ "instance_id": alice }),
+    );
+    let (status, body) = body_json(router.clone().oneshot(dup).await.unwrap()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "member_already_exists");
+
+    // 移除不存在的成员 → 404 member_not_found
+    let rm_missing = TestApp::request_no_body(
+        Method::DELETE,
+        &format!("/projects/{pid}/members/{outsider}"),
+    );
+    let (status, body) = body_json(router.clone().oneshot(rm_missing).await.unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "member_not_found");
+
+    // 指派非成员 → 400 assignee_not_project_member
+    let bad_assign = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/tasks"),
+        serde_json::json!({ "title": "T", "assignee": outsider }),
+    );
+    let (status, body) = body_json(router.clone().oneshot(bad_assign).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "assignee_not_project_member");
+
+    // 成员名下有未完成任务 → 移除 409 member_has_open_tasks
+    let with_task = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/tasks"),
+        serde_json::json!({ "title": "T2", "assignee": alice }),
+    );
+    let (status, _) = body_json(router.clone().oneshot(with_task).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let rm_alice = TestApp::request_no_body(
+        Method::DELETE,
+        &format!("/projects/{pid}/members/{alice}"),
+    );
+    let (status, body) = body_json(router.clone().oneshot(rm_alice).await.unwrap()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "member_has_open_tasks");
 }
 
 #[tokio::test]

@@ -68,6 +68,28 @@ async fn start_remote_server() -> (String, tempfile::TempDir) {
     (format!("http://{addr}/api/pm"), tmp)
 }
 
+/// 模拟人类在 UI 添加项目成员（REST POST /members）。
+async fn add_member_via_rest(
+    client: &reqwest::Client,
+    base: &str,
+    pid: &str,
+    instance_id: &str,
+) {
+    let resp = client
+        .post(format!("{base}/projects/{pid}/members"))
+        .header("x-actor", "human")
+        .header("content-type", "application/json")
+        .body(json!({ "instance_id": instance_id }).to_string())
+        .send()
+        .await
+        .expect("add member http request");
+    assert_eq!(
+        resp.status(),
+        200,
+        "add member {instance_id} via REST should succeed"
+    );
+}
+
 /// 发送一次 MCP JSON-RPC `tools/call`，返回完整 JSON-RPC 响应 Value。
 async fn mcp_call(
     client: &reqwest::Client,
@@ -146,6 +168,9 @@ async fn remote_agent_claim_submit_full_chain() {
     assert_eq!(resp.status(), 200, "human creates project via REST");
     let proj: Value = resp.json().await.unwrap();
     let pid = proj["id"].as_str().unwrap().to_string();
+
+    // ── 1.5 人类在 UI 添加远程 Agent 为项目成员（联动指派前置）─────────
+    add_member_via_rest(&client, &base, &pid, actor).await;
 
     // ── 2. 人类建任务，指派给远程 Agent ────────────────────────────────
     let resp = client
@@ -245,6 +270,9 @@ async fn non_assignee_mutation_rejected_over_http() {
     let proj: Value = resp.json().await.unwrap();
     let pid = proj["id"].as_str().unwrap().to_string();
 
+    // 联动指派：人类先添加 owner 为项目成员
+    add_member_via_rest(&client, &base, &pid, owner).await;
+
     let resp = client
         .post(format!("{base}/projects/{pid}/tasks"))
         .header("x-actor", "human")
@@ -338,6 +366,9 @@ async fn different_instance_ids_isolated() {
         .send().await.unwrap();
     let pid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
 
+    // 联动指派：人类先添加 alice 为项目成员
+    add_member_via_rest(&client, &base, &pid, alice).await;
+
     let resp = client
         .post(format!("{base}/projects/{pid}/tasks"))
         .header("x-actor", "human")
@@ -419,6 +450,10 @@ async fn multi_instance_same_package_tasks_are_isolated() {
         .body(json!({ "title": "P" }).to_string())
         .send().await.unwrap();
     let pid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+
+    // 联动指派：人类先添加两个 instance 为项目成员
+    add_member_via_rest(&client, &base, &pid, workspace_a).await;
+    add_member_via_rest(&client, &base, &pid, workspace_b).await;
 
     // 人类建两个任务，分别指给 workspace-a 和 workspace-b
     let resp = client

@@ -6,7 +6,7 @@
  * - 字段顺序：标题 → 类型/优先级 → 描述 → 指派/截止 → 父任务/依赖
  * - 仅"标题"必填，其余字段均可后补
  * - 父任务下拉：同项目内可选，含"无"（顶层任务）
- * - 指派下拉：来自 agentStore（Gateway /api/agents），含"未指派"
+ * - 指派下拉：仅列出该项目成员（联动指派），含"未指派"；无成员时提示先添加
  * - 依赖：简单多选（同项目任务）
  *
  * 服务端契约（T2-0 记录的偏差）：
@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createTask, updateTask } from "../../lib/pm-api";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
+import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Dropdown } from "../../components/common/Dropdown";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
@@ -68,6 +69,14 @@ export function TaskEditDialog({
   const boardTasks = usePmBoardStore((s) => s.tasks);
   const reload = usePmBoardStore((s) => s.reload);
 
+  // 项目成员（instance_id 集合）— 联动指派：assignee 必须是项目成员。
+  // selector 返回数组元素引用（find），非新建对象，符合 store 契约。
+  const project = usePmProjectStore((s) => s.projects.find((p) => p.id === projectId));
+  const memberIds = useMemo(
+    () => new Set((project?.members ?? []).map((m) => m.instance_id)),
+    [project?.members],
+  );
+
   const [title, setTitle] = useState(initial?.title ?? "");
   const [type, setType] = useState<TaskType>(initial?.type ?? "task");
   const [priority, setPriority] = useState<Priority>(initial?.priority ?? "normal");
@@ -107,9 +116,10 @@ export function TaskEditDialog({
 
   // ADR-073: dropdown value 是 agent_instance_id（UUID）— 与 task.assignee 语义一致。
   // label 用 display_name 解析（meta.display_name ?? meta.name ?? agent_id）。
+  // 联动指派：仅列出项目成员（memberIds），服务端强校验 assignee ∈ 成员 ∪ "human"。
   const agentOptions = useMemo(
-    () => buildAgentOptions(Object.values(agents)),
-    [agents],
+    () => buildAgentOptions(Object.values(agents), memberIds),
+    [agents, memberIds],
   );
 
   const parentOptions = useMemo(
@@ -260,12 +270,18 @@ export function TaskEditDialog({
 
           <div className="grid grid-cols-2 gap-3">
             <Field label={t("pm.task.assignee")}>
-              <Dropdown
-                value={assignee}
-                onChange={setAssignee}
-                options={agentOptions}
-                placeholder={{ value: "", label: t("pm.task.unassigned") }}
-              />
+              {memberIds.size === 0 ? (
+                <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-[11px] text-zinc-400 dark:border-zinc-600">
+                  {t("pm.assigneeNoMembersHint")}
+                </p>
+              ) : (
+                <Dropdown
+                  value={assignee}
+                  onChange={setAssignee}
+                  options={agentOptions}
+                  placeholder={{ value: "", label: t("pm.task.unassigned") }}
+                />
+              )}
             </Field>
             <Field label={t("pm.task.dueDate")}>
               <StyledInput
@@ -366,9 +382,12 @@ export interface AgentMeta {
 
 export function buildAgentOptions(
   agentList: ReadonlyArray<{ meta: AgentMeta }>,
+  onlyIds?: ReadonlySet<string> | null,
 ): Array<{ value: string; label: string }> {
-  return agentList.map((a) => ({
-    value: a.meta.instance_id,
-    label: a.meta.display_name || a.meta.name || a.meta.agent_id,
-  }));
+  return agentList
+    .filter((a) => !onlyIds || onlyIds.has(a.meta.instance_id))
+    .map((a) => ({
+      value: a.meta.instance_id,
+      label: a.meta.display_name || a.meta.name || a.meta.agent_id,
+    }));
 }

@@ -155,6 +155,25 @@ pub async fn scan_runtime_processes() -> Vec<RuntimeCandidate> {
     }
 }
 
+/// Does the first token of a spawn command line point at the runtime
+/// binary?
+///
+/// Windows quoting: Rust's `Command::new` wraps `argv[0]` in quotes
+/// when the path contains spaces, and `Get-CimInstance
+/// Win32_Process.CommandLine` preserves that quoting — the raw first
+/// token is `"C:\...\acowork-runtime.exe"`, so a bare `ends_with`
+/// check silently missed every running Runtime (orphans were never
+/// re-adopted and a duplicate was spawned on every Node restart).
+/// Strip surrounding quotes before comparing; a no-op for the bare
+/// `argv[0]` printed by unix `ps`.
+fn first_token_is_binary(command_line: &str, bin_name: &str) -> bool {
+    command_line
+        .split_whitespace()
+        .next()
+        .map(|t| t.trim_matches('"').ends_with(bin_name))
+        .unwrap_or(false)
+}
+
 #[cfg(not(windows))]
 async fn scan_unix(bin_name: &str) -> Vec<RuntimeCandidate> {
     let output = match tokio::process::Command::new("ps")
@@ -189,11 +208,7 @@ fn parse_ps_line(line: &str, bin_name: &str) -> Option<RuntimeCandidate> {
     let pid: u32 = line[..space_idx].trim().parse().ok()?;
     let args_str = line[space_idx..].trim();
     let tokens: Vec<String> = args_str.split_whitespace().map(str::to_string).collect();
-    if !tokens
-        .first()
-        .map(|t| t.ends_with(bin_name))
-        .unwrap_or(false)
-    {
+    if !first_token_is_binary(args_str, bin_name) {
         return None;
     }
     parse_runtime_args(pid, &tokens[1..])
@@ -233,7 +248,14 @@ async fn scan_windows(bin_name: &str) -> Vec<RuntimeCandidate> {
             // only one process matches.
             match serde_json::from_str::<Proc>(&stdout) {
                 Ok(single) => vec![single],
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        stdout = %stdout.trim(),
+                        "Re-adopt: failed to parse Windows process scan output — skipping orphan scan"
+                    );
+                    Vec::new()
+                }
             }
         }
     };
@@ -243,17 +265,13 @@ async fn scan_windows(bin_name: &str) -> Vec<RuntimeCandidate> {
         if p.command_line.is_empty() {
             continue;
         }
+        if !first_token_is_binary(&p.command_line, bin_name) {
+            continue;
+        }
         // Minimal Windows command-line tokenization — enough to locate
         // the flag/value pairs we need (`--agent-id` / `--http-port`
         // never contain spaces).
         let tokens: Vec<String> = p.command_line.split_whitespace().map(str::to_string).collect();
-        if !tokens
-            .first()
-            .map(|t| t.ends_with(bin_name))
-            .unwrap_or(false)
-        {
-            continue;
-        }
         if let Some(c) = parse_runtime_args(p.pid, &tokens[1..]) {
             found.push(c);
         }
@@ -394,6 +412,31 @@ mod tests {
     #[test]
     fn parse_empty_args_is_none() {
         assert!(parse_runtime_args(1, &[]).is_none());
+    }
+
+    #[test]
+    fn first_token_accepts_quoted_windows_argv0() {
+        // Get-CimInstance preserves the quoting Rust applies to argv[0]
+        // when the binary path contains a space; a bare `ends_with`
+        // check silently skipped every process (no orphan was ever
+        // re-adopted and a duplicate Runtime was spawned on Node
+        // restart — the two then fought over the MQTT session).
+        assert!(first_token_is_binary(
+            "\"F:\\work\\tranxon\\ACowork\\target\\release\\acowork-runtime.exe\" --agent-id com.example.weather --http-port 19901",
+            "acowork-runtime.exe"
+        ));
+        // Unquoted argv[0] (no space in the path) still matches.
+        assert!(first_token_is_binary(
+            "F:\\acowork-runtime.exe --agent-id com.example.weather",
+            "acowork-runtime.exe"
+        ));
+        // A grep/ps style process merely mentioning the binary name
+        // must not match.
+        assert!(!first_token_is_binary("/usr/bin/grep acowork-runtime", "acowork-runtime"));
+        // A different binary carrying the same flags must not match.
+        assert!(!first_token_is_binary("/usr/bin/other --agent-id com.x", "acowork-runtime"));
+        // Empty command lines must not match.
+        assert!(!first_token_is_binary("", "acowork-runtime"));
     }
 
     fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {

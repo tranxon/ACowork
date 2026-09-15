@@ -46,6 +46,13 @@ export type DependencyKind = "blocks" | "relates" | "duplicates";
 
 // ── 实体 ──────────────────────────────────────────────────────────────
 
+/** 项目成员（Agent 实例，ADR-073 instance_id 身份）。 */
+export interface PmProjectMember {
+  /** Agent 实例 ID（UUID，ADR-073） */
+  instance_id: string;
+  added_at: string;
+}
+
 /** 项目元数据 */
 export interface PmProject {
   id: string;
@@ -56,6 +63,11 @@ export interface PmProject {
   created_at: string;
   updated_at: string;
   metadata: Record<string, unknown>;
+  /**
+   * 项目成员（Agent 实例列表）。服务端 `#[serde(default)]` + 前端默认 `[]`，
+   * 兼容旧服务端/旧缓存数据（零迁移）。
+   */
+  members: PmProjectMember[];
 }
 
 /** 任务实体（不含派生字段） */
@@ -124,6 +136,11 @@ export interface CreateProjectInput {
   title: string;
   description?: string;
   metadata?: Record<string, unknown>;
+}
+
+/** POST /projects/:pid/members 请求体 */
+export interface AddProjectMemberInput {
+  instance_id: string;
 }
 
 export interface UpdateProjectInput {

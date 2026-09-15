@@ -25,6 +25,9 @@ pub enum PmError {
     #[error("attachment not found: {0}")]
     AttachmentNotFound(String),
 
+    #[error("project member not found: {0}")]
+    MemberNotFound(String),
+
     // ── 输入校验 ──────────────────────────────────────────────────────
     #[error("invalid id: {0}")]
     InvalidId(String),
@@ -38,6 +41,10 @@ pub enum PmError {
     #[error("reserved name cannot be used as task id: {0}")]
     ReservedId(String),
 
+    /// 联动指派：非空 assignee 必须是该项目成员（`assignee ∈ project.members`）。
+    #[error("assignee `{assignee}` is not a member of project {project_id}")]
+    AssigneeNotProjectMember { assignee: String, project_id: String },
+
     // ── 结构冲突 ──────────────────────────────────────────────────────
     #[error("cycle detected: cannot move {task_id} under {parent_id} (would create cycle)")]
     CycleDetected { task_id: String, parent_id: String },
@@ -47,6 +54,12 @@ pub enum PmError {
 
     #[error("too many children for task {0} (max 1000)")]
     TooManyChildren(String),
+
+    #[error("instance `{0}` is already a member of this project")]
+    MemberAlreadyExists(String),
+
+    #[error("cannot remove member `{instance_id}` from project {project_id}: instance still has open tasks (pending/in_progress/submitted)")]
+    MemberHasOpenTasks { instance_id: String, project_id: String },
 
     // ── 依赖图 ────────────────────────────────────────────────────────
     #[error("dependency cycle detected via task {0}")]
@@ -110,7 +123,8 @@ impl PmError {
         match self {
             PmError::ProjectNotFound(_)
             | PmError::TaskNotFound(_)
-            | PmError::AttachmentNotFound(_) => 404,
+            | PmError::AttachmentNotFound(_)
+            | PmError::MemberNotFound(_) => 404,
 
             PmError::InvalidId(_)
             | PmError::BadRequest(_)
@@ -121,10 +135,13 @@ impl PmError {
             | PmError::TooManyAttachments(_)
             | PmError::AttachmentTooLarge { .. }
             | PmError::AttachmentMimeRejected(_)
-            | PmError::InvalidStateTransition { .. } => 400,
+            | PmError::InvalidStateTransition { .. }
+            | PmError::AssigneeNotProjectMember { .. } => 400,
 
             PmError::CycleDetected { .. }
-            | PmError::DependencyCycle(_) => 409,
+            | PmError::DependencyCycle(_)
+            | PmError::MemberAlreadyExists(_)
+            | PmError::MemberHasOpenTasks { .. } => 409,
 
             PmError::DependencyNotSatisfied { .. } => 409,
 
@@ -144,13 +161,17 @@ impl PmError {
             PmError::ProjectNotFound(_) => "project_not_found",
             PmError::TaskNotFound(_) => "task_not_found",
             PmError::AttachmentNotFound(_) => "attachment_not_found",
+            PmError::MemberNotFound(_) => "member_not_found",
             PmError::InvalidId(_) => "invalid_id",
             PmError::BadRequest(_) => "bad_request",
             PmError::PathTraversal(_) => "path_traversal",
             PmError::ReservedId(_) => "reserved_id",
+            PmError::AssigneeNotProjectMember { .. } => "assignee_not_project_member",
             PmError::CycleDetected { .. } => "cycle_detected",
             PmError::MaxDepthExceeded { .. } => "max_depth_exceeded",
             PmError::TooManyChildren(_) => "too_many_children",
+            PmError::MemberAlreadyExists(_) => "member_already_exists",
+            PmError::MemberHasOpenTasks { .. } => "member_has_open_tasks",
             PmError::DependencyCycle(_) => "dependency_cycle",
             PmError::DependencyNotSatisfied { .. } => "dependency_not_satisfied",
             PmError::AttachmentTooLarge { .. } => "attachment_too_large",
@@ -205,6 +226,7 @@ mod tests {
             (PmError::ProjectNotFound("p-x".into()),       404, "project_not_found"),
             (PmError::TaskNotFound("t-x".into()),           404, "task_not_found"),
             (PmError::AttachmentNotFound("att-x".into()),   404, "attachment_not_found"),
+            (PmError::MemberNotFound("inst-1".into()),      404, "member_not_found"),
             // ── 400 input validation ─────────────────────────────────
             (PmError::InvalidId("foo".into()),              400, "invalid_id"),
             (PmError::BadRequest("missing field".into()),   400, "bad_request"),
@@ -215,6 +237,14 @@ mod tests {
             (PmError::TooManyAttachments("t-x".into()),     400, "too_many_attachments"),
             (PmError::AttachmentTooLarge { size: 1, max: 0 }, 400, "attachment_too_large"),
             (PmError::AttachmentMimeRejected("exe".into()), 400, "attachment_mime_rejected"),
+            (
+                PmError::AssigneeNotProjectMember {
+                    assignee: "inst-9".into(),
+                    project_id: "p-x".into(),
+                },
+                400,
+                "assignee_not_project_member"
+            ),
             (
                 PmError::InvalidStateTransition {
                     task_id: "t-x".into(),
@@ -241,6 +271,15 @@ mod tests {
                 },
                 409,
                 "dependency_not_satisfied"
+            ),
+            (PmError::MemberAlreadyExists("inst-1".into()), 409, "member_already_exists"),
+            (
+                PmError::MemberHasOpenTasks {
+                    instance_id: "inst-1".into(),
+                    project_id: "p-x".into(),
+                },
+                409,
+                "member_has_open_tasks"
             ),
             // ── 500 internal ──────────────────────────────────────────
             (
@@ -277,9 +316,9 @@ mod tests {
                 expected_code
             );
         }
-        // 23 个错误码,与 README §3 表 23 行对齐
-        // （P3 新增 unauthenticated / forbidden 两个 MCP 鉴权错误码）
-        assert_eq!(seen_codes.len(), 23);
+        // 27 个错误码（member_* 4 个：member_not_found / assignee_not_project_member
+        // / member_already_exists / member_has_open_tasks）
+        assert_eq!(seen_codes.len(), 27);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。
@@ -310,10 +349,15 @@ mod tests {
             PmError::ProjectNotFound("x".into()),
             PmError::TaskNotFound("x".into()),
             PmError::AttachmentNotFound("x".into()),
+            PmError::MemberNotFound("x".into()),
             PmError::InvalidId("x".into()),
             PmError::BadRequest("x".into()),
             PmError::PathTraversal("x".into()),
             PmError::ReservedId("x".into()),
+            PmError::AssigneeNotProjectMember {
+                assignee: "x".into(),
+                project_id: "p".into(),
+            },
             PmError::CycleDetected {
                 task_id: "a".into(),
                 parent_id: "b".into(),
@@ -324,6 +368,11 @@ mod tests {
             PmError::DependencyNotSatisfied {
                 task_id: "a".into(),
                 blocker: "b".into(),
+            },
+            PmError::MemberAlreadyExists("x".into()),
+            PmError::MemberHasOpenTasks {
+                instance_id: "x".into(),
+                project_id: "p".into(),
             },
             PmError::AttachmentTooLarge { size: 1, max: 0 },
             PmError::AttachmentMimeRejected("x".into()),

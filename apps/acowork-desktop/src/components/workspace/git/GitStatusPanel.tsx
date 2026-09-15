@@ -235,7 +235,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       );
     }
     return (
-      <ul className="max-h-[200px] overflow-y-auto py-0.5">
+      <ul className="flex-1 overflow-y-auto py-0.5">
         {changes.map((c) => {
           const meta = statusMeta(c);
           return (
@@ -283,7 +283,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
 
   return (
     <div
-      className="shrink-0 border-b border-right-panel-border bg-page-bg"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-right-panel-border bg-page-bg"
       data-testid="git-status-panel"
     >
       {body}

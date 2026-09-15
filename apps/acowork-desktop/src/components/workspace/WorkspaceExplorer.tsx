@@ -928,9 +928,14 @@ export function WorkspaceExplorer() {
                 panel touches RightPanel's `rounded-xl` (12px) bottom corners
                 — matches the chat input's `mb-3` buffer (ChatPanel.tsx
                 L2467). FileTree (flex-1) is unaffected since the padding
-                lives on the wrapper, not on the panel. */}
+                lives on the wrapper, not on the panel.
+                `max-h-1/2` caps the strip at half the workspace area — up
+                from the prior `max-h-[200px]` cap which surfaced too
+                little on repos with many uncommitted files. The cap
+                resolves against WorkspaceExplorer's definite flex-1
+                height (parent chain: RightPanel clip → tab content). */}
             {gitContext && (
-                <div className="shrink-0 pb-3">
+                <div className="flex min-h-0 flex-col pb-3 max-h-1/2">
                     <GitStatusBar
                         agentId={gitContext.agentId}
                         workspaceId={gitContext.workspaceId}

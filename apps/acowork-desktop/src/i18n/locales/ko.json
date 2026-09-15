@@ -702,6 +702,7 @@
     "remoteBrowseEmpty": "디렉토리 없음",
     "remoteBrowseSelected": "선택됨",
     "remoteBrowseSelect": "이 폴더 선택",
+    "remoteBrowseShowHidden": "숨김 파일 표시",
     "explorer": {
       "agentNotRunning": "Agent를 시작하여 워크스페이스 탐색",
       "loading": "로딩 중...",
