@@ -252,6 +252,7 @@ impl ProcessManager {
     pub async fn readopt_orphans(&self, state: &SharedNodeState) -> Vec<String> {
         let candidates = crate::process::reap::scan_runtime_processes().await;
         if candidates.is_empty() {
+            tracing::debug!("Re-adopt: orphan scan found no Runtime candidates");
             return Vec::new();
         }
 
