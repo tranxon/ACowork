@@ -236,7 +236,14 @@
     "contextUsedSuffix": "コンテキスト使用",
     "cacheHitLabel": "キャッシュヒット率（累計）",
     "cacheHitPerTurnLabel": "キャッシュヒット率（リアルタイム）",
-    "cached": "キャッシュ済み"
+    "cached": "キャッシュ済み",
+    "editWindow": "ウィンドウを編集",
+    "windowOverrideBadge": "セッション",
+    "windowUnitK": "K",
+    "windowEffectiveHint": "実際の適用値 = min({{setting}}, {{model}})",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "windowRangeError": "{{floor}}K〜{{ceiling}}K の範囲で入力してください"
   },
   "agentList": {
     "searchPlaceholder": "Agentを検索...",

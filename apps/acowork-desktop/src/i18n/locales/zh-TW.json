@@ -235,7 +235,14 @@
     "contextUsedSuffix": "上下文已用",
     "cacheHitLabel": "快取命中率（累計）",
     "cacheHitPerTurnLabel": "快取命中率（即時）",
-    "cached": "已快取"
+    "cached": "已快取",
+    "editWindow": "編輯窗口",
+    "windowOverrideBadge": "會話覆寫",
+    "windowUnitK": "K",
+    "windowEffectiveHint": "實際生效 = min({{setting}}, {{model}})",
+    "save": "儲存",
+    "cancel": "取消",
+    "windowRangeError": "請輸入 {{floor}}K~{{ceiling}}K 之間的值"
   },
   "agentList": {
     "searchPlaceholder": "搜尋 Agent...",

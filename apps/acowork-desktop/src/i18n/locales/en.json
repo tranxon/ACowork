@@ -153,7 +153,14 @@
     "contextUsedSuffix": "context used",
     "cacheHitLabel": "Cache hit rate (cumulative)",
     "cacheHitPerTurnLabel": "Cache hit rate (real-time)",
-    "cached": "cached"
+    "cached": "cached",
+    "editWindow": "Edit window",
+    "windowOverrideBadge": "Session",
+    "windowUnitK": "K",
+    "windowEffectiveHint": "Effective = min({{setting}}, {{model}})",
+    "save": "Save",
+    "cancel": "Cancel",
+    "windowRangeError": "Enter a value between {{floor}}K and {{ceiling}}K"
   },
   "onboarding": {
     "step": "Step {{current}} of {{total}}",

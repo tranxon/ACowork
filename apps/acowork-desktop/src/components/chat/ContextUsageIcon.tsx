@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { X } from "lucide-react";
+import { Pencil, X } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { fetchProviderModels } from "../../lib/gateway-api";
 import {
   computeContextUsageBreakdown,
   formatDetailedPercent,
@@ -11,6 +12,14 @@ import {
 import { cn } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
 import { computeCacheHitStats, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
+
+// ADR-074: the editor mirrors the backend `is_valid_context_window`
+// bounds (CONTEXT_WINDOW_FLOOR..=CEILING) so out-of-range input is
+// caught client-side before the PUT 400. Input is entered in K units
+// (×1000 → absolute tokens), matching the UI's token formatting.
+const WINDOW_FLOOR = 8_192;
+const WINDOW_CEILING = 4_194_304;
+const WINDOW_PRESETS = [200_000, 250_000, 300_000, 500_000];
 
 const CATEGORY_META: Record<ContextUsageCategoryKey, { labelKey: string; color: string }> = {
   system: { labelKey: "contextUsage.categories.systemPrompt", color: "#6366f1" },
@@ -169,6 +178,74 @@ const handleCompressSummary = () => {
     setOpen(false);
   };
 
+  // ── ADR-074: per-session context window editor ───────────────────
+  const sessionContextWindow = useChatStore(
+    (s) => s.agentStates[agentId]?.sessionStates[sessionId]?.sessionContextWindow ?? null,
+  );
+  const activeModel = useChatStore(
+    (s) => s.agentStates[agentId]?.sessionStates[sessionId]?.model ?? null,
+  );
+  const setSessionContextWindow = useChatStore((s) => s.setSessionContextWindow);
+
+  const [editingWindow, setEditingWindow] = useState(false);
+  const [windowDraft, setWindowDraft] = useState<string>("");
+  const [windowError, setWindowError] = useState<string | null>(null);
+  // Model window (for the "实际生效 = min(设定值, 模型窗口)" hint). Fetched
+  // lazily once from the provider models API; `null` = unknown → hint off.
+  const [modelWindow, setModelWindow] = useState<number | null>(null);
+  const modelWindowFetched = useRef(false);
+
+  const openWindowEditor = useCallback(() => {
+    // Existing override → prefill in K units; no override → leave empty
+    // with the placeholder showing the current effective total (ADR-074
+    // §5.3 — the editor never introduces a second data source).
+    setWindowDraft(sessionContextWindow != null ? String(sessionContextWindow / 1000) : "");
+    setWindowError(null);
+    setEditingWindow(true);
+    if (!modelWindowFetched.current && sessionProvider && activeModel) {
+      modelWindowFetched.current = true;
+      fetchProviderModels(sessionProvider)
+        .then((resp) => {
+          const m = resp.models.find((mm) => mm.id === activeModel);
+          if (m?.context_window) setModelWindow(m.context_window);
+        })
+        .catch(() => {
+          // Unknown model window → hint stays off; the runtime still
+          // caps at min(setting, model window).
+        });
+    }
+  }, [sessionContextWindow, sessionProvider, activeModel]);
+
+  const saveWindow = useCallback(() => {
+    const trimmed = windowDraft.trim();
+    if (trimmed === "") {
+      // Empty input on save = don't send the field = don't write an
+      // override (inheriting value must never be pinned as an override).
+      setEditingWindow(false);
+      return;
+    }
+    const abs = Math.round(parseFloat(trimmed) * 1000);
+    if (!Number.isFinite(abs) || abs < WINDOW_FLOOR || abs > WINDOW_CEILING) {
+      setWindowError(t("contextUsage.windowRangeError", {
+        floor: WINDOW_FLOOR / 1000,
+        ceiling: WINDOW_CEILING / 1000,
+      }));
+      return;
+    }
+    setWindowError(null);
+    setSessionContextWindow(abs, agentId);
+    setEditingWindow(false);
+  }, [windowDraft, agentId, setSessionContextWindow, t]);
+
+  // "实际生效 = min(设定值, 模型窗口)" hint, live while typing: shown
+  // when the draft would be capped by the model window (the runtime
+  // min's against the model window and never clamps the setting itself).
+  const draftAbs = Number.isFinite(parseFloat(windowDraft))
+    ? Math.round(parseFloat(windowDraft) * 1000)
+    : null;
+  const draftExceedsModel =
+    editingWindow && draftAbs != null && modelWindow != null && draftAbs > modelWindow;
+
   // Same precision contract as `formatTokenCount` in `RightPanel.tsx`:
   // 2 decimals for M (= 10K granularity), 1 decimal for K.  Kept in
   // sync because the two values rendered side by side (e.g.
@@ -249,7 +326,91 @@ const handleCompressSummary = () => {
                   {formatTokens(contextUsage?.context_window ?? 0)}
                 </span>
               </span>
+              {/* ADR-074: per-session window editor entry + override badge. */}
+              <button
+                type="button"
+                onClick={openWindowEditor}
+                aria-label={t("contextUsage.editWindow")}
+                title={t("contextUsage.editWindow")}
+                className="ml-1 rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+              >
+                <Pencil size={11} strokeWidth={2.25} />
+              </button>
+              {sessionContextWindow != null && (
+                <span className="ml-0.5 shrink-0 rounded bg-indigo-100 px-1 py-px text-[10px] leading-none text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300">
+                  {t("contextUsage.windowOverrideBadge")}
+                </span>
+              )}
             </div>
+
+            {/* ADR-074: per-session window editor (inline, same popover). */}
+            {editingWindow && (
+              <div className="mt-2.5 rounded-md border border-zinc-200 bg-zinc-50/80 p-2 dark:border-zinc-700 dark:bg-zinc-800/50">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={WINDOW_FLOOR / 1000}
+                    step="any"
+                    value={windowDraft}
+                    onChange={(e) => {
+                      setWindowDraft(e.target.value);
+                      setWindowError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") saveWindow();
+                      if (e.key === "Escape") setEditingWindow(false);
+                    }}
+                    placeholder={formatTokens(contextUsage?.context_window ?? 0)}
+                    aria-label={t("contextUsage.editWindow")}
+                    className="w-full min-w-0 rounded border border-zinc-300 bg-white px-1.5 py-1 text-xs tabular-nums text-zinc-700 outline-none focus:border-indigo-400 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200"
+                  />
+                  <span className="shrink-0 text-[10px] text-zinc-400">{t("contextUsage.windowUnitK")}</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {WINDOW_PRESETS.map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => {
+                        setWindowDraft(String(preset / 1000));
+                        setWindowError(null);
+                      }}
+                      className={cn(
+                        "rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-600 transition-colors",
+                        "hover:border-indigo-300 hover:text-indigo-600",
+                        "dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300",
+                      )}
+                    >
+                      {preset / 1000}K
+                    </button>
+                  ))}
+                </div>
+                {draftExceedsModel && (
+                  <p className="mt-1.5 text-[10px] leading-snug text-amber-600 dark:text-amber-400">
+                    {t("contextUsage.windowEffectiveHint", { setting: formatTokens(draftAbs ?? 0), model: formatTokens(modelWindow ?? 0) })}
+                  </p>
+                )}
+                {windowError != null && (
+                  <p className="mt-1.5 text-[10px] leading-snug text-red-600 dark:text-red-400">{windowError}</p>
+                )}
+                <div className="mt-2 flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={saveWindow}
+                    className="rounded bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-indigo-500"
+                  >
+                    {t("contextUsage.save")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingWindow(false)}
+                    className="rounded px-2 py-1 text-[11px] text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700/50"
+                  >
+                    {t("contextUsage.cancel")}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div
               className="mt-3 flex h-2 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700"
