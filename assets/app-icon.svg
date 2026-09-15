@@ -16,19 +16,22 @@
     <!-- Bite-mask: white rect reveals the dot; small black circle carves the C-notch. -->
     <mask id="bite" maskUnits="userSpaceOnUse" x="158" y="232" width="244" height="244">
       <rect x="158" y="232" width="244" height="244" fill="white"/>
-      <circle cx="293" cy="329" r="18" fill="black"/>
+      <circle cx="293" cy="317" r="22" fill="black"/>
     </mask>
   </defs>
   <!-- Yellow rounded square: x=0,y=0,w=512,h=512 so the icon fills the canvas edge-to-edge.
        rx=122 keeps the same rounded-square proportion (20/84 in the brand-mark). -->
   <rect x="0" y="0" width="512" height="512" rx="122" ry="122" fill="url(#bg)"/>
-  <!-- "A": two strokes that span ~58% of the icon height, vertically centered. -->
+  <!-- "A": two strokes that span ~58% of the icon height, vertically centered.
+       stroke-width=61 is the exact scale-up of brand-mark.svg's 10 onto a
+       512 canvas (10 × 512/84 = 60.95 ≈ 61), so the stroke-to-edge ratio
+       matches the brand-mark (≈ 11.9 % of the chip side). -->
   <path d="M110 402 L256 110 L402 402"
         fill="none"
         stroke="#282828"
-        stroke-width="70"
+        stroke-width="61"
         stroke-linecap="round"
         stroke-linejoin="round"/>
   <!-- Dot with C-notch from the bite mask, sitting below the A's apex. -->
-  <circle cx="256" cy="329" r="52" fill="#282828" mask="url(#bite)"/>
+  <circle cx="256" cy="317" r="62" fill="#282828" mask="url(#bite)"/>
 </svg>

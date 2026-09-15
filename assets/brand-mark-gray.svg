@@ -47,7 +47,7 @@
     <!-- Apple-style bite: white reveals the dot; black bite circle (offset right, vertically centered) carves the C silhouette that mirrors the wordmark's "Co". -->
     <mask id="bite" maskUnits="userSpaceOnUse" x="40" y="40" width="40" height="40">
       <rect x="40" y="40" width="40" height="40" fill="white"/>
-      <circle cx="62" cy="56" r="3" fill="black"/>
+      <circle cx="62" cy="54" r="3.6" fill="black"/>
     </mask>
   </defs>
   <!-- neutral chip (light: mid-gray; dark: near-black) -->
@@ -59,7 +59,7 @@
         stroke-width="10"
         stroke-linecap="round"
         stroke-linejoin="round"/>
-  <circle cx="56" cy="56" r="8.5" class="letter-a" mask="url(#bite)"/>
+  <circle cx="56" cy="54" r="10.2" class="letter-a" mask="url(#bite)"/>
   <!-- wordmark: Co > work in weight to preserve the brand's emphasis order -->
   <text x="106" y="71"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
