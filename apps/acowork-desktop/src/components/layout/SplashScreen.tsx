@@ -347,26 +347,31 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                             <p className="text-xs text-zinc-400 dark:text-zinc-500">
                                 Make sure the Gateway is running on port 19876
                             </p>
-                            {gatewayMode === "remote" && (
-                                <div className="mt-1 flex flex-col items-center gap-1.5">
-                                    <label
-                                        htmlFor="splash-gateway-url"
-                                        className="text-xs text-zinc-400 dark:text-zinc-500"
-                                    >
-                                        {t("splashScreen.gatewayAddress")}
-                                    </label>
-                                    <input
-                                        id="splash-gateway-url"
-                                        type="text"
-                                        value={gatewayUrlInput}
-                                        onChange={(e) => setGatewayUrlInput(e.target.value)}
-                                        spellCheck={false}
-                                        autoCapitalize="off"
-                                        autoCorrect="off"
-                                        className="w-80 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
-                                    />
-                                </div>
-                            )}
+                            {/* Always show the URL input on timeout — previously this
+                                was gated on `mode === "remote"`, which made the local
+                                + stale-remote-URL combination a deadlock (the user
+                                had no way to recover the URL from the splash view).
+                                `handleRetry` already routes by mode (local → start
+                                local, remote → just re-probe) and persists a new
+                                URL via `setGatewayUrl` before probing. */}
+                            <div className="mt-1 flex flex-col items-center gap-1.5">
+                                <label
+                                    htmlFor="splash-gateway-url"
+                                    className="text-xs text-zinc-400 dark:text-zinc-500"
+                                >
+                                    {t("splashScreen.gatewayAddress")}
+                                </label>
+                                <input
+                                    id="splash-gateway-url"
+                                    type="text"
+                                    value={gatewayUrlInput}
+                                    onChange={(e) => setGatewayUrlInput(e.target.value)}
+                                    spellCheck={false}
+                                    autoCapitalize="off"
+                                    autoCorrect="off"
+                                    className="w-80 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
+                                />
+                            </div>
                             <button
                                 onClick={handleRetry}
                                 disabled={retrying}

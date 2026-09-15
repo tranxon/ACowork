@@ -240,6 +240,22 @@ function GatewayTab() {
             ]}
             onChange={handleModeChange}
           />
+          {/* Single-topology note: mode and URL are independent. Surface the
+              current URL inside the mode card (UI spec: secondary info
+              belongs inside the collapsing section, not below it) so users
+              don't silently "switch back to local" while the URL still
+              points at a remote host. When the URL is non-loopback in
+              local mode, warn that Desktop will probe the remote address
+              first (probe-then-spawn in init_local_gateway: ownership=
+              foreign if reachable, owned if it has to spawn a child). */}
+          <p className="mt-2.5 text-xs text-zinc-500 dark:text-zinc-400">
+            {t("settings.gatewayUrl")}: <span className="font-mono">{gatewayUrl}</span>
+            {gatewayMode === "local" && !/127\.0\.0\.1|::1|localhost/i.test(gatewayUrl) && (
+              <span className="ml-2 text-amber-600 dark:text-amber-400">
+                {t("settings.localModeKeepsUrl")}
+              </span>
+            )}
+          </p>
         </ExpandableRow>
       </ListBox>
 

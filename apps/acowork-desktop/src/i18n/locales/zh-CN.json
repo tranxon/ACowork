@@ -345,6 +345,7 @@
     "local": "本地",
     "remote": "远程",
     "localGateway": "本地网关",
+    "localModeKeepsUrl": "切到本地模式后，Desktop 会先用此地址探测（如不通才 spawn 本地子进程）",
     "status": "状态",
     "running": "运行中",
     "starting": "启动中...",
