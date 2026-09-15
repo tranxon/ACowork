@@ -26,13 +26,23 @@ import { emitAgentConfigRefresh } from "./refresh";
  * inside `startAgentAndSyncUI` before any UI rendering.
  */
 async function initSessionForAgent(agentId: string): Promise<void> {
+    // ponytail: diagnostic
+    const __i0 = performance.now();
     // Retry until the startup scan completes (max 10 attempts, 1s interval).
     // The scan runs in a background task and may not have finished yet.
     const maxRetries = 10;
     let latestSession: { session_id: string; title: string | null } | null = null;
 
     for (let i = 0; i < maxRetries; i++) {
+        const __t0 = performance.now();
         latestSession = await useAgentStore.getState().fetchLatestSession(agentId);
+        // ponytail: diagnostic
+        console.warn(
+            `[agent-start] initSessionForAgent retry=${i} ` +
+            `after ${Math.round(performance.now() - __t0)}ms ` +
+            `result=${latestSession ? latestSession.session_id : "null"} ` +
+            `elapsed=${Math.round(performance.now() - __i0)}ms`,
+        );
         if (latestSession) break;
         if (i < maxRetries - 1) {
             await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -96,7 +106,17 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     await useChatStore
         .getState()
         .ensureLatestInCache(agentId, targetSessionId);
+    // ponytail: diagnostic
+    console.warn(
+        `[agent-start] initSessionForAgent pre-openSession done ` +
+        `elapsed=${Math.round(performance.now() - __i0)}ms`,
+    );
     await useChatStore.getState().openSession(agentId, targetSessionId);
+    // ponytail: diagnostic
+    console.warn(
+        `[agent-start] initSessionForAgent openSession done ` +
+        `elapsed=${Math.round(performance.now() - __i0)}ms`,
+    );
 }
 
 /**
@@ -112,16 +132,30 @@ export async function startAgentAndSyncUI(
     agentId: string,
     devMode = false,
 ): Promise<void> {
-    // 1. Start the agent process
-    await useAgentStore.getState().startAgent(agentId, devMode);
+    // ponytail: diagnostic
+    const __s0 = performance.now();
+    try {
+        // 1. Start the agent process
+        await useAgentStore.getState().startAgent(agentId, devMode);
+        console.warn(`[agent-start] startAgent done @${Math.round(performance.now() - __s0)}ms`);
 
-    // 2. Wait for the Runtime to become ready
-    await useAgentStore.getState().waitForAgentReady(agentId);
+        // 2. Wait for the Runtime to become ready
+        await useAgentStore.getState().waitForAgentReady(agentId);
+        console.warn(`[agent-start] waitForAgentReady done @${Math.round(performance.now() - __s0)}ms`);
 
-    // 3. Initialize session — fetch list, determine active, pull state
-    await initSessionForAgent(agentId);
+        // 3. Initialize session — fetch list, determine active, pull state
+        await initSessionForAgent(agentId);
+        console.warn(`[agent-start] initSessionForAgent done @${Math.round(performance.now() - __s0)}ms`);
 
-    // 4. Sync UI — workspaces, config refresh (pure render)
-    useWorkspaceStore.getState().fetchWorkspaces(agentId);
-    emitAgentConfigRefresh(agentId);
+        // 4. Sync UI — workspaces, config refresh (pure render)
+        useWorkspaceStore.getState().fetchWorkspaces(agentId);
+        emitAgentConfigRefresh(agentId);
+    } catch (e) {
+        // ponytail: diagnostic
+        console.warn(
+            `[agent-start] startAgentAndSyncUI FAILED @${Math.round(performance.now() - __s0)}ms:`,
+            e,
+        );
+        throw e;
+    }
 }

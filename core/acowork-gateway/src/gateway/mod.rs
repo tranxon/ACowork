@@ -1527,7 +1527,6 @@ impl Gateway {
                                 started_at: chrono::Utc::now(),
                                 workspace,
                                 node_id: sa_node_id.clone(),
-                                connected: false,
                                 ready: false,
                                 dev_mode: false,
                                 debug_state: crate::gateway::state::DebugState::Disabled,

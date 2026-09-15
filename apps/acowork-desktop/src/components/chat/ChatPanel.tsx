@@ -720,10 +720,18 @@ export function ChatPanel() {
   // the "X seconds until auto-reconnect" countdown.
   const mqttStaleSince = useChatStore((s) => s.staleSince);
   const availableModels = useChatStore((s) => s.availableModels);
-  // Mirrored from `SessionConfig.llm_availability` retained MQTT topic.
-  // Drives the three-state banner; the previous boolean check caused a
-  // visible flash on every startup (vault race).
-  const llmAvailability = useChatStore((s) => s.llmAvailability);
+  // Mirrored from this agent's `SessionConfig.llm_availability` retained
+  // MQTT topic. Per-agent: each Runtime publishes its own value, and a
+  // banner should reflect the CURRENTLY selected agent — not some other
+  // agent on the same broker flashing MISSING during a reconnect race.
+  // The previous boolean check caused a visible flash on every startup
+  // (vault race).
+  const llmAvailability = useChatStore(
+    (s) =>
+      selectedAgentId
+        ? (s.agentStates[selectedAgentId]?.llmAvailability ?? "unspecified")
+        : "unspecified",
+  );
   // Stable function refs
   const {
     sendMessage,
@@ -1926,7 +1934,22 @@ export function ChatPanel() {
                 // ADR-073: start is instance-scoped — use the instance key,
                 // not the package `agent_id` (ambiguous in multi-instance).
                 if (!selectedAgentId) return;
-                await startAgentAndSyncUI(selectedAgentId);
+                try {
+                  await startAgentAndSyncUI(selectedAgentId);
+                } catch (e) {
+                  // Start failure must surface to the user, not leak as an
+                  // unhandled rejection (2026-09-14: waitForAgentReady
+                  // raced the async /start and the rejection was swallowed).
+                  addToast({
+                    type: "error",
+                    message:
+                      typeof e === "string"
+                        ? e
+                        : e instanceof Error
+                          ? e.message
+                          : String(e),
+                  });
+                }
               }}
               className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
             >

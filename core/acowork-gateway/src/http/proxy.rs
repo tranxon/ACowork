@@ -2970,7 +2970,6 @@ mod tests {
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
                 node_id: "local".to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: false,
                 debug_state: DebugState::Disabled,
@@ -3039,7 +3038,6 @@ mod tests {
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
                 node_id: "local".to_string(),
-                connected: true,
                 ready: true,
                 dev_mode: true,
                 // Start in the Enabled state — that's the
