@@ -85,4 +85,28 @@ describe("buildAgentOptions (ADR-073 assignee dropdown)", () => {
     expect(selectedValue).toMatch(/^[0-9a-f-]{36}$/);
     expect(selectedValue).not.toBe("X Bot");
   });
+
+  it("filters to project members only when memberIds is provided (linked assignment)", () => {
+    // 联动指派：assignee 必须是项目成员。非成员 Agent 不得出现在选项中。
+    const agents = [
+      { meta: { instance_id: "11111111-1111-1111-1111-111111111111", agent_id: "com.acowork.member", display_name: "Member Agent" } },
+      { meta: { instance_id: "22222222-2222-2222-2222-222222222222", agent_id: "com.acowork.nonmember", display_name: "Not A Member" } },
+    ];
+    const memberIds = new Set(["11111111-1111-1111-1111-111111111111"]);
+    const opts = buildAgentOptions(agents, memberIds);
+    expect(opts).toHaveLength(1);
+    expect(opts[0].value).toBe("11111111-1111-1111-1111-111111111111");
+    expect(opts[0].label).toBe("Member Agent");
+    // 非成员不得泄漏进下拉
+    expect(opts[0].value).not.toBe("22222222-2222-2222-2222-222222222222");
+  });
+
+  it("returns all agents when onlyIds is null/undefined (backward compatible)", () => {
+    const agents = [
+      { meta: { instance_id: "u1", agent_id: "p1", display_name: "A" } },
+      { meta: { instance_id: "u2", agent_id: "p2", display_name: "B" } },
+    ];
+    expect(buildAgentOptions(agents)).toHaveLength(2);
+    expect(buildAgentOptions(agents, null)).toHaveLength(2);
+  });
 });

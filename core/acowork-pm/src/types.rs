@@ -197,6 +197,22 @@ pub enum DependencyKind {
 // 实体：Project
 // ────────────────────────────────────────────────────────────────────────────
 
+/// 项目成员（Agent 实例）。
+///
+/// **ADR-073**：`instance_id` 是唯一身份 key（UUID），`agent_id`（包 ID）仅
+/// 显示用。成员 = 可被指派为 `task.assignee` 的 Agent（联动指派不变量：
+/// `assignee ∈ ∅ ∪ project.members`，由 store 层强制）。
+///
+/// 只存身份 + 加入时间，**不**存显示名/头像快照——展示信息由前端 join
+/// agentStore 获取，避免快照过期不一致。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMember {
+    /// Agent 实例 ID（UUID，ADR-073）。
+    pub instance_id: String,
+    pub added_at: DateTime<Utc>,
+}
+
 /// 项目元数据。
 ///
 /// **不含** `tasks` 数组（任务分散存储在 `tasks/` 子目录下）。
@@ -216,6 +232,19 @@ pub struct Project {
     /// 额外键值对（颜色、图标、标签等 UI 偏好）
     #[serde(default)]
     pub metadata: IndexMap<String, serde_json::Value>,
+    /// 项目成员（Agent 实例列表）。`#[serde(default)]` 保证旧 `project.json`
+    /// 无此字段时读出空数组（零迁移）。
+    #[serde(default)]
+    pub members: Vec<ProjectMember>,
+}
+
+/// `POST /api/pm/projects/:pid/members` 请求体。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddProjectMember {
+    /// Agent 实例 ID（UUID，ADR-073）。添加前由 API 层按
+    /// `AgentDirectory::agent_exists` 校验存在性。
+    pub instance_id: String,
 }
 
 /// `POST /api/pm/projects` 请求体。
@@ -344,11 +373,11 @@ pub struct CreateTask {
     /// 可选：在创建时上传的附件 ID 列表（附件需先调用 multipart 上传获取 ID）。
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
-    /// 指派 Agent / human（设计 PM-04 / §6 `pm_create_task` 的 `assignee` 参数）。
+    /// 指派 Agent（设计 PM-04 / §6 `pm_create_task` 的 `assignee` 参数）。
     ///
     /// **ADR-073**：`assignee` 存 `agent_instance_id`（UUID），不是 `agent_id`（包 ID）。
-    /// 不存在的 instance 由上层（MCP `AgentDirectory` / Gateway）按
-    /// `GET /api/agents/{instance_id}` 校验，本结构仅承载字段。
+    /// **联动指派**：非空 assignee 必须是该项目成员（`project.members`），
+    /// 由 store 层统一强制（REST + MCP 共用同一写路径）。
     #[serde(default)]
     pub assignee: Option<String>,
     /// 截止时间（可选；`pm_create_task` 的 `due` 参数）。

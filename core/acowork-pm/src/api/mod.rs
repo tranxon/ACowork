@@ -33,6 +33,7 @@ pub mod tasks;
 use std::sync::Arc;
 
 use crate::config::PmConfig;
+use crate::mcp::AgentDirectory;
 use crate::store::tree::TreePmStore;
 
 /// API 层共享状态（axum `State<ApiState>`）。
@@ -42,4 +43,7 @@ use crate::store::tree::TreePmStore;
 pub struct ApiState {
     pub store: Arc<TreePmStore>,
     pub config: PmConfig,
+    /// Agent 目录（设计 §9.1）：`POST /projects/:pid/members` 添加成员时按
+    /// instance_id 校验 Agent 存在。宽松实现（[`NoopAgentDirectory`]）跳过校验。
+    pub agent_dir: Arc<dyn AgentDirectory>,
 }

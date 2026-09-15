@@ -70,8 +70,12 @@ impl PmService {
     /// （`/mcp`）在此合并。两者均为 `Router<()>`（内部已 `.with_state(...)`
     /// 注入 state）。
     pub fn router(&self) -> axum::Router {
-        crate::api::routes::pm_router(self.store.clone(), self.config.clone())
-            .merge(crate::mcp::mcp_router(self.store.clone(), self.agent_dir.clone()))
+        crate::api::routes::pm_router(
+            self.store.clone(),
+            self.config.clone(),
+            self.agent_dir.clone(),
+        )
+        .merge(crate::mcp::mcp_router(self.store.clone(), self.agent_dir.clone()))
     }
 
     /// 在给定地址上 serve 全量路由（REST + MCP + `/health`）。

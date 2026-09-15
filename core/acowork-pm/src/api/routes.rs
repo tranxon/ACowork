@@ -27,10 +27,11 @@
 
 use std::sync::Arc;
 
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::Router;
 
 use crate::config::PmConfig;
+use crate::mcp::AgentDirectory;
 use crate::store::tree::TreePmStore;
 
 use super::{attachments, projects, tasks, ApiState};
@@ -43,8 +44,16 @@ use super::{attachments, projects, tasks, ApiState};
 /// `config` 当前未在 handlers 中直接使用（store 构造时已持有 config 副本），
 /// 但保留在 [`ApiState`] 中供未来 P1+ 扩展使用（如 handlers 读取
 /// `config.max_attachment_size` 做上传校验）。
-pub fn pm_router(store: Arc<TreePmStore>, config: PmConfig) -> Router {
-    let state = ApiState { store, config };
+pub fn pm_router(
+    store: Arc<TreePmStore>,
+    config: PmConfig,
+    agent_dir: Arc<dyn AgentDirectory>,
+) -> Router {
+    let state = ApiState {
+        store,
+        config,
+        agent_dir,
+    };
 
     Router::new()
         // ── Projects ─────────────────────────────────────────────
@@ -57,6 +66,14 @@ pub fn pm_router(store: Arc<TreePmStore>, config: PmConfig) -> Router {
             get(projects::get)
                 .patch(projects::update)
                 .delete(projects::delete),
+        )
+        .route(
+            "/projects/{pid}/members",
+            post(projects::add_member),
+        )
+        .route(
+            "/projects/{pid}/members/{instance_id}",
+            delete(projects::remove_member),
         )
         // ── Tasks ────────────────────────────────────────────────
         .route(

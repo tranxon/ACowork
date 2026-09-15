@@ -46,8 +46,8 @@ use crate::config::PmConfig;
 use crate::error::{PmError, Result};
 use crate::types::{
     AttachmentId, AttachmentMeta, CreateProject, CreateTask, DependencyKind, Priority, Project,
-    ProjectId, ProjectStatus, ReparentTask, ReviewStatus, Task, TaskFilter, TaskId, TaskResult,
-    TaskSort, TaskStatus, UpdateProject, UpdateTask,
+    ProjectId, ProjectMember, ProjectStatus, ReparentTask, ReviewStatus, Task, TaskFilter, TaskId,
+    TaskResult, TaskSort, TaskStatus, UpdateProject, UpdateTask,
 };
 
 use super::atomic::{
@@ -72,6 +72,22 @@ pub trait PmStore: Send + Sync {
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn update_project(&self, id: &ProjectId, input: UpdateProject) -> Result<Project>;
     async fn delete_project(&self, id: &ProjectId, cascade: bool) -> Result<()>;
+
+    // ── Member operations ───────────────────────────────────────────
+
+    /// 添加项目成员（Agent 实例）。重复添加 → [`PmError::MemberAlreadyExists`]。
+    async fn add_project_member(
+        &self,
+        project_id: &ProjectId,
+        instance_id: &str,
+    ) -> Result<Project>;
+    /// 移除项目成员。成员不存在 → [`PmError::MemberNotFound`]；
+    /// 该成员名下仍有未完成任务 → [`PmError::MemberHasOpenTasks`]（显式失败）。
+    async fn remove_project_member(
+        &self,
+        project_id: &ProjectId,
+        instance_id: &str,
+    ) -> Result<Project>;
 
     // ── Task operations ─────────────────────────────────────────────
 
@@ -367,6 +383,15 @@ impl TreePmStore {
         self.index.read().by_id.get(task_id).cloned()
     }
 
+    /// 内部辅助：读取项目 `project.json`（不存在 → [`PmError::ProjectNotFound`]）。
+    pub(crate) async fn read_project(&self, project_id: &ProjectId) -> Result<Project> {
+        let path = self.project_json_path(project_id);
+        if !fs::try_exists(&path).await? {
+            return Err(PmError::ProjectNotFound(project_id.to_string()));
+        }
+        read_json(&path).await
+    }
+
     /// 推导任务的父任务 ID（由物理目录位置推断，根任务返回 `None`）。
     ///
     /// `dir_path` 结构：
@@ -386,6 +411,25 @@ impl TreePmStore {
         } else {
             // 根任务：父目录名是 "tasks"
             None
+        }
+    }
+
+    /// 内部辅助：联动指派校验 —— `assignee`（非空）必须是项目成员。
+    ///
+    /// 所有写入 `task.assignee` 的路径（create / update / claim）共用，
+    /// REST 与 MCP 两条入口统一由 store 层强制。
+    pub(crate) fn ensure_assignee_is_member(
+        &self,
+        project: &Project,
+        assignee: &str,
+    ) -> Result<()> {
+        if project.members.iter().any(|m| m.instance_id == assignee) {
+            Ok(())
+        } else {
+            Err(PmError::AssigneeNotProjectMember {
+                assignee: assignee.to_string(),
+                project_id: project.id.to_string(),
+            })
         }
     }
 }
@@ -454,6 +498,16 @@ impl PmStore for TreePmStore {
     ) -> Result<Project> {
         let id = ProjectId::generate();
         let now = Utc::now();
+        // 创建者自动成为成员（agent 实例）：否则 Agent 建项目后无法给自己
+        // 指派任务（联动指派要求 assignee ∈ members），形成死锁。
+        // human 创建者不进入 members（成员 = Agent 实例）。
+        let mut members = Vec::new();
+        if created_by != "human" {
+            members.push(ProjectMember {
+                instance_id: created_by.to_string(),
+                added_at: now,
+            });
+        }
         let project = Project {
             id: id.clone(),
             title: input.title,
@@ -463,6 +517,7 @@ impl PmStore for TreePmStore {
             created_at: now,
             updated_at: now,
             metadata: input.metadata,
+            members,
         };
         let dir = self.project_dir(&id);
         fs::create_dir_all(dir.join("tasks")).await?;
@@ -559,6 +614,80 @@ impl PmStore for TreePmStore {
         Ok(())
     }
 
+    // ── Members ─────────────────────────────────────────────────────
+
+    async fn add_project_member(
+        &self,
+        project_id: &ProjectId,
+        instance_id: &str,
+    ) -> Result<Project> {
+        let path = self.project_json_path(project_id);
+        let mut project: Project = if fs::try_exists(&path).await? {
+            read_json(&path).await?
+        } else {
+            return Err(PmError::ProjectNotFound(project_id.to_string()));
+        };
+        if project.members.iter().any(|m| m.instance_id == instance_id) {
+            return Err(PmError::MemberAlreadyExists(instance_id.to_string()));
+        }
+        project.members.push(ProjectMember {
+            instance_id: instance_id.to_string(),
+            added_at: Utc::now(),
+        });
+        project.updated_at = Utc::now();
+        atomic_write_json(&path, &project).await?;
+        tracing::info!(project_id = %project_id, instance_id, "project member added");
+        Ok(project)
+    }
+
+    async fn remove_project_member(
+        &self,
+        project_id: &ProjectId,
+        instance_id: &str,
+    ) -> Result<Project> {
+        let path = self.project_json_path(project_id);
+        let mut project: Project = if fs::try_exists(&path).await? {
+            read_json(&path).await?
+        } else {
+            return Err(PmError::ProjectNotFound(project_id.to_string()));
+        };
+        if !project.members.iter().any(|m| m.instance_id == instance_id) {
+            return Err(PmError::MemberNotFound(instance_id.to_string()));
+        }
+
+        // 显式失败：成员名下仍有未完成任务（pending/in_progress/submitted/rejected）
+        // 时拒绝移除——任务要先转走或完成，避免悬挂 assignee。
+        let has_open = {
+            let index = self.index.read();
+            index.by_assignee.get(instance_id).is_some_and(|ids| {
+                ids.iter().any(|tid| {
+                    index.by_id.get(tid).is_some_and(|e| {
+                        e.project_id == *project_id
+                            && matches!(
+                                e.status,
+                                TaskStatus::Pending
+                                    | TaskStatus::InProgress
+                                    | TaskStatus::Submitted
+                                    | TaskStatus::Rejected
+                            )
+                    })
+                })
+            })
+        };
+        if has_open {
+            return Err(PmError::MemberHasOpenTasks {
+                instance_id: instance_id.to_string(),
+                project_id: project_id.to_string(),
+            });
+        }
+
+        project.members.retain(|m| m.instance_id != instance_id);
+        project.updated_at = Utc::now();
+        atomic_write_json(&path, &project).await?;
+        tracing::info!(project_id = %project_id, instance_id, "project member removed");
+        Ok(project)
+    }
+
     // ── Tasks ──────────────────────────────────────────────────────
 
     async fn create_task(
@@ -567,9 +696,10 @@ impl PmStore for TreePmStore {
         input: CreateTask,
         created_by: &str,
     ) -> Result<Task> {
-        // 校验项目存在
-        if !fs::try_exists(self.project_json_path(project_id)).await? {
-            return Err(PmError::ProjectNotFound(project_id.to_string()));
+        // 校验项目存在 + 联动指派（assignee 非空必须是项目成员）
+        let project = self.read_project(project_id).await?;
+        if let Some(assignee) = &input.assignee {
+            self.ensure_assignee_is_member(&project, assignee)?;
         }
 
         let task_id = TaskId::generate();
@@ -771,6 +901,11 @@ impl PmStore for TreePmStore {
             task.priority = p;
         }
         if input.assignee.is_some() {
+            // 联动指派：新 assignee（非空）必须是项目成员
+            if let Some(new_assignee) = input.assignee.clone().flatten() {
+                let project = self.read_project(&entry.project_id).await?;
+                self.ensure_assignee_is_member(&project, &new_assignee)?;
+            }
             task.assignee = input.assignee.clone().flatten();
         }
         if input.due_at.is_some() {
@@ -976,6 +1111,9 @@ impl PmStore for TreePmStore {
         task.claimed_at = Some(Utc::now());
         // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
         // MCP 层已校验调用者 instance_id == assignee instance_id（设计 §9.2 / ADR-073）。
+        // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员。
+        let project = self.read_project(&entry.project_id).await?;
+        self.ensure_assignee_is_member(&project, actor)?;
         task.assignee = Some(actor.to_string());
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
@@ -1301,6 +1439,11 @@ mod tests {
         }
     }
 
+    /// 联动指派测试辅助：把 instance 加为项目成员。
+    async fn add_member(store: &TreePmStore, pid: &ProjectId, instance: &str) {
+        store.add_project_member(pid, instance).await.unwrap();
+    }
+
     #[tokio::test]
     async fn project_crud_roundtrip() {
         let store = TreePmStore::new(test_config()).await.unwrap();
@@ -1446,6 +1589,8 @@ mod tests {
             .unwrap();
         // ADR-073: actor 是 agent_instance_id（UUID）
         let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员
+        add_member(&store, &p.id, instance).await;
         let t = store
             .create_task(&p.id, create_task_input("t"), instance)
             .await
@@ -1550,6 +1695,8 @@ mod tests {
         assert_eq!(blocked, vec![t0.id.clone()], "T1 must be blocked by T0 while T0 is open");
 
         // 完成 T0 → T1 不再被阻塞
+        // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员
+        add_member(&store, &p.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await;
         let claimed = store.claim_task(&t0.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         assert_eq!(claimed.status, TaskStatus::InProgress);
         let submitted = store
@@ -1640,6 +1787,8 @@ mod tests {
             )
             .await
             .unwrap();
+        // 联动指派：update 设置 assignee 需要成员身份
+        add_member(&store, &p.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await;
         let t = store
             .create_task(&p.id, create_task_input("t"), "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
@@ -1791,6 +1940,11 @@ mod tests {
             )
             .await
             .unwrap();
+
+        // 联动指派：claim/assignee 需要成员身份
+        add_member(&store, &p1.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await;
+        add_member(&store, &p1.id, "agent-y").await;
+        add_member(&store, &p2.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await;
 
         let t_p1_inprog_x = store
             .create_task(&p1.id, create_task_input("p1-inprog-x"), "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
@@ -1953,5 +2107,222 @@ mod tests {
         assert!(parent_attachments.exists(), "attachments/ parent must remain");
         // Path::new(&meta.storage_path).parent() = "attachments/{att_id}",删除范围正确
         let _ = Path::new(&meta.storage_path); // 仅为路径 API 编译检查
+    }
+
+    // ── 项目成员 + 联动指派 ──────────────────────────────────────────
+
+    /// agent 创建项目 → 自动成为成员；human 创建 → members 为空。
+    #[tokio::test]
+    async fn creator_is_auto_member_when_agent() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+
+        let p_agent = store
+            .create_project(
+                CreateProject { title: "by-agent".into(), description: "".into(), metadata: Default::default() },
+                inst,
+            )
+            .await
+            .unwrap();
+        assert_eq!(p_agent.members.len(), 1);
+        assert_eq!(p_agent.members[0].instance_id, inst);
+
+        let p_human = store
+            .create_project(
+                CreateProject { title: "by-human".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert!(p_human.members.is_empty(), "human creator is not a member");
+    }
+
+    /// 成员增删往返 + 重复添加 409 + 移除不存在成员 404。
+    #[tokio::test]
+    async fn member_add_remove_roundtrip() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+
+        let updated = store.add_project_member(&p.id, inst).await.unwrap();
+        assert_eq!(updated.members.len(), 1);
+        assert_eq!(updated.members[0].instance_id, inst);
+        // 持久化后重新读取
+        let reloaded = store.get_project(&p.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.members.len(), 1, "member must persist to project.json");
+
+        // 重复添加 → MemberAlreadyExists
+        let err = store.add_project_member(&p.id, inst).await.unwrap_err();
+        assert!(matches!(err, PmError::MemberAlreadyExists(_)));
+
+        // 移除 → 成员消失
+        let updated = store.remove_project_member(&p.id, inst).await.unwrap();
+        assert!(updated.members.is_empty());
+
+        // 移除不存在的成员 → MemberNotFound
+        let err = store.remove_project_member(&p.id, inst).await.unwrap_err();
+        assert!(matches!(err, PmError::MemberNotFound(_)));
+
+        // 项目不存在 → ProjectNotFound
+        let ghost = crate::types::ProjectId("p-00000000".into());
+        let err = store.add_project_member(&ghost, inst).await.unwrap_err();
+        assert!(matches!(err, PmError::ProjectNotFound(_)));
+    }
+
+    /// 联动指派：create/update/claim 的 assignee（非空）必须是项目成员。
+    #[tokio::test]
+    async fn assignee_must_be_project_member() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let member = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let outsider = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, member).await;
+
+        // create_task: 非成员 assignee → 400
+        let err = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(outsider.to_string()),
+                    ..create_task_input("t")
+                },
+                "human",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PmError::AssigneeNotProjectMember { .. }));
+
+        // create_task: 成员 assignee → 成功
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(member.to_string()),
+                    ..create_task_input("t-ok")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert_eq!(t.assignee.as_deref(), Some(member));
+
+        // update_task: 非成员 assignee → 400
+        let err = store
+            .update_task(
+                &t.id,
+                UpdateTask {
+                    assignee: Some(Some(outsider.to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PmError::AssigneeNotProjectMember { .. }));
+
+        // update_task: 清空 assignee → 允许（非空才校验）
+        let cleared = store
+            .update_task(&t.id, UpdateTask { assignee: Some(None), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(cleared.assignee.is_none());
+
+        // claim: 非成员 actor → 400（claim 会把 actor 写为 assignee）
+        let t2 = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(member.to_string()),
+                    ..create_task_input("t2")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let err = store.claim_task(&t2.id, outsider).await.unwrap_err();
+        assert!(matches!(err, PmError::AssigneeNotProjectMember { .. }));
+        // 任务状态未被改变
+        let after = store.get_task(&t2.id).await.unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Pending);
+    }
+
+    /// 移除成员时若其名下仍有未完成任务 → 409；任务 done 后可移除。
+    #[tokio::test]
+    async fn remove_member_with_open_tasks_conflicts() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+
+        // 有 pending 任务 → 移除 409
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(inst.to_string()),
+                    ..create_task_input("open")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let err = store.remove_project_member(&p.id, inst).await.unwrap_err();
+        assert!(matches!(err, PmError::MemberHasOpenTasks { .. }));
+
+        // 任务走完生命周期（claim → submit → review done）后可移除
+        store.claim_task(&t.id, inst).await.unwrap();
+        store.submit_task(&t.id, "done", vec![], inst).await.unwrap();
+        store.review_task(&t.id, true, "human").await.unwrap();
+        let updated = store.remove_project_member(&p.id, inst).await.unwrap();
+        assert!(updated.members.is_empty(), "member removable after tasks done");
+    }
+
+    /// 旧 `project.json` 无 `members` 字段 → 读出空数组（零迁移）。
+    #[tokio::test]
+    async fn old_project_json_without_members_defaults_empty() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        // 手工改写 project.json 为"旧格式"（无 members 字段）
+        let path = store.project_json_path(&p.id);
+        let legacy = serde_json::json!({
+            "id": p.id.as_str(),
+            "title": p.title,
+            "description": p.description,
+            "status": "active",
+            "created_by": "human",
+            "created_at": p.created_at,
+            "updated_at": p.updated_at,
+            "metadata": {}
+        });
+        tokio::fs::write(&path, serde_json::to_string(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let reloaded = store.get_project(&p.id).await.unwrap().unwrap();
+        assert!(reloaded.members.is_empty(), "legacy project.json must deserialize with empty members");
     }
 }
