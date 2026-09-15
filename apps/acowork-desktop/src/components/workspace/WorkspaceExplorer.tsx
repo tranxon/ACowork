@@ -922,9 +922,15 @@ export function WorkspaceExplorer() {
                 session workspace (independent of any open editor file). Hidden
                 when: agent not running (above early-return), workspace is
                 __agent_home__ (no repo context), or this panel itself is not
-                the active right-panel tab (parent RightPanel handles that). */}
+                the active right-panel tab (parent RightPanel handles that).
+                The wrapper reserves `pb-3` of empty panel-background below
+                the git strip so neither the collapsed bar nor the expanded
+                panel touches RightPanel's `rounded-xl` (12px) bottom corners
+                — matches the chat input's `mb-3` buffer (ChatPanel.tsx
+                L2467). FileTree (flex-1) is unaffected since the padding
+                lives on the wrapper, not on the panel. */}
             {gitContext && (
-                <>
+                <div className="shrink-0 pb-3">
                     <GitStatusBar
                         agentId={gitContext.agentId}
                         workspaceId={gitContext.workspaceId}
@@ -935,7 +941,7 @@ export function WorkspaceExplorer() {
                             workspaceId={gitContext.workspaceId}
                         />
                     )}
-                </>
+                </div>
             )}
         </div>
     );

@@ -70,7 +70,27 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     // (already removed in ADR-038): it aborted in-flight loads and
     // re-ran fetchSessions — both are either no-ops or double-work on
     // first launch.
-    await useAgentStore.getState().fetchSessions(agentId);
+    //
+    // Retry `fetchSessions` with the same budget as `fetchLatestSession`
+    // above.  On cold start the `/sessions` endpoint races the disk scan
+    // and may 503 / return an empty list while `/latest-session` (which
+    // reads the in-memory cache) already resolved.  Without this retry
+    // the SessionTabBar would mount before `sessions[]` contained the
+    // active session and show "Untitled" until the user manually opened
+    // the session dropdown — same symptom as the `updateSessionTitle`
+    // regression pinned in `agentStore.sessionTitle.test.ts`.
+    for (let i = 0; i < maxRetries; i++) {
+        await useAgentStore.getState().fetchSessions(agentId);
+        const populated = useAgentStore
+            .getState()
+            .agents[agentId]?.sessions.some(
+                (s) => s.session_id === targetSessionId,
+            );
+        if (populated) break;
+        if (i < maxRetries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+    }
     // ADR-047: loadSession (config + state) is now called inside
     // openSession, so we only need ensureLatestInCache before it.
     await useChatStore

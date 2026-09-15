@@ -185,4 +185,48 @@ describe("GitStatusBar", () => {
     unmount();
     expect(mocks.setExpanded).toHaveBeenCalledTimes(1); // no repeat
   });
+
+  it("auto-refreshes status on mount so the banner shows branch info without a click", () => {
+    // Bug fix: the collapsed banner previously stayed on the default "Git"
+    // title until the user clicked to expand. FileTree.tsx already mounts
+    // its fetchTree in the same shape — mirror it here so the banner
+    // converges on the current branch immediately.
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.refresh).toHaveBeenCalledWith("a1", "ws1");
+  });
+
+  it("auto-refreshes status when the workspace switches", () => {
+    // Workspace switch (selected workspace changes inside the same agent)
+    // must re-fetch git status for the new group so the banner doesn't
+    // keep showing the previous workspace's branch.
+    const { rerender } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.refresh).toHaveBeenLastCalledWith("a1", "ws1");
+
+    rerender(<GitStatusBar agentId="a1" workspaceId="ws2" />);
+    expect(mocks.refresh).toHaveBeenCalledTimes(2);
+    expect(mocks.refresh).toHaveBeenLastCalledWith("a1", "ws2");
+  });
+
+  it("auto-refreshes status when the agent switches", () => {
+    // Agent switch (the entire WorkspaceExplorer stays mounted, only the
+    // (agent, workspace) group changes) must re-fetch for the new group.
+    const { rerender } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.refresh).toHaveBeenLastCalledWith("a1", "ws1");
+
+    rerender(<GitStatusBar agentId="a2" workspaceId="ws1" />);
+    expect(mocks.refresh).toHaveBeenCalledTimes(2);
+    expect(mocks.refresh).toHaveBeenLastCalledWith("a2", "ws1");
+  });
+
+  it("does not re-fetch when only an unrelated re-render leaves props stable", () => {
+    // The refresh selector returns a stable zustand action — re-rendering
+    // with the same props must NOT cause a duplicate fetch (inflight dedup
+    // would already swallow it, but skipping the call is cheaper).
+    const { rerender } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    rerender(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+  });
 });

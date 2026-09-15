@@ -45,6 +45,19 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
     };
   }, [agentId, workspaceId]);
 
+  // Auto-refresh status on mount and whenever the (agent, workspace) group
+  // changes (workspace switch, agent restart while the workspace panel is
+  // mounted). Mirrors FileTree.tsx's mount-time `fetchTree(agentId,
+  // workspaceId, "")` effect so the banner converges without a click —
+  // without this, the collapsed bar would stay on the default "Git" title
+  // until the user expands it (the expand path already calls refresh, but
+  // a collapsed banner should still show the current branch). Inflight
+  // dedup in `fetchStatus` keeps a double-fetch from clicking the refresh
+  // icon or expanding the bar from issuing a second HTTP request.
+  useEffect(() => {
+    void refresh(agentId, workspaceId);
+  }, [agentId, workspaceId, refresh]);
+
   const data = entry?.data;
   const loading = entry?.loading ?? false;
   const isRepo = data?.isRepo ?? true; // optimistically interactive pre-load
