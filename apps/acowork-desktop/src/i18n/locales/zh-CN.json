@@ -1220,7 +1220,11 @@
     "renamed": "已重命名",
     "added": "新增",
     "conflicted": "冲突",
-    "binaryDiff": "二进制文件 — 不显示差异"
+    "binaryDiff": "二进制文件 — 不显示差异",
+    "prevChange": "上一处修改",
+    "nextChange": "下一处修改",
+    "prevCommits": "更近的提交",
+    "nextCommits": "更早的提交"
   },
   "fileTree": {
     "deleteConfirmOk": "删除",

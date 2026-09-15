@@ -273,10 +273,19 @@ describe("FileEditorPanel virtual git tabs (ADR-078 decision 7)", () => {
     await vi.waitFor(() => {
       expect(h.MockDiffEditor).toHaveBeenCalled();
     });
-    // The diff/log branch passes no onMount — Monaco mount hooks that
-    // attach LSP clients are only wired for `kind === "file"`.
+    // The diff branch DOES pass an onMount — but it's only used to
+    // capture the editor ref for GitVirtualNav's hunk-jump buttons.
+    // The "no LSP wiring" invariant (ADR-058 / ADR-078) is preserved
+    // because the regular <Editor> kind === "file" branch is the only
+    // one that wires LSP didOpen / didChange hooks via
+    // handleEditorMount (FileEditorPanel.tsx ~L1577). Asserting only
+    // that the supplied onMount doesn't trigger any LSP / editor-
+    // state side effects is enough to lock the invariant in.
     const diffProps = h.MockDiffEditor.mock.calls.at(-1)![0] as Record<string, unknown>;
-    expect(diffProps.onMount).toBeUndefined();
+    const onMount = diffProps.onMount as ((ed: unknown) => void) | undefined;
+    expect(typeof onMount).toBe("function");
+    onMount?.({} as never);
+    expect(h.editorState.setActiveFile).not.toHaveBeenCalled();
     await act(async () => {}); // flush the async initMonaco state update
   });
 

@@ -1161,7 +1161,11 @@
     "renamed": "이름 변경됨",
     "added": "추가됨",
     "conflicted": "충돌",
-    "binaryDiff": "바이너리 파일 — diff가 표시되지 않습니다"
+    "binaryDiff": "바이너리 파일 — diff가 표시되지 않습니다",
+    "prevChange": "이전 변경",
+    "nextChange": "다음 변경",
+    "prevCommits": "더 최근 커밋",
+    "nextCommits": "더 오래된 커밋"
   },
   "fileTree": {
     "deleteConfirmOk": "삭제",

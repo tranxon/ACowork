@@ -408,7 +408,11 @@
     "renamed": "renamed",
     "added": "added",
     "conflicted": "conflicted",
-    "binaryDiff": "Binary file — diff not shown"
+    "binaryDiff": "Binary file — diff not shown",
+    "prevChange": "Previous change",
+    "nextChange": "Next change",
+    "prevCommits": "Previous commits",
+    "nextCommits": "Next commits"
   },
   "fileTree": {
     "deleteConfirmOk": "Delete",

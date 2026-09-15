@@ -29,6 +29,7 @@ import {
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { HtmlPreviewView } from "./HtmlPreviewView";
+import { GitVirtualNav } from "./GitVirtualNav";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
@@ -104,6 +105,15 @@ export function FileEditorPanel({ width }: { width: number }) {
     const theme = useSettingsStore((s) => s.theme);
     const fontSize = useSettingsStore((s) => s.fontSize);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
+    // Reset the DiffEditor state when the active tab changes — Monaco's
+    // onMount will repopulate it on the next render once the new
+    // DiffEditor mounts. Without this, GitVirtualNav briefly holds a
+    // dead IStandaloneDiffEditor reference for one render cycle when
+    // switching between two diff tabs, and a click in that window
+    // would call goToDiff() on a disposed instance.
+    useEffect(() => {
+        setDiffEditor(null);
+    }, [activeFileId]);
     // Monaco is loaded in the background (lib/monacoBootstrap.ts) so first
     // paint does not wait for it; gate <Editor> on it being ready. A failed
     // load must not leave an eternal spinner with no trace — monacoBootstrap
@@ -138,6 +148,14 @@ export function FileEditorPanel({ width }: { width: number }) {
     const [showSymbolSearch, setShowSymbolSearch] = useState(false);
     const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
     const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
+    // DiffEditor instance — state (not just a ref) so GitVirtualNav
+    // re-renders when Monaco finishes mounting and we can show the
+    // up / down hunk-jump buttons. DiffEditor remounts when the user
+    // switches diff tabs (the `original` / `modified` props change),
+    // so we clear it to null on unmount via the onMount teardown.
+    const [diffEditor, setDiffEditor] = useState<
+        import("monaco-editor").editor.IStandaloneDiffEditor | null
+    >(null);
     // (cursor / selectedCount moved to useEditorStatusStore — see Monaco
     //  selection handler below. The local useState was only used by the
     //  per-file status bar that PR-3 removed.)
@@ -1434,75 +1452,93 @@ export function FileEditorPanel({ width }: { width: number }) {
                     // original (HEAD) vs. working-tree content. GitDiffKind
                     // "deleted" arrives with empty `modified`, which Monaco
                     // renders as an empty right pane.
-                    activeFile.gitDiffKind === "binary" ? (
-                        // ADR-078 decision 4/7 — binary diffs degrade to a
-                        // placeholder: /git/diff returns kind=binary with no
-                        // content, so show an explicit notice rather than two
-                        // empty panes.
-                        <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
-                            {t("gitStatus.binaryDiff")}
-                        </div>
-                    ) : (
-                        <DiffEditor
-                            original={activeFile.originalContent}
-                            modified={activeFile.content}
+                    <>
+                        {activeFile.gitDiffKind === "binary" ? (
+                            // ADR-078 decision 4/7 — binary diffs degrade to a
+                            // placeholder: /git/diff returns kind=binary with no
+                            // content, so show an explicit notice rather than two
+                            // empty panes.
+                            <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+                                {t("gitStatus.binaryDiff")}
+                            </div>
+                        ) : (
+                            <DiffEditor
+                                original={activeFile.originalContent}
+                                modified={activeFile.content}
+                                language={activeFile.language}
+                                theme={resolvedMonacoTheme}
+                                onMount={(ed) => setDiffEditor(ed)}
+                                options={{
+                                    minimap: { enabled: false },
+                                    fontSize: editorFontSize,
+                                    lineNumbers: "on",
+                                    scrollBeyondLastLine: false,
+                                    readOnly: true,
+                                    renderSideBySide: true,
+                                    // ADR-078 decision 7: side-by-side is part of
+                                    // the "two-file diff" semantics — must hold at
+                                    // any editor width. Monaco otherwise auto-
+                                    // switches to inline mode when the container
+                                    // is narrower than renderSideBySideInlineBreakpoint
+                                    // (default 900 px; see
+                                    // monaco-editor/.../diffEditorOptions.js L32).
+                                    // Forcing it off keeps the two-pane layout
+                                    // intact even when FileEditorPanel is
+                                    // squeezed by a wide right panel / agent list.
+                                    useInlineViewWhenSpaceIsLimited: false,
+                                    // Disable Monaco's diff overview ruler. The
+                                    // ruler paints a 30-px-wide marker strip on
+                                    // the modified (right) pane only — see
+                                    // monaco-editor/.../overviewRulerFeature.js
+                                    // (ONE_OVERVIEW_WIDTH=15, ENTIRE=15*2=30) —
+                                    // which stacks visually on top of the
+                                    // 14-px scrollbar there. Result: the right
+                                    // scrollbar looks ~2x wider than the left's
+                                    // (which has no ruler). Diff markers are
+                                    // still conveyed by the per-line green/red
+                                    // highlights inside the panes, which is the
+                                    // primary affordance.
+                                    renderOverviewRuler: false,
+                                    automaticLayout: true,
+                                    padding: { top: 8 },
+                                }}
+                            />
+                        )}
+                        {/* Floating Up / Down hunk-jump + (log only)
+                            Load-older overlay — sibling of the DiffEditor
+                            so its `absolute right-4` anchors to the same
+                            `relative` editor-area div. Wired to
+                            Monaco's IStandaloneDiffEditor.goToDiff
+                            (defined in monaco-editor editor.api.d.ts
+                            IDiffEditor) — no custom hunk parsing needed. */}
+                        <GitVirtualNav file={activeFile} diffEditor={diffEditor} />
+                    </>
+                ) : activeFile.kind === "log" ? (
+                    // ADR-078 decision 7 — read-only single-pane commit log.
+                    <>
+                        <Editor
+                            path={activeFile.relPath}
+                            value={activeFile.content}
                             language={activeFile.language}
                             theme={resolvedMonacoTheme}
+                            keepCurrentModel={false}
                             options={{
                                 minimap: { enabled: false },
                                 fontSize: editorFontSize,
-                                lineNumbers: "on",
+                                lineNumbers: "off",
                                 scrollBeyondLastLine: false,
                                 readOnly: true,
-                                renderSideBySide: true,
-                                // ADR-078 decision 7: side-by-side is part of
-                                // the "two-file diff" semantics — must hold at
-                                // any editor width. Monaco otherwise auto-
-                                // switches to inline mode when the container
-                                // is narrower than renderSideBySideInlineBreakpoint
-                                // (default 900 px; see
-                                // monaco-editor/.../diffEditorOptions.js L32).
-                                // Forcing it off keeps the two-pane layout
-                                // intact even when FileEditorPanel is
-                                // squeezed by a wide right panel / agent list.
-                                useInlineViewWhenSpaceIsLimited: false,
-                                // Disable Monaco's diff overview ruler. The
-                                // ruler paints a 30-px-wide marker strip on
-                                // the modified (right) pane only — see
-                                // monaco-editor/.../overviewRulerFeature.js
-                                // (ONE_OVERVIEW_WIDTH=15, ENTIRE=15*2=30) —
-                                // which stacks visually on top of the
-                                // 14-px scrollbar there. Result: the right
-                                // scrollbar looks ~2x wider than the left's
-                                // (which has no ruler). Diff markers are
-                                // still conveyed by the per-line green/red
-                                // highlights inside the panes, which is the
-                                // primary affordance.
-                                renderOverviewRuler: false,
+                                wordWrap: "on",
                                 automaticLayout: true,
                                 padding: { top: 8 },
                             }}
                         />
-                    )
-                ) : activeFile.kind === "log" ? (
-                    // ADR-078 decision 7 — read-only single-pane commit log.
-                    <Editor
-                        path={activeFile.relPath}
-                        value={activeFile.content}
-                        language={activeFile.language}
-                        theme={resolvedMonacoTheme}
-                        keepCurrentModel={false}
-                        options={{
-                            minimap: { enabled: false },
-                            fontSize: editorFontSize,
-                            lineNumbers: "off",
-                            scrollBeyondLastLine: false,
-                            readOnly: true,
-                            wordWrap: "on",
-                            automaticLayout: true,
-                            padding: { top: 8 },
-                        }}
-                    />
+                        {/* Floating Up / Down / Load-older overlay — see
+                            diff branch comment above. Log tabs pass
+                            `diffEditor={null}` because the load-older
+                            button doesn't need the Monaco editor. */}
+                        <GitVirtualNav file={activeFile} diffEditor={null} />
+                    </>
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
                     // SVG preview branch. Raster images (png/jpg/gif/webp) never
                     // reach here because `canPreview` in the tab context menu only
