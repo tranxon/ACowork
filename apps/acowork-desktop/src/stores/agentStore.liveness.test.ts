@@ -207,6 +207,32 @@ describe("fetchAgents — adopts the Gateway's `alive` verdict verbatim", () => 
         expect(agents[INSTANCE_ID]).toBeDefined();
         expect(agents[REMOVED_INSTANCE_ID]).toBeUndefined();
     });
+
+    it("keeps existing agents when the Gateway returns an EMPTY list (restart registry window)", async () => {
+        // Right after a Gateway restart the agent registry may not be
+        // populated yet → `list_agents` returns []. Wiping the sidebar
+        // here would blank the agent list until the next successful poll
+        // (regression: second stop→restart cycle left the list empty
+        // until the user switched tabs). Empty list ≠ "all uninstalled".
+        seedAgent({ alive: true });
+        mockListAgents.mockResolvedValue([]);
+
+        await useAgentStore.getState().fetchAgents();
+
+        const agents = useAgentStore.getState().agents;
+        expect(agents[INSTANCE_ID]).toBeDefined();
+        expect(useAgentStore.getState().loading).toBe(false);
+    });
+
+    it("clears the map when an empty list is genuinely the first fetch (nothing seeded)", async () => {
+        // No pre-existing agents → nothing to protect; the empty list
+        // simply results in an empty map (same as before the guard).
+        mockListAgents.mockResolvedValue([]);
+
+        await useAgentStore.getState().fetchAgents();
+
+        expect(Object.keys(useAgentStore.getState().agents)).toHaveLength(0);
+    });
 });
 
 describe("updateAgentLiveness — realtime MQTT path patches meta", () => {
