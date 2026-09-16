@@ -102,7 +102,12 @@ pub struct AgentCore {
     /// base_url, protocol_type, compact_model for all configured providers.
     pub(crate) global_provider_list: Arc<RwLock<Vec<ProviderListItem>>>,
     /// Provider list version for diff sync with Gateway.
-    pub(crate) provider_list_version: u64,
+    ///
+    /// Shared via `Arc<RwLock<...>>` for the same reason as
+    /// [`Self::provider_compact_models`] — written by the SessionManager
+    /// template on `acowork/global/providers` updates and read (if ever)
+    /// through the same Arc by every session clone.
+    pub(crate) provider_list_version: Arc<RwLock<u64>>,
     /// Provider key vault (in-memory only, never persisted).
     pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, String>>>,
     /// Search key vault (in-memory only, never persisted).
@@ -124,14 +129,25 @@ pub struct AgentCore {
     pub(crate) compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
 
     /// Provider→compact_model mapping from provider_list at AgentHello.
-    pub(crate) provider_compact_models: HashMap<String, Option<String>>,
+    ///
+    /// Shared across sessions via `Arc<RwLock<...>>` (ADR-063 §3.7.5
+    /// pattern): `SessionManager::update_global_provider_list` writes
+    /// through the RwLock, and every session's deep-cloned AgentCore
+    /// shares the same inner Arc, so in-flight sessions see the change
+    /// on their next `resolve_distill_model()` call. A plain HashMap
+    /// would be snapshotted per session and go stale.
+    pub(crate) provider_compact_models: Arc<RwLock<HashMap<String, Option<String>>>>,
     /// ADR-056: Global default compact model reference — `(provider_id, model_id)`.
     /// Set from `AvailableProviders.default_compact_model` at session init.
     /// Top-priority candidate in the distillation fallback chain
     /// (`resolve_distill_model`). `None` means no global override; runtime
     /// then falls back to `provider_compact_models` (Level 2) and finally the
     /// session's current chat model (Level 3).
-    pub(crate) default_compact_model: Option<(String, String)>,
+    ///
+    /// Shared across sessions via `Arc<RwLock<...>>` for the same reason
+    /// as [`Self::provider_compact_models`] — the global pick must reach
+    /// in-flight sessions, not just sessions created after the change.
+    pub(crate) default_compact_model: Arc<RwLock<Option<(String, String)>>>,
     /// LLM temperature override (from Gateway config via agent_config.json).
     /// Level 1 in the resolution chain.
     pub(crate) temperature_override: Option<f32>,
@@ -511,13 +527,13 @@ impl AgentCore {
             mcp_tools: None,
             all_tools: initial_all_tools,
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
-            provider_list_version: 0,
+            provider_list_version: Arc::new(RwLock::new(0)),
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
             search_key_vault: Arc::new(RwLock::new(HashMap::new())),
             search_provider_list: Arc::new(RwLock::new(Vec::new())),
             compat_cache: None,
-            provider_compact_models: HashMap::new(),
-            default_compact_model: None,
+            provider_compact_models: Arc::new(RwLock::new(HashMap::new())),
+            default_compact_model: Arc::new(RwLock::new(None)),
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
@@ -1362,7 +1378,7 @@ impl AgentCore {
             return mid.clone();
         }
         // Layer 3: global default compact model.
-        if let Some((_, mid)) = self.default_compact_model.as_ref() {
+        if let Some((_, mid)) = self.default_compact_model.read().unwrap().as_ref() {
             return mid.clone();
         }
         // Layer 4: first model in the provider list (legacy convention).
@@ -1524,7 +1540,8 @@ impl AgentCore {
     /// default (ADR-056 §2.3 "chat 用 deepseek,蒸馏用本地 qwen2.5:0.5b")
     /// would always be rejected and the feature would never fire.
     pub fn is_default_compact_provider_available(&self) -> bool {
-        let Some((pid, _)) = self.default_compact_model.as_ref() else {
+        let guard = self.default_compact_model.read().unwrap();
+        let Some((pid, _)) = guard.as_ref() else {
             return false;
         };
         // 1) Cloud provider with a configured key.
@@ -1705,13 +1722,13 @@ impl Clone for AgentCore {
             mcp_tools: self.mcp_tools.clone(),
             all_tools: self.all_tools.clone(),
             global_provider_list: self.global_provider_list.clone(),
-            provider_list_version: self.provider_list_version,
+            provider_list_version: Arc::clone(&self.provider_list_version),
             provider_key_vault: self.provider_key_vault.clone(),
             search_key_vault: self.search_key_vault.clone(),
             search_provider_list: self.search_provider_list.clone(),
             compat_cache: self.compat_cache.clone(),
-            provider_compact_models: self.provider_compact_models.clone(),
-            default_compact_model: self.default_compact_model.clone(),
+            provider_compact_models: Arc::clone(&self.provider_compact_models),
+            default_compact_model: Arc::clone(&self.default_compact_model),
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,

@@ -2210,32 +2210,26 @@ After installation, ask the user to re-enable the MCP server.",
             "SessionManager: updating global provider list"
         );
 
-        // The shared `core` is wrapped in `Arc<AgentCore>` and may be cloned
-        // by SessionTasks; mutate `provider_compact_models`, `default_compact_model`,
-        // and the version counter only when we are the sole owner. The provider_list
-        // and key vault live behind `Arc<RwLock<...>>` and can be updated
-        // regardless of refcount.
-        if let Some(c) = Arc::get_mut(&mut self.core) {
-            c.provider_compact_models.clear();
+        // All three fields are shared `Arc<RwLock<...>>` (ADR-063 §3.7.5
+        // pattern) — writing through the RwLock is immediately visible to
+        // every session's deep-cloned AgentCore, so no `Arc::get_mut`
+        // sole-owner dance is needed. (That dance silently skipped the
+        // update whenever debug mode or any other live Arc clone existed,
+        // leaving in-flight sessions with the stale value.)
+        {
+            let mut pcm = self.core.provider_compact_models.write().unwrap();
+            pcm.clear();
             for provider in &provider_list {
-                c.provider_compact_models
-                    .insert(provider.id.clone(), provider.compact_model.clone());
+                pcm.insert(provider.id.clone(), provider.compact_model.clone());
             }
-            c.provider_list_version = provider_list_version;
-            // ADR-056: Sync the global default compact model. Sessions
-            // created after this point will inherit it via the per-session
-            // AgentCore clone. Existing in-flight sessions pick up the new
-            // value lazily on their next resolve_distill_model() call.
-            c.default_compact_model = default_compact_model
-                .as_ref()
-                .map(|r| (r.provider_id.clone(), r.model_id.clone()));
-        } else {
-            tracing::warn!(
-                "SessionManager: AgentCore Arc has multiple owners; \
-                 provider_compact_models / provider_list_version not updated. \
-                 Sessions will still see new provider_list + key vault via shared RwLock."
-            );
         }
+        *self.core.provider_list_version.write().unwrap() = provider_list_version;
+        // ADR-056: Sync the global default compact model through the
+        // shared Arc — in-flight sessions see the new value on their next
+        // resolve_distill_model() call, no session broadcast needed.
+        *self.core.default_compact_model.write().unwrap() = default_compact_model
+            .as_ref()
+            .map(|r| (r.provider_id.clone(), r.model_id.clone()));
 
         // Replace the shared global provider list (live read-view for sessions).
         {

@@ -369,9 +369,11 @@ pub(crate) async fn phase_b_init_session(
         let providers_for_init = ctx.provider_config.as_ref().map(|c| &c.providers);
 
         if let Some(providers) = providers_for_init {
-            for p in providers {
-                c.provider_compact_models
-                    .insert(p.id.clone(), p.compact_model.clone());
+            {
+                let mut pcm = c.provider_compact_models.write().unwrap();
+                for p in providers {
+                    pcm.insert(p.id.clone(), p.compact_model.clone());
+                }
             }
             {
                 let mut list = c.global_provider_list.write().unwrap();
@@ -379,7 +381,7 @@ pub(crate) async fn phase_b_init_session(
             }
             tracing::info!(
                 provider_count = providers.len(),
-                compact_count = c.provider_compact_models.len(),
+                compact_count = c.provider_compact_models.read().unwrap().len(),
                 "Populated AgentCore.global_provider_list from resource cache"
             );
         }
@@ -394,7 +396,8 @@ pub(crate) async fn phase_b_init_session(
             .as_ref()
             .and_then(|c| c.default_compact_model.as_ref())
         {
-            c.default_compact_model = Some((cm.provider_id.clone(), cm.model_id.clone()));
+            *c.default_compact_model.write().unwrap() =
+                Some((cm.provider_id.clone(), cm.model_id.clone()));
             tracing::info!(
                 provider_id = %cm.provider_id,
                 model_id = %cm.model_id,
