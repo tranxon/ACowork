@@ -369,8 +369,102 @@ fn status_sort_key(c: &GitChangeDto) -> (u8, u8, &str) {
 
 // ── Blob read helpers ──────────────────────────────────────────────────────
 
-/// `git cat-file -s <rev>:<path>` — blob size in bytes, `None` when the
-/// rev:path does not exist. `rev` may be `"HEAD"` or `""` (index).
+/// Parse `git diff-tree -r --name-status -z --no-commit-id --root <rev>`.
+///
+/// Record layout (every field NUL-terminated, per `-z`):
+/// - non-rename/copy: `<status>\0<path>\0`
+/// - rename/copy:     `<status>\0<new_path>\0<old_path>\0`
+///
+/// `<status>` is one letter optionally followed by a score or type info
+/// (`M`, `A`, `D`, `R<score>`, `C<score>`, `T<type>`). We only inspect
+/// the leading byte.
+///
+/// `truncated` is set when the byte cap was hit (mirrors the working-tree
+/// `parse_status_porcelain` truncation contract so the same UI flag works
+/// for both code paths).
+fn parse_diff_tree_name_status(
+    raw: &[u8],
+    repo_root: &Path,
+    workspace_root: &Path,
+) -> (Vec<GitChangeDto>, bool) {
+    let mut changes = Vec::new();
+    let mut truncated = false;
+
+    let cap_end = truncate_at_nul(raw, STATUS_BYTE_CAP);
+    if cap_end < raw.len() {
+        truncated = true;
+    }
+    let slice = &raw[..cap_end];
+    let mut tokens = slice.split(|&b| b == 0).peekable();
+
+    while let Some(status_tok) = tokens.next() {
+        if status_tok.is_empty() {
+            continue;
+        }
+        let status = status_tok[0] as char;
+        // Each record consumes one or two path tokens.
+        let path_tok = match tokens.next() {
+            Some(t) if !t.is_empty() => t,
+            _ => continue,
+        };
+        // `R` / `C` records consume a second path token (the old path).
+        let old_path_tok = if status == 'R' || status == 'C' {
+            tokens.next()
+        } else {
+            None
+        };
+
+        let path = String::from_utf8_lossy(path_tok).into_owned();
+        let old_path = old_path_tok.map(|p| String::from_utf8_lossy(p).into_owned());
+
+        if let Some(change) =
+            make_commit_change(status, &path, old_path.as_deref(), workspace_root, repo_root)
+        {
+            changes.push(change);
+        }
+        if changes.len() >= STATUS_ENTRY_CAP {
+            truncated = true;
+            break;
+        }
+    }
+
+    (changes, truncated)
+}
+
+/// Map a `git diff-tree` status letter to (index, worktree, staged).
+///
+/// A commit's file list is a single-axis view (M/A/D/R/C/T vs parent)
+/// — the legacy dual-axis worktree semantics don't apply. We mirror the
+/// change on both columns and force `staged = false`: the "staged" badge
+/// in GitStatusPanel is reserved for index-vs-worktree divergence, and a
+/// historical commit has neither index nor worktree. Setting it true
+/// here would make every row of a commit's file list look "已暂存".
+fn make_commit_change(
+    status: char,
+    path: &str,
+    old_path: Option<&str>,
+    workspace_root: &Path,
+    repo_root: &Path,
+) -> Option<GitChangeDto> {
+    let ws_path = repo_to_workspace_rel(repo_root, workspace_root, path)?;
+    let ws_old = old_path.and_then(|o| repo_to_workspace_rel(repo_root, workspace_root, o));
+    let (index, worktree) = match status {
+        'M' | 'T' => (GitIndexStatus::Modified, GitWorktreeStatus::Modified),
+        'A' => (GitIndexStatus::Added, GitWorktreeStatus::Untracked),
+        'D' => (GitIndexStatus::Deleted, GitWorktreeStatus::Deleted),
+        'R' | 'C' => (GitIndexStatus::Renamed, GitWorktreeStatus::Modified),
+        // `U` (unmerged) and unknown statuses: surface as Modified so the
+        // file is never silently hidden.
+        _ => (GitIndexStatus::Modified, GitWorktreeStatus::Modified),
+    };
+    Some(GitChangeDto {
+        path: ws_path,
+        old_path: ws_old,
+        index,
+        worktree,
+        staged: false,
+    })
+}
 async fn cat_file_size(
     git_bin: &str,
     repo_root: &Path,
@@ -429,8 +523,18 @@ impl GitQueryService for RuntimeGitQueryService {
                 error: Some("not_a_repo".to_string()),
                 truncated: false,
                 changes: vec![],
+                rev: None,
             });
         };
+
+        // ADR-XXX: rev=Some(h) → list files touched by commit h
+        // (parsed via `git diff-tree -r --name-status -z --root --no-commit-id h`).
+        // rev=None or rev=Some("") → current working-tree status (legacy path).
+        let trimmed_rev = params.rev.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        if let Some(rev) = trimmed_rev {
+            return self.status_for_commit(&repo_root, &canonical_ws, rev).await;
+        }
 
         let mut cmd = git_cmd(&self.git_bin, &repo_root);
         cmd.args([
@@ -453,6 +557,7 @@ impl GitQueryService for RuntimeGitQueryService {
                     error: Some("git_unavailable".to_string()),
                     truncated: false,
                     changes: vec![],
+                    rev: None,
                 });
             }
             Err(e) => return Err(e),
@@ -466,6 +571,7 @@ impl GitQueryService for RuntimeGitQueryService {
                     error: Some("not_a_repo".to_string()),
                     truncated: false,
                     changes: vec![],
+                    rev: None,
                 });
             }
             return Err(GitError::GitFailed(format!(
@@ -484,12 +590,24 @@ impl GitQueryService for RuntimeGitQueryService {
             error: None,
             truncated,
             changes,
+            rev: None,
         })
     }
 
+
+
     async fn diff(&self, params: &GitDiffParams) -> Result<GitDiffResponse, GitError> {
-        if params.cached > 1 {
-            return Err(GitError::BadRequest("cached must be 0 or 1".into()));
+        // ADR-078 extension: accept arbitrary `base_ref` / `head_ref` so the
+        // frontend can compare any two git revisions. The legacy semantics
+        // (worktree vs HEAD) survive as the defaults - `base_ref` defaults
+        // to "HEAD", `head_ref` defaults to "" which routes through
+        // `diff_with_worktree` below (preserving untracked / deleted handling).
+        let base_ref = params.base_ref.as_deref().unwrap_or("HEAD");
+        let head_ref = params.head_ref.as_deref().unwrap_or("");
+        if base_ref.is_empty() {
+            return Err(GitError::BadRequest(
+                "base_ref must not be empty (use \"HEAD\" for the current branch tip)".into(),
+            ));
         }
 
         let (canonical_ws, _, _) = resolve_within_static(
@@ -502,8 +620,8 @@ impl GitQueryService for RuntimeGitQueryService {
         let repo_root = discover_repo_root(&canonical_ws)
             .ok_or_else(|| GitError::NotARepo(canonical_ws.display().to_string()))?;
 
-        // ADR-078 decision 3: workspace-relative → absolute → validate →
-        // strip repo_root prefix → repo-root-relative.
+        // ADR-078 decision 3: workspace-relative -> absolute -> validate ->
+        // strip repo_root prefix -> repo-root-relative.
         let abs_path = canonical_ws.join(&params.path);
         let repo_rel = abs_path
             .strip_prefix(&repo_root)
@@ -511,67 +629,15 @@ impl GitQueryService for RuntimeGitQueryService {
             .to_string_lossy()
             .replace('\\', "/");
 
-        // Current XY state of this exact path (cheap: single-path status).
-        let xy = self.path_status(&repo_root, &repo_rel).await?;
-
-        let Some((x, y, rename_old)) = xy else {
-            // Tracked & clean — the two sides are identical (NoChange).
-            return self.diff_clean(&repo_root, &abs_path, &repo_rel, params.cached).await;
-        };
-
-        // Renames: HEAD holds the OLD path; worktree/index hold the NEW.
-        let head_repo_rel = if x == 'R' || y == 'R' {
-            rename_old.as_deref().unwrap_or(&repo_rel)
+        if head_ref.is_empty() {
+            self.diff_with_worktree(&repo_root, &abs_path, &repo_rel, base_ref)
+                .await
         } else {
-            &repo_rel
-        };
-
-        let is_untracked = x == '?' && y == '?';
-        let is_worktree_deleted = y == 'D';
-
-        // ── original (HEAD side) ─────────────────────────────────────────
-        let original = if is_untracked {
-            Vec::new()
-        } else {
-            match read_blob(&self.git_bin, &repo_root, "HEAD", head_repo_rel).await? {
-                BlobRead::Missing => Vec::new(), // staged-added new file
-                BlobRead::TooLarge => {
-                    return Ok(binary_diff_response());
-                }
-                BlobRead::Ok(bytes) => bytes,
-            }
-        };
-
-        // ── modified side (worktree, or index when cached=1) ────────────
-        let modified = if params.cached == 1 {
-            if is_untracked {
-                Vec::new()
-            } else {
-                match read_blob(&self.git_bin, &repo_root, "", &repo_rel).await? {
-                    BlobRead::Missing => Vec::new(),
-                    BlobRead::TooLarge => {
-                        return Ok(binary_diff_response());
-                    }
-                    BlobRead::Ok(bytes) => bytes,
-                }
-            }
-        } else if is_worktree_deleted {
-            Vec::new()
-        } else {
-            match std::fs::metadata(&abs_path) {
-                Ok(md) if md.len() > DIFF_SIZE_CAP => return Ok(binary_diff_response()),
-                Ok(_) => std::fs::read(&abs_path)?,
-                Err(_) => Vec::new(),
-            }
-        };
-
-        Ok(assemble_diff(
-            original,
-            modified,
-            is_untracked,
-            is_worktree_deleted,
-        ))
+            self.diff_two_refs(&repo_root, &repo_rel, base_ref, head_ref)
+                .await
+        }
     }
+
 
     async fn log(&self, params: &GitLogParams) -> Result<GitLogResponse, GitError> {
         let workspace_root = resolve_workspace_root(&self.work_dir, params.workspace_id.as_deref())
@@ -648,6 +714,100 @@ impl GitQueryService for RuntimeGitQueryService {
 }
 
 impl RuntimeGitQueryService {
+    /// ADR-XXX: list files touched by commit `rev`. Backend for the
+    /// Git Status Bar history dropdown. Drives off `git diff-tree
+    /// -r --name-status -z --no-commit-id --root <rev>`:
+    ///
+    /// - `--root` makes the initial commit work (its "parent" is the
+    ///   empty tree, so without `--root` it returns nothing);
+    /// - `-r` recurses into subtrees;
+    /// - `-z` NUL-separates every field, including rename paths;
+    /// - `--no-commit-id` suppresses the commit hash header so only
+    ///   the change records are emitted.
+    ///
+    /// The output format per record (NUL-terminated):
+    /// - `<status>\0<path>\0` for non-rename/copy;
+    /// - `<status>\0<new>\0<old>\0` for rename/copy.
+    ///
+    /// `<status>` is a single letter optionally followed by a score
+    /// (`M`, `A`, `D`, `R<score>`, `C<score>`, `T<type>`).
+    ///
+    /// Merge commits: `git diff-tree` returns the diff against the
+    /// first parent — that is what the user expects from "files in
+    /// this commit" (the alternative, `--cc`, folds common changes
+    /// across parents and is rarely what a human wants).
+    async fn status_for_commit(
+        &self,
+        repo_root: &Path,
+        workspace_root: &Path,
+        rev: &str,
+    ) -> Result<GitStatusResponse, GitError> {
+        // 1. Resolve the commit label (short SHA + subject prefix) for the
+        //    bar header — separate command so we can degrade gracefully if
+        //    it fails (the diff-tree output below is the source of truth).
+        let label_cmd = {
+            let mut c = git_cmd(&self.git_bin, repo_root);
+            c.args(["log", "-1", "--format=%h %s"]);
+            c.arg(rev);
+            c
+        };
+        let label = match run_git(label_cmd).await {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => rev.to_string(),
+        };
+
+        // 2. diff-tree -r --name-status -z --no-commit-id --root <rev>
+        let mut cmd = git_cmd(&self.git_bin, repo_root);
+        cmd.args([
+            "diff-tree",
+            "-r",
+            "--name-status",
+            "-z",
+            "--no-commit-id",
+            "--root",
+        ]);
+        cmd.arg(rev);
+        let out = match run_git(cmd).await {
+            Ok(o) => o,
+            Err(GitError::GitUnavailable(_)) => {
+                return Ok(GitStatusResponse {
+                    is_repo: true,
+                    branch: Some(label),
+                    error: Some("git_unavailable".to_string()),
+                    truncated: false,
+                    changes: vec![],
+                    rev: Some(rev.to_string()),
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Unresolvable rev → BadRequest so the Desktop surfaces a
+            // real error instead of silently rendering "0 files" for
+            // a typo'd hash.
+            return Err(GitError::BadRequest(format!(
+                "git diff-tree {rev}: {}",
+                stderr.trim()
+            )));
+        }
+
+        let (mut changes, truncated) = parse_diff_tree_name_status(
+            &out.stdout,
+            repo_root,
+            workspace_root,
+        );
+        changes.sort_by(|a, b| status_sort_key(a).cmp(&status_sort_key(b)));
+
+        Ok(GitStatusResponse {
+            is_repo: true,
+            branch: Some(label),
+            error: None,
+            truncated,
+            changes,
+            rev: Some(rev.to_string()),
+        })
+    }
     /// Single-path `git status --porcelain=v1 -z` → `(x, y, old)` for
     /// the requested repo-relative path, or `None` when the path is not
     /// in the status output (tracked & clean).
@@ -700,30 +860,91 @@ impl RuntimeGitQueryService {
     }
 
     /// Diff for a tracked-and-clean path (absent from status output).
+    /// Only reachable via `diff_with_worktree` - the working-tree
+    /// branch is the only one that uses XY and therefore the only
+    /// one that can encounter "tracked & clean" (both refs resolve
+    /// to identical bytes).
     async fn diff_clean(
         &self,
         repo_root: &Path,
         abs_path: &Path,
         repo_rel: &str,
-        cached: u8,
     ) -> Result<GitDiffResponse, GitError> {
         let original = match read_blob(&self.git_bin, repo_root, "HEAD", repo_rel).await? {
             BlobRead::Missing => Vec::new(),
             BlobRead::TooLarge => return Ok(binary_diff_response()),
             BlobRead::Ok(bytes) => bytes,
         };
-        let modified = if cached == 1 {
-            match read_blob(&self.git_bin, repo_root, "", repo_rel).await? {
+        let modified = match std::fs::metadata(abs_path) {
+            Ok(md) if md.len() > DIFF_SIZE_CAP => return Ok(binary_diff_response()),
+            Ok(_) => std::fs::read(abs_path)?,
+            Err(_) => Vec::new(),
+        };
+        Ok(assemble_diff(original, modified, false, false))
+    }
+
+    /// Working-tree variant: `original = base_ref:<path>`, `modified =
+    /// <working-tree>`. Mirrors the original ADR-078 implementation
+    /// (untracked / deleted / staged) but parameterises the base ref
+    /// instead of hard-coding "HEAD".
+    async fn diff_with_worktree(
+        &self,
+        repo_root: &Path,
+        abs_path: &Path,
+        repo_rel: &str,
+        base_ref: &str,
+    ) -> Result<GitDiffResponse, GitError> {
+        let xy = self.path_status(repo_root, repo_rel).await?;
+        let Some((x, y, rename_old)) = xy else {
+            return self.diff_clean(repo_root, abs_path, repo_rel).await;
+        };
+        let head_repo_rel = if x == 'R' || y == 'R' {
+            rename_old.as_deref().unwrap_or(repo_rel)
+        } else {
+            repo_rel
+        };
+        let is_untracked = x == '?' && y == '?';
+        let is_worktree_deleted = y == 'D';
+        let original = if is_untracked {
+            Vec::new()
+        } else {
+            match read_blob(&self.git_bin, repo_root, base_ref, head_repo_rel).await? {
                 BlobRead::Missing => Vec::new(),
                 BlobRead::TooLarge => return Ok(binary_diff_response()),
                 BlobRead::Ok(bytes) => bytes,
             }
+        };
+        let modified = if is_worktree_deleted {
+            Vec::new()
         } else {
             match std::fs::metadata(abs_path) {
                 Ok(md) if md.len() > DIFF_SIZE_CAP => return Ok(binary_diff_response()),
                 Ok(_) => std::fs::read(abs_path)?,
                 Err(_) => Vec::new(),
             }
+        };
+        Ok(assemble_diff(original, modified, is_untracked, is_worktree_deleted))
+    }
+
+    /// Two-ref variant: `original = base_ref:<path>`, `modified =
+    /// head_ref:<path>`. No working-tree involvement - used when the
+    /// caller wants to compare two commits (or commit vs index).
+    async fn diff_two_refs(
+        &self,
+        repo_root: &Path,
+        repo_rel: &str,
+        base_ref: &str,
+        head_ref: &str,
+    ) -> Result<GitDiffResponse, GitError> {
+        let original = match read_blob(&self.git_bin, repo_root, base_ref, repo_rel).await? {
+            BlobRead::Missing => return Ok(binary_diff_response()),
+            BlobRead::TooLarge => return Ok(binary_diff_response()),
+            BlobRead::Ok(bytes) => bytes,
+        };
+        let modified = match read_blob(&self.git_bin, repo_root, head_ref, repo_rel).await? {
+            BlobRead::Missing => Vec::new(),
+            BlobRead::TooLarge => return Ok(binary_diff_response()),
+            BlobRead::Ok(bytes) => bytes,
         };
         Ok(assemble_diff(original, modified, false, false))
     }
@@ -912,6 +1133,28 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].path, "inside.rs");
         assert_eq!(changes[1].path, "u.txt");
+    }
+
+    #[test]
+    fn diff_tree_rows_are_never_marked_staged() {
+        // Regression: a historical commit's file list has no index/worktree
+        // semantics, so the "staged" badge in GitStatusPanel must not appear
+        // on commit-mode rows. Setting `staged: true` here used to make every
+        // row of a commit's file list render as "已暂存".
+        let ws = Path::new("/repo");
+        let repo = Path::new("/repo");
+        let raw = b"M\0src/a.rs\0A\0src/new.rs\0D\0src/gone.rs\0R\0new.txt\0old.txt\0";
+        let (changes, _) = parse_diff_tree_name_status(raw, repo, ws);
+        assert_eq!(changes.len(), 4);
+        for c in &changes {
+            assert!(!c.staged, "commit-mode row must not be staged: {}", c.path);
+        }
+        // Index/worktree columns are mirrored to a sensible single-axis view.
+        assert_eq!(changes[0].index, GitIndexStatus::Modified);
+        assert_eq!(changes[1].index, GitIndexStatus::Added);
+        assert_eq!(changes[2].index, GitIndexStatus::Deleted);
+        assert_eq!(changes[3].index, GitIndexStatus::Renamed);
+        assert_eq!(changes[3].old_path.as_deref(), Some("old.txt"));
     }
 
     #[test]
@@ -1157,7 +1400,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await;
         assert!(matches!(d, Err(GitError::GitUnavailable(_))), "{d:?}");
@@ -1183,7 +1426,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1195,7 +1438,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1209,7 +1452,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "new.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1223,7 +1466,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1241,7 +1484,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "bin.dat".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1269,7 +1512,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "b2.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1299,7 +1542,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "c.txt".into(),
-                cached: 1,
+            ..Default::default()
             })
             .await
             .unwrap();
@@ -1323,7 +1566,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "../evil.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await;
         match r {
@@ -1374,7 +1617,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "tracked.txt".into(),
-                cached: 0,
+            ..Default::default()
             })
             .await
             .unwrap();

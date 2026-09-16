@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { useFileEditorStore, registerFileDisposer, type OpenFile } from "../../stores/fileEditorStore";
+import { useFileEditorStore, registerFileDisposer, sourceRelPath, type OpenFile } from "../../stores/fileEditorStore";
+import { useGitStore } from "../../stores/gitStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileTreeStore, getCachedWorkspaceRoot, treeKey, isReadyNode } from "../../stores/fileTree";
@@ -30,6 +31,9 @@ import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { HtmlPreviewView } from "./HtmlPreviewView";
 import { GitVirtualNav } from "./GitVirtualNav";
+import { CommitPicker } from "./CommitPicker";
+import { MarkdownToolbar } from "../markdown/MarkdownToolbar";
+import { registerMarkdownTableNavigation } from "../markdown/editorAid";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
@@ -105,6 +109,9 @@ export function FileEditorPanel({ width }: { width: number }) {
     const theme = useSettingsStore((s) => s.theme);
     const fontSize = useSettingsStore((s) => s.fontSize);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
+    const [diffEditor, setDiffEditor] = useState<
+        import("monaco-editor").editor.IStandaloneDiffEditor | null
+    >(null);
     // Reset the DiffEditor state when the active tab changes — Monaco's
     // onMount will repopulate it on the next render once the new
     // DiffEditor mounts. Without this, GitVirtualNav briefly holds a
@@ -153,9 +160,6 @@ export function FileEditorPanel({ width }: { width: number }) {
     // up / down hunk-jump buttons. DiffEditor remounts when the user
     // switches diff tabs (the `original` / `modified` props change),
     // so we clear it to null on unmount via the onMount teardown.
-    const [diffEditor, setDiffEditor] = useState<
-        import("monaco-editor").editor.IStandaloneDiffEditor | null
-    >(null);
     // (cursor / selectedCount moved to useEditorStatusStore — see Monaco
     //  selection handler below. The local useState was only used by the
     //  per-file status bar that PR-3 removed.)
@@ -181,6 +185,50 @@ export function FileEditorPanel({ width }: { width: number }) {
     const codeEditorOverriddenRef = useRef(false);
 
     const activeFile = openFiles.find((f) => f.id === activeFileId) ?? null;
+
+    // Diff banner commit pickers. The two banners ("HEAD" / "Working
+    // Tree") on a diff tab are buttons - clicking opens this picker
+    // anchored under the button. Only one side is open at a time.
+    const [pickerSide, setPickerSide] = useState<"base" | "head" | null>(null);
+    const [baseAnchor, setBaseAnchor] = useState<HTMLElement | null>(null);
+    const [headAnchor, setHeadAnchor] = useState<HTMLElement | null>(null);
+
+    const fetchDiff = useGitStore((s) => s.fetchDiff);
+    const updateDiffRefs = useFileEditorStore((s) => s.updateDiffRefs);
+
+    /** Apply a new base/head ref pair: re-fetch and replace the diff
+     *  tab content in place (no remount, no flicker). The base/head
+     *  refs on the OpenFile are updated so the banner labels render
+     *  the new selection immediately. */
+    const applyDiffRefs = useCallback(
+        async (baseRef: string, headRef: string) => {
+            if (!activeFile) return;
+            try {
+                const diff = await fetchDiff(
+                    activeFile.agentId,
+                    activeFile.workspaceId,
+                    sourceRelPath(activeFile),
+                    baseRef,
+                    headRef,
+                );
+                updateDiffRefs(activeFile.id, baseRef, headRef);
+                useFileEditorStore.getState().setVirtualFileContent(
+                    activeFile.id,
+                    diff.modified,
+                );
+                useFileEditorStore.setState((s) => ({
+                    openFiles: s.openFiles.map((f) =>
+                        f.id === activeFile.id
+                            ? { ...f, originalContent: diff.original }
+                            : f,
+                    ),
+                }));
+            } catch (e) {
+                console.error("[FileEditorPanel] applyDiffRefs failed:", e);
+            }
+        },
+        [activeFile, fetchDiff, updateDiffRefs],
+    );
 
     // ── Locate-in-tree eligibility ──────────────────────────────────
     // The button is only enabled when the active file lives in the currently
@@ -231,7 +279,9 @@ export function FileEditorPanel({ width }: { width: number }) {
             agentId: activeFile.agentId,
             workspaceId: activeFile.workspaceId,
             sessionId: activeSessionId,
-            relPath: activeFile.relPath,
+            // Virtual tabs (diff/log) prefix relPath for monaco URI
+            // disambiguation — FileTree locate must use the real path.
+            relPath: sourceRelPath(activeFile),
         });
     }, [activeFile, locateDisabled, selectedAgentId, activeSessionId, requestShowWorkspacePanel, requestLocate]);
 
@@ -529,6 +579,13 @@ export function FileEditorPanel({ width }: { width: number }) {
                 if (currentId) void saveFile(currentId);
             },
         );
+
+        // GFM table cell navigation (Tab / Shift+Tab) — shared with the doc
+        // editor (editorAid + tableAid). The Editor is a singleton reused
+        // across all files (models switch via the `path` prop), so the
+        // languageId filter keeps default Tab behavior for non-markdown
+        // models. No dispose needed: commands die with the editor instance.
+        registerMarkdownTableNavigation(editor, monaco, { languageId: "markdown" });
 
         // Ctrl+P / Cmd+P — Go to File (Monaco QuickInput-style palette).
         // Monaco standalone has no built-in "Go to File" provider and
@@ -1255,7 +1312,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                         const isPreview = file.mode === "preview";
                         return (
                             <Tooltip
-                                content={isPreview ? `${file.relPath} · ${t("fileEditor.previewBadge")}` : file.relPath}
+                                content={isPreview ? `${sourceRelPath(file)} · ${t("fileEditor.previewBadge")}` : sourceRelPath(file)}
                                 variant="plain"
                                 key={file.id}
                             >
@@ -1440,7 +1497,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 editor container rather than the outer `rounded-xl` root so
                 the existing rounded bottom corners of the panel still
                 clip cleanly under `overflow-hidden`. */}
-            <div className="relative flex-1 overflow-hidden border-x border-right-panel-border">
+            <div className="relative flex flex-1 flex-col overflow-hidden border-x border-right-panel-border">
                 {!activeFile ? (
                     <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
                         {t("fileEditor.emptyState")}
@@ -1462,47 +1519,158 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 {t("gitStatus.binaryDiff")}
                             </div>
                         ) : (
-                            <DiffEditor
-                                original={activeFile.originalContent}
-                                modified={activeFile.content}
-                                language={activeFile.language}
-                                theme={resolvedMonacoTheme}
-                                onMount={(ed) => setDiffEditor(ed)}
-                                options={{
-                                    minimap: { enabled: false },
-                                    fontSize: editorFontSize,
-                                    lineNumbers: "on",
-                                    scrollBeyondLastLine: false,
-                                    readOnly: true,
-                                    renderSideBySide: true,
-                                    // ADR-078 decision 7: side-by-side is part of
-                                    // the "two-file diff" semantics — must hold at
-                                    // any editor width. Monaco otherwise auto-
-                                    // switches to inline mode when the container
-                                    // is narrower than renderSideBySideInlineBreakpoint
-                                    // (default 900 px; see
-                                    // monaco-editor/.../diffEditorOptions.js L32).
-                                    // Forcing it off keeps the two-pane layout
-                                    // intact even when FileEditorPanel is
-                                    // squeezed by a wide right panel / agent list.
-                                    useInlineViewWhenSpaceIsLimited: false,
-                                    // Disable Monaco's diff overview ruler. The
-                                    // ruler paints a 30-px-wide marker strip on
-                                    // the modified (right) pane only — see
-                                    // monaco-editor/.../overviewRulerFeature.js
-                                    // (ONE_OVERVIEW_WIDTH=15, ENTIRE=15*2=30) —
-                                    // which stacks visually on top of the
-                                    // 14-px scrollbar there. Result: the right
-                                    // scrollbar looks ~2x wider than the left's
-                                    // (which has no ruler). Diff markers are
-                                    // still conveyed by the per-line green/red
-                                    // highlights inside the panes, which is the
-                                    // primary affordance.
-                                    renderOverviewRuler: false,
-                                    automaticLayout: true,
-                                    padding: { top: 8 },
-                                }}
-                            />
+                            <div className="flex h-full flex-col">
+                                {/* Labels the two side-by-side panes. Backend
+                                    pins original=HEAD and modified=working-
+                                    tree when cached=0, which is what
+                                    GitStatusPanel.openDiff always sends
+                                    (fetchDiff(..., 0) — see
+                                    core/acowork-runtime/src/usecases/
+                                    git_query_impl.rs `diff`). grid-cols-2
+                                    keeps each label visually under its pane. */}
+                                <div className="grid grid-cols-2 border-b border-right-panel-border bg-zinc-50 text-[11px] dark:bg-zinc-900/40">
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            const next = pickerSide === "base" ? null : "base";
+                                            setBaseAnchor(next ? (e.currentTarget as HTMLElement) : null);
+                                            setPickerSide(next);
+                                        }}
+                                        aria-label={t("gitStatus.headLabel")}
+                                        className={
+                                            "flex items-center gap-2 truncate px-3 py-1 text-left transition-colors " +
+                                            (pickerSide === "base"
+                                                ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
+                                                : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800/60")
+                                        }
+                                    >
+                                        <span className="font-medium">
+                                            {(!activeFile.diffBaseRef || activeFile.diffBaseRef === "HEAD")
+                                                ? t("gitStatus.headLabel")
+                                                : activeFile.diffBaseRef.slice(0, 7)}
+                                        </span>
+                                        <span className="truncate text-zinc-400 dark:text-zinc-500">
+                                            {sourceRelPath(activeFile)}
+                                        </span>
+                                        <svg
+                                            className="ml-auto h-3 w-3 shrink-0 opacity-60"
+                                            viewBox="0 0 12 12"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="1.5"
+                                            aria-hidden
+                                        >
+                                            <path d="M3 4.5L6 7.5L9 4.5" />
+                                        </svg>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            const next = pickerSide === "head" ? null : "head";
+                                            setHeadAnchor(next ? (e.currentTarget as HTMLElement) : null);
+                                            setPickerSide(next);
+                                        }}
+                                        aria-label={t("gitStatus.workingTreeLabel")}
+                                        className={
+                                            "flex items-center justify-end gap-2 truncate px-3 py-1 text-right transition-colors " +
+                                            (pickerSide === "head"
+                                                ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
+                                                : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800/60")
+                                        }
+                                    >
+                                        <span className="truncate text-zinc-400 dark:text-zinc-500">
+                                            {sourceRelPath(activeFile)}
+                                        </span>
+                                        <span className="font-medium">
+                                            {!activeFile.diffHeadRef
+                                                ? t("gitStatus.workingTreeLabel")
+                                                : activeFile.diffHeadRef.slice(0, 7)}
+                                        </span>
+                                        <svg
+                                            className="h-3 w-3 shrink-0 opacity-60"
+                                            viewBox="0 0 12 12"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="1.5"
+                                            aria-hidden
+                                        >
+                                            <path d="M3 4.5L6 7.5L9 4.5" />
+                                        </svg>
+                                    </button>
+                                </div>
+                                {pickerSide && (
+                                    <CommitPicker
+                                        anchorEl={pickerSide === "base" ? baseAnchor : headAnchor}
+                                        currentRef={
+                                            pickerSide === "base"
+                                                ? (activeFile.diffBaseRef ?? "HEAD")
+                                                : (activeFile.diffHeadRef ?? "")
+                                        }
+                                        allowWorkingTree={pickerSide === "head"}
+                                        agentId={activeFile.agentId}
+                                        workspaceId={activeFile.workspaceId}
+                                        relPath={sourceRelPath(activeFile)}
+                                        onSelect={(ref) => {
+                                            if (pickerSide === "base") {
+                                                void applyDiffRefs(ref, activeFile.diffHeadRef ?? "");
+                                            } else {
+                                                void applyDiffRefs(activeFile.diffBaseRef ?? "HEAD", ref);
+                                            }
+                                            setPickerSide(null);
+                                            setBaseAnchor(null);
+                                            setHeadAnchor(null);
+                                        }}
+                                        onClose={() => {
+                                            setPickerSide(null);
+                                            setBaseAnchor(null);
+                                            setHeadAnchor(null);
+                                        }}
+                                    />
+                                )}
+                                <div className="min-h-0 flex-1">
+                                    <DiffEditor
+                                        original={activeFile.originalContent}
+                                        modified={activeFile.content}
+                                        language={activeFile.language}
+                                        theme={resolvedMonacoTheme}
+                                        onMount={(ed) => setDiffEditor(ed)}
+                                        options={{
+                                            minimap: { enabled: false },
+                                            fontSize: editorFontSize,
+                                            lineNumbers: "on",
+                                            scrollBeyondLastLine: false,
+                                            readOnly: true,
+                                            renderSideBySide: true,
+                                            // ADR-078 decision 7: side-by-side is part of
+                                            // the "two-file diff" semantics — must hold at
+                                            // any editor width. Monaco otherwise auto-
+                                            // switches to inline mode when the container
+                                            // is narrower than renderSideBySideInlineBreakpoint
+                                            // (default 900 px; see
+                                            // monaco-editor/.../diffEditorOptions.js L32).
+                                            // Forcing it off keeps the two-pane layout
+                                            // intact even when FileEditorPanel is
+                                            // squeezed by a wide right panel / agent list.
+                                            useInlineViewWhenSpaceIsLimited: false,
+                                            // Disable Monaco's diff overview ruler. The
+                                            // ruler paints a 30-px-wide marker strip on
+                                            // the modified (right) pane only — see
+                                            // monaco-editor/.../overviewRulerFeature.js
+                                            // (ONE_OVERVIEW_WIDTH=15, ENTIRE=15*2=30) —
+                                            // which stacks visually on top of the
+                                            // 14-px scrollbar there. Result: the right
+                                            // scrollbar looks ~2x wider than the left's
+                                            // (which has no ruler). Diff markers are
+                                            // still conveyed by the per-line green/red
+                                            // highlights inside the panes, which is the
+                                            // primary affordance.
+                                            renderOverviewRuler: false,
+                                            automaticLayout: true,
+                                            padding: { top: 8 },
+                                        }}
+                                    />
+                                </div>
+                            </div>
                         )}
                         {/* Floating Up / Down hunk-jump + (log only)
                             Load-older overlay — sibling of the DiffEditor
@@ -1588,6 +1756,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                     <MarkdownPreviewView file={activeFile} />
                 ) : monacoReady ? (
                     <>
+                        {/* Markdown editing toolbar — only for .md source files;
+                            shared with the doc editor (components/markdown). */}
+                        {activeFile.language === "markdown" && (
+                            <MarkdownToolbar editor={editorRef.current} disabled={activeFile.loading} />
+                        )}
+                        <div className="min-h-0 flex-1">
                         <Editor
                             path={activeReadyRelPath}
                             value={activeFile && !activeFile.loading ? activeFile.content : undefined}
@@ -1635,6 +1809,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 Loading...
                             </div>
                         )}
+                        </div>
                     </>
                 ) : monacoFailed ? (
                     <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">

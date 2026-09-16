@@ -773,30 +773,45 @@ export function WorkspaceExplorer() {
             {/* Workspace selector + action buttons */}
             <div className="flex items-center gap-0.5 border-b border-zinc-200 px-1.5 py-1.5 dark:border-zinc-800">
                 <WorkspaceSelector dropDirection="down" />
-                <div className="ml-auto flex items-center gap-0.5">
-                    <Tooltip content={t("workspace.newFile")} variant="plain">
-                        <button
-                            onClick={handleNewFile}
-                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-[var(--color-accent)] dark:hover:bg-zinc-800"
-                        >
-                            <FilePlus className="h-3.5 w-3.5" />
-                        </button>
-                    </Tooltip>
-                    <Tooltip content={t("workspace.newFolder")} variant="plain">
-                        <button
-                            onClick={handleNewFolder}
-                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-yellow-600 dark:hover:bg-zinc-800 dark:hover:text-yellow-400"
-                        >
-                            <FolderPlus className="h-3.5 w-3.5" />
-                        </button>
-                    </Tooltip>
-                    <button
-                        onClick={handleRefresh}
-                        className="rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-
-                    >
-                        <RefreshCw className="h-3 w-3" />
-                    </button>
+                <div className="ml-auto flex items-center gap-1 pr-1 shrink-0">
+                    {/* Toolbar action buttons. The class string + Tooltip
+                        wrap mirror SessionTabBar's session-history button
+                        (and the git banner's history/refresh buttons) so
+                        the three toolbar strips at the top, right, and
+                        bottom of the workspace panel read as a family.
+                        The previous per-icon accent / yellow hover colors
+                        were dropped here — visual differentiation was
+                        costing family parity for negligible gain. */}
+                    <div className="relative inline-flex">
+                        <Tooltip content={t("workspace.newFile")} variant="plain">
+                            <button
+                                onClick={handleNewFile}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                            >
+                                <FilePlus className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    </div>
+                    <div className="relative inline-flex">
+                        <Tooltip content={t("workspace.newFolder")} variant="plain">
+                            <button
+                                onClick={handleNewFolder}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                            >
+                                <FolderPlus className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    </div>
+                    <div className="relative inline-flex">
+                        <Tooltip content={t("workspace.refresh")} variant="plain">
+                            <button
+                                onClick={handleRefresh}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                            >
+                                <RefreshCw className="h-3.5 w-3.5" />
+                            </button>
+                        </Tooltip>
+                    </div>
                 </div>
             </div>
 

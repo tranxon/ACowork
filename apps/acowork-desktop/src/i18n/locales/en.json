@@ -362,6 +362,7 @@
     "changeToReadWrite": "Change to read-write",
     "newFile": "New file",
     "newFolder": "New folder",
+    "refresh": "Refresh",
     "addWorkspace": "Add Workspace",
     "title": "Workspace",
     "remoteBrowseTitle": "Browse Remote Server",
@@ -397,7 +398,9 @@
   "gitStatusBar": {
     "title": "Git",
     "notRepo": "Not a Git repository",
-    "changes": "changes"
+    "changes": "changes",
+    "history": "Show commit history",
+    "refresh": "Refresh"
   },
   "gitStatus": {
     "loading": "Loading…",
@@ -419,7 +422,11 @@
     "prevChange": "Previous change",
     "nextChange": "Next change",
     "prevCommits": "Previous commits",
-    "nextCommits": "Next commits"
+    "nextCommits": "Next commits",
+    "headLabel": "HEAD",
+    "workingTreeLabel": "Working Tree",
+    "commitPickerLabel": "Select a revision",
+    "commitPickerLoading": "Loading commits…"
   },
   "fileTree": {
     "deleteConfirmOk": "Delete",
@@ -1483,6 +1490,30 @@
     "reviewRejected": "Rejected \"{{name}}\"",
     "reviewFailed": "Review action failed",
     "offlineTitle": "Document service unavailable",
-    "offlineHint": "The doc service is offline. Content shown is cached and read-only; retry or wait for auto-reconnect."
+    "offlineHint": "The doc service is offline. Content shown is cached and read-only; retry or wait for auto-reconnect.",
+    "split": "Split",
+    "toolbarLabel": "Markdown toolbar",
+    "tbH1": "Heading 1",
+    "tbH2": "Heading 2",
+    "tbH3": "Heading 3",
+    "tbBold": "Bold",
+    "tbItalic": "Italic",
+    "tbStrike": "Strikethrough",
+    "tbInlineCode": "Inline code",
+    "tbCodeBlock": "Code block",
+    "tbLink": "Link",
+    "tbImage": "Image",
+    "tbQuote": "Quote",
+    "tbBulletList": "Bullet list",
+    "tbOrderedList": "Ordered list",
+    "tbTaskList": "Task list",
+    "tbTable": "Insert table",
+    "tbTableRows": "Rows",
+    "tbTableCols": "Columns",
+    "tbTableInsert": "Insert",
+    "tbColLabel": "Column {{n}}",
+    "tbMermaid": "Mermaid diagram",
+    "tbRule": "Divider",
+    "editorLoadFailed": "Editor failed to load. Close and reopen the doc to retry."
   }
 }

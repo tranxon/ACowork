@@ -695,6 +695,7 @@
     "changeToReadWrite": "Change to read-write",
     "newFile": "New file",
     "newFolder": "New folder",
+    "refresh": "Refresh",
     "addWorkspace": "워크스페이스 추가",
     "title": "워크스페이스",
     "remoteBrowseTitle": "원격 서버 탐색",
@@ -1150,7 +1151,9 @@
   "gitStatusBar": {
     "title": "Git",
     "notRepo": "Git 저장소가 아닙니다",
-    "changes": "개 변경"
+    "changes": "개 변경",
+    "history": "커밋 기록 보기",
+    "refresh": "새로 고침"
   },
   "gitStatus": {
     "loading": "불러오는 중…",
@@ -1172,7 +1175,11 @@
     "prevChange": "이전 변경",
     "nextChange": "다음 변경",
     "prevCommits": "더 최근 커밋",
-    "nextCommits": "더 오래된 커밋"
+    "nextCommits": "더 오래된 커밋",
+    "headLabel": "HEAD",
+    "workingTreeLabel": "작업 트리",
+    "commitPickerLabel": "리비전 선택",
+    "commitPickerLoading": "커밋 불러오는 중…"
   },
   "fileTree": {
     "deleteConfirmOk": "삭제",
@@ -1426,6 +1433,30 @@
     "reviewRejected": "「{{name}}」을 거부했습니다",
     "reviewFailed": "검토 작업에 실패했습니다",
     "offlineTitle": "문서 서비스를 사용할 수 없습니다",
-    "offlineHint": "문서 서비스가 오프라인입니다. 표시된 내용은 읽기 전용 캐시이며, 다시 시도하거나 자동 재연결을 기다리세요."
+    "offlineHint": "문서 서비스가 오프라인입니다. 표시된 내용은 읽기 전용 캐시이며, 다시 시도하거나 자동 재연결을 기다리세요.",
+    "split": "분할",
+    "toolbarLabel": "Markdown 도구 모음",
+    "tbH1": "제목 1",
+    "tbH2": "제목 2",
+    "tbH3": "제목 3",
+    "tbBold": "굵게",
+    "tbItalic": "기울임",
+    "tbStrike": "취소선",
+    "tbInlineCode": "인라인 코드",
+    "tbCodeBlock": "코드 블록",
+    "tbLink": "링크",
+    "tbImage": "이미지",
+    "tbQuote": "인용",
+    "tbBulletList": "글머리 목록",
+    "tbOrderedList": "번호 목록",
+    "tbTaskList": "작업 목록",
+    "tbTable": "표 삽입",
+    "tbTableRows": "행",
+    "tbTableCols": "열",
+    "tbTableInsert": "삽입",
+    "tbColLabel": "열 {{n}}",
+    "tbMermaid": "Mermaid 플로우차트",
+    "tbRule": "구분선",
+    "editorLoadFailed": "편집기 로드에 실패했습니다. 다시 시도하세요"
   }
 }

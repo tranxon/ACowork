@@ -142,6 +142,10 @@ pub struct GitChangeDto {
 pub struct GitStatusResponse {
     pub is_repo: bool,
     /// Current branch name (`HEAD` when detached). None when not a repo.
+    /// When `rev` is set, this is overwritten with the commit's display
+    /// label (`"<short_sha> <subject prefix>"`) so the Git Status Bar
+    /// can render the commit the user picked from the history dropdown
+    /// without an extra round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// `"not_a_repo"` | `"git_unavailable"` | null — explicit error
@@ -155,6 +159,11 @@ pub struct GitStatusResponse {
     pub truncated: bool,
     #[serde(default)]
     pub changes: Vec<GitChangeDto>,
+    /// Echo of the requested `rev` (None for working-tree status).
+    /// Lets the Desktop cache entries by `(groupKey, rev)` and still
+    /// know which view each cache slot is rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
 }
 
 /// Querystring for `GET /git/status`.
@@ -162,6 +171,16 @@ pub struct GitStatusResponse {
 pub struct GitStatusParams {
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Optional git revision: when set, the response's `changes` lists
+    /// the files touched by that commit (parsed from
+    /// `git diff-tree --name-status -z`) instead of the current
+    /// working-tree status. The legacy working-tree semantics survive
+    /// as the default (`rev = None`). The Desktop's Git Status Bar
+    /// history dropdown uses this to render "files in commit X" without
+    /// a dedicated endpoint. Pass `""` explicitly to opt into the
+    /// working-tree semantics (same as omitting the param).
+    #[serde(default)]
+    pub rev: Option<String>,
 }
 
 // ── Diff DTOs ──────────────────────────────────────────────────────────────
@@ -178,14 +197,14 @@ pub enum GitDiffKind {
 }
 
 /// Response for `GET /git/diff` — two full texts for the DiffEditor
-/// (original = HEAD, modified = worktree or index).
+/// (original = `base_ref`, modified = `head_ref`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitDiffResponse {
     pub kind: GitDiffKind,
-    /// HEAD version; `""` for untracked; full text for deleted.
+    /// `base_ref` version; `""` for untracked / missing; full text for deleted.
     pub original: String,
-    /// Worktree version (or index when cached=1); `""` for deleted.
+    /// `head_ref` version; `""` for deleted.
     pub modified: String,
 }
 
@@ -197,9 +216,17 @@ pub struct GitDiffParams {
     /// Workspace-root-relative path (validated, then converted to
     /// repo-root-relative before reaching git — ADR-078 decision 3).
     pub path: String,
-    /// 0 (default): worktree vs HEAD; 1: index vs HEAD (staged diff).
+    /// Base revision: any git rev (HEAD, branch, tag, full/short hash).
+    /// Default `"HEAD"`. Must not be empty.
     #[serde(default)]
-    pub cached: u8,
+    pub base_ref: Option<String>,
+    /// Compare revision: `""` (default) means the working tree on disk
+    /// (preserves the pre-existing worktree-vs-HEAD semantics including
+    /// untracked / deleted handling). Any non-empty value is treated as
+    /// a git rev resolved via `git show <rev>:<path>` (e.g. a commit
+    /// hash, branch, tag, or `:path` for the index).
+    #[serde(default)]
+    pub head_ref: Option<String>,
 }
 
 // ── Log DTOs ───────────────────────────────────────────────────────────────

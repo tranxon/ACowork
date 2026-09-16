@@ -120,13 +120,21 @@ describe("gitStore URL construction", () => {
     expect(fetchUrls[0]).toBe("http://gw.test/api/agents/a1/git/status");
   });
 
-  it("builds the diff URL with path and cached params", async () => {
-    await useGitStore.getState().fetchDiff("a1", "ws1", "src/a.ts", 1);
+  it("builds the diff URL with path, base_ref, and head_ref", async () => {
+    await useGitStore.getState().fetchDiff("a1", "ws1", "src/a.ts", "abc123", ":");
     const url = fetchUrls[0];
     expect(url).toContain("/api/agents/a1/git/diff");
     expect(url).toContain("workspace_id=ws1");
     expect(url).toContain("path=src%2Fa.ts");
-    expect(url).toContain("cached=1");
+    expect(url).toContain("base_ref=abc123");
+    expect(url).toContain("head_ref=%3A");
+  });
+
+  it("defaults diff refs to HEAD vs working tree", async () => {
+    await useGitStore.getState().fetchDiff("a1", "ws1", "src/a.ts");
+    const url = fetchUrls[0];
+    expect(url).toContain("base_ref=HEAD");
+    expect(url).toContain("head_ref=");
   });
 
   it("builds the log URL with limit (clamped to 200) and optional path", async () => {

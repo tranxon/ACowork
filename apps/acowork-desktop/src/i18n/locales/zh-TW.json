@@ -693,6 +693,7 @@
     "changeToReadWrite": "Change to read-write",
     "newFile": "New file",
     "newFolder": "New folder",
+    "refresh": "Refresh",
     "addWorkspace": "新增工作區",
     "title": "工作區",
     "remoteBrowseTitle": "瀏覽遠端伺服器",
@@ -1148,7 +1149,9 @@
   "gitStatusBar": {
     "title": "Git",
     "notRepo": "不是 Git 儲存庫",
-    "changes": "處變更"
+    "changes": "處變更",
+    "history": "查看提交歷史",
+    "refresh": "重新整理"
   },
   "gitStatus": {
     "loading": "載入中…",
@@ -1170,7 +1173,11 @@
     "prevChange": "上一處修改",
     "nextChange": "下一處修改",
     "prevCommits": "較新的提交",
-    "nextCommits": "較舊的提交"
+    "nextCommits": "較舊的提交",
+    "headLabel": "HEAD",
+    "workingTreeLabel": "本機工作區",
+    "commitPickerLabel": "選擇版本",
+    "commitPickerLoading": "載入提交紀錄…"
   },
   "fileTree": {
     "deleteConfirmOk": "刪除",
@@ -1424,6 +1431,30 @@
     "reviewRejected": "已拒絕「{{name}}」",
     "reviewFailed": "審核操作失敗",
     "offlineTitle": "文件服務無法使用",
-    "offlineHint": "文件服務離線。目前內容為唯讀快取，可重試或等待自動重連。"
+    "offlineHint": "文件服務離線。目前內容為唯讀快取，可重試或等待自動重連。",
+    "split": "分割",
+    "toolbarLabel": "Markdown 工具列",
+    "tbH1": "一級標題",
+    "tbH2": "二級標題",
+    "tbH3": "三級標題",
+    "tbBold": "粗體",
+    "tbItalic": "斜體",
+    "tbStrike": "刪除線",
+    "tbInlineCode": "行內程式碼",
+    "tbCodeBlock": "程式碼區塊",
+    "tbLink": "連結",
+    "tbImage": "圖片",
+    "tbQuote": "引用",
+    "tbBulletList": "無序清單",
+    "tbOrderedList": "有序清單",
+    "tbTaskList": "任務清單",
+    "tbTable": "插入表格",
+    "tbTableRows": "列",
+    "tbTableCols": "欄",
+    "tbTableInsert": "插入",
+    "tbColLabel": "欄 {{n}}",
+    "tbMermaid": "Mermaid 流程圖",
+    "tbRule": "分隔線",
+    "editorLoadFailed": "編輯器載入失敗，請關閉後重試"
   }
 }

@@ -748,6 +748,7 @@
     "changeToReadWrite": "改为读写",
     "newFile": "新建文件",
     "newFolder": "新建文件夹",
+    "refresh": "刷新",
     "addWorkspace": "添加工作区",
     "title": "工作区",
     "remoteBrowseTitle": "浏览远程服务器",
@@ -1209,7 +1210,9 @@
   "gitStatusBar": {
     "title": "Git",
     "notRepo": "不是 Git 仓库",
-    "changes": "处变更"
+    "changes": "处变更",
+    "history": "查看提交历史",
+    "refresh": "刷新"
   },
   "gitStatus": {
     "loading": "加载中…",
@@ -1231,7 +1234,11 @@
     "prevChange": "上一处修改",
     "nextChange": "下一处修改",
     "prevCommits": "更近的提交",
-    "nextCommits": "更早的提交"
+    "nextCommits": "更早的提交",
+    "headLabel": "HEAD",
+    "workingTreeLabel": "本地工作区",
+    "commitPickerLabel": "选择版本",
+    "commitPickerLoading": "加载提交记录…"
   },
   "fileTree": {
     "deleteConfirmOk": "删除",
@@ -1500,6 +1507,30 @@
     "reviewRejected": "已拒绝「{{name}}」",
     "reviewFailed": "审核操作失败",
     "offlineTitle": "文档服务不可用",
-    "offlineHint": "文档服务离线。当前内容为缓存只读，可点击重试或等待自动重连。"
+    "offlineHint": "文档服务离线。当前内容为缓存只读，可点击重试或等待自动重连。",
+    "split": "分栏",
+    "toolbarLabel": "Markdown 工具栏",
+    "tbH1": "一级标题",
+    "tbH2": "二级标题",
+    "tbH3": "三级标题",
+    "tbBold": "加粗",
+    "tbItalic": "斜体",
+    "tbStrike": "删除线",
+    "tbInlineCode": "行内代码",
+    "tbCodeBlock": "代码块",
+    "tbLink": "链接",
+    "tbImage": "图片",
+    "tbQuote": "引用",
+    "tbBulletList": "无序列表",
+    "tbOrderedList": "有序列表",
+    "tbTaskList": "任务列表",
+    "tbTable": "插入表格",
+    "tbTableRows": "行",
+    "tbTableCols": "列",
+    "tbTableInsert": "插入",
+    "tbColLabel": "列 {{n}}",
+    "tbMermaid": "Mermaid 流程图",
+    "tbRule": "分割线",
+    "editorLoadFailed": "编辑器加载失败，请关闭后重试"
   }
 }

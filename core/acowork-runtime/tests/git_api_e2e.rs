@@ -289,6 +289,68 @@ async fn status_workspace_subdir_of_repo_filters_changes() {
 }
 
 #[tokio::test]
+async fn status_rev_returns_files_in_that_commit() {
+    // ADR-XXX: `?rev=<hash>` makes `/git/status` return the files touched
+    // by that commit (parsed via `git diff-tree --name-status -z`). The
+    // bar header (branch) is replaced with the commit's "<short_sha>
+    // <subject>" label, and `rev` is echoed back so the Desktop can
+    // cache the entry by (groupKey, rev).
+    let (port, dir) = spawn_server("status-rev").await;
+    init_repo(&dir);
+    // Second commit: add b.txt (A), modify a.txt (M), delete c.txt (D).
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    std::fs::write(dir.join("c.txt"), "c\n").unwrap();
+    git_in(&dir, &["add", "b.txt", "c.txt"]);
+    git_in(&dir, &["commit", "-m", "second"]);
+    std::fs::write(dir.join("a.txt"), "modified\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "third"]);
+    // `git log --format=%H -1` returns the third commit's full hash.
+    let head_hash = git_in(&dir, &["log", "--format=%H", "-1"]).trim().to_string();
+    // And its short SHA + subject (what the bar will display).
+    let head_label = git_in(&dir, &["log", "--format=%h %s", "-1"]).trim().to_string();
+    // Second commit is `HEAD~` — also reachable.
+    let parent_hash = git_in(&dir, &["log", "--format=%H", "HEAD~"]).trim().to_string();
+
+    // rev = HEAD (third commit): a.txt M.
+    let (status, body) = get_git(port, "status", &[("rev", &head_hash)]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["isRepo"], true);
+    assert_eq!(body["error"], serde_json::Value::Null);
+    assert_eq!(body["rev"], head_hash, "rev must echo back the requested ref");
+    assert_eq!(
+        body["branch"], head_label,
+        "branch must be the commit's '<short_sha> <subject>' label"
+    );
+    let changes = body["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "third commit only touched a.txt");
+    assert_eq!(changes[0]["path"], "a.txt");
+    assert_eq!(changes[0]["index"], "modified");
+
+    // rev = HEAD~ (second commit): b.txt added, c.txt added — note
+    // the initial-commit `a.txt` is NOT in this list because diff-tree
+    // compares against the parent.
+    let (status, body) = get_git(port, "status", &[("rev", &parent_hash)]).await;
+    assert_eq!(status, 200);
+    let changes = body["changes"].as_array().unwrap();
+    let paths: Vec<&str> = changes.iter().map(|c| c["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, vec!["b.txt", "c.txt"], "second commit added b.txt + c.txt");
+    for c in changes {
+        assert_eq!(c["index"], "added");
+    }
+
+    // Empty rev ("") must behave like the legacy working-tree status.
+    let (status, body) = get_git(port, "status", &[("rev", "")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["branch"], "main", "no rev → branch header");
+    assert_eq!(body["rev"], serde_json::Value::Null, "empty rev is normalised to None");
+
+    // Unresolvable rev → 400 BadRequest.
+    let (status, body) = get_git(port, "status", &[("rev", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")]).await;
+    assert_eq!(status, 400, "unknown rev must surface as 400: {body}");
+}
+
+#[tokio::test]
 async fn status_unknown_workspace_returns_404() {
     let (port, dir) = spawn_server("status-unknown-ws").await;
     init_repo(&dir);
@@ -339,27 +401,56 @@ async fn diff_deleted_has_empty_modified() {
 }
 
 #[tokio::test]
-async fn diff_cached_reads_index_not_worktree() {
-    let (port, dir) = spawn_server("diff-cached").await;
+async fn diff_index_ref_reads_index_not_worktree() {
+    let (port, dir) = spawn_server("diff-index").await;
     init_repo(&dir);
     std::fs::write(dir.join("a.txt"), "index version\n").unwrap();
     git_in(&dir, &["add", "a.txt"]);
     std::fs::write(dir.join("a.txt"), "worktree version\n").unwrap();
 
-    // cached=1 → index vs HEAD
-    let (status, body) = get_git(port, "diff", &[("path", "a.txt"), ("cached", "1")]).await;
+    // head_ref=":" → index vs HEAD (git show :path form)
+    let (status, body) = get_git(port, "diff", &[("path", "a.txt"), ("head_ref", ":")]).await;
     assert_eq!(status, 200);
     assert_eq!(body["kind"], "modified");
     assert_eq!(body["modified"], "index version\n");
 
-    // cached=0 (default) → worktree vs HEAD
-    let (status, body) = get_git(port, "diff", &[("path", "a.txt"), ("cached", "0")]).await;
+    // head_ref="" (default) → worktree vs HEAD
+    let (status, body) = get_git(port, "diff", &[("path", "a.txt")]).await;
     assert_eq!(status, 200);
     assert_eq!(body["modified"], "worktree version\n");
 
-    // cached > 1 → 400
-    let (status, _) = get_git(port, "diff", &[("path", "a.txt"), ("cached", "2")]).await;
+    // base_ref="" → 400 (must specify a base revision)
+    let (status, _) = get_git(port, "diff", &[("path", "a.txt"), ("base_ref", "")]).await;
     assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn diff_two_refs_compares_any_two_commits() {
+    let (port, dir) = spawn_server("diff-two-refs").await;
+    init_repo(&dir);
+    std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "first"]);
+    let first = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "second"]);
+
+    // base_ref=first, head_ref=HEAD → v1 vs v2
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[
+            ("path", "a.txt"),
+            ("base_ref", &first),
+            ("head_ref", "HEAD"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["kind"], "modified");
+    assert_eq!(body["original"], "v1\n");
+    assert_eq!(body["modified"], "v2\n");
 }
 
 #[tokio::test]

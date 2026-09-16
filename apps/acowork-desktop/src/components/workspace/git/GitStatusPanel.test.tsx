@@ -41,12 +41,14 @@ vi.mock("../../../i18n/useTranslation", () => ({
 /** Mutable gitStore mock — both the selector form and getState() form. */
 const gitStoreMocks = {
   status: {} as Record<string, unknown>,
+  viewingRev: {} as Record<string, string>,
   fetchDiff: vi.fn(),
   fetchLog: vi.fn(),
 };
 
 vi.mock("../../../stores/gitStore", () => ({
   gitGroupKey: (a: string, w: string) => `${a}\u0000${w}`,
+  gitViewKey: (group: string, rev: string) => (rev ? `${group}|${rev}` : group),
   useGitStore: Object.assign(
     (selector: (s: typeof gitStoreMocks) => unknown) => selector(gitStoreMocks),
     { getState: () => gitStoreMocks },
@@ -73,11 +75,20 @@ function setEntry(entry: Record<string, unknown> | undefined) {
   gitStoreMocks.status[KEY] = entry;
 }
 
+/** Mirror of `setEntry` that writes to the view-keyed slot the bar's
+ *  history dropdown fills. Mirrors production: `fetchStatus(..., rev)`
+ *  stores under `gitViewKey(group, rev)`. */
+function setViewEntry(rev: string, entry: Record<string, unknown> | undefined) {
+  gitStoreMocks.status[`${KEY}|${rev}`] = entry;
+}
+
 function okResponse(body: Record<string, unknown>) {
   return Promise.resolve(body);
 }
 
 beforeEach(() => {
+  gitStoreMocks.viewingRev = {};
+  for (const k of Object.keys(gitStoreMocks.status)) delete gitStoreMocks.status[k];
   setEntry(undefined);
   gitStoreMocks.fetchDiff.mockReset();
   gitStoreMocks.fetchLog.mockReset();
@@ -183,7 +194,7 @@ describe("GitStatusPanel", () => {
     fireEvent.click(screen.getByTestId("git-status-row"));
 
     await vi.waitFor(() => {
-      expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith("a1", "ws1", "gone.ts", 0);
+      expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith("a1", "ws1", "gone.ts", "HEAD", "");
     });
     await vi.waitFor(() => {
       expect(fileEditorMocks.openVirtualFile).toHaveBeenCalledWith(
@@ -251,7 +262,7 @@ describe("GitStatusPanel", () => {
     // Show Diff action → fetchDiff + openVirtualFile(kind: diff).
     fireEvent.click(screen.getByText("Show Diff"));
     await vi.waitFor(() => {
-      expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith("a1", "ws1", "src/a.ts", 0);
+      expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith("a1", "ws1", "src/a.ts", "HEAD", "");
     });
     await vi.waitFor(() => {
       expect(fileEditorMocks.openVirtualFile).toHaveBeenCalledWith(
@@ -378,5 +389,72 @@ describe("GitStatusPanel", () => {
     // Conflicted rows must not show a staged badge.
     const cRow = screen.getByText("c.txt").closest("li");
     expect(cRow?.textContent).not.toContain("staged");
+  });
+
+  // ── History dropdown → files-in-commit (ADR-XXX) ─────────────────────
+
+  it("renders files in the viewed commit when viewingRev is set", () => {
+    // After the user picks commit X from the bar's history dropdown,
+    // `viewingRev` is set and `status[groupKey|X]` carries that
+    // commit's file list. The panel must read from the view-keyed slot
+    // (NOT the bare group key) so a commit-view never accidentally
+    // overlays the working-tree list.
+    gitStoreMocks.viewingRev = { [KEY]: "abc1234" };
+    setViewEntry("abc1234", {
+      data: {
+        isRepo: true,
+        branch: "abc1234 feat",
+        error: null,
+        truncated: false,
+        changes: [{ path: "a.txt", index: "modified", worktree: "modified", staged: true }],
+        rev: "abc1234",
+      },
+      loading: false,
+    });
+    render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    // Commit-view files render through the same row template as the
+    // working-tree list — the difference is purely which status slot
+    // the panel reads. (The branch label is the bar's concern, not
+    // the panel's — see GitStatusBar.test.tsx.)
+    expect(screen.getByText("a.txt")).toBeTruthy();
+  });
+
+  it("opens the diff against X^ vs X when clicking a row while viewing commit X", () => {
+    // Click-row in commit view defaults to "open the diff for that
+    // commit vs its first parent" — not "open the file in the editor"
+    // (the file may not exist on the worktree yet).
+    gitStoreMocks.viewingRev = { [KEY]: "abc1234" };
+    setViewEntry("abc1234", {
+      data: {
+        isRepo: true,
+        branch: "abc1234 feat",
+        error: null,
+        truncated: false,
+        changes: [{ path: "a.txt", index: "modified", worktree: "modified", staged: true }],
+        rev: "abc1234",
+      },
+      loading: false,
+    });
+    gitStoreMocks.fetchDiff.mockReturnValue(
+      okResponse({ kind: "modified", original: "old", modified: "new" }) as never,
+    );
+    render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    fireEvent.click(screen.getByText("a.txt"));
+    // Wait for the async openDiff to settle.
+    return vi.waitFor(() => {
+      expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith(
+        "a1",
+        "ws1",
+        "a.txt",
+        "abc1234^", // base = X's first parent
+        "abc1234", // head = X
+      );
+      expect(fileEditorMocks.openVirtualFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          diffBaseRef: "abc1234^",
+          diffHeadRef: "abc1234",
+        }),
+      );
+    });
   });
 });

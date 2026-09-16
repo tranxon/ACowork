@@ -158,6 +158,13 @@ export interface OpenFile {
     /** ADR-078: git diff classification for kind === "diff" virtual
      *  tabs ("modified" | "untracked" | "deleted" | "binary" | "no_change"). */
     gitDiffKind?: string;
+    /** ADR-078 extension: base revision for the diff (default "HEAD").
+     *  Set when the user picks a different base via the diff banner. */
+    diffBaseRef?: string;
+    /** ADR-078 extension: compare revision for the diff.
+     *  "" (default) means the working tree; any git ref is accepted.
+     *  Set when the user picks a different compare via the diff banner. */
+    diffHeadRef?: string;
     /** Pagination state for kind === "log" virtual tabs.
      *
      *  - `loadedCommits` is the cache of every commit we've fetched for
@@ -237,6 +244,11 @@ interface FileEditorState {
         loadedCommits?: GitCommitDto[];
         displayedLimit?: number;
         reachedEnd?: boolean;
+        /** ADR-XXX: diff ref override — when set, the diff tab will
+         *  render against these revisions instead of HEAD vs working
+         *  tree. Set by the diff banner commit picker. */
+        diffBaseRef?: string;
+        diffHeadRef?: string;
     }) => void;
     /** Close a file tab. Returns false if dirty (caller should confirm first). */
     closeFile: (fileId: string, force?: boolean) => boolean;
@@ -262,6 +274,12 @@ interface FileEditorState {
             reachedEnd?: boolean;
         },
     ) => void;
+    /** ADR-078 extension: change the diff base / head refs in place
+     *  (no new tab). The actual content re-fetch is the caller's job
+     *  — this only updates which refs the tab is bound to so the
+     *  banner labels render correctly and a later commit-picker
+     *  selection knows what to highlight. */
+    updateDiffRefs: (fileId: string, baseRef?: string, headRef?: string) => void;
     /** Save file content to Gateway */
     saveFile: (fileId: string) => Promise<void>;
     /** Re-fetch file content from disk and replace both content and originalContent.
@@ -512,7 +530,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
     },
 
-    openVirtualFile: ({ agentId, workspaceId, kind, relPath, content, original, gitDiffKind, language, loadedCommits, displayedLimit, reachedEnd }) => {
+    openVirtualFile: ({ agentId, workspaceId, kind, relPath, content, original, gitDiffKind, language, loadedCommits, displayedLimit, reachedEnd, diffBaseRef, diffHeadRef }) => {
         const fileId = `git:${agentId}:${workspaceId}:${kind}:${relPath}`;
         const existing = get().openFiles.find((f) => f.id === fileId);
         if (existing) {
@@ -550,6 +568,8 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             mode: "edit",
             kind,
             gitDiffKind,
+            diffBaseRef,
+            diffHeadRef,
         };
 
         set((state) => ({
@@ -649,6 +669,20 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                     reachedEnd: extras?.reachedEnd ?? f.reachedEnd,
                 };
             }),
+        }));
+    },
+
+    updateDiffRefs: (fileId, baseRef, headRef) => {
+        set((state) => ({
+            openFiles: state.openFiles.map((f) =>
+                f.id === fileId
+                    ? {
+                          ...f,
+                          diffBaseRef: baseRef ?? f.diffBaseRef,
+                          diffHeadRef: headRef ?? f.diffHeadRef,
+                      }
+                    : f,
+            ),
         }));
     },
 
@@ -845,3 +879,19 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
     },
 }));
+
+/**
+ * Real workspace-relative path for an OpenFile.
+ *
+ * Virtual tabs (`kind === "diff" | "log"`) prefix `relPath` with the kind
+ * for monaco URI disambiguation (see `openVirtualFile`), so consumers that
+ * need the user-facing path — FileTree locate, banner display, tab
+ * tooltip — must strip the prefix via this helper. For `file` / `url`
+ * tabs `relPath` is already the workspace path.
+ */
+export function sourceRelPath(file: Pick<OpenFile, "kind" | "relPath">): string {
+    if (file.kind === "diff" || file.kind === "log") {
+        return file.relPath.replace(/^(diff|log):/, "");
+    }
+    return file.relPath;
+}

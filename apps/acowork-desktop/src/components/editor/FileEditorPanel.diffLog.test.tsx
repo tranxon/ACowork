@@ -102,6 +102,13 @@ function selectorStore<T>(state: T) {
 vi.mock("../../stores/fileEditorStore", () => ({
   registerFileDisposer: () => () => {},
   useFileEditorStore: selectorStore(h.editorState),
+  // Pass-through helper so the panel renders the same real-path
+  // stripping it does in production. Tests don't assert on tooltip
+  // text — only that the DiffEditor / binary placeholder render.
+  sourceRelPath: (file: { kind: string; relPath: string }) =>
+    file.kind === "diff" || file.kind === "log"
+      ? file.relPath.replace(/^(diff|log):/, "")
+      : file.relPath,
 }));
 
 vi.mock("../../stores/chatStore", () => ({

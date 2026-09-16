@@ -18,6 +18,8 @@ const translations: Record<string, string> = {
   "gitStatusBar.title": "Git",
   "gitStatusBar.notRepo": "Not a Git repository",
   "gitStatusBar.changes": "changes",
+  "gitStatusBar.history": "Show commit history",
+  "gitStatusBar.refresh": "Refresh",
 };
 
 vi.mock("../../../i18n/useTranslation", () => ({
@@ -26,17 +28,60 @@ vi.mock("../../../i18n/useTranslation", () => ({
   }),
 }));
 
+/** Stub CommitPicker so the history-dropdown tests can assert lifecycle
+ *  (mount / unmount / onSelect) without depending on the real picker's
+ *  fetchLog + DOM positioning logic. The picker is exercised end-to-end
+ *  in `CommitPicker.test.tsx`. */
+const pickerProps: Array<{
+  anchorEl: HTMLElement | null;
+  currentRef: string;
+  allowWorkingTree: boolean;
+  onSelect: (ref: string, label: string) => void;
+  onClose: () => void;
+}> = [];
+vi.mock("../../editor/CommitPicker", () => ({
+  CommitPicker: (props: (typeof pickerProps)[number]) => {
+    pickerProps.push(props);
+    return (
+      <div
+        data-testid="commit-picker"
+        data-allow-working-tree={props.allowWorkingTree}
+        data-current-ref={props.currentRef}
+      >
+        <button
+          data-testid="picker-select-commit"
+          onClick={() => props.onSelect("abc1234", "abc1234")}
+        >
+          pick abc1234
+        </button>
+        <button
+          data-testid="picker-select-worktree"
+          onClick={() => props.onSelect("", "Working Tree")}
+        >
+          pick Working Tree
+        </button>
+        <button data-testid="picker-close" onClick={() => props.onClose()}>
+          close
+        </button>
+      </div>
+    );
+  },
+}));
+
 /** Fake gitStore state fed through the selector pattern the component uses. */
 const mocks = {
   expandedKey: null as string | null,
+  viewingRev: {} as Record<string, string>,
   isExpanded: vi.fn(() => false),
   status: {} as Record<string, unknown>,
   setExpanded: vi.fn(),
   refresh: vi.fn(),
+  setViewingRev: vi.fn(),
 };
 
 vi.mock("../../../stores/gitStore", () => ({
   gitGroupKey: (a: string, w: string) => `${a}\u0000${w}`,
+  gitViewKey: (group: string, rev: string) => (rev ? `${group}|${rev}` : group),
   useGitStore: Object.assign(
     (selector: (s: Record<string, unknown>) => unknown) =>
       selector(mocks as unknown as Record<string, unknown>),
@@ -59,7 +104,10 @@ beforeEach(() => {
   mocks.isExpanded.mockReset().mockReturnValue(false);
   mocks.setExpanded.mockReset();
   mocks.refresh.mockReset();
+  mocks.setViewingRev.mockReset();
+  mocks.viewingRev = {};
   setEntry(undefined);
+  pickerProps.length = 0;
 });
 
 describe("GitStatusBar", () => {
@@ -108,8 +156,9 @@ describe("GitStatusBar", () => {
     setEntry({ data: null, loading: true });
     const { container } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
     expect(container.querySelector(".animate-spin")).toBeTruthy();
-    // No manual-refresh affordance during an in-flight fetch.
-    expect(screen.queryByTestId("git-refresh")).toBeNull();
+    // No manual-refresh / history affordance during an in-flight fetch.
+    expect(screen.queryByTestId("git-status-bar-history")).toBeNull();
+    expect(container.querySelector("svg.lucide-refresh-cw")).toBeNull();
   });
 
   it("clicking the bar expands a collapsed group", () => {
@@ -228,5 +277,103 @@ describe("GitStatusBar", () => {
     expect(mocks.refresh).toHaveBeenCalledTimes(1);
     rerender(<GitStatusBar agentId="a1" workspaceId="ws1" />);
     expect(mocks.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  // ── History dropdown (ADR-XXX) ────────────────────────────────────────
+
+  it("renders a History button next to Refresh when not loading", () => {
+    setEntry({
+      data: { isRepo: true, branch: "main", error: null, truncated: false, changes: [] },
+      loading: false,
+    });
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(screen.getByTestId("git-status-bar-history")).toBeTruthy();
+    expect(screen.getByLabelText("Show commit history")).toBeTruthy();
+    expect(screen.getByLabelText("Refresh")).toBeTruthy();
+    // Picker must NOT mount until the user clicks the History button.
+    expect(pickerProps).toHaveLength(0);
+  });
+
+  it("opens the commit picker on history click and passes allowWorkingTree + currentRef", () => {
+    setEntry({
+      data: { isRepo: true, branch: "main", error: null, truncated: false, changes: [] },
+      loading: false,
+    });
+    mocks.viewingRev = { "a1\u0000ws1": "deadbeef" };
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    fireEvent.click(screen.getByTestId("git-status-bar-history"));
+    expect(pickerProps).toHaveLength(1);
+    expect(pickerProps[0].allowWorkingTree).toBe(true);
+    expect(pickerProps[0].currentRef).toBe("deadbeef");
+    // Repo-wide history (no file scope) — the picker passes "" so the
+    // fetchLog endpoint skips the path param.
+    expect(pickerProps[0].anchorEl).toBe(screen.getByTestId("git-status-bar-history"));
+  });
+
+  it("commits the picked hash to setViewingRev and closes the popover", () => {
+    setEntry({
+      data: { isRepo: true, branch: "main", error: null, truncated: false, changes: [] },
+      loading: false,
+    });
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    fireEvent.click(screen.getByTestId("git-status-bar-history"));
+    // Pick from the (mocked) picker list.
+    fireEvent.click(screen.getByTestId("picker-select-commit"));
+    expect(mocks.setViewingRev).toHaveBeenCalledWith("a1", "ws1", "abc1234");
+    // Popover should unmount — no CommitPicker rendered anymore.
+    expect(screen.queryByTestId("commit-picker")).toBeNull();
+  });
+
+  it("commits the empty ref when the user picks Local Working Tree", () => {
+    setEntry({
+      data: { isRepo: true, branch: "main", error: null, truncated: false, changes: [] },
+      loading: false,
+    });
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    fireEvent.click(screen.getByTestId("git-status-bar-history"));
+    fireEvent.click(screen.getByTestId("picker-select-worktree"));
+    // The store action is the source of truth for clearing the view.
+    expect(mocks.setViewingRev).toHaveBeenCalledWith("a1", "ws1", "");
+  });
+
+  it("toggles the popover closed on a second click of the History button", () => {
+    setEntry({
+      data: { isRepo: true, branch: "main", error: null, truncated: false, changes: [] },
+      loading: false,
+    });
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    const btn = screen.getByTestId("git-status-bar-history");
+    fireEvent.click(btn);
+    expect(pickerProps).toHaveLength(1);
+    // StopPropagation inside the History span must NOT have toggled the
+    // bar's expand/collapse state.
+    expect(mocks.setExpanded).not.toHaveBeenCalled();
+    fireEvent.click(btn);
+    expect(screen.queryByTestId("commit-picker")).toBeNull();
+  });
+
+  it("renders the branch header (still the same `branch · N changes`) when viewing a commit", () => {
+    // The backend rewrites `branch` to "<short_sha> <subject>" for any
+    // rev-view fetch (see git_query_impl::status_for_commit). The bar's
+    // title doesn't care whether the label is a branch or a commit — it
+    // just renders `branch · N changes` for both, so existing tests stay
+    // green and the user sees the commit they picked. The entry is
+    // stored under the view-key (groupKey|rev) — not the bare groupKey —
+    // because fetchStatus writes there; the bar reads from the same
+    // slot.
+    mocks.viewingRev = { "a1\u0000ws1": "abc1234full" };
+    mocks.status["a1\u0000ws1|abc1234full"] = {
+      data: {
+        isRepo: true,
+        branch: "abc1234 add feature",
+        error: null,
+        truncated: false,
+        changes: [{}, {}],
+        rev: "abc1234full",
+      },
+      loading: false,
+    };
+    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(screen.getByText("abc1234 add feature · 2 changes")).toBeTruthy();
   });
 });

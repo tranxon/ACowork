@@ -19,6 +19,7 @@ import {
   type GitDiffResponse,
   type GitLogResponse,
   gitGroupKey,
+  gitViewKey,
   useGitStore,
 } from "../../../stores/gitStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
@@ -108,7 +109,13 @@ function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; la
 
 export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
   const { t } = useTranslation();
-  const entry = useGitStore((s) => s.status[gitGroupKey(agentId, workspaceId)]);
+  const groupKey = gitGroupKey(agentId, workspaceId);
+  // Subscribe to the rev the group is currently viewing so a click in the
+  // bar's history dropdown swaps the panel's source data on the next
+  // render. Reading via the same `gitViewKey` the store writes keeps
+  // the panel, the cache, and the bar title coherent.
+  const viewingRev = useGitStore((s) => s.viewingRev[groupKey] ?? "");
+  const entry = useGitStore((s) => s.status[gitViewKey(groupKey, viewingRev)]);
   const menu = useContextMenu<GitChangeDto>();
 
   const data = entry?.data;
@@ -120,9 +127,16 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     () => async (c: GitChangeDto) => {
       const editor = useFileEditorStore.getState();
       try {
+        // When the panel is showing files in commit X, click-row opens
+        // the diff for that commit vs its first parent (`X^` — git's
+        // standard first-parent shorthand; root commits have no parent
+        // and the backend will surface a 400, which the user sees as a
+        // toast). Otherwise the default is HEAD vs working tree.
+        const baseRef = viewingRev ? `${viewingRev}^` : "HEAD";
+        const headRef = viewingRev;
         const diff: GitDiffResponse = await useGitStore
           .getState()
-          .fetchDiff(agentId, workspaceId, c.path, 0);
+          .fetchDiff(agentId, workspaceId, c.path, baseRef, headRef);
         editor.openVirtualFile({
           agentId,
           workspaceId,
@@ -132,12 +146,14 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           original: diff.original,
           gitDiffKind: diff.kind,
           language: languageForPath(c.path),
+          diffBaseRef: baseRef,
+          diffHeadRef: headRef,
         });
       } catch (e) {
         console.error("[GitStatusPanel] fetchDiff failed:", e);
       }
     },
-    [agentId, workspaceId],
+    [agentId, workspaceId, viewingRev],
   );
 
   const openLog = useMemo(
@@ -258,7 +274,12 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 "hover:bg-zinc-100 dark:hover:bg-zinc-800",
               )}
               onClick={() => {
-                if (c.worktree === "deleted") void openDiff(c);
+                // When viewing a commit's file list, the file may not
+                // exist on disk (e.g. it was deleted in that commit, or
+                // the worktree hasn't caught up). Default the click to
+                // "open the diff for that commit" so the user gets a
+                // useful preview regardless.
+                if (viewingRev || c.worktree === "deleted") void openDiff(c);
                 else
                   void useFileEditorStore
                     .getState()
