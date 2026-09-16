@@ -154,8 +154,7 @@ async fn re_entry_after_cancel_resolves_immediately() {
 #[tokio::test]
 async fn select_on_cancel_future_wins_returns_some() {
     let handle = CancelHandle::new();
-    let result =
-        select_on_cancel(handle, async { Ok::<i32, RuntimeError>(42) }).await;
+    let result = select_on_cancel(handle, async { Ok::<i32, RuntimeError>(42) }).await;
     assert_eq!(result.unwrap(), Some(42));
 }
 
@@ -190,9 +189,10 @@ async fn select_on_cancel_cancel_wins_returns_none() {
 #[tokio::test]
 async fn select_on_cancel_propagates_inner_error() {
     let handle = CancelHandle::new();
-    let result =
-        select_on_cancel::<i32, RuntimeError, _>(handle, async { Err(RuntimeError::Tool("inner failure".into())) })
-            .await;
+    let result = select_on_cancel::<i32, RuntimeError, _>(handle, async {
+        Err(RuntimeError::Tool("inner failure".into()))
+    })
+    .await;
     assert!(result.is_err(), "inner error must propagate unchanged");
     match result.unwrap_err() {
         RuntimeError::Tool(msg) => assert_eq!(msg, "inner failure"),
@@ -355,7 +355,8 @@ async fn result_type_alias_works_with_select_on_cancel() {
     // (which fixes `E = RuntimeError`) to confirm signature drift is
     // caught at compile time.
     let handle = CancelHandle::new();
-    let r: Result<Option<i32>> = select_on_cancel(handle, async { Ok::<i32, RuntimeError>(7) }).await;
+    let r: Result<Option<i32>> =
+        select_on_cancel(handle, async { Ok::<i32, RuntimeError>(7) }).await;
     assert_eq!(r.unwrap(), Some(7));
 }
 
@@ -517,7 +518,10 @@ async fn phase3_handle_lookup_then_cancel_propagates_to_select() {
             source: StopSource::ChatPanel { .. },
             reason,
         }) => assert_eq!(reason, "user_clicked_stop"),
-        other => panic!("expected UserStop{{ChatPanel, user_clicked_stop}}, got {:?}", other),
+        other => panic!(
+            "expected UserStop{{ChatPanel, user_clicked_stop}}, got {:?}",
+            other
+        ),
     }
 
     canceller.await.unwrap();
@@ -546,12 +550,19 @@ async fn phase3_repeat_cancel_preserves_first_reason() {
         reason: "second_stop".into(),
     };
 
-    assert!(handle.cancel(first.clone()), "first cancel must take effect");
+    assert!(
+        handle.cancel(first.clone()),
+        "first cancel must take effect"
+    );
     assert!(
         !handle.cancel(second),
         "subsequent cancels must be no-ops (first-wins)"
     );
-    assert_eq!(handle.reason(), Some(first), "first reason must be preserved");
+    assert_eq!(
+        handle.reason(),
+        Some(first),
+        "first reason must be preserved"
+    );
 }
 
 /// Phase 3 L4: verifies the `poll_control()` integration — when the handle
@@ -600,8 +611,7 @@ fn per_request_slot_replaces_cancelled_state() {
     use parking_lot::Mutex as ParkingMutex;
 
     // Stand-in for `SessionCore::current_cancel_handle` slot.
-    let slot: Arc<ParkingMutex<CancelHandle>> =
-        Arc::new(ParkingMutex::new(CancelHandle::new()));
+    let slot: Arc<ParkingMutex<CancelHandle>> = Arc::new(ParkingMutex::new(CancelHandle::new()));
 
     // Read the initial (Active) handle through the slot — exactly what
     // SessionManager does on every external cancel dispatch.
@@ -638,7 +648,10 @@ fn per_request_slot_replaces_cancelled_state() {
     // it remains Cancelled (level-triggered semantics) but no one observes
     // it any more. We hold it here to demonstrate that the old instance is
     // in fact still alive (Arc keeps it).
-    assert!(initial.is_cancelled(), "old handle still observed as Cancelled");
+    assert!(
+        initial.is_cancelled(),
+        "old handle still observed as Cancelled"
+    );
 }
 
 /// Per-request slot + concurrent reader/writer: simulates the production
@@ -649,8 +662,7 @@ fn per_request_slot_replaces_cancelled_state() {
 fn per_request_slot_arc_keeps_readers_in_sync() {
     use parking_lot::Mutex as ParkingMutex;
 
-    let slot: Arc<ParkingMutex<CancelHandle>> =
-        Arc::new(ParkingMutex::new(CancelHandle::new()));
+    let slot: Arc<ParkingMutex<CancelHandle>> = Arc::new(ParkingMutex::new(CancelHandle::new()));
 
     // "Old generation" handle — what `chat_stream` was using before Stop.
     let old = slot.lock().clone();

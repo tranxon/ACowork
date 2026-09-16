@@ -388,7 +388,12 @@ mod tests {
     fn test_unregister_provider() {
         let registry = ProviderRegistry::new();
         let provider = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", "openai-official", provider, vec!["gpt-4".to_string()]);
+        registry.register_provider(
+            "openai",
+            "openai-official",
+            provider,
+            vec!["gpt-4".to_string()],
+        );
         assert!(registry.unregister("openai"));
         assert!(registry.get("openai").is_none());
     }
@@ -398,7 +403,12 @@ mod tests {
         let registry = ProviderRegistry::new();
 
         let openai = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", "openai-official", openai, vec!["gpt-4".to_string()]);
+        registry.register_provider(
+            "openai",
+            "openai-official",
+            openai,
+            vec!["gpt-4".to_string()],
+        );
 
         let anthropic = Arc::new(AnthropicProvider::new(Some("sk-ant-test")));
         registry.register_provider(
@@ -421,7 +431,12 @@ mod tests {
     fn test_capability_query() {
         let registry = ProviderRegistry::new();
         let provider = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", "openai-official", provider, vec!["gpt-4".to_string()]);
+        registry.register_provider(
+            "openai",
+            "openai-official",
+            provider,
+            vec!["gpt-4".to_string()],
+        );
 
         assert!(registry.has_capability("openai", "gpt-4", ModelCapability::Streaming));
         assert!(registry.has_capability("openai", "gpt-4", ModelCapability::ToolUse));
@@ -476,7 +491,12 @@ mod tests {
         let registry = ProviderRegistry::new();
 
         let openai = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", "openai-official", openai, vec!["gpt-4".to_string()]);
+        registry.register_provider(
+            "openai",
+            "openai-official",
+            openai,
+            vec!["gpt-4".to_string()],
+        );
 
         let ollama = Arc::new(OllamaProvider::new());
         let mut entry = ProviderEntry {

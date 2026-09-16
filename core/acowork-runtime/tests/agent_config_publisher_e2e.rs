@@ -19,12 +19,10 @@
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-use acowork_core::mqtt_proto::{
-    data_envelope::Payload, AgentConfig, DataEnvelope,
-};
+use acowork_core::mqtt_proto::{AgentConfig, DataEnvelope, data_envelope::Payload};
 use acowork_gateway::mqtt::start_broker;
 use acowork_runtime::mqtt::{
-    new_shared_cache, MqttAgentConfigPublisher, MqttConnectConfig, RuntimeMqttClient,
+    MqttAgentConfigPublisher, MqttConnectConfig, RuntimeMqttClient, new_shared_cache,
 };
 use prost::Message as _;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
@@ -44,10 +42,9 @@ async fn wait_for_retained_publish(
     let start = Instant::now();
     while start.elapsed() < budget {
         let remaining = budget.saturating_sub(start.elapsed());
-        match tokio::time::timeout(
-            remaining.min(Duration::from_millis(100)),
-            eventloop.poll(),
-        ).await {
+        match tokio::time::timeout(remaining.min(Duration::from_millis(100)), eventloop.poll())
+            .await
+        {
             Ok(Ok(Event::Incoming(Incoming::Publish(p)))) => {
                 if p.topic != target_topic {
                     continue;
@@ -64,7 +61,10 @@ async fn wait_for_retained_publish(
             Err(_) => {}
         }
     }
-    panic!("did not receive retained publish on '{}' within {:?}", target_topic, budget);
+    panic!(
+        "did not receive retained publish on '{}' within {:?}",
+        target_topic, budget
+    );
 }
 
 /// Connect a test Runtime and return it together with the ADR-073
@@ -118,7 +118,10 @@ async fn e2e_publish_delivers_retained_agent_config() {
     opts.set_keep_alive(Duration::from_secs(5));
     let (sub_client, mut eventloop) = AsyncClient::new(opts, 10);
     let target = format!("acowork/agents/{}/config", instance_id);
-    sub_client.subscribe(&target, QoS::AtLeastOnce).await.expect("subscribe");
+    sub_client
+        .subscribe(&target, QoS::AtLeastOnce)
+        .await
+        .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -144,14 +147,19 @@ async fn e2e_retained_snapshot_arrives_to_late_subscriber() {
     let (runtime, instance_id) = connect_runtime(port, "com.test.retained").await;
     let publisher = MqttAgentConfigPublisher::from_runtime_client(&runtime);
 
-    publisher.publish(r#"{"active_mcp_servers":["pm"]}"#.to_string()).await;
+    publisher
+        .publish(r#"{"active_mcp_servers":["pm"]}"#.to_string())
+        .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut opts = MqttOptions::new("test:late", "127.0.0.1", port);
     opts.set_keep_alive(Duration::from_secs(5));
     let (_sub_client, mut eventloop) = AsyncClient::new(opts, 10);
     let target = format!("acowork/agents/{}/config", instance_id);
-    _sub_client.subscribe(&target, QoS::AtLeastOnce).await.expect("subscribe");
+    _sub_client
+        .subscribe(&target, QoS::AtLeastOnce)
+        .await
+        .expect("subscribe");
 
     let ac = wait_for_retained_publish(&mut eventloop, &target, Duration::from_secs(5)).await;
     assert_eq!(ac.agent_id, "com.test.retained");
@@ -185,7 +193,8 @@ async fn e2e_publish_without_broker_is_graceful() {
     let result = tokio::time::timeout(
         Duration::from_secs(2),
         publisher.publish(r#"{"x":1}"#.to_string()),
-    ).await;
+    )
+    .await;
     assert!(
         result.is_ok(),
         "publish() must not deadlock when broker is unreachable"

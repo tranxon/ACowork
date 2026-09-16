@@ -12,13 +12,13 @@
 
 use std::sync::Arc;
 
-use acowork_core::timeout_config::constants;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session::{SessionManager, SessionManagerConfig};
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext, build_session_manager_config};
+use acowork_core::timeout_config::constants;
 
 /// Cached result of the background scan that finds the most recently active
 /// session — `(session_id, title)`. Held in an `Arc<RwLock<…>>` so the
@@ -81,9 +81,7 @@ pub(crate) async fn phase_b_init_session(
                             if p.api_key.is_empty() {
                                 None
                             } else {
-                                p.models
-                                    .first()
-                                    .map(|m| (p.id.clone(), m.id.clone()))
+                                p.models.first().map(|m| (p.id.clone(), m.id.clone()))
                             }
                         })
                     {
@@ -111,86 +109,90 @@ pub(crate) async fn phase_b_init_session(
         );
     }
 
-    let conversation_session =
-        if let Some(latest_id) = crate::conversation::find_latest_session(&conversations_dir) {
-            tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
-            match crate::conversation::ConversationSession::resume(
-                work_dir_path,
-                &latest_id,
-                committed_lines.clone(),
-            ) {
-                Ok((conv, config_rx, state_rx)) => {
-                    // ADR-043: Spawn config + state change relays so
-                    // persisted-session updates flow through MQTT to the
-                    // Desktop.
-                    if let Some(chunk_tx) = ctx.chunk_tx.clone() {
-                        crate::startup::subsystems::spawn_config_change_relay(
-                            config_rx,
-                            chunk_tx.clone(),
-                            conv.clone(),
-                            latest_id.clone(),
-                            // agent_core_shared is populated later in
-                            // Phase B (after AgentCore construction +
-                            // injection). The relay reads it lazily on
-                            // each config change event, so by the time
-                            // a user action triggers a push the slot is
-                            // already filled.
-                            ctx.agent_core_shared.clone(),
-                        );
-                        crate::startup::subsystems::spawn_state_change_relay(
-                            state_rx,
-                            chunk_tx,
-                            conv.clone(),
-                            latest_id.clone(),
-                        );
-                    }
-                    Some(conv)
-                }
-                Err(e) => {
-                    let msg = format!(
-                        "session_persistence_unavailable: cannot resume session \"{}\" in {:?}: {}",
-                        latest_id, conversations_dir, e
+    let conversation_session = if let Some(latest_id) =
+        crate::conversation::find_latest_session(&conversations_dir)
+    {
+        tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
+        match crate::conversation::ConversationSession::resume(
+            work_dir_path,
+            &latest_id,
+            committed_lines.clone(),
+        ) {
+            Ok((conv, config_rx, state_rx)) => {
+                // ADR-043: Spawn config + state change relays so
+                // persisted-session updates flow through MQTT to the
+                // Desktop.
+                if let Some(chunk_tx) = ctx.chunk_tx.clone() {
+                    crate::startup::subsystems::spawn_config_change_relay(
+                        config_rx,
+                        chunk_tx.clone(),
+                        conv.clone(),
+                        latest_id.clone(),
+                        // agent_core_shared is populated later in
+                        // Phase B (after AgentCore construction +
+                        // injection). The relay reads it lazily on
+                        // each config change event, so by the time
+                        // a user action triggers a push the slot is
+                        // already filled.
+                        ctx.agent_core_shared.clone(),
                     );
-                    eprintln!("⚠️ {}; runtime will run with an in-memory session (history will be lost on restart)", msg);
-                    if let Ok(mut reasons) = ctx.degraded_reasons.write() {
-                        reasons.push(msg);
-                    }
-                    None
+                    crate::startup::subsystems::spawn_state_change_relay(
+                        state_rx,
+                        chunk_tx,
+                        conv.clone(),
+                        latest_id.clone(),
+                    );
                 }
+                Some(conv)
             }
-        } else {
-            let new_id = crate::conversation::generate_session_id();
-            tracing::info!(session_id = %new_id, "Creating new conversation session");
-            // Use the cache-resolved values when present (Bug B fix v4);
-            // fall back to None so the legacy validation / noop path
-            // takes over on Gateway failure.
-            let (initial_model, initial_provider) = match cache_initial_provider_model {
-                Some((pid, mid)) => (Some(mid), Some(pid)),
-                None => (None, None),
-            };
-            let (conv, config_rx, state_rx) = crate::conversation::ConversationSession::new(
-                work_dir_path,
-                &new_id,
-                crate::conversation::SessionConfig {
-                    agent_id: config.agent_id.clone(),
-                    workspace_id: None,
-                    model: initial_model,
-                    provider: initial_provider,
-                },
-                agent_cfg.max_sessions.unwrap_or(config.max_sessions),
-                committed_lines.clone(),
-            )?;
-            // Drop the meta-change receiver — new-session creation writes
-            // the initial meta file, but no subscriber cares about it yet
-            // (the session_task spawns its own relay after this returns to
-            // the SessionManager path). Leaving the receiver unhandled
-            // here would silently buffer `UnboundedSender`s and prevent
-            // Drop-time notifications from being observed. Dropping is
-            // the explicit "I don't care" signal.
-            drop(config_rx);
-            drop(state_rx);
-            Some(conv)
+            Err(e) => {
+                let msg = format!(
+                    "session_persistence_unavailable: cannot resume session \"{}\" in {:?}: {}",
+                    latest_id, conversations_dir, e
+                );
+                eprintln!(
+                    "⚠️ {}; runtime will run with an in-memory session (history will be lost on restart)",
+                    msg
+                );
+                if let Ok(mut reasons) = ctx.degraded_reasons.write() {
+                    reasons.push(msg);
+                }
+                None
+            }
+        }
+    } else {
+        let new_id = crate::conversation::generate_session_id();
+        tracing::info!(session_id = %new_id, "Creating new conversation session");
+        // Use the cache-resolved values when present (Bug B fix v4);
+        // fall back to None so the legacy validation / noop path
+        // takes over on Gateway failure.
+        let (initial_model, initial_provider) = match cache_initial_provider_model {
+            Some((pid, mid)) => (Some(mid), Some(pid)),
+            None => (None, None),
         };
+        let (conv, config_rx, state_rx) = crate::conversation::ConversationSession::new(
+            work_dir_path,
+            &new_id,
+            crate::conversation::SessionConfig {
+                agent_id: config.agent_id.clone(),
+                workspace_id: None,
+                model: initial_model,
+                provider: initial_provider,
+            },
+            agent_cfg.max_sessions.unwrap_or(config.max_sessions),
+            committed_lines.clone(),
+        )?;
+        // Drop the meta-change receiver — new-session creation writes
+        // the initial meta file, but no subscriber cares about it yet
+        // (the session_task spawns its own relay after this returns to
+        // the SessionManager path). Leaving the receiver unhandled
+        // here would silently buffer `UnboundedSender`s and prevent
+        // Drop-time notifications from being observed. Dropping is
+        // the explicit "I don't care" signal.
+        drop(config_rx);
+        drop(state_rx);
+        Some(conv)
+    };
 
     // ADR-033 (MQTT path): pre-compute the set of provider IDs that have a
     // decrypted API key in the cached `AvailableProviders` payload. This is
@@ -221,15 +223,15 @@ pub(crate) async fn phase_b_init_session(
 
         let is_valid = match (&session_model, &session_provider) {
             (Some(model), Some(provider_id)) => {
-                let in_cache =
-                    ctx.provider_config
-                        .as_ref()
-                        .map(|c| &c.providers)
-                        .is_none_or(|providers| {
-                            providers
-                                .iter()
-                                .any(|p| p.id == *provider_id && p.models.iter().any(|m| m.id == *model))
-                        });
+                let in_cache = ctx
+                    .provider_config
+                    .as_ref()
+                    .map(|c| &c.providers)
+                    .is_none_or(|providers| {
+                        providers.iter().any(|p| {
+                            p.id == *provider_id && p.models.iter().any(|m| m.id == *model)
+                        })
+                    });
                 if !in_cache {
                     false
                 } else {
@@ -276,8 +278,7 @@ pub(crate) async fn phase_b_init_session(
     let conversations_dir_clone = conversations_dir.clone();
     let _session_scan_handle = tokio::spawn(async move {
         let handle = crate::conversation::scan_sessions_async(conversations_dir_clone, None, None);
-        let (sessions, _, _agent_totals) =
-            handle.await.unwrap_or((Vec::new(), 0, (0, 0, 0, 0)));
+        let (sessions, _, _agent_totals) = handle.await.unwrap_or((Vec::new(), 0, (0, 0, 0, 0)));
         if let Some(s) = sessions.first() {
             *latest_session_scan_clone.write().unwrap() =
                 Some((s.session_id.clone(), s.title.clone()));
@@ -512,17 +513,20 @@ pub(crate) async fn phase_b_init_session(
                 }
             }
         } else {
-            tracing::warn!("init_memory_store completed but no store was assigned — HTTP memory endpoints will report 'no store'");
+            tracing::warn!(
+                "init_memory_store completed but no store was assigned — HTTP memory endpoints will report 'no store'"
+            );
         }
 
         // ADR-040: Publish GrafeoMemoryAdapter to the HTTP server's
         // late-bind slot so memory handlers can use the trait path.
         {
-            let adapter: Arc<dyn crate::usecases::MemoryQueryService> =
-                Arc::new(crate::usecases::memory_query_impl::GrafeoMemoryAdapter::new(
+            let adapter: Arc<dyn crate::usecases::MemoryQueryService> = Arc::new(
+                crate::usecases::memory_query_impl::GrafeoMemoryAdapter::new(
                     ctx.memory_store_shared.clone(),
                     ctx.embed_dim_shared.clone(),
-                ));
+                ),
+            );
             let mut slot = ctx.memory_query_slot.lock().await;
             *slot = Some(adapter);
         }
@@ -533,12 +537,11 @@ pub(crate) async fn phase_b_init_session(
         // can wire them immediately. Both services must be published
         // BEFORE the workspace HTTP handlers can serve a real response.
         {
-            let query_svc: Arc<dyn crate::usecases::WorkspaceQueryService> = Arc::new(
-                crate::usecases::RuntimeWorkspaceQueryService::new(
+            let query_svc: Arc<dyn crate::usecases::WorkspaceQueryService> =
+                Arc::new(crate::usecases::RuntimeWorkspaceQueryService::new(
                     work_dir_path.to_path_buf(),
                     ctx.agent_id.clone(),
-                ),
-            );
+                ));
             let mut slot = ctx.workspace_query_slot.lock().await;
             *slot = Some(query_svc);
         }
@@ -555,12 +558,11 @@ pub(crate) async fn phase_b_init_session(
             // commands inside the Runtime (workspace owner); the Gateway
             // only reverse-proxies `/git/*`. Must be published before the
             // git HTTP handlers can serve a real response.
-            let git_svc: Arc<dyn crate::usecases::GitQueryService> = Arc::new(
-                crate::usecases::RuntimeGitQueryService::new(
+            let git_svc: Arc<dyn crate::usecases::GitQueryService> =
+                Arc::new(crate::usecases::RuntimeGitQueryService::new(
                     work_dir_path.to_path_buf(),
                     ctx.agent_id.clone(),
-                ),
-            );
+                ));
             let mut slot = ctx.git_query_slot.lock().await;
             *slot = Some(git_svc);
         }
@@ -623,9 +625,8 @@ pub(crate) async fn phase_b_init_session(
             // manifest says; the chain does the filtering at resolve time.
             if updated.context_window.is_none() {
                 let manifest_cw = ctx.loaded.manifest.llm.context_window;
-                updated.context_window = Some(
-                    manifest_cw.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW),
-                );
+                updated.context_window =
+                    Some(manifest_cw.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW));
                 dirty = true;
             }
             c.context_window_override = updated.context_window;
@@ -642,9 +643,8 @@ pub(crate) async fn phase_b_init_session(
             // ── temperature: manifest.llm.temperature → 0.3 ─────────
             if updated.temperature.is_none() {
                 let manifest_temp = ctx.loaded.manifest.llm.temperature;
-                updated.temperature = Some(
-                    manifest_temp.unwrap_or(crate::config::DEFAULT_TEMPERATURE),
-                );
+                updated.temperature =
+                    Some(manifest_temp.unwrap_or(crate::config::DEFAULT_TEMPERATURE));
                 dirty = true;
             }
             c.temperature_override = updated.temperature;
@@ -663,8 +663,7 @@ pub(crate) async fn phase_b_init_session(
 
             // ── shell_approval_threshold: config default ("medium") ─
             if updated.shell_approval_threshold.is_none() {
-                updated.shell_approval_threshold =
-                    Some(config.shell_approval_threshold.clone());
+                updated.shell_approval_threshold = Some(config.shell_approval_threshold.clone());
                 dirty = true;
             }
 
@@ -682,11 +681,10 @@ pub(crate) async fn phase_b_init_session(
             // (and the UI dropdown in the Setup panel is restored from disk).
             // The watcher itself is spawned at the end of session_init; the
             // writeback below is the only side-effect of `Some(0)` ("never sleep").
-            let effective_idle_timeout_secs =
-                crate::agent::idle_watcher::resolve_idle_timeout_secs(
-                    updated.idle_timeout_secs,
-                    ctx.loaded.manifest.resources.idle_timeout_secs,
-                );
+            let effective_idle_timeout_secs = crate::agent::idle_watcher::resolve_idle_timeout_secs(
+                updated.idle_timeout_secs,
+                ctx.loaded.manifest.resources.idle_timeout_secs,
+            );
             if updated.idle_timeout_secs.is_none() {
                 updated.idle_timeout_secs = Some(effective_idle_timeout_secs);
                 dirty = true;
@@ -718,12 +716,10 @@ pub(crate) async fn phase_b_init_session(
                     && let Some(d) = manifest_distiller.as_ref()
                     && (d.model_provider_id.is_some() || d.model_id.is_some())
                 {
-                    updated.distiller_model = Some(
-                        acowork_core::protocol::CompactModelRef {
-                            provider_id: d.model_provider_id.clone().unwrap_or_default(),
-                            model_id: d.model_id.clone().unwrap_or_default(),
-                        },
-                    );
+                    updated.distiller_model = Some(acowork_core::protocol::CompactModelRef {
+                        provider_id: d.model_provider_id.clone().unwrap_or_default(),
+                        model_id: d.model_id.clone().unwrap_or_default(),
+                    });
                     dirty = true;
                 }
                 if updated.distiller_interval_minutes.is_none() {
@@ -756,17 +752,13 @@ pub(crate) async fn phase_b_init_session(
             }
 
             if dirty {
-                if let Err(e) =
-                    crate::agent_config::save_agent_config(work_dir_path, &updated)
-                {
+                if let Err(e) = crate::agent_config::save_agent_config(work_dir_path, &updated) {
                     tracing::warn!(
                         error = %e,
                         "Failed to persist resolved defaults to agent_config.json",
                     );
                 } else {
-                    tracing::info!(
-                        "Resolved and persisted agent_config.json defaults",
-                    );
+                    tracing::info!("Resolved and persisted agent_config.json defaults",);
                 }
             }
         }
@@ -803,9 +795,7 @@ pub(crate) async fn phase_b_init_session(
     // Assigned unconditionally inside the block below (never read as None
     // on the production path) — declared without an initializer so the
     // compiler can prove it is set before the Phase B use at the bottom.
-    let session_config_impl: Option<
-        Arc<crate::usecases::RuntimeSessionConfigService>,
-    >;
+    let session_config_impl: Option<Arc<crate::usecases::RuntimeSessionConfigService>>;
     {
         let core_clone = Arc::clone(&core);
         if let Ok(mut slot) = ctx.agent_core_shared.write() {
@@ -859,8 +849,7 @@ pub(crate) async fn phase_b_init_session(
             ctx.agent_core_shared.clone(),
         ));
         session_config_impl = Some(impl_arc.clone());
-        let session_config: Arc<dyn crate::usecases::SessionConfigService> =
-            impl_arc;
+        let session_config: Arc<dyn crate::usecases::SessionConfigService> = impl_arc;
         {
             let mut slot = ctx.session_config_slot.lock().await;
             *slot = Some(session_config);
@@ -901,9 +890,7 @@ pub(crate) async fn phase_b_init_session(
     // by the pre-ADR-040 Gateway. Nothing else: the default is intentionally
     // NOT persisted at agent level — it is inherited from the session meta
     // at startup and updated from `route_workspace_switch` at runtime.
-    let inherited_ws = conversation_session
-        .as_ref()
-        .and_then(|c| c.workspace_id());
+    let inherited_ws = conversation_session.as_ref().and_then(|c| c.workspace_id());
     let fallback_ws = ctx
         .workspace_resolver
         .read()
@@ -944,7 +931,11 @@ pub(crate) async fn phase_b_init_session(
         }
         let sid = conv.session_id().to_string();
         session_manager
-            .create_session_with_id_and_conversation(sid.clone(), Some(conv), Some(committed_lines.clone()))
+            .create_session_with_id_and_conversation(
+                sid.clone(),
+                Some(conv),
+                Some(committed_lines.clone()),
+            )
             .await?;
         sid
     } else {
@@ -985,8 +976,7 @@ pub(crate) async fn phase_b_init_session(
             temperature = ?agent_cfg.temperature,
             "Applying runtime config overrides from workspace agent_config.json"
         );
-        session_manager
-            .apply_runtime_config_override(&RuntimeConfigOverrides::from(&agent_cfg));
+        session_manager.apply_runtime_config_override(&RuntimeConfigOverrides::from(&agent_cfg));
     }
 
     // Wrap SessionManager in an Arc<tokio::sync::Mutex<>> so the

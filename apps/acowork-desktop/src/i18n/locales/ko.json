@@ -1181,7 +1181,13 @@
     "headLabel": "HEAD",
     "workingTreeLabel": "작업 트리",
     "commitPickerLabel": "리비전 선택",
-    "commitPickerLoading": "커밋 불러오는 중…"
+    "commitPickerLoading": "커밋 불러오는 중…",
+    "commitPickerSearchPlaceholder": "메시지·작성자·해시 검색",
+    "commitPickerShowing": "{{start}}-{{end}} / 총 {{total}}개",
+    "commitPickerNoMatches": "일치하는 커밋 없음",
+    "commitPickerPageOf": "{{current}} / {{total}} 페이지",
+    "commitPickerPrevPage": "이전 페이지",
+    "commitPickerNextPage": "다음 페이지"
   },
   "fileTree": {
     "deleteConfirmOk": "삭제",

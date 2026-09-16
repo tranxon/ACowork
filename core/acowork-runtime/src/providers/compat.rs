@@ -336,7 +336,13 @@ impl CompatCache {
             Ok(file) if file.version == CACHE_FILE_VERSION => {
                 let mut entries: HashMap<String, EntryState> = HashMap::new();
                 for (key, persisted) in file.entries {
-                    entries.insert(key, EntryState { durable: Some(persisted), ..Default::default() });
+                    entries.insert(
+                        key,
+                        EntryState {
+                            durable: Some(persisted),
+                            ..Default::default()
+                        },
+                    );
                 }
                 debug!(
                     path = %cache.persist_path.display(),
@@ -520,9 +526,10 @@ impl CompatCache {
                 }
             } else {
                 // Candidate path: find same (class, action) evidence.
-                let idx = state.candidates.iter().position(|c| {
-                    c.class == class && c.profile.same_strip_action(&profile)
-                });
+                let idx = state
+                    .candidates
+                    .iter()
+                    .position(|c| c.class == class && c.profile.same_strip_action(&profile));
                 if let Some(i) = idx {
                     let cand = &mut state.candidates[i];
                     cand.confirmations += 1;
@@ -625,7 +632,8 @@ impl CompatCache {
 
     /// Async persist immediately (promotions / invalidations).
     fn persist_immediate(&self) {
-        self.last_persist_unix_ts.store(now_unix_ts(), Ordering::Relaxed);
+        self.last_persist_unix_ts
+            .store(now_unix_ts(), Ordering::Relaxed);
         self.spawn_persist();
     }
 
@@ -647,10 +655,7 @@ impl CompatCache {
 }
 
 /// Atomic write helper — write to `*.tmp`, then `rename` over target.
-async fn write_atomic(
-    path: &Path,
-    durable: &HashMap<String, PersistedEntry>,
-) -> io::Result<()> {
+async fn write_atomic(path: &Path, durable: &HashMap<String, PersistedEntry>) -> io::Result<()> {
     let file = DiskFileV2 {
         version: CACHE_FILE_VERSION,
         entries: durable.clone(),
@@ -720,7 +725,13 @@ mod tests {
         p
     }
 
-    fn seed_durable(cache: &CompatCache, key: &str, profile: StripProfile, class: &str, promoted_at: u64) {
+    fn seed_durable(
+        cache: &CompatCache,
+        key: &str,
+        profile: StripProfile,
+        class: &str,
+        promoted_at: u64,
+    ) {
         cache.inner.write().insert(
             key.to_string(),
             EntryState {
@@ -746,7 +757,9 @@ mod tests {
     #[test]
     fn classify_error_bodies() {
         assert_eq!(
-            ErrorClass::classify("The reasoning_content in the thinking mode must be passed back to the API"),
+            ErrorClass::classify(
+                "The reasoning_content in the thinking mode must be passed back to the API"
+            ),
             ErrorClass::ContentIntegrity,
         );
         assert_eq!(
@@ -769,7 +782,10 @@ mod tests {
             ErrorClass::classify("parallel_tool_calls is not supported by this deployment"),
             ErrorClass::ToolsSchema,
         );
-        assert_eq!(ErrorClass::classify("upstream timeout after 60s"), ErrorClass::Unknown);
+        assert_eq!(
+            ErrorClass::classify("upstream timeout after 60s"),
+            ErrorClass::Unknown
+        );
         // Non-learnable classes are never learned from, and only ToolsSchema
         // may ever strip tools.
         assert!(!ErrorClass::ContentIntegrity.is_learnable());
@@ -787,7 +803,10 @@ mod tests {
         let key = "deepseek::deepseek-v4-flash";
         // One lucky strip_tools success (the 2026-09-05 shape) must NOT persist.
         cache.record_fallback_success(key, tools_profile(4), ErrorClass::ToolsSchema);
-        assert!(cache.get(key).is_none(), "single success must not be durable");
+        assert!(
+            cache.get(key).is_none(),
+            "single success must not be durable"
+        );
         assert_eq!(candidate_count(&cache, key), 1);
         let _ = fs::remove_file(&path);
     }
@@ -802,7 +821,9 @@ mod tests {
             assert!(cache.get(key).is_none(), "not promoted before threshold");
         }
         cache.record_fallback_success(key, schema_profile(2), ErrorClass::RequestSchema);
-        let got = cache.get(key).expect("promoted after COMPAT_CONFIRM_REQUIRED successes");
+        let got = cache
+            .get(key)
+            .expect("promoted after COMPAT_CONFIRM_REQUIRED successes");
         assert!(got.strip_stream_options);
         assert!(got.strip_thinking);
         assert!(!got.strip_tools);
@@ -840,11 +861,20 @@ mod tests {
         let key = "p::m";
         let now = now_unix_ts();
         // Durable profile promoted long ago -> expired lease.
-        seed_durable(&cache, key, schema_profile(2), "request_schema", now - COMPAT_PROFILE_TTL_SECS - 1);
+        seed_durable(
+            &cache,
+            key,
+            schema_profile(2),
+            "request_schema",
+            now - COMPAT_PROFILE_TTL_SECS - 1,
+        );
         assert!(cache.get(key).is_none(), "expired lease must re-probe");
         // Re-probe outcome: same class + same strip action succeeds again.
         cache.record_fallback_success(key, schema_profile(2), ErrorClass::RequestSchema);
-        assert!(cache.get(key).is_some(), "re-probe re-confirmed and renewed the lease");
+        assert!(
+            cache.get(key).is_some(),
+            "re-probe re-confirmed and renewed the lease"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -860,10 +890,21 @@ mod tests {
         assert_eq!(candidate_count(&cache, key), 0);
 
         let now = now_unix_ts();
-        seed_durable(&cache, key, schema_profile(2), "request_schema", now - COMPAT_PROFILE_TTL_SECS - 1);
+        seed_durable(
+            &cache,
+            key,
+            schema_profile(2),
+            "request_schema",
+            now - COMPAT_PROFILE_TTL_SECS - 1,
+        );
         cache.record_plain_success(key);
         assert!(
-            cache.inner.read().get(key).and_then(|s| s.durable.as_ref()).is_none(),
+            cache
+                .inner
+                .read()
+                .get(key)
+                .and_then(|s| s.durable.as_ref())
+                .is_none(),
             "plain success after TTL expiry retires the old durable profile",
         );
         let _ = fs::remove_file(&path);
@@ -889,7 +930,8 @@ mod tests {
         {
             let mut guard = cache.inner.write();
             let state = guard.get_mut(key).unwrap();
-            state.invalidated_at_unix_ts = Some(now_unix_ts() - COMPAT_INVALIDATE_COOLDOWN_SECS - 1);
+            state.invalidated_at_unix_ts =
+                Some(now_unix_ts() - COMPAT_INVALIDATE_COOLDOWN_SECS - 1);
         }
         cache.record_fallback_success(key, tools_profile(4), ErrorClass::ToolsSchema);
         assert_eq!(candidate_count(&cache, key), 1);
@@ -922,7 +964,10 @@ mod tests {
         cache.record_fallback_success(key, tools_profile(4), ErrorClass::ToolsSchema);
         assert_eq!(candidate_count(&cache, key), 1);
         let got = cache.get(key).unwrap();
-        assert!(!got.strip_tools, "new evidence must not override durable instantly");
+        assert!(
+            !got.strip_tools,
+            "new evidence must not override durable instantly"
+        );
         let _ = fs::remove_file(&path);
     }
 

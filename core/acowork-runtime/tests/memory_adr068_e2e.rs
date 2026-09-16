@@ -1,20 +1,17 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use acowork_core::tools::traits::Tool;
 use acowork_core::EmbeddingProvider;
+use acowork_core::tools::traits::Tool;
 
 use acowork_grafeo::consolidation::{DefaultEpisodicDistiller, EpisodicDistiller};
 use acowork_grafeo::grafeo::GrafeoStore;
 
 use acowork_memory::consolidation::{
-    DistillerConfig, LlmMessage, LlmResponse, PromotionDecision, PromotionKind,
-    TripleExtractorLlm,
+    DistillerConfig, LlmMessage, LlmResponse, PromotionDecision, PromotionKind, TripleExtractorLlm,
 };
 use acowork_memory::types::{AutobioCategory, Episode, KnowledgeSubType};
-use acowork_memory::{
-    MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, labels,
-};
+use acowork_memory::{MemoryManager, MemoryManagerConfig, MemoryProvider, MemoryQuery, labels};
 
 use acowork_runtime::memory::MemorySessionHandle;
 use acowork_runtime::tools::builtin::memory_store::MemoryStoreTool;
@@ -74,10 +71,7 @@ impl ScriptedDistillerLlm {
 
 #[async_trait::async_trait]
 impl TripleExtractorLlm for ScriptedDistillerLlm {
-    async fn chat(
-        &self,
-        _messages: Vec<LlmMessage>,
-    ) -> std::result::Result<LlmResponse, String> {
+    async fn chat(&self, _messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String> {
         let resp = self
             .responses
             .lock()
@@ -300,8 +294,7 @@ async fn distiller_promotes_autobio_limitation_and_audits() {
 
     let llm = ScriptedDistillerLlm::new(vec![
         extraction_response(
-            &ids
-                .iter()
+            &ids.iter()
                 .map(|id| (*id, "autobio", "limitation", "verbose_response"))
                 .collect::<Vec<_>>(),
         ),
@@ -339,7 +332,10 @@ async fn distiller_promotes_autobio_limitation_and_audits() {
         .expect("AutobiographicalNode exists");
     assert_eq!(node.category, AutobioCategory::Limitation);
     assert_eq!(node.source_episode_ids.len(), 3);
-    let meta = node.promotion_metadata.as_ref().expect("promotion metadata");
+    let meta = node
+        .promotion_metadata
+        .as_ref()
+        .expect("promotion metadata");
     assert_eq!(meta.promoted_by, "episodic_distiller");
     assert_eq!(meta.evidence_episode_ids.len(), 3);
     assert!(meta.llm_judge_confidence > 0.0);
@@ -384,8 +380,7 @@ async fn distiller_promotes_fact_with_two_evidence_episodes() {
 
     let llm = ScriptedDistillerLlm::new(vec![
         extraction_response(
-            &ids
-                .iter()
+            &ids.iter()
                 .map(|id| (*id, "triple", "lives_in", "Shanghai"))
                 .collect::<Vec<_>>(),
         ),
@@ -488,8 +483,7 @@ async fn retrieve_surfaces_promoted_autobiographical_node() {
 
     let llm = ScriptedDistillerLlm::new(vec![
         extraction_response(
-            &ids
-                .iter()
+            &ids.iter()
                 .map(|id| (*id, "autobio", "limitation", "verbose_response"))
                 .collect::<Vec<_>>(),
         ),
@@ -511,11 +505,7 @@ async fn retrieve_surfaces_promoted_autobiographical_node() {
     let mut query = MemoryQuery::new("concise shorter answers".to_string());
     query.abstention_enabled = false;
     let retrieved = manager
-        .retrieve(
-            &*e2e.store,
-            &mut query,
-            Some(&DeterministicEmbedding),
-        )
+        .retrieve(&*e2e.store, &mut query, Some(&DeterministicEmbedding))
         .await
         .expect("retrieve ok");
 
@@ -633,8 +623,8 @@ async fn bootstrap_creates_identity_and_capability_nodes() {
         [capabilities.search]
         description = "Search the web"
     "#;
-    let manifest = acowork_core::manifest::AgentManifest::from_toml(toml_str)
-        .expect("manifest parses");
+    let manifest =
+        acowork_core::manifest::AgentManifest::from_toml(toml_str).expect("manifest parses");
     let e2e = Adr068E2e::new();
     let provider = e2e.provider();
 
@@ -682,8 +672,8 @@ async fn bootstrap_is_idempotent() {
         [capabilities.weather]
         description = "Query weather"
     "#;
-    let manifest = acowork_core::manifest::AgentManifest::from_toml(toml_str)
-        .expect("manifest parses");
+    let manifest =
+        acowork_core::manifest::AgentManifest::from_toml(toml_str).expect("manifest parses");
     let e2e = Adr068E2e::new();
     let provider = e2e.provider();
 
@@ -694,10 +684,11 @@ async fn bootstrap_is_idempotent() {
     assert_eq!(first.identity_written, 3); // agent_id, name, description
     assert_eq!(first.capability_written, 1);
 
-    let second = acowork_runtime::agent::bootstrap_autobio::bootstrap_autobiographical_from_manifest(
-        &manifest,
-        provider.as_ref(),
-    );
+    let second =
+        acowork_runtime::agent::bootstrap_autobio::bootstrap_autobiographical_from_manifest(
+            &manifest,
+            provider.as_ref(),
+        );
     assert!(second.skipped_existing, "second bootstrap must be skipped");
     assert_eq!(second.identity_written, 0);
     assert_eq!(second.capability_written, 0);

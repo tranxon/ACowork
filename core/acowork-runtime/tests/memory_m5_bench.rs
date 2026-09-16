@@ -210,15 +210,45 @@ impl BenchE2e {
 /// - `N*` = Active distractors.
 const M4_CORPUS: &[(&str, &str, f32, f32)] = &[
     ("A1", "User prefers dark mode for the code editor", 0.9, 0.8),
-    ("A2", "User lives in Shanghai near the Huangpu river", 0.9, 0.8),
-    ("A3", "User works at Acme Corp as a backend engineer", 0.9, 0.8),
-    ("A4", "User speaks Japanese and writes fluent code", 0.9, 0.8),
+    (
+        "A2",
+        "User lives in Shanghai near the Huangpu river",
+        0.9,
+        0.8,
+    ),
+    (
+        "A3",
+        "User works at Acme Corp as a backend engineer",
+        0.9,
+        0.8,
+    ),
+    (
+        "A4",
+        "User speaks Japanese and writes fluent code",
+        0.9,
+        0.8,
+    ),
     ("A5", "User keeps two cats named Mochi and Tofu", 0.9, 0.8),
-    ("D1", "User used to prefer dark mode in the terminal", 0.9, 0.1),
+    (
+        "D1",
+        "User used to prefer dark mode in the terminal",
+        0.9,
+        0.1,
+    ),
     ("D2", "Old note about the Shanghai office address", 0.9, 0.1),
-    ("D3", "User previously worked at Acme Corp in sales", 0.9, 0.1),
+    (
+        "D3",
+        "User previously worked at Acme Corp in sales",
+        0.9,
+        0.1,
+    ),
     ("N1", "User prefers a light theme during winter", 0.9, 0.5),
-    ("N2", "User reads books about backend architecture", 0.9, 0.5),
+    (
+        "N2",
+        "User reads books about backend architecture",
+        0.9,
+        0.5,
+    ),
 ];
 
 /// Keyword-distinctive nodes added in M5. Each K* has lexically-disjoint
@@ -360,14 +390,11 @@ async fn m5_keyword_index_before_after() {
     let e2e = BenchE2e::new();
 
     // ── 1. Build the fixed corpus via the real write chain ──────────────
-    let mut ids_by_key: std::collections::HashMap<&str, u64> =
-        std::collections::HashMap::new();
+    let mut ids_by_key: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
 
     // M4 corpus (content-only).
     for (key, content, confidence, importance) in M4_CORPUS {
-        let id = e2e
-            .store_knowledge(content, *confidence, *importance)
-            .await;
+        let id = e2e.store_knowledge(content, *confidence, *importance).await;
         ids_by_key.insert(*key, id);
     }
 
@@ -413,8 +440,7 @@ async fn m5_keyword_index_before_after() {
     // ── 3. BEFORE: keywords metadata-only (M4 baseline behaviour) ───────
     // Plan Y: keywords remain in metadata["keywords"] only, BM25 cannot
     // see them, K* queries return 0 relevant hits.
-    let before =
-        run_state(&e2e, &relevant, &keyword_ground_truth_ids, false).await;
+    let before = run_state(&e2e, &relevant, &keyword_ground_truth_ids, false).await;
 
     // ── 4. AFTER: keywords folded into `object` (M5 behaviour) ──────────
     // Plan Y: the write-time fold puts keywords into the BM25-indexed
@@ -424,8 +450,7 @@ async fn m5_keyword_index_before_after() {
     // The M4 nodes are unchanged (their content matches M4 queries
     // regardless of keywords).
     let m5_store = BenchE2e::new();
-    let mut m5_ids: std::collections::HashMap<&str, u64> =
-        std::collections::HashMap::new();
+    let mut m5_ids: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
     for (key, content, confidence, importance) in M4_CORPUS {
         let id = m5_store
             .store_knowledge(content, *confidence, *importance)
@@ -466,19 +491,24 @@ async fn m5_keyword_index_before_after() {
         });
         m5_keyword_gt.insert(text.to_string(), k_id);
     }
-    let after =
-        run_state(&m5_store, &m5_relevant, &m5_keyword_gt, true).await;
+    let after = run_state(&m5_store, &m5_relevant, &m5_keyword_gt, true).await;
 
     // ── 5. Report (before/after comparison table) ──────────────────────
     println!("\n===== ADR-062 M5: keyword_index before/after =====");
-    println!(
-        "{:<34}{:>12}{:>12}",
-        "metric", "before", "after"
-    );
+    println!("{:<34}{:>12}{:>12}", "metric", "before", "after");
     println!("{:-<58}", "");
-    println!("{:<34}{:>12.4}{:>12.4}", "Precision@5 (full)", before.p5, after.p5);
-    println!("{:<34}{:>12.4}{:>12.4}", "Recall@5 (full)", before.r5, after.r5);
-    println!("{:<34}{:>12.4}{:>12.4}", "MRR (full)", before.mrr, after.mrr);
+    println!(
+        "{:<34}{:>12.4}{:>12.4}",
+        "Precision@5 (full)", before.p5, after.p5
+    );
+    println!(
+        "{:<34}{:>12.4}{:>12.4}",
+        "Recall@5 (full)", before.r5, after.r5
+    );
+    println!(
+        "{:<34}{:>12.4}{:>12.4}",
+        "MRR (full)", before.mrr, after.mrr
+    );
     println!(
         "{:<34}{:>12.4}{:>12.4}",
         "keyword hit@5 rate (K* only)", before.keyword_hit_rate, after.keyword_hit_rate

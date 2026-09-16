@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::usecases::workspace_mutation::{
-    CopyMoveBody, CreateFileBody, FilePathQuery, PathOnlyBody, PromptFileBody,
-    WorkspaceEntryInput, WorkspaceMutationResponse, WorkspaceMutationService,
+    CopyMoveBody, CreateFileBody, FilePathQuery, PathOnlyBody, PromptFileBody, WorkspaceEntryInput,
+    WorkspaceMutationResponse, WorkspaceMutationService,
 };
 use crate::usecases::workspace_query::WorkspaceError;
 
@@ -107,8 +107,8 @@ impl RuntimeWorkspaceMutationService {
     fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dst)
             .map_err(|e| format!("failed to create destination directory: {}", e))?;
-        for entry in std::fs::read_dir(src)
-            .map_err(|e| format!("failed to read source directory: {}", e))?
+        for entry in
+            std::fs::read_dir(src).map_err(|e| format!("failed to read source directory: {}", e))?
         {
             let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
             let file_type = entry
@@ -183,8 +183,7 @@ impl RuntimeWorkspaceMutationService {
             .map_err(|e| WorkspaceError::Persist(format!("create config dir: {}", e)))?;
         let path = self.workspaces_config_path();
         let tmp = path.with_extension("tmp");
-        let json = serde_json::to_string_pretty(cfg)
-            .map_err(WorkspaceError::Json)?;
+        let json = serde_json::to_string_pretty(cfg).map_err(WorkspaceError::Json)?;
         std::fs::write(&tmp, &json)
             .map_err(|e| WorkspaceError::Persist(format!("write tmp: {}", e)))?;
         std::fs::rename(&tmp, &path)
@@ -242,11 +241,9 @@ pub(crate) fn resolve_workspace_root(
     };
 
     let config_path = work_dir.join("config").join("agent_workspaces.json");
-    let content = std::fs::read_to_string(&config_path).map_err(|_| {
-        WorkspaceError::WorkspaceNotFound(ws_id.to_string())
-    })?;
-    let val: serde_json::Value =
-        serde_json::from_str(&content).map_err(WorkspaceError::Json)?;
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|_| WorkspaceError::WorkspaceNotFound(ws_id.to_string()))?;
+    let val: serde_json::Value = serde_json::from_str(&content).map_err(WorkspaceError::Json)?;
 
     if let Some(dirs) = val.get("additional_dirs").and_then(|v| v.as_array()) {
         for dir in dirs {
@@ -312,18 +309,24 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         // body field optional. For create, however, the desktop always
         // supplies `path` + `access`; anything else is a malformed
         // request and surfaces here as 400 before we touch the config.
-        let path = entry.path.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
-            WorkspaceError::BadRequest {
+        let path = entry
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| WorkspaceError::BadRequest {
                 status: 400,
                 message: "missing required field 'path'".to_string(),
-            }
-        })?;
-        let access = entry.access.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
-            WorkspaceError::BadRequest {
+            })?;
+        let access = entry
+            .access
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| WorkspaceError::BadRequest {
                 status: 400,
                 message: "missing required field 'access'".to_string(),
-            }
-        })?;
+            })?;
 
         // ── Path sanity guard ──────────────────────────────────────────
         //
@@ -334,11 +337,9 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         // resolve to files or missing paths break `resolve_within` later
         // with cryptic canonicalize errors.
         let path_buf = PathBuf::from(path);
-        let path_meta = std::fs::metadata(&path_buf).map_err(|e| {
-            WorkspaceError::BadRequest {
-                status: 400,
-                message: format!("path not accessible: {} ({})", path, e),
-            }
+        let path_meta = std::fs::metadata(&path_buf).map_err(|e| WorkspaceError::BadRequest {
+            status: 400,
+            message: format!("path not accessible: {} ({})", path, e),
         })?;
         if !path_meta.is_dir() {
             return Err(WorkspaceError::BadRequest {
@@ -359,9 +360,11 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         };
 
         let mut cfg = self.load_config()?;
-        if cfg.additional_dirs.iter().any(|d| {
-            d.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
-        }) {
+        if cfg
+            .additional_dirs
+            .iter()
+            .any(|d| d.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+        {
             return Err(WorkspaceError::BadRequest {
                 status: 409,
                 message: format!("workspace id already exists: {}", id),
@@ -386,10 +389,20 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         // Optional fields — only write the key when the desktop
         // actually supplied it, so the on-disk file stays minimal for
         // users who don't use aliases / prompt-files.
-        if let Some(alias) = entry.alias.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(alias) = entry
+            .alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             new_entry["alias"] = serde_json::json!(alias);
         }
-        if let Some(pf) = entry.prompt_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(pf) = entry
+            .prompt_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             new_entry["prompt_file"] = serde_json::json!(pf);
         }
 
@@ -441,16 +454,36 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         // different id we silently keep the original; this avoids a
         // 422 when an old desktop build happens to echo the path id
         // back, and matches the historical behaviour.
-        if let Some(path) = entry.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(path) = entry
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             target["path"] = serde_json::json!(path);
         }
-        if let Some(access) = entry.access.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(access) = entry
+            .access
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             target["access"] = serde_json::json!(access);
         }
-        if let Some(alias) = entry.alias.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(alias) = entry
+            .alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             target["alias"] = serde_json::json!(alias);
         }
-        if let Some(pf) = entry.prompt_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(pf) = entry
+            .prompt_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             target["prompt_file"] = serde_json::json!(pf);
         }
         if let Some(la) = entry.last_active {
@@ -520,8 +553,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 message: "missing 'path' in querystring or body".to_string(),
             });
         }
-        let (_root, abs_path, rel_path) =
-            self.resolve_within(workspace_id.as_deref(), &path)?;
+        let (_root, abs_path, rel_path) = self.resolve_within(workspace_id.as_deref(), &path)?;
 
         if abs_path.exists() && !body.overwrite {
             return Err(WorkspaceError::BadRequest {
@@ -573,8 +605,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
             .map(|m| (metadata_modified_rfc3339(&m), m.len()))
             .unwrap_or((None, body.content.len() as u64));
 
-        let mut entry =
-            serde_json::json!({"written": true, "path": rel_path, "size": size});
+        let mut entry = serde_json::json!({"written": true, "path": rel_path, "size": size});
         if let Some(m) = modified {
             entry["modified"] = serde_json::Value::String(m);
         }
@@ -602,8 +633,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 message: "missing 'path' in querystring or body".to_string(),
             });
         }
-        let (_root, abs_path, rel_path) =
-            self.resolve_within(workspace_id.as_deref(), &path)?;
+        let (_root, abs_path, rel_path) = self.resolve_within(workspace_id.as_deref(), &path)?;
 
         if !abs_path.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -643,8 +673,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 message: "missing 'path' in querystring or body".to_string(),
             });
         }
-        let (_root, abs_path, rel_path) =
-            self.resolve_within(workspace_id.as_deref(), &path)?;
+        let (_root, abs_path, rel_path) = self.resolve_within(workspace_id.as_deref(), &path)?;
 
         std::fs::create_dir_all(&abs_path)
             .map_err(|e| WorkspaceError::Persist(format!("failed to create directory: {}", e)))?;
@@ -672,8 +701,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 message: "missing 'path' in querystring or body".to_string(),
             });
         }
-        let (_root, abs_path, rel_path) =
-            self.resolve_within(workspace_id.as_deref(), &path)?;
+        let (_root, abs_path, rel_path) = self.resolve_within(workspace_id.as_deref(), &path)?;
 
         if !abs_path.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -707,10 +735,8 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 message: "missing 'source' or 'dest' in body".to_string(),
             });
         }
-        let (_root, abs_src, rel_src) =
-            self.resolve_within(workspace_id.as_deref(), &source)?;
-        let (_root, abs_dest, rel_dest) =
-            self.resolve_within(workspace_id.as_deref(), &dest)?;
+        let (_root, abs_src, rel_src) = self.resolve_within(workspace_id.as_deref(), &source)?;
+        let (_root, abs_dest, rel_dest) = self.resolve_within(workspace_id.as_deref(), &dest)?;
 
         if !abs_src.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -738,10 +764,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         {
             return Err(WorkspaceError::BadRequest {
                 status: 400,
-                message: format!(
-                    "destination parent directory does not exist: {}",
-                    rel_dest
-                ),
+                message: format!("destination parent directory does not exist: {}", rel_dest),
             });
         }
 
@@ -749,9 +772,8 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
             Self::copy_dir_recursive(&abs_src, &abs_dest)
                 .map_err(|e| WorkspaceError::Persist(format!("copy failed: {}", e)))?;
         } else {
-            std::fs::copy(&abs_src, &abs_dest).map_err(|e| {
-                WorkspaceError::Persist(format!("failed to copy file: {}", e))
-            })?;
+            std::fs::copy(&abs_src, &abs_dest)
+                .map_err(|e| WorkspaceError::Persist(format!("failed to copy file: {}", e)))?;
         }
 
         Ok(WorkspaceMutationResponse {
@@ -775,10 +797,8 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
                 message: "missing 'source' or 'dest' in body".to_string(),
             });
         }
-        let (_root, abs_src, rel_src) =
-            self.resolve_within(workspace_id.as_deref(), &source)?;
-        let (_root, abs_dest, rel_dest) =
-            self.resolve_within(workspace_id.as_deref(), &dest)?;
+        let (_root, abs_src, rel_src) = self.resolve_within(workspace_id.as_deref(), &source)?;
+        let (_root, abs_dest, rel_dest) = self.resolve_within(workspace_id.as_deref(), &dest)?;
 
         if !abs_src.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -806,10 +826,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         {
             return Err(WorkspaceError::BadRequest {
                 status: 400,
-                message: format!(
-                    "destination parent directory does not exist: {}",
-                    rel_dest
-                ),
+                message: format!("destination parent directory does not exist: {}", rel_dest),
             });
         }
 
@@ -875,7 +892,10 @@ mod tests {
             .expect("create_workspace succeeds");
 
         let entry = resp.entry.expect("entry returned on create");
-        let id = entry.get("id").and_then(|v| v.as_str()).expect("id assigned");
+        let id = entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("id assigned");
         assert!(
             id.starts_with("ws-") && id.len() == "ws-".len() + 12,
             "id should be ws-<12 hex chars>, got: {id}"
@@ -884,8 +904,14 @@ mod tests {
             entry.get("path").and_then(|v| v.as_str()),
             Some(dir.path().to_string_lossy().to_string()).as_deref(),
         );
-        assert_eq!(entry.get("access").and_then(|v| v.as_str()), Some("read-only"));
-        assert_eq!(entry.get("last_active").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            entry.get("access").and_then(|v| v.as_str()),
+            Some("read-only")
+        );
+        assert_eq!(
+            entry.get("last_active").and_then(|v| v.as_bool()),
+            Some(false)
+        );
         assert_eq!(entry.get("select_count").and_then(|v| v.as_u64()), Some(0));
         assert!(
             entry.get("added_at").and_then(|v| v.as_str()).is_some(),
@@ -894,8 +920,14 @@ mod tests {
         // Optional fields must be omitted (not present as `null`) when
         // the desktop didn't supply them — keeps the on-disk file
         // minimal and avoids serde round-trip ambiguity.
-        assert!(entry.get("alias").is_none(), "alias should be absent when not supplied");
-        assert!(entry.get("prompt_file").is_none(), "prompt_file should be absent when not supplied");
+        assert!(
+            entry.get("alias").is_none(),
+            "alias should be absent when not supplied"
+        );
+        assert!(
+            entry.get("prompt_file").is_none(),
+            "prompt_file should be absent when not supplied"
+        );
     }
 
     /// Creating a workspace whose root contains `AGENTS.md` (with no
@@ -1014,9 +1046,16 @@ mod tests {
 
         let entry = resp.entry.expect("entry returned on create");
         assert_eq!(entry.get("alias").and_then(|v| v.as_str()), Some("legacy"));
-        assert_eq!(entry.get("access").and_then(|v| v.as_str()), Some("read-write"));
+        assert_eq!(
+            entry.get("access").and_then(|v| v.as_str()),
+            Some("read-write")
+        );
         assert!(
-            entry.get("id").and_then(|v| v.as_str()).map(|s| s.starts_with("ws-")).unwrap_or(false),
+            entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.starts_with("ws-"))
+                .unwrap_or(false),
             "id must be server-generated when client omits it"
         );
     }
@@ -1189,7 +1228,10 @@ mod tests {
             .expect("access-only update must succeed");
 
         let entry = updated.entry.expect("entry returned on update");
-        assert_eq!(entry.get("access").and_then(|v| v.as_str()), Some("read-write"));
+        assert_eq!(
+            entry.get("access").and_then(|v| v.as_str()),
+            Some("read-write")
+        );
         // All other fields MUST be preserved.
         assert_eq!(entry.get("id").and_then(|v| v.as_str()), Some("ws-keep"));
         assert_eq!(
@@ -1197,7 +1239,10 @@ mod tests {
             Some(dir.path().to_string_lossy().to_string()).as_deref(),
         );
         assert_eq!(entry.get("alias").and_then(|v| v.as_str()), Some("keep-me"));
-        assert_eq!(entry.get("prompt_file").and_then(|v| v.as_str()), Some("AGENTS.md"));
+        assert_eq!(
+            entry.get("prompt_file").and_then(|v| v.as_str()),
+            Some("AGENTS.md")
+        );
     }
 
     /// Alias update via the dedicated `PUT /workspaces/{id}` body — the
@@ -1255,7 +1300,9 @@ mod tests {
         let suffix = &id["ws-".len()..];
         assert_eq!(suffix.len(), 12, "suffix must be 12 chars, got: {suffix}");
         assert!(
-            suffix.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "suffix must be lowercase hex, got: {suffix}"
         );
         // Two consecutive calls must produce distinct ids.
@@ -1315,7 +1362,8 @@ mod tests {
 
         // Both the pre-existing and the newly-created workspace survive.
         let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("config").join("agent_workspaces.json")).unwrap(),
+            &std::fs::read_to_string(dir.path().join("config").join("agent_workspaces.json"))
+                .unwrap(),
         )
         .unwrap();
         let ids: Vec<&str> = on_disk["additional_dirs"]

@@ -12,7 +12,7 @@ use acowork_core::tools::traits::Tool;
 use acowork_mcp::client::McpRegistry;
 use acowork_mcp::wrapper::McpToolWrapper;
 
-use crate::agent_config::{tool_enabled_in, AgentMcpToolsConfig, McpToolDescriptor};
+use crate::agent_config::{AgentMcpToolsConfig, McpToolDescriptor, tool_enabled_in};
 
 /// Re-export from acowork-mcp so SessionManager can reference it.
 pub use acowork_mcp::client::McpConnectionFailure;
@@ -221,7 +221,9 @@ mod tests {
     #[tokio::test]
     async fn connect_empty_yields_empty_registry() {
         let mut mgr = McpManager::new();
-        let (registry, wrappers, specs, failures) = mgr.connect(&[], &crate::agent_config::AgentMcpToolsConfig::default()).await;
+        let (registry, wrappers, specs, failures) = mgr
+            .connect(&[], &crate::agent_config::AgentMcpToolsConfig::default())
+            .await;
         assert!(registry.is_empty());
         assert!(wrappers.is_empty());
         assert!(specs.is_empty());

@@ -229,11 +229,7 @@ pub fn merge_content_parts(
 ) -> Option<Vec<ContentPart>> {
     let mut all: Vec<ContentPart> = frontend_parts.unwrap_or_default();
     all.extend(derived_images);
-    if all.is_empty() {
-        None
-    } else {
-        Some(all)
-    }
+    if all.is_empty() { None } else { Some(all) }
 }
 
 #[cfg(test)]
@@ -242,9 +238,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::usecases::attachment::{
-        AttachmentError, UploadFileParams, UploadedFileResponse,
-    };
+    use crate::usecases::attachment::{AttachmentError, UploadFileParams, UploadedFileResponse};
 
     /// In-memory fake of [`AttachmentService`].
     ///
@@ -318,7 +312,16 @@ mod tests {
         }
         // Non-image formats return None — we never fabricate an
         // image MIME for arbitrary input.
-        for input in ["pdf", "docx", "exe", "html", "", "image/jpeg", "../png", "."] {
+        for input in [
+            "pdf",
+            "docx",
+            "exe",
+            "html",
+            "",
+            "image/jpeg",
+            "../png",
+            ".",
+        ] {
             assert_eq!(
                 safe_mime(input),
                 None,
@@ -367,13 +370,13 @@ mod tests {
                 filename: "report.pdf".into(),
                 format: "pdf".into(),
                 size_bytes: 4096,
-            client_id: None,
+                client_id: None,
             },
             png_item("img-1", "png", 16),
             AttachedItem::AttachedFile {
                 abs_path: "/workspace/foo.rs".into(),
                 name: "foo.rs".into(),
-            client_id: None,
+                client_id: None,
             },
             AttachedItem::AttachedSelection {
                 abs_path: "/workspace/foo.rs".into(),
@@ -385,7 +388,7 @@ mod tests {
             AttachedItem::AttachedFolder {
                 abs_path: "/workspace/src".into(),
                 name: "src".into(),
-            client_id: None,
+                client_id: None,
             },
         ];
         let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
@@ -420,7 +423,9 @@ mod tests {
         // No blob pre-loaded for "missing".
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
         let items = vec![png_item("missing", "png", 8)];
-        let err = derive_image_parts_from_items(&*svc, &items).await.unwrap_err();
+        let err = derive_image_parts_from_items(&*svc, &items)
+            .await
+            .unwrap_err();
         // Wrapped under RuntimeError::Config per current helper impl.
         let msg = err.to_string();
         assert!(
@@ -456,7 +461,7 @@ mod tests {
                 size_bytes: 4,
                 width: None,
                 height: None,
-            client_id: None,
+                client_id: None,
             },
         ];
         let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();

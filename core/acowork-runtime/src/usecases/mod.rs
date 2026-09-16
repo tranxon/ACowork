@@ -28,7 +28,7 @@ pub use agent_tools::{
     PutSearchConfigBody,
 };
 pub use attachment::{
-    AttachmentError, AttachmentService, UploadFileParams, UploadedFileResponse, MAX_UPLOAD_BYTES,
+    AttachmentError, AttachmentService, MAX_UPLOAD_BYTES, UploadFileParams, UploadedFileResponse,
 };
 pub use debug_service::DebugService;
 pub use git_query::{

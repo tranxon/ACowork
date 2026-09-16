@@ -951,8 +951,8 @@ mod tests {
 
         let identity =
             "- Display Name: Alice\n- Language: zh-CN\n- Timezone: Asia/Shanghai".to_string();
-        let builder = ContextBuilder::new("You are a helper.".to_string())
-            .with_identity(Some(identity));
+        let builder =
+            ContextBuilder::new("You are a helper.".to_string()).with_identity(Some(identity));
 
         let request = builder.build(&manifest, &history, None, None, 32_768);
         let system = &request.messages[0].content;
@@ -973,8 +973,8 @@ mod tests {
         use crate::debug::protocol::{PatchSet, PatchValue};
         use std::collections::HashMap;
 
-        let mut builder = ContextBuilder::new("base".to_string())
-            .with_override_model("gpt-4".to_string());
+        let mut builder =
+            ContextBuilder::new("base".to_string()).with_override_model("gpt-4".to_string());
         builder.set_ambiguous_confirmation_hint("hint".to_string());
         builder.set_workspace_prompt_file(Some("CLAUDE.md content".to_string()));
 
@@ -984,11 +984,15 @@ mod tests {
             patches: HashMap::from([
                 (
                     "ambiguous_confirmation_hint".to_string(),
-                    PatchValue::Text { value: String::new() },
+                    PatchValue::Text {
+                        value: String::new(),
+                    },
                 ),
                 (
                     "workspace_prompt_file".to_string(),
-                    PatchValue::Text { value: String::new() },
+                    PatchValue::Text {
+                        value: String::new(),
+                    },
                 ),
             ]),
         };
@@ -1012,7 +1016,10 @@ mod tests {
             !system.contains("Memory Conflicts Needing Confirmation"),
             "ambiguous hint omitted"
         );
-        assert!(!system.contains("Workspace Prompt File"), "prompt file omitted");
+        assert!(
+            !system.contains("Workspace Prompt File"),
+            "prompt file omitted"
+        );
     }
 
     // ── ADR-060: Block A/B/C/D layout ──
@@ -1026,8 +1033,8 @@ mod tests {
         history.append(ChatMessage::user("First turn"));
         history.append(ChatMessage::assistant("First reply"));
 
-        let builder = ContextBuilder::new("Kernel".to_string())
-            .with_override_model("gpt-4".to_string());
+        let builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
 
         // Block D: current user message (explicitly passed).
         let current = ChatMessage::user("Second turn");
@@ -1081,8 +1088,8 @@ mod tests {
         ));
         history.append(ChatMessage::tool("toolu_1", "ok"));
 
-        let builder = ContextBuilder::new("Kernel".to_string())
-            .with_override_model("gpt-4".to_string());
+        let builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
 
         let request = builder.build(&manifest, &history, None, None, 32_768);
         // [0] A, [1..3] B — no D, no C (ADR-060 v2).
@@ -1102,18 +1109,25 @@ mod tests {
         let history = HistoryManager::new(10000);
 
         // Normal path: no abstention prompt set → Block A unchanged.
-        let builder = ContextBuilder::new("Kernel".to_string())
-            .with_override_model("gpt-4".to_string());
-        let request = builder.build(&manifest, &history, None, None, 32_768);
-        assert!(!request.messages[0].content.contains("Memory Abstention Guidance"));
-
-        // Abstention path: prompt set → injected into Block A.
-        let mut builder = ContextBuilder::new("Kernel".to_string())
-            .with_override_model("gpt-4".to_string());
-        builder.set_abstention_prompt("When you are not confident, say you're not sure.".to_string());
+        let builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         let request = builder.build(&manifest, &history, None, None, 32_768);
         assert!(
-            request.messages[0].content.contains("## Memory Abstention Guidance"),
+            !request.messages[0]
+                .content
+                .contains("Memory Abstention Guidance")
+        );
+
+        // Abstention path: prompt set → injected into Block A.
+        let mut builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
+        builder
+            .set_abstention_prompt("When you are not confident, say you're not sure.".to_string());
+        let request = builder.build(&manifest, &history, None, None, 32_768);
+        assert!(
+            request.messages[0]
+                .content
+                .contains("## Memory Abstention Guidance"),
             "Block A must contain the abstention guidance section"
         );
         assert!(
@@ -1122,13 +1136,15 @@ mod tests {
         );
 
         // clear_abstention_prompt removes it (stale prevention path).
-        let mut builder = ContextBuilder::new("Kernel".to_string())
-            .with_override_model("gpt-4".to_string());
+        let mut builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         builder.set_abstention_prompt("prompt".to_string());
         builder.clear_retrieved_memory(); // clears memory + hint + abstention
         let request = builder.build(&manifest, &history, None, None, 32_768);
         assert!(
-            !request.messages[0].content.contains("Memory Abstention Guidance"),
+            !request.messages[0]
+                .content
+                .contains("Memory Abstention Guidance"),
             "abstention prompt must be cleared with stale memory prevention"
         );
     }
@@ -1189,7 +1205,9 @@ mod tests {
             .apply_patches(&PatchSet {
                 patches: HashMap::from([(
                     "environment".to_string(),
-                    PatchValue::Text { value: String::new() },
+                    PatchValue::Text {
+                        value: String::new(),
+                    },
                 )]),
             })
             .expect("clear environment must succeed");
@@ -1394,7 +1412,10 @@ mod tests {
 
         let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
 
-        assert_eq!(lookup(&sections, "system_prompt"), "Base prompt".len() as u64);
+        assert_eq!(
+            lookup(&sections, "system_prompt"),
+            "Base prompt".len() as u64
+        );
         assert!(
             sections.iter().any(|s| s.key == "environment"),
             "environment section must always be present"
@@ -1452,14 +1473,32 @@ mod tests {
         let mcp_tools = vec![mcp_tool.clone()];
         let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
 
-        assert_eq!(lookup(&sections, "system_prompt"), "Base prompt".len() as u64);
+        assert_eq!(
+            lookup(&sections, "system_prompt"),
+            "Base prompt".len() as u64
+        );
         assert_eq!(lookup(&sections, "identity_context"), identity.len() as u64);
-        assert_eq!(lookup(&sections, "workspace_context"), workspace.len() as u64);
-        assert_eq!(lookup(&sections, "retrieved_memory"), retrieved.len() as u64);
-        assert_eq!(lookup(&sections, "ambiguous_confirmation_hint"), hint.len() as u64);
-        assert_eq!(lookup(&sections, "abstention_prompt"), abstention.len() as u64);
+        assert_eq!(
+            lookup(&sections, "workspace_context"),
+            workspace.len() as u64
+        );
+        assert_eq!(
+            lookup(&sections, "retrieved_memory"),
+            retrieved.len() as u64
+        );
+        assert_eq!(
+            lookup(&sections, "ambiguous_confirmation_hint"),
+            hint.len() as u64
+        );
+        assert_eq!(
+            lookup(&sections, "abstention_prompt"),
+            abstention.len() as u64
+        );
         assert_eq!(lookup(&sections, "skill_instructions"), skills.len() as u64);
-        assert_eq!(lookup(&sections, "workspace_prompt_file"), prompt_file.len() as u64);
+        assert_eq!(
+            lookup(&sections, "workspace_prompt_file"),
+            prompt_file.len() as u64
+        );
 
         let tool_defs_size = lookup(&sections, "tool_definitions");
         let only_builtin = serde_json::to_string(&vec![builtin_tool.clone()])
@@ -1702,8 +1741,7 @@ pub fn compute_context_usage(
         Some(0) | None => model_window,
         Some(cap) => cap.min(model_window),
     };
-    let effective_usable =
-        caps.input_budget_with_cap(context_window_cap, max_output_tokens_limit);
+    let effective_usable = caps.input_budget_with_cap(context_window_cap, max_output_tokens_limit);
     let total = usage.prompt_tokens + usage.completion_tokens;
     // UI percent = total (input + output) / window total. The compaction
     // line lives on the PROJECTED input vs usable_context and is NOT the

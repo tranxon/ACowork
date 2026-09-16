@@ -93,8 +93,7 @@ impl AgentLoop {
         let hb_request_id = request_id.clone();
         let hb_timeout_ms = (effective_timeout_secs as u64) * 1000;
         let heartbeat_task = if let (Some(sid), Some(ct)) = (hb_session_id, hb_chunk_tx) {
-            let heartbeat_interval =
-                acowork_core::timeout_config::constants::TOOL_HEARTBEAT;
+            let heartbeat_interval = acowork_core::timeout_config::constants::TOOL_HEARTBEAT;
             Some(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(heartbeat_interval);
                 // Skip the first (immediate) tick so the first heartbeat
@@ -173,10 +172,7 @@ impl AgentLoop {
     ///
     /// This is synchronous (no I/O or user interaction) since todos are
     /// pure in-memory state on SessionState.
-    pub(crate) fn handle_todo_write(
-        &mut self,
-        tc: &ToolCall,
-    ) -> String {
+    pub(crate) fn handle_todo_write(&mut self, tc: &ToolCall) -> String {
         use crate::agent::session_state::TodoItem;
 
         let params: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
@@ -233,9 +229,11 @@ impl AgentLoop {
         self.session.update_todos(items, merge);
 
         // Emit TodoListUpdated event to frontend for UI rendering
-        let _ = self.session_core.try_send_chunk(ChunkEvent::TodoListUpdated {
-            todos: self.session.todos.clone(),
-        });
+        let _ = self
+            .session_core
+            .try_send_chunk(ChunkEvent::TodoListUpdated {
+                todos: self.session.todos.clone(),
+            });
 
         // Return formatted list as the tool result
         match self.session.format_todos() {

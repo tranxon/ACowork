@@ -22,11 +22,11 @@ pub mod prompt;
 pub mod providers;
 pub mod security;
 pub mod skills;
-pub mod token;
 pub mod startup;
-pub mod tools;
-pub mod util;
 #[cfg(test)]
 pub mod test_support;
+pub mod token;
+pub mod tools;
 pub mod usecases;
+pub mod util;
 pub mod workspace;

@@ -141,7 +141,11 @@ impl FallbackEmbeddingProvider {
         }
         providers.push(ProviderEntry::new(fallback, 5000)); // Remote: 5s timeout
 
-        Self { providers, config, locked_dim: None }
+        Self {
+            providers,
+            config,
+            locked_dim: None,
+        }
     }
 
     /// Create with a full providers chain.
@@ -169,7 +173,11 @@ impl FallbackEmbeddingProvider {
             .into_iter()
             .map(|(provider, timeout_ms)| ProviderEntry::new(provider, timeout_ms))
             .collect();
-        Self { providers, config, locked_dim: None }
+        Self {
+            providers,
+            config,
+            locked_dim: None,
+        }
     }
 
     /// Create with only a remote fallback (no local provider).

@@ -125,7 +125,10 @@ impl std::fmt::Display for SummaryError {
                 write!(f, "compact model output is missing the <summary> block")
             }
             SummaryError::LowQuality(preview) => {
-                write!(f, "compact model summary failed the quality gate: {preview:?}")
+                write!(
+                    f,
+                    "compact model summary failed the quality gate: {preview:?}"
+                )
             }
         }
     }
@@ -194,7 +197,10 @@ fn is_low_quality(summary: &str) -> bool {
         return true;
     }
     let mut contamination_flags = 0u8;
-    if trimmed.lines().any(|l| l.trim_start().starts_with(['|', '│'])) {
+    if trimmed
+        .lines()
+        .any(|l| l.trim_start().starts_with(['|', '│']))
+    {
         contamination_flags += 1;
     }
     if file_line_leak_regex().is_match(trimmed) {
@@ -209,9 +215,7 @@ fn is_low_quality(summary: &str) -> bool {
     // line is tolerated and only counts as one contamination feature.
     let role_label_echoes = trimmed
         .lines()
-        .filter(|l| {
-            role_marker_prefix_regex().is_match(l) || tool_marker_line_regex().is_match(l)
-        })
+        .filter(|l| role_marker_prefix_regex().is_match(l) || tool_marker_line_regex().is_match(l))
         .count();
     if role_label_echoes >= 2 {
         return true;
@@ -251,12 +255,9 @@ fn validate_summary_output(raw: &str) -> std::result::Result<(), SummaryError> {
 /// applies the quality gate first and **fails** when the block is missing or
 /// unusable — the summary is discarded (quality-over-nothing), never
 /// substituted with raw text.
-pub fn parse_compact_output_strict(
-    raw: &str,
-) -> std::result::Result<CompactOutput, SummaryError> {
+pub fn parse_compact_output_strict(raw: &str) -> std::result::Result<CompactOutput, SummaryError> {
     validate_summary_output(raw)?;
-    let summary =
-        sanitize_summary_text(&extract_block(raw, "summary").expect("validated above"));
+    let summary = sanitize_summary_text(&extract_block(raw, "summary").expect("validated above"));
     // ADR-057 (triples-removed): `<triples>` block is ignored if the LLM
     // still emits one. We deliberately do NOT parse it.
     Ok(CompactOutput { summary })
@@ -311,9 +312,6 @@ fn extract_block(text: &str, tag: &str) -> Option<String> {
     Some(text[start..start + end].trim().to_string())
 }
 
-
-
-
 /// Lazily-compiled regex for **tool-role marker lines**.
 ///
 /// Matches a line that echoes a tool call / result back into the summary,
@@ -336,8 +334,10 @@ fn tool_marker_line_regex() -> &'static Regex {
 fn role_marker_prefix_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)^\s*\[(?:user|assistant|system|compaction_summary|compactionsummary)\]:\s*")
-            .expect("role marker regex is valid")
+        Regex::new(
+            r"(?i)^\s*\[(?:user|assistant|system|compaction_summary|compactionsummary)\]:\s*",
+        )
+        .expect("role marker regex is valid")
     })
 }
 
@@ -578,10 +578,8 @@ pub(crate) async fn compact_with_llm(
     identity_context: Option<&str>,
     system_prompt: &str,
 ) -> Result<(String, UsageInfo)> {
-    let system_prompt = crate::prompt::build_compaction_system_prompt(
-        system_prompt,
-        identity_context,
-    );
+    let system_prompt =
+        crate::prompt::build_compaction_system_prompt(system_prompt, identity_context);
 
     // Explicitly disable deep thinking for compaction/distillation.
     // Reasoning models may otherwise put the entire summary in
@@ -604,10 +602,7 @@ pub(crate) async fn compact_with_llm(
         thinking_mode: Some("disabled".to_string()),
     };
 
-    let response = provider
-        .chat(request)
-        .await
-        .map_err(RuntimeError::Core)?;
+    let response = provider.chat(request).await.map_err(RuntimeError::Core)?;
 
     // ADR-027: capture raw Provider usage for session token accounting.
     // Providers that omit usage (e.g. some local mocks) yield
@@ -671,10 +666,7 @@ pub async fn compact_session_title_with_llm(
         thinking_mode: Some("disabled".to_string()),
     };
 
-    let response = provider
-        .chat(request)
-        .await
-        .map_err(RuntimeError::Core)?;
+    let response = provider.chat(request).await.map_err(RuntimeError::Core)?;
 
     // ADR-027: capture raw Provider usage for session token accounting.
     let usage = response.usage.unwrap_or_default();
@@ -749,7 +741,10 @@ mod tests {
             &self,
             _request: ChatRequest,
         ) -> std::result::Result<
-            Box<dyn futures_core::Stream<Item = acowork_core::providers::traits::StreamEvent> + Send>,
+            Box<
+                dyn futures_core::Stream<Item = acowork_core::providers::traits::StreamEvent>
+                    + Send,
+            >,
             acowork_core::AcoworkError,
         > {
             Err(acowork_core::AcoworkError::Unknown(
@@ -799,7 +794,8 @@ mod tests {
     async fn test_compact_with_llm_returns_zero_usage_when_provider_omits_it() {
         // ADR-027 "宁可 miss 也不估计": when Provider returns no usage,
         // the second tuple element is UsageInfo::default() (all zeros).
-        let provider = StubProvider::new("<summary>a concise summary of the conversation here</summary>");
+        let provider =
+            StubProvider::new("<summary>a concise summary of the conversation here</summary>");
         let result = compact_with_llm(
             "ignored",
             &provider,
@@ -827,16 +823,10 @@ mod tests {
             content: "你好，请帮我分析这个问题".to_string(),
             ..Default::default()
         }];
-        let err = EpisodeDistiller::compact_messages(
-            &messages,
-            &provider,
-            "model",
-            1024,
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let err =
+            EpisodeDistiller::compact_messages(&messages, &provider, "model", 1024, None, None)
+                .await
+                .unwrap_err();
         assert!(
             matches!(err, RuntimeError::Summary(SummaryError::MissingBlock)),
             "marker-less dump must fail the quality gate, got: {err:?}"
@@ -855,8 +845,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result =
-            compact_session_title_with_llm("ignored", &provider, "model", 64).await;
+        let result = compact_session_title_with_llm("ignored", &provider, "model", 64).await;
         let (title, usage) = result.expect("title generation should succeed");
         assert_eq!(title, "Rust async ownership");
         assert_eq!(usage.prompt_tokens, 200);
@@ -909,10 +898,7 @@ mod tests {
         // `User` role in memory — see `HistoryManager::replace_middle_with_summary`).
         let mut msg = ChatMessage::assistant("Previous conversation summary");
         msg.name = Some(COMPACTION_SUMMARY_NAME.to_string());
-        let messages = vec![
-            ChatMessage::user("Hello"),
-            msg,
-        ];
+        let messages = vec![ChatMessage::user("Hello"), msg];
         let text = format_messages(&messages);
         assert!(
             text.contains("[CompactionSummary]"),
@@ -986,7 +972,8 @@ mod tests {
         );
         assert!(
             text.contains("Normal tool output"),
-            "content must be preserved");
+            "content must be preserved"
+        );
     }
 
     #[test]
@@ -1158,7 +1145,8 @@ mod tests {
     #[test]
     fn parse_compact_output_strict_ok() {
         // Triples-removed: strict parser now only checks the <summary> block.
-        let raw = "<summary>用户修复了上下文压缩的摘要质量问题，并验证了三层 fallback 链。</summary>";
+        let raw =
+            "<summary>用户修复了上下文压缩的摘要质量问题，并验证了三层 fallback 链。</summary>";
         let parsed =
             parse_compact_output_strict(raw).expect("valid output must parse in strict mode");
         assert!(parsed.summary.contains("摘要质量"));
@@ -1188,10 +1176,22 @@ mod tests {
                    [Tool(file_read)]: 420: const sessionState = ...\n\
                    最终定位到 RetryWaitBanner 组件。";
         let cleaned = sanitize_summary_text(raw);
-        assert!(!cleaned.contains("[Tool(bash)]"), "tool echo must be dropped, got:\n{cleaned}");
-        assert!(!cleaned.contains("[Tool(file_read)]"), "tool echo must be dropped, got:\n{cleaned}");
-        assert!(cleaned.contains("用户要求查找 running"), "real prose must survive");
-        assert!(cleaned.contains("RetryWaitBanner"), "real prose must survive");
+        assert!(
+            !cleaned.contains("[Tool(bash)]"),
+            "tool echo must be dropped, got:\n{cleaned}"
+        );
+        assert!(
+            !cleaned.contains("[Tool(file_read)]"),
+            "tool echo must be dropped, got:\n{cleaned}"
+        );
+        assert!(
+            cleaned.contains("用户要求查找 running"),
+            "real prose must survive"
+        );
+        assert!(
+            cleaned.contains("RetryWaitBanner"),
+            "real prose must survive"
+        );
     }
 
     #[test]
@@ -1205,12 +1205,27 @@ mod tests {
                    [tool_result]: 找到 3 个文件\n\
                    [assistant]: 已经找到。";
         let cleaned = sanitize_summary_text(raw);
-        assert!(!cleaned.contains("[tool_call]"), "tool_call line must be dropped");
-        assert!(!cleaned.contains("[tool_result]"), "tool_result line must be dropped");
-        assert!(!cleaned.contains("[thought]"), "thought line must be dropped");
+        assert!(
+            !cleaned.contains("[tool_call]"),
+            "tool_call line must be dropped"
+        );
+        assert!(
+            !cleaned.contains("[tool_result]"),
+            "tool_result line must be dropped"
+        );
+        assert!(
+            !cleaned.contains("[thought]"),
+            "thought line must be dropped"
+        );
         assert!(cleaned.contains("你好"), "dialogue content must survive");
-        assert!(cleaned.contains("我来看一下"), "dialogue content must survive");
-        assert!(cleaned.contains("已经找到"), "dialogue content must survive");
+        assert!(
+            cleaned.contains("我来看一下"),
+            "dialogue content must survive"
+        );
+        assert!(
+            cleaned.contains("已经找到"),
+            "dialogue content must survive"
+        );
     }
 
     #[test]
@@ -1223,7 +1238,10 @@ mod tests {
         let cleaned = sanitize_summary_text(raw);
         assert!(!cleaned.contains("[User]"), "label must be stripped");
         assert!(!cleaned.contains("[Assistant]"), "label must be stripped");
-        assert!(!cleaned.contains("[CompactionSummary]"), "label must be stripped");
+        assert!(
+            !cleaned.contains("[CompactionSummary]"),
+            "label must be stripped"
+        );
         assert!(cleaned.contains("请重构 Settings 页面"));
         assert!(cleaned.contains("好的，我准备开始重构"));
         assert!(cleaned.contains("ChatPanel"));
@@ -1238,9 +1256,15 @@ mod tests {
                    [Tool result compressed. Call context_retrieve(id=\"toolu_abc\") to retrieve the full content.]\n\
                    [重要] 下一步需要验证。";
         let cleaned = sanitize_summary_text(raw);
-        assert!(cleaned.contains("Tool result compressed"), "placeholder body must survive");
+        assert!(
+            cleaned.contains("Tool result compressed"),
+            "placeholder body must survive"
+        );
         assert!(cleaned.contains("此前工具结果被压缩"));
-        assert!(cleaned.contains("[重要] 下一步需要验证"), "unrelated bracketed text must survive");
+        assert!(
+            cleaned.contains("[重要] 下一步需要验证"),
+            "unrelated bracketed text must survive"
+        );
     }
 
     #[test]
@@ -1251,9 +1275,13 @@ mod tests {
         // legacy-internal `parse_compact_output` path; `parse_compact_output_strict`
         // (the gate-enforced variant) covers the same invariant via the
         // quality gate.
-        let raw = "<summary>用户要求查找 UI 元素。\n[Tool(bash)]: grep ...\n定位到 Banner。</summary>";
+        let raw =
+            "<summary>用户要求查找 UI 元素。\n[Tool(bash)]: grep ...\n定位到 Banner。</summary>";
         let parsed = parse_compact_output(raw);
-        assert!(!parsed.summary.contains("[Tool(bash)]"), "summary must be clean of tool echoes");
+        assert!(
+            !parsed.summary.contains("[Tool(bash)]"),
+            "summary must be clean of tool echoes"
+        );
         assert!(parsed.summary.contains("用户要求查找 UI 元素"));
         assert!(parsed.summary.contains("Banner"));
     }
@@ -1296,8 +1324,7 @@ mod tests {
             "a single table-artifact line must be tolerated"
         );
 
-        let file_line_only =
-            "定位到 ChatPanel 组件的问题。\nsrc/components/chat/ChatPanel.tsx:420 出现异常\n最终修复了滚动位置。";
+        let file_line_only = "定位到 ChatPanel 组件的问题。\nsrc/components/chat/ChatPanel.tsx:420 出现异常\n最终修复了滚动位置。";
         assert!(
             !is_low_quality(file_line_only),
             "a single file:line leak must be tolerated"
@@ -1317,10 +1344,15 @@ mod tests {
         // dump leaked into the summary). Covers the pairs the e2e pollution
         // test does not reach (table+tool, file:line+tool).
         let table_plus_tool = "定位到问题。\n| 文件 | 行号 |\n| ChatPanel | 420 |\n通过 [tool(bash)] 确认。最终修复。";
-        assert!(is_low_quality(table_plus_tool), "table + tool echo must be rejected");
+        assert!(
+            is_low_quality(table_plus_tool),
+            "table + tool echo must be rejected"
+        );
 
-        let fileline_plus_tool =
-            "定位到问题。\nsrc/components/chat/ChatPanel.tsx:420 异常\n通过 [tool(bash)] 确认。最终修复。";
-        assert!(is_low_quality(fileline_plus_tool), "file:line + tool echo must be rejected");
+        let fileline_plus_tool = "定位到问题。\nsrc/components/chat/ChatPanel.tsx:420 异常\n通过 [tool(bash)] 确认。最终修复。";
+        assert!(
+            is_low_quality(fileline_plus_tool),
+            "file:line + tool echo must be rejected"
+        );
     }
 }

@@ -86,7 +86,7 @@ impl CodebaseTool {
                 Requires a language server to be installed for the target language. \
                 OUTPUT CONTRACT: results over {max} entries are truncated with a marker; \
                 the entire response is hard-capped at 32 KB — narrow your query if truncated."
-                    .replace("{max}", &output::MAX_RESULT_COUNT.to_string()),
+                .replace("{max}", &output::MAX_RESULT_COUNT.to_string()),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -504,7 +504,11 @@ mod tests {
         let items = out["items"].as_array().unwrap();
         for (i, item) in items.iter().enumerate().take(1000) {
             let expected_uri = format!("file:///repo/src/file_{i}.rs");
-            assert_eq!(item["uri"], Value::String(expected_uri), "item {i} order drifted");
+            assert_eq!(
+                item["uri"],
+                Value::String(expected_uri),
+                "item {i} order drifted"
+            );
         }
     }
 

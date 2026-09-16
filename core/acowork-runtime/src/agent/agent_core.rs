@@ -19,15 +19,15 @@ use acowork_core::protocol::{ModelCapabilitiesInfo, ProtocolType, ProviderListIt
 use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
+use acowork_memory::MemoryProvider;
 use acowork_memory::admin::MemoryAdminService;
 use acowork_memory::consolidation::SchedulerConfig;
 use acowork_memory::types::EpisodicDecayConfig;
-use acowork_memory::MemoryProvider;
 
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::config::RuntimeConfig;
 use crate::debug::DebugObserverSlot;
 use crate::embedding::EmbeddingProvider;
-use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
 use acowork_core::ShellApprovalThreshold;
@@ -121,7 +121,8 @@ pub struct AgentCore {
     /// Same sharing semantics as [`Self::search_key_vault`]. Read by
     /// `WebSearchEngine` at search time to determine which providers are
     /// configured and in what order.
-    pub(crate) search_provider_list: Arc<RwLock<Vec<acowork_core::protocol::SearchProviderListItem>>>,
+    pub(crate) search_provider_list:
+        Arc<RwLock<Vec<acowork_core::protocol::SearchProviderListItem>>>,
 
     /// Per-agent compatibility cache, shared across all provider instances
     /// (including those rebuilt by `build_provider_for`).  `None` when no
@@ -223,7 +224,6 @@ pub struct AgentCore {
     // Field naming maps 1-to-1 to entries in
     // `crate::package::prompt_builder::OVERRIDABLE_PROMPTS`; see ADR-063
     // §3.2 for the full list and resolution chain.
-
     /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
     /// (`prompts/search.md`). Inner `None` = use built-in Perplexity
     /// search system prompt.
@@ -267,7 +267,6 @@ pub struct AgentCore {
     // are the grafeo distiller Steps 2a / 4 — resolved via
     // `distiller_scheduler_config()` which projects these slots onto
     // `DistillerConfig.{extraction_prompt_override,judge_prompt_override}`.
-
     /// Override for the built-in `EXTRACTION_SYSTEM_PROMPT` in
     /// `acowork-grafeo` (distiller Step 2a, `prompts/distiller-extraction.md`).
     /// Inner `None` = use the built-in constant.
@@ -409,12 +408,18 @@ fn manifest_distiller_to_config(
         preference_min_evidence: manifest
             .preference_min_evidence
             .unwrap_or(base.preference_min_evidence),
-        relation_min_evidence: manifest.relation_min_evidence.unwrap_or(base.relation_min_evidence),
+        relation_min_evidence: manifest
+            .relation_min_evidence
+            .unwrap_or(base.relation_min_evidence),
         procedure_min_evidence: manifest
             .procedure_min_evidence
             .unwrap_or(base.procedure_min_evidence),
-        autobio_min_evidence: manifest.autobio_min_evidence.unwrap_or(base.autobio_min_evidence),
-        autobio_min_span_days: manifest.autobio_min_span_days.unwrap_or(base.autobio_min_span_days),
+        autobio_min_evidence: manifest
+            .autobio_min_evidence
+            .unwrap_or(base.autobio_min_evidence),
+        autobio_min_span_days: manifest
+            .autobio_min_span_days
+            .unwrap_or(base.autobio_min_span_days),
         promotion_confidence_threshold: manifest
             .promotion_confidence_threshold
             .unwrap_or(base.promotion_confidence_threshold),
@@ -671,9 +676,15 @@ impl AgentCore {
         }
     }
 
-    pub fn config(&self) -> &RuntimeConfig { &self.config }
-    pub fn manifest(&self) -> &acowork_core::AgentManifest { &self.manifest }
-    pub fn provider(&self) -> &Arc<dyn Provider> { &self.provider }
+    pub fn config(&self) -> &RuntimeConfig {
+        &self.config
+    }
+    pub fn manifest(&self) -> &acowork_core::AgentManifest {
+        &self.manifest
+    }
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        &self.provider
+    }
 
     // ── ADR-028: Agent-scoped cumulative token usage ───────────────────
     //
@@ -836,10 +847,7 @@ impl AgentCore {
         );
     }
 
-    pub fn update_embedding_provider(
-        &mut self,
-        new_provider: Arc<dyn EmbeddingProvider>,
-    ) {
+    pub fn update_embedding_provider(&mut self, new_provider: Arc<dyn EmbeddingProvider>) {
         let old_name = self
             .embedding_provider
             .as_ref()
@@ -903,7 +911,10 @@ impl AgentCore {
     }
 
     pub fn update_max_output_tokens_limit(&mut self, limit: u64) {
-        tracing::info!(new_limit = limit, "AgentCore max_output_tokens_limit updated from Gateway (all models)");
+        tracing::info!(
+            new_limit = limit,
+            "AgentCore max_output_tokens_limit updated from Gateway (all models)"
+        );
         let mut list = self.global_provider_list.write().unwrap();
         for provider in list.iter_mut() {
             for model in provider.models.iter_mut() {
@@ -914,7 +925,10 @@ impl AgentCore {
 
     pub fn apply_runtime_config(&mut self, overrides: &RuntimeConfigOverrides) {
         if let Some(limit) = overrides.max_output_tokens {
-            tracing::info!(new = limit, "runtime config: max_output_tokens updated (all models)");
+            tracing::info!(
+                new = limit,
+                "runtime config: max_output_tokens updated (all models)"
+            );
             self.update_max_output_tokens_limit(limit);
         }
         if let Some(n) = overrides.max_iterations {
@@ -961,7 +975,8 @@ impl AgentCore {
             self.session_language_override = overrides.session_language.clone();
         }
         if let Some(ref threshold) = overrides.shell_approval_threshold {
-            let new_threshold = ShellApprovalThreshold::from_str_loose(threshold).unwrap_or_default();
+            let new_threshold =
+                ShellApprovalThreshold::from_str_loose(threshold).unwrap_or_default();
             tracing::info!(
                 old = ?self.shell_approval_threshold,
                 new = ?new_threshold,
@@ -1118,26 +1133,35 @@ impl AgentCore {
     #[cfg(feature = "grafeo-backend")]
     fn init_grafeo_backend(&mut self, memory_dir: &std::path::Path) {
         use acowork_grafeo::grafeo::GrafeoStore;
-        use acowork_grafeo::types::{GrafeoConfig, DEFAULT_EMBEDDING_DIM};
+        use acowork_grafeo::types::{DEFAULT_EMBEDDING_DIM, GrafeoConfig};
 
         let db_path = memory_dir.join("private.grafeo");
-        let embedding_dim = self.embedding_provider.as_ref().map(|p| p.dimension()).unwrap_or_else(|| {
-            tracing::warn!(
-                default_dim = DEFAULT_EMBEDDING_DIM,
-                "⚠️ Embedding provider unavailable - opening GrafeoStore with default dim {}. \
+        let embedding_dim = self
+            .embedding_provider
+            .as_ref()
+            .map(|p| p.dimension())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    default_dim = DEFAULT_EMBEDDING_DIM,
+                    "⚠️ Embedding provider unavailable - opening GrafeoStore with default dim {}. \
                  If the on-disk store was created with a different dim, vector search will fail \
                  (HNSW index creation will warn) and memory will fall back to text-only search. \
                  Restart runtime after the embedding service is back online to use vector search.",
+                    DEFAULT_EMBEDDING_DIM
+                );
                 DEFAULT_EMBEDDING_DIM
-            );
-            DEFAULT_EMBEDDING_DIM
-        });
-        let config = GrafeoConfig { db_path: db_path.clone(), embedding_dim };
+            });
+        let config = GrafeoConfig {
+            db_path: db_path.clone(),
+            embedding_dim,
+        };
         match GrafeoStore::open(&config) {
             Ok(store) => {
                 let graph = store.db().graph_store();
                 let existing: usize = ["Episodic", "Knowledge", "Procedural", "Autobiographical"]
-                    .iter().map(|l| graph.nodes_by_label(l).len()).sum();
+                    .iter()
+                    .map(|l| graph.nodes_by_label(l).len())
+                    .sum();
                 tracing::info!(path = %db_path.display(), existing_nodes = existing, "Grafeo memory store opened");
                 let quality = self.memory_quality_config();
                 if let Err(e) = store.apply_quality_config(&quality) {
@@ -1187,10 +1211,7 @@ impl AgentCore {
             &self.manifest,
             provider,
         );
-        tracing::debug!(
-            ?outcome,
-            "Manifest autobiographical bootstrap finished"
-        );
+        tracing::debug!(?outcome, "Manifest autobiographical bootstrap finished");
     }
 
     /// Resolve the agent's `MemoryManagerConfig` (manifest overrides +
@@ -1439,8 +1460,8 @@ impl AgentCore {
             distiller_enabled: true,
             ..self.distiller_scheduler_config()
         };
-        let result = run_episodic_distiller_step_once(provider, llm, embedding, scheduler_config)
-            .await;
+        let result =
+            run_episodic_distiller_step_once(provider, llm, embedding, scheduler_config).await;
         // Manual runs also reset the interval gate so the periodic scheduler
         // does not immediately re-trigger right after a manual run, and store
         // the run summary for the status endpoint (ADR-071 D2).
@@ -1452,7 +1473,8 @@ impl AgentCore {
                         result,
                     );
                     timer.record_distill_result(&record).await;
-                }                None => timer.mark_distill_run().await,
+                }
+                None => timer.mark_distill_run().await,
             }
         }
         Ok(result)
@@ -1464,7 +1486,9 @@ impl AgentCore {
             return;
         };
         let Some(ref embedding) = self.embedding_provider else {
-            tracing::warn!("Cannot start consolidation pipeline: embedding provider not available. Background memory consolidation (generalization, conflict resolution) is disabled until embedding service is back.");
+            tracing::warn!(
+                "Cannot start consolidation pipeline: embedding provider not available. Background memory consolidation (generalization, conflict resolution) is disabled until embedding service is back."
+            );
             return;
         };
         if self.consolidation_bg_task.is_some() {
@@ -1481,8 +1505,11 @@ impl AgentCore {
         // keeps the distiller disabled unless the runtime layer turns it on.
         let scheduler_config = self.distiller_scheduler_config();
         let params = ConsolidationParams {
-            provider: provider.clone(), llm_provider: self.provider.clone(), model,
-            embedding_provider: embedding.clone(), scheduler_config,
+            provider: provider.clone(),
+            llm_provider: self.provider.clone(),
+            model,
+            embedding_provider: embedding.clone(),
+            scheduler_config,
             poll_interval: Duration::from_secs(60),
             work_dir: Some(std::path::PathBuf::from(&self.config.work_dir)),
         };
@@ -1510,7 +1537,10 @@ impl AgentCore {
             }
         }
         if !list.is_empty() {
-            let available: Vec<&str> = list.iter().flat_map(|p| p.models.iter().map(|m| m.id.as_str())).collect();
+            let available: Vec<&str> = list
+                .iter()
+                .flat_map(|p| p.models.iter().map(|m| m.id.as_str()))
+                .collect();
             tracing::warn!(model = %model_name, available = ?available, "Model capabilities not found for '{}'", model_name);
         }
         None
@@ -1555,16 +1585,17 @@ impl AgentCore {
         // 2) Local provider — no key required, but must still be present in
         //    the provider list with a reachable local base_url.
         let list = self.global_provider_list.read().unwrap();
-        list.iter()
-            .find(|p| p.id == *pid)
-            .is_some_and(|p| {
-                matches!(p.protocol_type, ProtocolType::Ollama)
-                    || crate::providers::is_local_base_url(&p.base_url)
-            })
+        list.iter().find(|p| p.id == *pid).is_some_and(|p| {
+            matches!(p.protocol_type, ProtocolType::Ollama)
+                || crate::providers::is_local_base_url(&p.base_url)
+        })
     }
 
     pub fn set_debug_mode(&mut self, observer: crate::debug::DebugObserverImpl) {
-        tracing::info!(is_dev = crate::debug::observer::DebugObserver::is_dev_mode(&observer), "AgentCore::set_debug_mode called (observer pipeline)");
+        tracing::info!(
+            is_dev = crate::debug::observer::DebugObserver::is_dev_mode(&observer),
+            "AgentCore::set_debug_mode called (observer pipeline)"
+        );
         self.debug_observer = DebugObserverSlot::dev(observer);
     }
 
@@ -1583,9 +1614,7 @@ impl AgentCore {
     ///   after the toggle.
     pub fn clear_debug_mode(&mut self) {
         if !self.debug_observer.is_dev_mode() {
-            tracing::debug!(
-                "AgentCore::clear_debug_mode: no-op (observer already in Production)"
-            );
+            tracing::debug!("AgentCore::clear_debug_mode: no-op (observer already in Production)");
             return;
         }
         tracing::info!("AgentCore::clear_debug_mode: dropping DevMode observer");
@@ -1624,9 +1653,7 @@ impl AgentCore {
     /// Returns `None` when the lock is contended (the writer holds it); in
     /// that case the caller should retry next iteration rather than block
     /// the agent loop.
-    pub(crate) fn take_pending_debug_handles(
-        &self,
-    ) -> Option<crate::debug::DebugHandles> {
+    pub(crate) fn take_pending_debug_handles(&self) -> Option<crate::debug::DebugHandles> {
         let ch = self.pending_debug_handles.as_ref()?;
         match ch.try_lock() {
             Ok(mut guard) => guard.take(),
@@ -1634,11 +1661,21 @@ impl AgentCore {
         }
     }
 
-    pub fn debug_observer(&self) -> &DebugObserverSlot { &self.debug_observer }
-    pub fn debug_observer_mut(&mut self) -> &mut DebugObserverSlot { &mut self.debug_observer }
-    pub fn is_dev_mode(&self) -> bool { self.debug_observer.is_dev_mode() }
-    pub fn approval_gate(&self) -> Option<&Arc<dyn ApprovalGate>> { self.approval_gate.as_ref() }
-    pub fn set_approval_gate(&mut self, gate: Arc<dyn ApprovalGate>) { self.approval_gate = Some(gate); }
+    pub fn debug_observer(&self) -> &DebugObserverSlot {
+        &self.debug_observer
+    }
+    pub fn debug_observer_mut(&mut self) -> &mut DebugObserverSlot {
+        &mut self.debug_observer
+    }
+    pub fn is_dev_mode(&self) -> bool {
+        self.debug_observer.is_dev_mode()
+    }
+    pub fn approval_gate(&self) -> Option<&Arc<dyn ApprovalGate>> {
+        self.approval_gate.as_ref()
+    }
+    pub fn set_approval_gate(&mut self, gate: Arc<dyn ApprovalGate>) {
+        self.approval_gate = Some(gate);
+    }
 
     /// ADR-046: bind the blob store used to read uploaded files. Called
     /// from Phase B of `session_init` once the workspace services are
@@ -1648,14 +1685,12 @@ impl AgentCore {
     pub fn attachment_service(&self) -> Option<&Arc<dyn crate::usecases::AttachmentService>> {
         self.attachment_service.as_ref()
     }
-    pub fn set_attachment_service(
-        &mut self,
-        svc: Arc<dyn crate::usecases::AttachmentService>,
-    ) {
+    pub fn set_attachment_service(&mut self, svc: Arc<dyn crate::usecases::AttachmentService>) {
         self.attachment_service = Some(svc);
     }
-    pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
-
+    pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold {
+        &self.shell_approval_threshold
+    }
 
     /// Resolve the user-configured **total context cap**:
     /// Resolve the effective context window budget for history trimming.
@@ -1681,8 +1716,7 @@ impl AgentCore {
 
         self.get_model_capabilities(model_name)
             .map(|caps| {
-                let effective =
-                    caps.input_budget_with_cap(resolved_cap, max_output_limit);
+                let effective = caps.input_budget_with_cap(resolved_cap, max_output_limit);
                 tracing::debug!(
                     model = %model_name,
                     context_window = caps.context_window,
@@ -1801,9 +1835,9 @@ impl Clone for AgentCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RuntimeConfig;
     use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
     use acowork_core::providers::mock::MockProvider;
-    use crate::config::RuntimeConfig;
 
     /// Add a single dummy tool entry with the given name + initial
     /// enabled flag. Used by tests that need at least one entry in
@@ -1963,12 +1997,7 @@ mod tests {
         // Both None → should use DEFAULT_CONTEXT_WINDOW (200K)
         // Model is also 200K, so min(200K, 200K-16K) = 184K?
         // Actually: min(200_000, 183_616) = 183_616
-        let core = make_core(
-            None,
-            None,
-            Some(test_model_caps(200_000, 16_384)),
-            128_000,
-        );
+        let core = make_core(None, None, Some(test_model_caps(200_000, 16_384)), 128_000);
         let budget = resolved_trim_budget(&core, "test-model", None);
         // DEFAULT_CONTEXT_WINDOW=200K > model_budget=183_616 → min = 183_616
         assert_eq!(budget, 183_616);
@@ -2008,12 +2037,7 @@ mod tests {
     fn test_zero_cap_with_small_model() {
         // config=0 invalid → DEFAULT 200K, but the small model window
         // (32K) binds: 32_000 − 4_096 = 27_904.
-        let core = make_core(
-            Some(0),
-            None,
-            Some(test_model_caps(32_000, 4_096)),
-            128_000,
-        );
+        let core = make_core(Some(0), None, Some(test_model_caps(32_000, 4_096)), 128_000);
         let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 27_904);
     }
@@ -2068,12 +2092,7 @@ mod tests {
     #[test]
     fn test_no_model_caps_falls_back_to_history_max_tokens() {
         // No model capabilities → use history_max_tokens capped by user setting
-        let core = make_core(
-            Some(80_000),
-            None,
-            None,
-            64_000,
-        );
+        let core = make_core(Some(80_000), None, None, 64_000);
         let budget = resolved_trim_budget(&core, "test-model", None);
         // user_cap=80K, history_max_tokens=64K → min(80K, 64K) = 64K
         assert_eq!(budget, 64_000);
@@ -2083,12 +2102,7 @@ mod tests {
     fn test_no_model_caps_zero_user_cap() {
         // No model capabilities + user_cap=0 (invalid) → DEFAULT 200K →
         // min(200K, history 128K) = 128K.
-        let core = make_core(
-            Some(0),
-            None,
-            None,
-            128_000,
-        );
+        let core = make_core(Some(0), None, None, 128_000);
         let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 128_000);
     }
@@ -2096,12 +2110,7 @@ mod tests {
     #[test]
     fn test_no_model_caps_default_fallback() {
         // No model capabilities, no user cap → min(DEFAULT_CONTEXT_WINDOW=200K, history=128K) = 128K
-        let core = make_core(
-            None,
-            None,
-            None,
-            128_000,
-        );
+        let core = make_core(None, None, None, 128_000);
         let budget = resolved_trim_budget(&core, "test-model", None);
         assert_eq!(budget, 128_000);
     }
@@ -2169,12 +2178,7 @@ mod tests {
     #[test]
     fn test_model_budget_zero_edge_case() {
         // Model with 0 context_window (invalid but defensive)
-        let core = make_core(
-            Some(100_000),
-            None,
-            Some(test_model_caps(0, 0)),
-            128_000,
-        );
+        let core = make_core(Some(100_000), None, Some(test_model_caps(0, 0)), 128_000);
         let budget = resolved_trim_budget(&core, "test-model", None);
         // effective_input_budget: 0 - 0 = 0; min(100K, 0) = 0
         assert_eq!(budget, 0);
@@ -2270,7 +2274,6 @@ mod tests {
         );
     }
 
-
     // ── Consolidation timer integration tests (ADR-051 P4) ──────────
 
     /// G1: Verify that `start_consolidation_pipeline` stores the timer
@@ -2297,15 +2300,27 @@ mod tests {
         struct DummyEmbeddingProvider;
         #[async_trait::async_trait]
         impl EmbeddingProvider for DummyEmbeddingProvider {
-            fn name(&self) -> &str { "dummy" }
-            async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+            fn name(&self) -> &str {
+                "dummy"
+            }
+            async fn embed(
+                &self,
+                _text: &str,
+            ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
                 Ok(vec![0.0; 384])
             }
-            async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
                 Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
             }
-            fn dimension(&self) -> usize { 384 }
-            async fn is_available(&self) -> bool { true }
+            fn dimension(&self) -> usize {
+                384
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
         }
         core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
 
@@ -2317,7 +2332,8 @@ mod tests {
         core.start_consolidation_pipeline();
 
         // After starting: timer must be stored.
-        let timer = core.consolidation_timer
+        let timer = core
+            .consolidation_timer
             .clone()
             .expect("consolidation_timer must be Some after start_consolidation_pipeline");
         assert!(core.consolidation_bg_task.is_some());
@@ -2361,15 +2377,27 @@ mod tests {
         struct DummyEmbeddingProvider;
         #[async_trait::async_trait]
         impl EmbeddingProvider for DummyEmbeddingProvider {
-            fn name(&self) -> &str { "dummy" }
-            async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+            fn name(&self) -> &str {
+                "dummy"
+            }
+            async fn embed(
+                &self,
+                _text: &str,
+            ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
                 Ok(vec![0.0; 384])
             }
-            async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
                 Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
             }
-            fn dimension(&self) -> usize { 384 }
-            async fn is_available(&self) -> bool { true }
+            fn dimension(&self) -> usize {
+                384
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
         }
         core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
 
@@ -2380,7 +2408,8 @@ mod tests {
         let session_core = core.clone();
 
         // The session clone must share the same timer Arc.
-        let session_timer = session_core.consolidation_timer
+        let session_timer = session_core
+            .consolidation_timer
             .as_ref()
             .expect("session clone must have consolidation_timer");
         assert!(
@@ -2411,9 +2440,8 @@ mod tests {
     /// survive the overlay.
     #[test]
     fn test_distiller_scheduler_config_projects_prompt_overrides() {
-        let core = make_core_with_memory_toml(
-            "[memory.distiller]\nenabled = true\nbatch_size = 20\n",
-        );
+        let core =
+            make_core_with_memory_toml("[memory.distiller]\nenabled = true\nbatch_size = 20\n");
         // Without override files the slots are `None` → manifest values.
         let cfg = core.distiller_scheduler_config();
         assert!(cfg.distiller_enabled);
@@ -2429,7 +2457,10 @@ mod tests {
 
         let cfg2 = core.distiller_scheduler_config();
         let dc2 = cfg2.distiller_config.expect("manifest section present");
-        assert_eq!(dc2.extraction_prompt_override.as_deref(), Some("EX_OVERRIDE"));
+        assert_eq!(
+            dc2.extraction_prompt_override.as_deref(),
+            Some("EX_OVERRIDE")
+        );
         assert_eq!(dc2.judge_prompt_override.as_deref(), Some("JU_OVERRIDE"));
         assert_eq!(
             dc2.batch_size, 20,
@@ -2450,8 +2481,13 @@ mod tests {
 
         let cfg = core.distiller_scheduler_config();
         assert!(!cfg.distiller_enabled, "opt-in invariant must hold");
-        let dc = cfg.distiller_config.expect("override must force Some(config)");
-        assert_eq!(dc.extraction_prompt_override.as_deref(), Some("EX_OVERRIDE"));
+        let dc = cfg
+            .distiller_config
+            .expect("override must force Some(config)");
+        assert_eq!(
+            dc.extraction_prompt_override.as_deref(),
+            Some("EX_OVERRIDE")
+        );
         assert!(dc.judge_prompt_override.is_none());
         // No manifest fields → defaults for the rest.
         assert_eq!(
@@ -2487,9 +2523,7 @@ mod tests {
         use acowork_core::embedding::EmbeddingProvider;
         use acowork_grafeo::GrafeoStore;
 
-        let mut core = make_core_with_memory_toml(
-            "[memory.distiller]\nenabled = true\n",
-        );
+        let mut core = make_core_with_memory_toml("[memory.distiller]\nenabled = true\n");
         assert!(core.manifest.memory.distiller_enabled());
 
         let store: Arc<dyn acowork_memory::MemoryProvider> =
@@ -2499,15 +2533,27 @@ mod tests {
         struct DummyEmbeddingProvider;
         #[async_trait::async_trait]
         impl EmbeddingProvider for DummyEmbeddingProvider {
-            fn name(&self) -> &str { "dummy" }
-            async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+            fn name(&self) -> &str {
+                "dummy"
+            }
+            async fn embed(
+                &self,
+                _text: &str,
+            ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
                 Ok(vec![0.0; 384])
             }
-            async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
                 Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
             }
-            fn dimension(&self) -> usize { 384 }
-            async fn is_available(&self) -> bool { true }
+            fn dimension(&self) -> usize {
+                384
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
         }
         core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
 
@@ -2537,7 +2583,9 @@ mod tests {
         struct DummyRag;
         #[async_trait::async_trait]
         impl RagProvider for DummyRag {
-            fn name(&self) -> &str { "dummy_rag" }
+            fn name(&self) -> &str {
+                "dummy_rag"
+            }
             async fn query(&self, _query: &str) -> Vec<acowork_core::rag::AnnotatedRagResult> {
                 Vec::new()
             }
@@ -2555,10 +2603,7 @@ mod tests {
 
         // Verify it's accessible.
         assert!(core.rag_provider.is_some());
-        assert_eq!(
-            core.rag_provider.as_ref().unwrap().name(),
-            "dummy_rag"
-        );
+        assert_eq!(core.rag_provider.as_ref().unwrap().name(), "dummy_rag");
 
         // Verify it survives clone_for_session.
         let session_core = core.clone();
@@ -2686,9 +2731,7 @@ mod tests {
     #[test]
     fn test_auto_inject_manifest_opt_in_true() {
         // Per-agent opt-in: `[memory.quality].auto_inject_enabled = true`.
-        let core = make_core_with_memory_toml(
-            "[memory.quality]\nauto_inject_enabled = true\n",
-        );
+        let core = make_core_with_memory_toml("[memory.quality]\nauto_inject_enabled = true\n");
         assert!(
             core.init_memory_manager().config().auto_inject_enabled,
             "manifest opt-in must enable auto-inject"
@@ -2698,9 +2741,7 @@ mod tests {
     #[test]
     fn test_auto_inject_manifest_opt_in_false() {
         // Explicit opt-out is still honored.
-        let core = make_core_with_memory_toml(
-            "[memory.quality]\nauto_inject_enabled = false\n",
-        );
+        let core = make_core_with_memory_toml("[memory.quality]\nauto_inject_enabled = false\n");
         assert!(
             !core.init_memory_manager().config().auto_inject_enabled,
             "manifest opt-out must disable auto-inject"
@@ -2743,7 +2784,10 @@ mod tests {
         // Auto-inject reads the same settings straight from the core.
         assert!(core.init_memory_manager().config().forgetting.enabled);
         assert_eq!(
-            core.init_memory_manager().config().forgetting.half_life_days,
+            core.init_memory_manager()
+                .config()
+                .forgetting
+                .half_life_days,
             90
         );
     }
@@ -2777,11 +2821,26 @@ mod tests {
         // built-in constant" at the LLM call site.
         let core = make_core(Some(8192), None, None, 0);
 
-        assert!(core.compaction_prompt().is_none(), "compaction_prompt must default to None");
-        assert!(core.search_prompt().is_none(), "search_prompt must default to None");
-        assert!(core.title_prompt().is_none(), "title_prompt must default to None");
-        assert!(core.abstention_prompt().is_none(), "abstention_prompt must default to None");
-        assert!(core.compact_template().is_none(), "compact_template must default to None");
+        assert!(
+            core.compaction_prompt().is_none(),
+            "compaction_prompt must default to None"
+        );
+        assert!(
+            core.search_prompt().is_none(),
+            "search_prompt must default to None"
+        );
+        assert!(
+            core.title_prompt().is_none(),
+            "title_prompt must default to None"
+        );
+        assert!(
+            core.abstention_prompt().is_none(),
+            "abstention_prompt must default to None"
+        );
+        assert!(
+            core.compact_template().is_none(),
+            "compact_template must default to None"
+        );
     }
 
     #[test]
@@ -2911,7 +2970,6 @@ mod tests {
              built-in fallback constant takes effect again"
         );
     }
-
 
     // ── ADR-066: agent-level cache counter tests ─────────────────────
 
@@ -3051,10 +3109,10 @@ mod tests {
         // Step 2: scan reports smaller values across the board — every
         // dimension's atomic-max preserves the live value.
         core.merge_token_totals((
-            Some(50),  // < live 100
-            Some(5),   // < live 10
-            Some(10),  // < live 50
-            Some(5),   // < live 20
+            Some(50), // < live 100
+            Some(5),  // < live 10
+            Some(10), // < live 50
+            Some(5),  // < live 20
         ));
         assert_eq!(
             core.agent_token_totals(),
@@ -3065,10 +3123,10 @@ mod tests {
         // Step 3: scan reports larger values across the board — every
         // dimension's atomic-max adopts the scanned value.
         core.merge_token_totals((
-            Some(200),  // > live 100
-            Some(20),   // > live 10
-            Some(500),  // > live 50
-            Some(300),  // > live 20
+            Some(200), // > live 100
+            Some(20),  // > live 10
+            Some(500), // > live 50
+            Some(300), // > live 20
         ));
         assert_eq!(
             core.agent_token_totals(),
@@ -3107,5 +3165,4 @@ mod tests {
             "each dimension is max'd independently"
         );
     }
-
 }

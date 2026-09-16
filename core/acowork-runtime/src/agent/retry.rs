@@ -69,10 +69,7 @@ pub enum RetryAction {
     /// and continue retrying with exponential backoff (5m → 10m → 20m →
     /// 30m cap) until the network recovers, the user stops, or a
     /// non-retryable error surfaces.
-    Persistent {
-        wait_ms: u64,
-        attempt: u32,
-    },
+    Persistent { wait_ms: u64, attempt: u32 },
     /// The error is not retryable — return it and end the loop.
     GiveUp,
 }
@@ -95,10 +92,7 @@ pub fn decide_retry_action(
 
     if fast_count < MAX_ITERATION_RETRIES {
         // Exponential: 1s, 2s, 4s (capped at 10s).
-        let backoff_ms = std::cmp::min(
-            1_000u64.saturating_mul(2u64.pow(fast_count)),
-            10_000,
-        );
+        let backoff_ms = std::cmp::min(1_000u64.saturating_mul(2u64.pow(fast_count)), 10_000);
         return RetryAction::FastRetry {
             backoff_ms,
             attempt: fast_count + 1,
@@ -132,9 +126,11 @@ mod tests {
     /// retry budget is exhausted on a network failure. This is the exact error
     /// that killed the 03:33 session in the 2026-09-02 incident.
     fn network_err() -> RuntimeError {
-        RuntimeError::Core(acowork_core::AcoworkError::Provider(ProviderError::network(
-            "error sending request for url (ark.cn-beijing.volces.com)".to_string(),
-        )))
+        RuntimeError::Core(acowork_core::AcoworkError::Provider(
+            ProviderError::network(
+                "error sending request for url (ark.cn-beijing.volces.com)".to_string(),
+            ),
+        ))
     }
 
     fn io_err() -> RuntimeError {
@@ -157,9 +153,9 @@ mod tests {
     }
 
     fn quota_err() -> RuntimeError {
-        RuntimeError::Core(acowork_core::AcoworkError::Provider(ProviderError::unknown(
-            "insufficient_quota".into(),
-        )))
+        RuntimeError::Core(acowork_core::AcoworkError::Provider(
+            ProviderError::unknown("insufficient_quota".into()),
+        ))
     }
 
     // ── Fast retry tier ──────────────────────────────────────────────
@@ -208,7 +204,10 @@ mod tests {
         let action = decide_retry_action(&io_err(), 0, 0, 0);
         assert!(matches!(
             action,
-            RetryAction::FastRetry { backoff_ms: 1_000, .. }
+            RetryAction::FastRetry {
+                backoff_ms: 1_000,
+                ..
+            }
         ));
     }
 
@@ -269,12 +268,8 @@ mod tests {
 
     #[test]
     fn network_error_after_long_budget_enters_persistent_at_5m() {
-        let action = decide_retry_action(
-            &network_err(),
-            MAX_ITERATION_RETRIES,
-            MAX_LONG_RETRIES,
-            0,
-        );
+        let action =
+            decide_retry_action(&network_err(), MAX_ITERATION_RETRIES, MAX_LONG_RETRIES, 0);
         assert_eq!(
             action,
             RetryAction::Persistent {
@@ -286,12 +281,8 @@ mod tests {
 
     #[test]
     fn second_persistent_attempt_doubles_to_10m() {
-        let action = decide_retry_action(
-            &network_err(),
-            MAX_ITERATION_RETRIES,
-            MAX_LONG_RETRIES,
-            1,
-        );
+        let action =
+            decide_retry_action(&network_err(), MAX_ITERATION_RETRIES, MAX_LONG_RETRIES, 1);
         assert_eq!(
             action,
             RetryAction::Persistent {
@@ -303,12 +294,8 @@ mod tests {
 
     #[test]
     fn third_persistent_attempt_doubles_to_20m() {
-        let action = decide_retry_action(
-            &network_err(),
-            MAX_ITERATION_RETRIES,
-            MAX_LONG_RETRIES,
-            2,
-        );
+        let action =
+            decide_retry_action(&network_err(), MAX_ITERATION_RETRIES, MAX_LONG_RETRIES, 2);
         assert_eq!(
             action,
             RetryAction::Persistent {
@@ -320,12 +307,8 @@ mod tests {
 
     #[test]
     fn fourth_persistent_attempt_caps_at_30m() {
-        let action = decide_retry_action(
-            &network_err(),
-            MAX_ITERATION_RETRIES,
-            MAX_LONG_RETRIES,
-            3,
-        );
+        let action =
+            decide_retry_action(&network_err(), MAX_ITERATION_RETRIES, MAX_LONG_RETRIES, 3);
         assert_eq!(
             action,
             RetryAction::Persistent {
@@ -339,12 +322,8 @@ mod tests {
     fn persistent_backoff_caps_at_30m_for_high_attempt_counts() {
         // persistent_count = 10, 50, 100 — must stay at 30m cap.
         for n in [10u32, 50, 100] {
-            let action = decide_retry_action(
-                &network_err(),
-                MAX_ITERATION_RETRIES,
-                MAX_LONG_RETRIES,
-                n,
-            );
+            let action =
+                decide_retry_action(&network_err(), MAX_ITERATION_RETRIES, MAX_LONG_RETRIES, n);
             assert_eq!(
                 action,
                 RetryAction::Persistent {
@@ -390,12 +369,7 @@ mod tests {
 
     #[test]
     fn loop_detected_error_is_non_retryable() {
-        let action = decide_retry_action(
-            &RuntimeError::LoopDetected("loop".into()),
-            0,
-            0,
-            0,
-        );
+        let action = decide_retry_action(&RuntimeError::LoopDetected("loop".into()), 0, 0, 0);
         assert_eq!(action, RetryAction::GiveUp);
     }
 

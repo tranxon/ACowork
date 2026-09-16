@@ -174,8 +174,10 @@ pub trait WorkspaceMutationService: Send + Sync {
     ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
 
     /// `DELETE /workspaces/{ws_id}` — remove a workspace entry.
-    async fn delete_workspace(&self, ws_id: &str)
-        -> Result<WorkspaceMutationResponse, WorkspaceError>;
+    async fn delete_workspace(
+        &self,
+        ws_id: &str,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
 
     /// `POST /workspaces/file` — create a new text file.
     /// Returns `AlreadyExists` if the file exists and `overwrite=false`.

@@ -15,19 +15,19 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use acowork_core::error::Result;
 use acowork_core::rag::{AnnotatedRagResult, RagProvider, RagResultItem};
-use acowork_memory::types::{
-    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayScanResult,
-    Episode, EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus,
-    ProceduralNode, ResultSource, SearchResult, StoreHealth, StoreStats,
-};
 use acowork_memory::MemoryProvider;
 use acowork_memory::quality::MemoryQualityConfig;
+use acowork_memory::types::{
+    AutobioCategory, AutobiographicalNode, CollaborationSpan, DecayScanResult, Episode,
+    EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryQuery, NodeStatus, ProceduralNode,
+    ResultSource, SearchResult, StoreHealth, StoreStats,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -229,17 +229,12 @@ impl MemoryProvider for InMemoryProvider {
     }
 
     fn count_unconsolidated_episodes(&self) -> Result<usize> {
-        Ok(self
-            .get_episodes_by_subtype(None, usize::MAX)?
-            .len())
+        Ok(self.get_episodes_by_subtype(None, usize::MAX)?.len())
     }
 
     fn collaboration_span(&self) -> Result<Option<CollaborationSpan>> {
         let episodes = self.episodes.read().unwrap();
-        let earliest = episodes
-            .iter()
-            .map(|(_, e)| e.timestamp)
-            .min_by_key(|t| *t);
+        let earliest = episodes.iter().map(|(_, e)| e.timestamp).min_by_key(|t| *t);
         Ok(earliest.map(|earliest_episode_at| CollaborationSpan {
             earliest_episode_at,
             episode_count: episodes.len() as u64,
@@ -341,10 +336,7 @@ impl MemoryProvider for InMemoryProvider {
 
     // ── Forgetting ──────────────────────────────────────────────────────
 
-    fn run_episodic_decay_scan(
-        &self,
-        _config: &EpisodicDecayConfig,
-    ) -> Result<DecayScanResult> {
+    fn run_episodic_decay_scan(&self, _config: &EpisodicDecayConfig) -> Result<DecayScanResult> {
         Ok(DecayScanResult::default())
     }
 
@@ -559,8 +551,6 @@ impl MemoryProvider for InMemoryProvider {
         // thresholds - no-op (zero-config behaviour is identical either way).
         Ok(())
     }
-
-
 }
 
 // ============================================================================
@@ -710,7 +700,10 @@ mod tests {
 
         let annotated = provider.query("roadmap").await;
         assert_eq!(annotated.len(), 1);
-        assert_eq!(annotated[0].item.content, "Q3 roadmap includes AI assistant");
+        assert_eq!(
+            annotated[0].item.content,
+            "Q3 roadmap includes AI assistant"
+        );
         assert_eq!(annotated[0].source_label, "[RAG:enterprise_kb]");
         assert_eq!(annotated[0].tool_name, "enterprise_kb");
     }

@@ -180,8 +180,7 @@ impl Tool for MemoryRecallTool {
         {
             let epoch = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
                 .unwrap_or_else(chrono::Utc::now);
-            memory_query.filters.time_range =
-                Some((epoch, u_dt.with_timezone(&chrono::Utc)));
+            memory_query.filters.time_range = Some((epoch, u_dt.with_timezone(&chrono::Utc)));
         }
 
         // Config consistency (ADR-062 M5): use the agent's MemoryManagerConfig
@@ -514,9 +513,7 @@ mod tests {
     /// InMemoryProvider variant covers the manager post-filter + tool wiring.
     #[tokio::test]
     async fn test_memory_recall_since_filters_by_created_at_inmemory() {
-        use acowork_memory::types::{
-            KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel,
-        };
+        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
         use chrono::{Duration, Utc};
 
         let (tool, provider) = test_tool_inmemory();
@@ -559,7 +556,10 @@ mod tests {
         // since = 7 days ago: the 30-day-old memory must be filtered out.
         let since = (now - Duration::days(7)).to_rfc3339();
         let result = tool
-            .execute(serde_json::json!({ "query": "likes", "since": since }), None)
+            .execute(
+                serde_json::json!({ "query": "likes", "since": since }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -579,9 +579,7 @@ mod tests {
     /// `GrafeoProvider::get_node_created_at` (real property read path).
     #[tokio::test]
     async fn test_memory_recall_since_filters_by_created_at_grafeo() {
-        use acowork_memory::types::{
-            KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel,
-        };
+        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
         use chrono::{Duration, Utc};
 
         let store: Arc<dyn acowork_memory::MemoryProvider> =
@@ -627,7 +625,10 @@ mod tests {
 
         let since = (now - Duration::days(7)).to_rfc3339();
         let result = tool
-            .execute(serde_json::json!({ "query": "likes", "since": since }), None)
+            .execute(
+                serde_json::json!({ "query": "likes", "since": since }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -682,7 +683,10 @@ mod tests {
         // until = 7 days ago: only the 30-day-old memory survives.
         let until = (now - Duration::days(7)).to_rfc3339();
         let result = tool
-            .execute(serde_json::json!({ "query": "likes", "until": until }), None)
+            .execute(
+                serde_json::json!({ "query": "likes", "until": until }),
+                None,
+            )
             .await
             .unwrap();
         assert!(result.ok);
@@ -702,8 +706,8 @@ mod tests {
     /// `created_at` timestamp from the provider (InMemoryProvider impl).
     #[test]
     fn test_get_node_created_at_inmemory() {
-        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
         use acowork_memory::MemoryProvider;
+        use acowork_memory::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
         use chrono::{Duration, Utc};
 
         let provider = Arc::new(InMemoryProvider::new());
@@ -786,11 +790,17 @@ mod tests {
             .unwrap();
 
         assert!(
-            retrieval.memories.iter().any(|m| m.content.contains("rust")),
+            retrieval
+                .memories
+                .iter()
+                .any(|m| m.content.contains("rust")),
             "recent memory must survive the time-range filter"
         );
         assert!(
-            !retrieval.memories.iter().any(|m| m.content.contains("coffee")),
+            !retrieval
+                .memories
+                .iter()
+                .any(|m| m.content.contains("coffee")),
             "old memory must be filtered by time_range at manager layer"
         );
     }

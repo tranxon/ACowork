@@ -21,10 +21,7 @@ use std::fmt;
 pub enum CancellationReason {
     /// A user-facing surface (ChatPanel, Debug server, CLI, test harness) requested
     /// the operation to stop.
-    UserStop {
-        source: StopSource,
-        reason: String,
-    },
+    UserStop { source: StopSource, reason: String },
     /// Debugger paused execution (distinct from stop — see ADR §4.3).
     Pause,
     /// Debugger explicitly stopped the agent (rare; usually via `Pause + kill`).
@@ -77,11 +74,7 @@ impl fmt::Display for StopSource {
             Self::ChatPanel {
                 agent_id,
                 session_id,
-            } => write!(
-                f,
-                "chat_panel[agent={}, session={}]",
-                agent_id, session_id
-            ),
+            } => write!(f, "chat_panel[agent={}, session={}]", agent_id, session_id),
             Self::DebugServer => write!(f, "debug_server"),
             Self::Cli => write!(f, "cli"),
             Self::Test => write!(f, "test"),

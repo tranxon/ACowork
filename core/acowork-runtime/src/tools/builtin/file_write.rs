@@ -95,7 +95,11 @@ impl Tool for FileWriteTool {
         match write_result {
             Ok(()) => Ok(ToolResult {
                 ok: true,
-                content: format!("{} {} bytes to {path}", if is_append { "Appended" } else { "Written" }, content.len()),
+                content: format!(
+                    "{} {} bytes to {path}",
+                    if is_append { "Appended" } else { "Written" },
+                    content.len()
+                ),
                 error: None,
                 token_usage: None,
             }),

@@ -610,12 +610,7 @@ mod tests {
             let r = h.await.unwrap();
             if r.ok {
                 ok_count += 1;
-            } else if r
-                .error
-                .as_deref()
-                .unwrap_or("")
-                .contains("not found")
-            {
+            } else if r.error.as_deref().unwrap_or("").contains("not found") {
                 not_found_count += 1;
             }
         }
@@ -775,7 +770,10 @@ mod tests {
         // Sanity: zero bare LF left.
         let crlf_count = final_content.matches("\r\n").count();
         let lf_only_count = final_content.matches('\n').count() - crlf_count;
-        assert_eq!(lf_only_count, 0, "replaced lines leaked LF: {final_content:?}");
+        assert_eq!(
+            lf_only_count, 0,
+            "replaced lines leaked LF: {final_content:?}"
+        );
     }
 
     /// Trailing-newline variant: `old_text` ends with `\n`. CRLF upgrade
@@ -827,7 +825,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!r.ok, "should not have matched CRLF old_text against LF file");
+        assert!(
+            !r.ok,
+            "should not have matched CRLF old_text against LF file"
+        );
         let err = r.error.as_deref().unwrap_or("");
         assert!(
             err.contains("line ending"),
@@ -855,10 +856,7 @@ mod tests {
             LineEnding::Crlf
         );
         // Many CRLFs + one bare LF → Mixed (no 2x majority).
-        assert_eq!(
-            detect_line_ending("AAA\nBBB\r\n"),
-            LineEnding::Mixed
-        );
+        assert_eq!(detect_line_ending("AAA\nBBB\r\n"), LineEnding::Mixed);
     }
 
     #[test]

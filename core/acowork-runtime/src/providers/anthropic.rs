@@ -162,9 +162,7 @@ impl AnthropicSystemBlock {
 #[serde(tag = "type")]
 enum AnthropicThinking {
     #[serde(rename = "enabled")]
-    Enabled {
-        budget_tokens: u32,
-    },
+    Enabled { budget_tokens: u32 },
     #[serde(rename = "disabled")]
     Disabled,
     #[serde(rename = "adaptive")]
@@ -204,7 +202,11 @@ fn map_anthropic_thinking(
     thinking_mode: Option<&str>,
     max_output: u32,
     original_temperature: Option<f64>,
-) -> (Option<AnthropicThinking>, Option<AnthropicOutputConfig>, Option<f64>) {
+) -> (
+    Option<AnthropicThinking>,
+    Option<AnthropicOutputConfig>,
+    Option<f64>,
+) {
     use acowork_core::providers::ReasoningEffort;
     let is_adaptive = thinking_mode == Some("adaptive");
 
@@ -220,7 +222,11 @@ fn map_anthropic_thinking(
         }
         Some(ReasoningEffort::Off) => {
             // Explicitly disable thinking (both extended and adaptive).
-            return (Some(AnthropicThinking::Disabled), None, original_temperature);
+            return (
+                Some(AnthropicThinking::Disabled),
+                None,
+                original_temperature,
+            );
         }
         Some(e) => e,
     };
@@ -236,7 +242,9 @@ fn map_anthropic_thinking(
         };
         return (
             Some(AnthropicThinking::Adaptive),
-            Some(AnthropicOutputConfig { effort: effort_str.to_string() }),
+            Some(AnthropicOutputConfig {
+                effort: effort_str.to_string(),
+            }),
             None, // temperature must be omitted
         );
     }
@@ -255,7 +263,13 @@ fn map_anthropic_thinking(
     let budget = std::cmp::min(budget, max_output.saturating_sub(1));
 
     // When thinking is enabled, temperature must be omitted (defaults to 1.0)
-    (Some(AnthropicThinking::Enabled { budget_tokens: budget }), None, None)
+    (
+        Some(AnthropicThinking::Enabled {
+            budget_tokens: budget,
+        }),
+        None,
+        None,
+    )
 }
 
 /// Anthropic message format
@@ -421,14 +435,16 @@ fn build_anthropic_content(msg: &ChatMessage) -> serde_json::Value {
 /// E.g. "data:image/png;base64,iVBOR..." → ("image/png", "iVBOR...")
 fn parse_data_uri(uri: &str) -> (&str, &str) {
     if let Some(rest) = uri.strip_prefix("data:")
-        && let Some(semi) = rest.find(';') {
-            let media_type = &rest[..semi];
-            let after_semi = &rest[semi + 1..];
-            if let Some(comma) = after_semi.find(',')
-                && after_semi[..comma].contains("base64") {
-                    return (media_type, &after_semi[comma + 1..]);
-                }
+        && let Some(semi) = rest.find(';')
+    {
+        let media_type = &rest[..semi];
+        let after_semi = &rest[semi + 1..];
+        if let Some(comma) = after_semi.find(',')
+            && after_semi[..comma].contains("base64")
+        {
+            return (media_type, &after_semi[comma + 1..]);
         }
+    }
     // Fallback: treat as raw base64 with unknown media type
     ("image/png", uri)
 }
@@ -454,7 +470,9 @@ fn convert_messages(
                 // today, but append is the safe superset of the old
                 // overwrite-with-last semantics).
                 let mut block = AnthropicSystemBlock::text(msg.content.clone());
-                if msg.cache_control == Some(acowork_core::providers::traits::CacheControl::Ephemeral) {
+                if msg.cache_control
+                    == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+                {
                     block.cache_control = Some(AnthropicCacheControl::ephemeral());
                 }
                 system_blocks.push(block);
@@ -1197,9 +1215,7 @@ mod tests {
             cache_control: Some(CacheControl::Ephemeral),
         };
 
-        let (converted, system) = convert_messages(&[
-            sys, todo, asst, plain, tool,
-        ]);
+        let (converted, system) = convert_messages(&[sys, todo, asst, plain, tool]);
         let blocks = system.expect("system blocks present");
         assert_eq!(
             blocks[0].cache_control.as_ref().unwrap().cache_type,
@@ -1212,7 +1228,10 @@ mod tests {
         assert!(converted[1].cache_control.is_some()); // Block B tail breakpoint
         assert!(converted[2].cache_control.is_none()); // plain user
         assert!(converted[3].cache_control.is_none()); // tool_result must not carry it
-        assert_eq!(converted[3].content.as_ref().unwrap()[0]["type"], "tool_result");
+        assert_eq!(
+            converted[3].content.as_ref().unwrap()[0]["type"],
+            "tool_result"
+        );
     }
 
     #[test]
@@ -1275,8 +1294,14 @@ mod tests {
         assert_eq!(converted[2].role, "user");
         // tool_result: cache_control suppressed, content is a tool_result block.
         assert!(converted[1].cache_control.is_none());
-        assert_eq!(converted[1].content.as_ref().unwrap()[0]["type"], "tool_result");
-        assert_eq!(converted[1].content.as_ref().unwrap()[0]["tool_use_id"], "toolu_01");
+        assert_eq!(
+            converted[1].content.as_ref().unwrap()[0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            converted[1].content.as_ref().unwrap()[0]["tool_use_id"],
+            "toolu_01"
+        );
         // Block C (todo snapshot) keeps its ephemeral breakpoint.
         assert!(converted[2].cache_control.is_some());
         assert_eq!(

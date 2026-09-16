@@ -131,7 +131,9 @@ impl ScriptedProvider {
     fn is_title_request(request: &ChatRequest) -> bool {
         request.messages.len() == 1
             && request.messages[0].role == MessageRole::User
-            && request.messages[0].content.contains("Generate a session title")
+            && request.messages[0]
+                .content
+                .contains("Generate a session title")
     }
 
     fn pop_step(&self, title: bool) -> ChatResponse {
@@ -271,9 +273,7 @@ impl E2eHarness {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let evt = tokio::time::timeout(remaining, self.chunk_rx.recv())
                 .await
-                .unwrap_or_else(|_| {
-                    panic!("round for '{content}' did not finish within 60s")
-                })
+                .unwrap_or_else(|_| panic!("round for '{content}' did not finish within 60s"))
                 .expect("chunk channel stays open");
             match evt.event {
                 ChunkEvent::Done { .. } => return,
@@ -369,33 +369,36 @@ async fn spawn_harness(
     // Register the test model with capabilities — in production this data
     // arrives via the Gateway `AgentHelloResult` push; the loop's
     // context-usage reporting requires it before emitting a response.
-    core.global_provider_list.write().unwrap().push(ProviderListItem {
-        id: "test-provider".to_string(),
-        base_url: "http://127.0.0.1:0".to_string(),
-        protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
-        models: vec![ProviderModelEntry {
-            id: "test-model".to_string(),
-            capabilities: ModelCapabilitiesInfo {
-                context_window: 128_000,
-                max_output_tokens: 4096,
-                max_input_tokens: None,
-                supports_tool_calling: true,
-                supports_reasoning: None,
-                supports_attachment: None,
-                supports_temperature: None,
-                cost: None,
-                modalities: None,
-                name: Some("Test Model".to_string()),
-                family: None,
-                knowledge_cutoff: None,
-                default_reasoning_effort: None,
-                thinking_mode: None,
-            },
-            max_output_tokens_limit: 4096,
-        }],
-        compact_model: None,
-        custom: false,
-    });
+    core.global_provider_list
+        .write()
+        .unwrap()
+        .push(ProviderListItem {
+            id: "test-provider".to_string(),
+            base_url: "http://127.0.0.1:0".to_string(),
+            protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+            models: vec![ProviderModelEntry {
+                id: "test-model".to_string(),
+                capabilities: ModelCapabilitiesInfo {
+                    context_window: 128_000,
+                    max_output_tokens: 4096,
+                    max_input_tokens: None,
+                    supports_tool_calling: true,
+                    supports_reasoning: None,
+                    supports_attachment: None,
+                    supports_temperature: None,
+                    cost: None,
+                    modalities: None,
+                    name: Some("Test Model".to_string()),
+                    family: None,
+                    knowledge_cutoff: None,
+                    default_reasoning_effort: None,
+                    thinking_mode: None,
+                },
+                max_output_tokens_limit: 4096,
+            }],
+            compact_model: None,
+            custom: false,
+        });
 
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(64);
     let mut sm = SessionManager::new(
@@ -412,12 +415,9 @@ async fn spawn_harness(
 
     let committed_lines = SessionManager::new_committed_lines();
     let (sid, conversation) = if let Some(resume_sid) = resume_sid {
-        let (conv, _meta_rx, _state_rx) = ConversationSession::resume(
-            work_dir,
-            resume_sid,
-            committed_lines.clone(),
-        )
-        .expect("resume conversation from disk");
+        let (conv, _meta_rx, _state_rx) =
+            ConversationSession::resume(work_dir, resume_sid, committed_lines.clone())
+                .expect("resume conversation from disk");
         (resume_sid.to_string(), conv)
     } else {
         let sid = "test-sid-1".to_string();
@@ -442,9 +442,13 @@ async fn spawn_harness(
         .expect("create conversation on disk");
         (sid, conv)
     };
-    sm.create_session_with_id_and_conversation(sid.clone(), Some(conversation), Some(committed_lines))
-        .await
-        .expect("session task starts");
+    sm.create_session_with_id_and_conversation(
+        sid.clone(),
+        Some(conversation),
+        Some(committed_lines),
+    )
+    .await
+    .expect("session task starts");
 
     E2eHarness {
         sid,
@@ -483,13 +487,10 @@ fn assert_block_v2_layout(msgs: &[ChatMessage], current: &str) {
         "Block A must NOT contain the todo snapshot — it lives in Block B"
     );
     // Block D — the current user message (explicitly passed, cloned copy).
+    assert_eq!(msgs[n - 1].role, MessageRole::User, "Block D is user role");
     assert_eq!(
-        msgs[n - 1].role,
-        MessageRole::User,
-        "Block D is user role"
-    );
-    assert_eq!(
-        msgs[n - 1].content, current,
+        msgs[n - 1].content,
+        current,
         "Block D carries the current turn"
     );
     // ADR-060 v2: no Block C. The "## Todo Task List" header must NOT appear
@@ -504,9 +505,9 @@ fn assert_block_v2_layout(msgs: &[ChatMessage], current: &str) {
 /// Assert Block B contains a `todo_write` tool result with the given
 /// `tool_call_id`. The canonical todo state source.
 fn assert_block_b_carries_todo_state(msgs: &[ChatMessage], tool_call_id: &str) {
-    let found = msgs.iter().any(|m| {
-        m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some(tool_call_id)
-    });
+    let found = msgs
+        .iter()
+        .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some(tool_call_id));
     assert!(
         found,
         "Block B must contain the todo_write tool result ({tool_call_id}) \
@@ -545,9 +546,17 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     // ── Turn 1: no todos yet → layout is A + B(u1) + D(u1') ──
     h1.send("First turn", "m1").await;
     let captured = provider.captured();
-    assert_eq!(captured.len(), 1, "turn 1 must trigger exactly one LLM call");
+    assert_eq!(
+        captured.len(),
+        1,
+        "turn 1 must trigger exactly one LLM call"
+    );
     let msgs = &captured[0].messages;
-    assert_eq!(roles(msgs), ["system", "user", "user"], "A + B(u1) + D(u1')");
+    assert_eq!(
+        roles(msgs),
+        ["system", "user", "user"],
+        "A + B(u1) + D(u1')"
+    );
     assert!(
         msgs[0].content.contains(SYSTEM_PROMPT),
         "Block A carries the system prompt"
@@ -556,14 +565,21 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
         !msgs[0].content.contains("## Todo Task List"),
         "Block A must NOT contain the todo snapshot"
     );
-    assert_eq!(msgs[1].content, "First turn", "Block B holds the original turn");
+    assert_eq!(
+        msgs[1].content, "First turn",
+        "Block B holds the original turn"
+    );
     assert_eq!(msgs[2].content, "First turn", "Block D is the cloned copy");
 
     // ── Turn 2: LLM returns a todo_write tool call ──
     h1.send("Second turn", "m2").await;
     let captured = provider.captured();
     // Call 2 = turn-2 request; call 3 = the post-tool iteration request.
-    assert_eq!(captured.len(), 3, "turn 2 must trigger two LLM calls (tool iteration)");
+    assert_eq!(
+        captured.len(),
+        3,
+        "turn 2 must trigger two LLM calls (tool iteration)"
+    );
     let msgs = &captured[1].messages;
     assert_eq!(msgs.last().unwrap().role, MessageRole::User);
     assert_eq!(msgs.last().unwrap().content, "Second turn");
@@ -612,23 +628,25 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     let msgs = &captured[3].messages;
     assert_block_v2_layout(msgs, "Third turn");
     assert_block_b_carries_todo_state(msgs, "toolu_01");
-    assert_eq!(msgs.last().unwrap().content, "Third turn", "Block D is cloned current turn");
+    assert_eq!(
+        msgs.last().unwrap().content,
+        "Third turn",
+        "Block D is cloned current turn"
+    );
 
     // ── Prefix stability: Block A byte-identical across every call ──
     // This is the core prompt-cache guarantee of ADR-060: the static
     // kernel (Block A) must never change once a session exists.
     for (i, req) in captured.iter().enumerate() {
         assert_eq!(
-            req.messages[0].content,
-            captured[0].messages[0].content,
+            req.messages[0].content, captured[0].messages[0].content,
             "Block A (system) must be byte-stable across calls (call {i})"
         );
         assert_eq!(req.messages[0].role, MessageRole::System);
     }
     // Block B is append-only: the turn-1 user message reappears verbatim.
     assert_eq!(
-        captured[3].messages[1].content,
-        captured[0].messages[1].content,
+        captured[3].messages[1].content, captured[0].messages[1].content,
         "Block B history must be append-only (u1 verbatim in turn 3)"
     );
 
@@ -655,8 +673,7 @@ async fn todo_write_roundtrip_v2_layout_and_restart_recovery() {
     assert_block_b_carries_todo_state(msgs, "toolu_01");
     // Block A is byte-identical across the process restart.
     assert_eq!(
-        msgs[0].content,
-        captured[0].messages[0].content,
+        msgs[0].content, captured[0].messages[0].content,
         "Block A must be byte-stable across the process restart"
     );
 }
@@ -689,10 +706,7 @@ fn summary_step() -> ScriptedStep {
 /// Count compaction markers (User messages with `name = "compaction_summary"`).
 fn count_compaction_markers(msgs: &[ChatMessage]) -> usize {
     msgs.iter()
-        .filter(|m| {
-            m.role == MessageRole::User
-                && m.name.as_deref() == Some("compaction_summary")
-        })
+        .filter(|m| m.role == MessageRole::User && m.name.as_deref() == Some("compaction_summary"))
         .count()
 }
 
@@ -745,11 +759,17 @@ async fn compression_injects_removed_todo_round_after_marker() {
     // ── Sanity: the compaction LLM call was captured and saw the round ──
     let compaction_req = &captured[4];
     assert!(
-        compaction_req.messages.iter().any(|m| m.content.contains("First turn")),
+        compaction_req
+            .messages
+            .iter()
+            .any(|m| m.content.contains("First turn")),
         "compaction request must have seen the pre-compress history"
     );
     assert!(
-        compaction_req.messages.iter().any(|m| m.content.contains("Second turn")),
+        compaction_req
+            .messages
+            .iter()
+            .any(|m| m.content.contains("Second turn")),
         "compaction request must have seen the todo_write turn"
     );
 
@@ -812,8 +832,9 @@ async fn compression_idempotent_across_multiple_compacts() {
     // restart. The test covers that downstream invariant separately
     // (`restart_after_compression_preserves_todo_state`).
     assert!(
-        !msgs.iter().any(|m| m.role == MessageRole::Tool
-            && m.tool_call_id.as_deref() == Some("toolu_01")),
+        !msgs
+            .iter()
+            .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("toolu_01")),
         "Block B must NOT contain a duplicate todo_write tool result \
          after the second compression (idempotency gate enforced) — the \
          canonical state lives in JSONL until the next chat turn refreshes it"
@@ -839,7 +860,9 @@ async fn compression_idempotent_across_multiple_compacts() {
             v["role"] == "tool_call"
                 && v["metadata"]["tool_name"] == "todo_write"
                 && v["metadata"]["tool_call_id"] == "toolu_01"
-                && v["id"].as_str().is_some_and(|id| id.starts_with("inject-call-"))
+                && v["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("inject-call-"))
         })
         .collect();
     assert_eq!(
@@ -1030,8 +1053,7 @@ async fn restart_after_compression_preserves_todo_state() {
 fn read_jsonl_entries(work_dir: &Path, sid: &str) -> Vec<serde_json::Value> {
     use std::io::{BufRead, BufReader};
     let path = work_dir.join("conversations").join(format!("{sid}.jsonl"));
-    let f = std::fs::File::open(&path)
-        .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let f = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
     let r = BufReader::new(f);
     r.lines()
         .map(|l| {
@@ -1209,7 +1231,9 @@ async fn multiple_compressions_write_exactly_one_synthesized_round_to_jsonl() {
             v["role"] == "tool_call"
                 && v["metadata"]["tool_name"] == "todo_write"
                 && v["metadata"]["tool_call_id"] == "toolu_01"
-                && v["id"].as_str().is_some_and(|id| id.starts_with("inject-call-"))
+                && v["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("inject-call-"))
         })
         .collect();
     assert_eq!(
@@ -1229,7 +1253,9 @@ async fn multiple_compressions_write_exactly_one_synthesized_round_to_jsonl() {
             v["role"] == "tool_result"
                 && v["metadata"]["tool_name"] == "todo_write"
                 && v["metadata"]["tool_call_id"] == "toolu_01"
-                && v["id"].as_str().is_some_and(|id| id.starts_with("inject-result-"))
+                && v["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("inject-result-"))
         })
         .collect();
     assert_eq!(
@@ -1252,16 +1278,13 @@ async fn multiple_compressions_write_exactly_one_synthesized_round_to_jsonl() {
     let mut found_after_some_marker = false;
     for (i, v) in entries.iter().enumerate() {
         if v["kind"].as_str() == Some("compaction") {
-            let synth_after = entries
-                .iter()
-                .skip(i + 1)
-                .any(|w| {
-                    w["role"] == "tool_result"
-                        && w["metadata"]["tool_call_id"] == "toolu_01"
-                        && w["id"]
-                            .as_str()
-                            .is_some_and(|id| id.starts_with("inject-result-"))
-                });
+            let synth_after = entries.iter().skip(i + 1).any(|w| {
+                w["role"] == "tool_result"
+                    && w["metadata"]["tool_call_id"] == "toolu_01"
+                    && w["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("inject-result-"))
+            });
             if synth_after {
                 found_after_some_marker = true;
                 break;
@@ -1355,7 +1378,10 @@ fn assert_round_schema_intact(msgs: &[ChatMessage], label: &str) {
             continue;
         }
         let id = m.tool_call_id.clone().unwrap_or_default();
-        let prev_assistant = msgs[..i].iter().rev().find(|x| x.role == MessageRole::Assistant);
+        let prev_assistant = msgs[..i]
+            .iter()
+            .rev()
+            .find(|x| x.role == MessageRole::Assistant);
         let covered = prev_assistant
             .and_then(|a| a.tool_calls.as_ref())
             .is_some_and(|cs| cs.iter().any(|c| c.id == id));
@@ -1446,7 +1472,8 @@ async fn v3_full_chain_keeps_tool_rounds_valid_across_compact_and_restart() {
         assert!(
             req.messages
                 .iter()
-                .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("toolu_03")),
+                .any(|m| m.role == MessageRole::Tool
+                    && m.tool_call_id.as_deref() == Some("toolu_03")),
             "gen2 request #{idx}: restored history must retain the post-compact tool round",
         );
     }

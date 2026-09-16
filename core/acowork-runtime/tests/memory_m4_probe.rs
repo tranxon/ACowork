@@ -119,7 +119,10 @@ async fn probe_min_score_domain() {
     println!("raw text search scores: {:?}", raw);
 
     // Probe 2: hybrid search via provider (with embedding, no min_score).
-    let emb = DeterministicEmbedding.embed("dark mode editor").await.unwrap();
+    let emb = DeterministicEmbedding
+        .embed("dark mode editor")
+        .await
+        .unwrap();
     let hybrid = store
         .hybrid_search_full("Knowledge", "dark mode editor", &emb, 10, 0.8, 0.2, None)
         .unwrap();
@@ -127,7 +130,15 @@ async fn probe_min_score_domain() {
 
     // Probe 3: hybrid with min_score = 0.3 (the ADR-062 §6.4 assumption).
     let hybrid30 = store
-        .hybrid_search_full("Knowledge", "dark mode editor", &emb, 10, 0.8, 0.2, Some(0.3))
+        .hybrid_search_full(
+            "Knowledge",
+            "dark mode editor",
+            &emb,
+            10,
+            0.8,
+            0.2,
+            Some(0.3),
+        )
         .unwrap();
     println!("hybrid scores (min_score=0.3): {:?}", hybrid30);
 
@@ -142,7 +153,10 @@ async fn probe_min_score_domain() {
         println!(
             "auto_inject min_score={ms:?} → {} results, scores: {:?}",
             res.memories.len(),
-            res.memories.iter().map(|m| (m.node_id, m.score)).collect::<Vec<_>>()
+            res.memories
+                .iter()
+                .map(|m| (m.node_id, m.score))
+                .collect::<Vec<_>>()
         );
     }
 }

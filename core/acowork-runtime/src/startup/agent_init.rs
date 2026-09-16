@@ -28,11 +28,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let _span = tracing::info_span!("startup_phase_a").entered();
 
     use crate::agent::context::ContextBuilder;
-    use crate::embedding::remote::RemoteEmbeddingProvider;
+    use crate::agent_config::load_agent_provider_config;
     use crate::embedding::EmbeddingProvider;
+    use crate::embedding::remote::RemoteEmbeddingProvider;
     use crate::package::loader::load_package;
     use crate::package::prompt_builder::build_system_prompt_with_mode;
-    use crate::agent_config::load_agent_provider_config;
     use crate::tools::builtin;
     use crate::tools::registry::ToolRegistry;
 
@@ -94,7 +94,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ADR-033: Dispatch channel for Runtime HTTP → agent loop write operations.
     // HTTP handlers send (session_id, InboundMessage) tuples; the gateway loop
     // forwards them to the right session's AgentLoop via send_inbound().
-    let (http_dispatch_tx, http_dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(String, crate::agent::inbound::InboundMessage)>();
+    let (http_dispatch_tx, http_dispatch_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, crate::agent::inbound::InboundMessage)>();
     let http_dispatch_shared: crate::http::SharedDispatchSender =
         Arc::new(tokio::sync::Mutex::new(Some(http_dispatch_tx)));
 
@@ -109,8 +110,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // is updated once `embed_dimension` is resolved below (after the HTTP
     // server has already started listening). The memory-stats handler
     // surfaces this as `model_dim` for HNSW dimension-mismatch detection.
-    let embed_dim_shared: crate::http::SharedEmbedDimension =
-        Arc::new(std::sync::RwLock::new(0));
+    let embed_dim_shared: crate::http::SharedEmbedDimension = Arc::new(std::sync::RwLock::new(0));
 
     // Shared degradation reasons. Created empty here and populated by
     // Phase B if session persistence fails. The same Arc is passed to
@@ -122,26 +122,29 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // and populated by Phase B once `AgentCore::new` completes. The
     // `list_sessions` HTTP handler uses it to merge disk-scanned token
     // totals and report `agent_total_input_tokens` / `agent_total_output_tokens`.
-    let agent_core_shared: crate::http::SharedAgentCore =
-        Arc::new(std::sync::RwLock::new(None));
+    let agent_core_shared: crate::http::SharedAgentCore = Arc::new(std::sync::RwLock::new(None));
 
     // ADR-040: Late-bind slot for session metadata service. Populated
     // by Phase B. The `list_sessions` handler falls back to direct
     // implementation when this is still None.
-    let session_metadata_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let session_metadata_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-040: Late-bind slot for memory query service.
-    let memory_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let memory_query_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-040: Late-bind slots for workspace query + mutation services.
     // Workspace services are populated immediately after the runtime
     // boots (no async dependency like memory) — see session_init.rs.
-    let workspace_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
-    let workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let workspace_query_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
+    let workspace_mutation_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-078: Late-bind slot for the git query service (read-only
     // `/git/*` endpoints). Same sync-work_dir pattern — populated
@@ -154,25 +157,29 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // `/agents/{id}/search-config` HTTP handlers). The service holds
     // only the work_dir (sync, no async dependency), so we wire it
     // immediately after the workspace services in session_init.rs.
-    let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let agent_tools_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-040 follow-up: Late-bind slot for the per-agent runtime
     // config service (`PUT /agents/{id}/config`). Shares the same
     // sync-work_dir state as `agent_tools_slot`, so the same
     // session_init Phase B pattern applies.
-    let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let agent_config_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-046: attachment blob store (`POST /sessions/{sid}/files` +
     // `GET /files/{doc_id}`). Same sync-work_dir pattern as the other
     // services — populates in Phase B.
-    let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let attachment_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-047: session config service for GET/PUT /sessions/{sid}/config.
-    let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let session_config_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
     let consolidation_timer_slot: crate::http::server::SharedConsolidationTimer =
         Arc::new(std::sync::RwLock::new(None));
     let rag_provider_slot: crate::http::server::SharedRagProvider =
@@ -181,8 +188,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // populated in Phase B once SessionManager has built per-session
     // debug controllers (only when DevMode is active — outside DevMode
     // the slot stays None and `/api/debug/*` returns 503).
-    let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let debug_service_slot: Arc<
+        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // Late-bind slot for `SessionManager`. Empty in Phase A; populated
     // by Phase B once SessionManager is constructed. Cloned into the
@@ -217,7 +225,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // `workspace_mutation_impl::save_config`). See
     // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
     {
-        let guard = workspace_resolver.read().expect("workspace_resolver lock poisoned");
+        let guard = workspace_resolver
+            .read()
+            .expect("workspace_resolver lock poisoned");
         tracing::info!(
             work_dir = %config.work_dir,
             allowed_dirs = guard.allowed_dirs().len(),
@@ -286,7 +296,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             // reload handler returns 503 (same late-bind pattern as
             // every other shared resource) until Phase B finishes.
             agent_core_shared.clone(),
-        ).await {
+        )
+        .await
+        {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
                 workspace_watcher_set = Some(server.workspace_watchers.clone());
@@ -309,8 +321,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // Fallback for the no-HTTP-server path: create the set standalone so
     // Phase C's startup hook always has a set to reconcile into.
-    let workspace_watcher_set: crate::workspace::SharedWorkspaceWatcherSet =
-        workspace_watcher_set.unwrap_or_else(|| {
+    let workspace_watcher_set: crate::workspace::SharedWorkspaceWatcherSet = workspace_watcher_set
+        .unwrap_or_else(|| {
             Arc::new(tokio::sync::Mutex::new(
                 crate::workspace::WorkspaceWatcherSet::new(
                     loaded.manifest.agent_id.clone(),
@@ -350,39 +362,43 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // Gateway keeps routing through the node — no restart.
         let (node_proxy_update_tx, mut node_proxy_update_rx) =
             tokio::sync::mpsc::unbounded_channel::<String>();
-        let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
-            .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
-        match crate::mqtt::RuntimeMqttClient::connect(
-            crate::mqtt::client::MqttConnectConfig {
-                // ADR-055 D3: parameterise the broker host instead of
-                // hard-coding 127.0.0.1 so the Runtime can connect to a
-                // remote / distributed Gateway broker. Defaults to
-                // 127.0.0.1 for single-machine topology (L3-5).
-                host: config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
-                port: mqtt_port,
-                agent_id: &loaded.manifest.agent_id,
-                // ADR-073: instance identity (required — injected by the
-                // Node at spawn time via --agent-instance-id).
-                instance_id: config.instance_id(),
-                agent_name: &loaded.manifest.name,
-                agent_version: &loaded.manifest.version,
-                config_json: &config_json,
-                available_cache: cache.clone(),
-                control_tx,
-                identity_update_tx: Some(identity_update_tx),
-                provider_update_tx: Some(provider_update_tx),
-                search_update_tx: Some(search_update_tx),
-                embedding_update_tx: Some(embedding_update_tx),
-                node_id: config.node_id.as_deref(),
-                lsps_update_tx: Some(lsps_update_tx),
-                node_proxy_update_tx: Some(node_proxy_update_tx),
-                work_dir: std::path::PathBuf::from(&config.work_dir),
-                username: config.mqtt_username.as_deref(),
-                password: config.mqtt_password.as_deref(),
-                http_advertise_endpoint: config.http_advertise_endpoint.as_deref(),
-                http_port: runtime_http_port,
-            },
-        ).await {
+        let config_json =
+            crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
+                .ok()
+                .flatten()
+                .map(|c| serde_json::to_string(&c).unwrap_or_default())
+                .unwrap_or_default();
+        match crate::mqtt::RuntimeMqttClient::connect(crate::mqtt::client::MqttConnectConfig {
+            // ADR-055 D3: parameterise the broker host instead of
+            // hard-coding 127.0.0.1 so the Runtime can connect to a
+            // remote / distributed Gateway broker. Defaults to
+            // 127.0.0.1 for single-machine topology (L3-5).
+            host: config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
+            port: mqtt_port,
+            agent_id: &loaded.manifest.agent_id,
+            // ADR-073: instance identity (required — injected by the
+            // Node at spawn time via --agent-instance-id).
+            instance_id: config.instance_id(),
+            agent_name: &loaded.manifest.name,
+            agent_version: &loaded.manifest.version,
+            config_json: &config_json,
+            available_cache: cache.clone(),
+            control_tx,
+            identity_update_tx: Some(identity_update_tx),
+            provider_update_tx: Some(provider_update_tx),
+            search_update_tx: Some(search_update_tx),
+            embedding_update_tx: Some(embedding_update_tx),
+            node_id: config.node_id.as_deref(),
+            lsps_update_tx: Some(lsps_update_tx),
+            node_proxy_update_tx: Some(node_proxy_update_tx),
+            work_dir: std::path::PathBuf::from(&config.work_dir),
+            username: config.mqtt_username.as_deref(),
+            password: config.mqtt_password.as_deref(),
+            http_advertise_endpoint: config.http_advertise_endpoint.as_deref(),
+            http_port: runtime_http_port,
+        })
+        .await
+        {
             Ok(client) => {
                 tracing::info!(agent_id=%loaded.manifest.agent_id, "Runtime MQTT client connected");
                 // Publish HTTP port (Retained) so Gateway can proxy session queries.
@@ -406,20 +422,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     // instance identity.
                     let instance_id = config.instance_id().to_string();
                     let endpoint = match &config.http_advertise_endpoint {
-                        Some(base) => format!(
-                            "{}/agents/{}",
-                            base.trim_end_matches('/'),
-                            instance_id
-                        ),
+                        Some(base) => {
+                            format!("{}/agents/{}", base.trim_end_matches('/'), instance_id)
+                        }
                         None => format!("http://127.0.0.1:{}", port),
                     };
                     let topic = format!("acowork/agents/{}/http_endpoint", instance_id);
-                    match client.publish_raw(
-                        &topic,
-                        endpoint.as_bytes(),
-                        crate::mqtt::client::MqttQoS::AtLeastOnce,
-                        true, // Retained — so Gateway can discover on restart
-                    ).await {
+                    match client
+                        .publish_raw(
+                            &topic,
+                            endpoint.as_bytes(),
+                            crate::mqtt::client::MqttQoS::AtLeastOnce,
+                            true, // Retained — so Gateway can discover on restart
+                        )
+                        .await
+                    {
                         Ok(()) => tracing::info!(
                             agent_id=%loaded.manifest.agent_id,
                             instance_id=%instance_id,
@@ -444,7 +461,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 // keep the original for `AgentBootContext::mqtt_client`,
                 // which downstream sites (`subsystems.rs` / `gateway_loop.rs`)
                 // still consume by `&RuntimeMqttClient` reference.
-                *mqtt_client_slot.lock().await = Some(Arc::new(tokio::sync::Mutex::new(client.clone())));
+                *mqtt_client_slot.lock().await =
+                    Some(Arc::new(tokio::sync::Mutex::new(client.clone())));
 
                 // §6.3.3: live re-publication of the retained
                 // `http_endpoint`. When the node changes network (Wi-Fi
@@ -464,10 +482,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                                 base.trim_end_matches('/'),
                                 endpoint_instance_id
                             );
-                            let topic = format!(
-                                "acowork/agents/{}/http_endpoint",
-                                endpoint_instance_id
-                            );
+                            let topic =
+                                format!("acowork/agents/{}/http_endpoint", endpoint_instance_id);
                             match endpoint_client
                                 .publish_raw(
                                     &topic,
@@ -624,8 +640,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ships `prompts/distiller-extraction.md` or `prompts/distiller-judge.md`,
     // they replace the built-ins per-agent. Loaded in Phase A like the
     // ADR-063 overrides above so Gateway and Standalone modes agree.
-    let distiller_extraction_prompt =
-        load_or_trace("distiller-extraction.md", "distiller Step 2a extraction prompt");
+    let distiller_extraction_prompt = load_or_trace(
+        "distiller-extraction.md",
+        "distiller Step 2a extraction prompt",
+    );
     let distiller_judge_prompt =
         load_or_trace("distiller-judge.md", "distiller Step 4 judge prompt");
 
@@ -700,14 +718,19 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     // Empty string means "no key configured" (e.g. local
                     // Ollama). Convert to Option<&str> for the provider
                     // factory, which treats None as "no auth header".
-                    let api_key_opt: Option<&str> =
-                        if api_key.is_empty() { None } else { Some(api_key.as_str()) };
+                    let api_key_opt: Option<&str> = if api_key.is_empty() {
+                        None
+                    } else {
+                        Some(api_key.as_str())
+                    };
                     let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                    let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
+                    let model_id = prov
+                        .models
+                        .first()
+                        .map(|m| m.id.clone())
+                        .unwrap_or_else(|| "default".to_string());
                     let proto_str =
-                        acowork_core::protocol::llm_protocol_to_protocol_type(
-                            prov.protocol_type,
-                        );
+                        acowork_core::protocol::llm_protocol_to_protocol_type(prov.protocol_type);
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
 
                     // Load (or initialize) the per-agent compatibility cache.
@@ -716,9 +739,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     let compat_cache_path = std::path::Path::new(&config.work_dir)
                         .join("config")
                         .join("provider_compat.json");
-                    let compat_cache_arc = crate::providers::compat::CompatCache::load(
-                        compat_cache_path,
-                    );
+                    let compat_cache_arc =
+                        crate::providers::compat::CompatCache::load(compat_cache_path);
                     compat_cache = Some(compat_cache_arc.clone());
                     let wiring = crate::providers::router::ProviderWiring {
                         provider_id: Some(prov.id.clone()),
@@ -936,69 +958,77 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // (MQTT race), the provider is constructed with `None` auth and
     // RAG queries will return empty results until the key is available.
     // A follow-up enhancement could make the credential dynamic.
-    let rag_provider: Option<Arc<dyn acowork_core::rag::RagProvider>> =
-        if let Some((tool_name, rag_config)) = loaded.manifest.rag_config() {
-            tracing::info!(
-                tool_name = %tool_name,
-                endpoint = %rag_config.endpoint,
-                "Manifest declares RAG tool - constructing HttpRagProvider"
-            );
+    let rag_provider: Option<Arc<dyn acowork_core::rag::RagProvider>> = if let Some((
+        tool_name,
+        rag_config,
+    )) =
+        loaded.manifest.rag_config()
+    {
+        tracing::info!(
+            tool_name = %tool_name,
+            endpoint = %rag_config.endpoint,
+            "Manifest declares RAG tool - constructing HttpRagProvider"
+        );
 
-            // Best-effort auth resolution: try to find the RAG key in the
-            // MQTT available cache's provider list. The `auth_ref` format
-            // is "vault:<key_name>" - we look for a provider whose ID
-            // matches <key_name>. If not found, the provider is
-            // constructed with `None` auth; RAG queries will return
-            // empty results until the key is available.
-            let auth = {
-                let key_value: Option<String> = available_cache.as_ref().and_then(|cache| {
-                    let cache_read = cache.blocking_read();
-                    cache_read.providers.as_ref().and_then(|p| {
-                        rag_config
-                            .auth_ref
-                            .as_deref()
-                            .and_then(|ref_str| {
-                                crate::tools::rag::client::RagAuthCredential::vault_provider_name(ref_str)
-                            })
-                            .and_then(|key_name| {
-                                p.providers
-                                    .iter()
-                                    .find(|pr| pr.id == key_name)
-                                    .map(|pr| pr.api_key.clone())
-                            })
-                    })
-                });
-                crate::tools::rag::client::RagAuthCredential::from_vault_ref(
-                    rag_config.auth_ref.as_deref(),
-                    &rag_config.auth_type,
-                    key_value.as_deref(),
-                )
-            };
-            if matches!(auth, crate::tools::rag::client::RagAuthCredential::None)
-                && rag_config.auth_ref.is_some()
-            {
-                tracing::warn!(
-                    auth_ref = ?rag_config.auth_ref,
-                    "RAG auth_ref declared but key not found in available cache - RAG queries will fail until key is available"
-                );
-            }
-
-            let rag_client_config = crate::tools::rag::client::RagClientConfig::from_manifest(
-                rag_config,
-                tool_name.to_string(),
-                auth,
-            );
-            let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(rag_client_config));
-
-            // Register the rag_query tool so the LLM can invoke it.
-            let rag_tool = crate::tools::builtin::rag_query::RagQueryTool::new(provider.clone());
-            registry.register(Arc::new(rag_tool) as Arc<dyn acowork_core::tools::traits::Tool>);
-            tracing::info!("rag_query tool registered");
-
-            Some(provider as Arc<dyn acowork_core::rag::RagProvider>)
-        } else {
-            None
+        // Best-effort auth resolution: try to find the RAG key in the
+        // MQTT available cache's provider list. The `auth_ref` format
+        // is "vault:<key_name>" - we look for a provider whose ID
+        // matches <key_name>. If not found, the provider is
+        // constructed with `None` auth; RAG queries will return
+        // empty results until the key is available.
+        let auth = {
+            let key_value: Option<String> = available_cache.as_ref().and_then(|cache| {
+                let cache_read = cache.blocking_read();
+                cache_read.providers.as_ref().and_then(|p| {
+                    rag_config
+                        .auth_ref
+                        .as_deref()
+                        .and_then(|ref_str| {
+                            crate::tools::rag::client::RagAuthCredential::vault_provider_name(
+                                ref_str,
+                            )
+                        })
+                        .and_then(|key_name| {
+                            p.providers
+                                .iter()
+                                .find(|pr| pr.id == key_name)
+                                .map(|pr| pr.api_key.clone())
+                        })
+                })
+            });
+            crate::tools::rag::client::RagAuthCredential::from_vault_ref(
+                rag_config.auth_ref.as_deref(),
+                &rag_config.auth_type,
+                key_value.as_deref(),
+            )
         };
+        if matches!(auth, crate::tools::rag::client::RagAuthCredential::None)
+            && rag_config.auth_ref.is_some()
+        {
+            tracing::warn!(
+                auth_ref = ?rag_config.auth_ref,
+                "RAG auth_ref declared but key not found in available cache - RAG queries will fail until key is available"
+            );
+        }
+
+        let rag_client_config = crate::tools::rag::client::RagClientConfig::from_manifest(
+            rag_config,
+            tool_name.to_string(),
+            auth,
+        );
+        let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(
+            rag_client_config,
+        ));
+
+        // Register the rag_query tool so the LLM can invoke it.
+        let rag_tool = crate::tools::builtin::rag_query::RagQueryTool::new(provider.clone());
+        registry.register(Arc::new(rag_tool) as Arc<dyn acowork_core::tools::traits::Tool>);
+        tracing::info!("rag_query tool registered");
+
+        Some(provider as Arc<dyn acowork_core::rag::RagProvider>)
+    } else {
+        None
+    };
 
     // ── ADR-029: Resolve `agent_tools.json` enabled flags ──────────
     //
@@ -1025,10 +1055,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     count = persisted_cfg.tools.len(),
                     "Loaded existing agent_tools.json — merging with code registry"
                 );
-                let merged = crate::agent_config::merge_tools_config(
-                    &code_tool_list,
-                    &persisted_cfg.tools,
-                );
+                let merged =
+                    crate::agent_config::merge_tools_config(&code_tool_list, &persisted_cfg.tools);
                 // Persist the merged result so new tools from code
                 // upgrades are written to agent_tools.json immediately.
                 // This ensures the file is always a complete,
@@ -1086,12 +1114,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // Activate with the merged enabled list, applying security
     // decorators (path guard + rate limiter) to each tool.
-    let active_tools = registry.activate(
-        &loaded.manifest,
-        &workspace_resolver,
-        60,
-        &resolved_entries,
-    );
+    let active_tools =
+        registry.activate(&loaded.manifest, &workspace_resolver, 60, &resolved_entries);
     tracing::info!(
         total_enabled = active_tools.iter().filter(|e| e.enabled).count(),
         total_disabled = active_tools.iter().filter(|e| !e.enabled).count(),
@@ -1180,8 +1204,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                             // `SessionManager::apply_runtime_config_override`
                             // + `update_user_identity`.
                             crate::agent::session::session_manager::format_user_profile_context(
-                                &profile,
-                                None,
+                                &profile, None,
                             )
                         });
                     }
@@ -1335,8 +1358,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
 /// Return a noop provider tuple for fallback cases where no provider list
 /// is available from Gateway or MQTT cache.
-fn noop_provider_tuple(
-) -> (
+fn noop_provider_tuple() -> (
     std::sync::Arc<dyn acowork_core::providers::traits::Provider>,
     String,
     Vec<String>,
@@ -1410,9 +1432,9 @@ mod tests {
         );
 
         // Construct HttpRagProvider (same as agent_init.rs line 602).
-        let provider = Arc::new(
-            crate::tools::rag::client::HttpRagProvider::new(rag_client_config),
-        );
+        let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(
+            rag_client_config,
+        ));
 
         // Register RagQueryTool in registry (same as agent_init.rs lines 605-606).
         let mut registry = ToolRegistry::new();
@@ -1421,7 +1443,10 @@ mod tests {
 
         // G8: Verify the tool is discoverable in the registry by name.
         let found = registry.get("rag_query");
-        assert!(found.is_some(), "rag_query must be in the registry after registration");
+        assert!(
+            found.is_some(),
+            "rag_query must be in the registry after registration"
+        );
 
         // Verify the tool spec has the right name and input schema.
         let tool = found.unwrap();
@@ -1460,7 +1485,10 @@ mod tests {
 
         // In agent_init.rs, rag_provider would be None and no tool registered.
         let registry = ToolRegistry::new();
-        assert!(registry.get("rag_query").is_none(), "rag_query should not exist without RAG manifest");
+        assert!(
+            registry.get("rag_query").is_none(),
+            "rag_query should not exist without RAG manifest"
+        );
     }
 
     /// G8b: Verify that the registered RAG tool's spec name matches
@@ -1482,7 +1510,9 @@ mod tests {
             "enterprise_knowledge".to_string(),
             crate::tools::rag::client::RagAuthCredential::None,
         );
-        let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(client_config));
+        let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(
+            client_config,
+        ));
         let rag_tool = crate::tools::builtin::rag_query::RagQueryTool::new(provider);
 
         // The tool's name() must be "rag_query" - this is what the LLM sees.

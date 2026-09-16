@@ -258,7 +258,6 @@ pub struct RetryPauseInfo {
     pub provider: String,
 }
 
-
 impl SessionStatus {
     /// Returns true if the session is actively processing (non-idle).
     ///
@@ -379,8 +378,8 @@ impl SessionState {
         budget: acowork_core::Budget,
         conversation: Option<Arc<ConversationSession>>,
     ) -> Self {
-        let status = serde_json::to_string(&SessionStatus::Idle)
-            .unwrap_or_else(|_| r#""idle""#.to_string());
+        let status =
+            serde_json::to_string(&SessionStatus::Idle).unwrap_or_else(|_| r#""idle""#.to_string());
         Self {
             history: HistoryManager::new(max_tokens),
             conversation,
@@ -685,7 +684,10 @@ mod tests {
             recoverable: false,
         };
         assert!(status.is_errored());
-        assert!(!status.is_active(), "Errored must NOT be active — frontend must exit 'replying' indicator");
+        assert!(
+            !status.is_active(),
+            "Errored must NOT be active — frontend must exit 'replying' indicator"
+        );
     }
 
     #[test]
@@ -706,9 +708,13 @@ mod tests {
             SessionStatus::Idle,
             SessionStatus::LlmAwaitingFirstChunk,
             SessionStatus::Thinking,
-            SessionStatus::LlmStreaming { message_id: Some("m1".into()) },
+            SessionStatus::LlmStreaming {
+                message_id: Some("m1".into()),
+            },
             SessionStatus::ToolExecuting,
-            SessionStatus::WaitingApproval { request_id: "r1".into() },
+            SessionStatus::WaitingApproval {
+                request_id: "r1".into(),
+            },
             SessionStatus::Paused {
                 iteration: Some(1),
                 max_iterations: Some(3),

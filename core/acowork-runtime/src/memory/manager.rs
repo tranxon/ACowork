@@ -8,17 +8,15 @@
 
 // Re-export for backward compatibility.
 pub use acowork_memory::{
-    InjectedMemory, MemoryManager, MemoryManagerConfig, RetrievalResult,
-    RetrievedMemory,
+    InjectedMemory, MemoryManager, MemoryManagerConfig, RetrievalResult, RetrievedMemory,
 };
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use acowork_grafeo::grafeo::GrafeoStore as TestStore;
     use acowork_grafeo::types::DEFAULT_EMBEDDING_DIM;
-    use acowork_memory::{labels, HintType, MemoryProvider, MemoryQuery};
+    use acowork_memory::{HintType, MemoryProvider, MemoryQuery, labels};
     use grafeo_common::types::{NodeId, Value};
 
     /// Helper: create an in-memory TestStore for testing.
@@ -53,8 +51,7 @@ mod tests {
         age_days: i64,
     ) -> u64 {
         let id = store_episode(store, content, embedding);
-        let created =
-            chrono::Utc::now() - chrono::Duration::days(age_days);
+        let created = chrono::Utc::now() - chrono::Duration::days(age_days);
         store.db().set_node_property(
             NodeId::from(id),
             "created_at",
@@ -103,12 +100,7 @@ mod tests {
 
     /// Helper: store an Autobiographical node.
     #[allow(dead_code)]
-    fn store_autobiographical(
-        store: &TestStore,
-        key: &str,
-        value: &str,
-        embedding: &[f32],
-    ) -> u64 {
+    fn store_autobiographical(store: &TestStore, key: &str, value: &str, embedding: &[f32]) -> u64 {
         let id = store
             .store_node(
                 labels::AUTOBIOGRAPHICAL,
@@ -148,7 +140,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         assert!(!result.memories.is_empty(), "expected at least one result");
         assert!(!result.metrics.abstention_triggered);
         // G9: non-empty result must NOT attach the abstention prompt.
@@ -172,7 +167,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         assert_eq!(result.metrics.result_count, 0);
@@ -207,11 +205,8 @@ mod tests {
             .retrieve(&store as &dyn MemoryProvider, &mut base_query, None)
             .await
             .unwrap();
-        let base_scores: Vec<(u64, f64)> = base
-            .memories
-            .iter()
-            .map(|m| (m.node_id, m.score))
-            .collect();
+        let base_scores: Vec<(u64, f64)> =
+            base.memories.iter().map(|m| (m.node_id, m.score)).collect();
         // Both nodes present; without decay the old node is not strictly
         // penalized below the fresh one.
         assert!(base_scores.iter().any(|(id, _)| *id == old_id));
@@ -285,7 +280,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         // G9: abstention triggered → prompt must be present.
@@ -310,7 +308,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         // Text search should still find results.
         assert!(!result.memories.is_empty());
     }
@@ -408,7 +409,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         assert!(
             !result.memories.is_empty(),
             "should retrieve Rust-related nodes"
@@ -443,7 +447,10 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         assert!(!result.memories.is_empty());
     }
 
@@ -467,16 +474,16 @@ mod tests {
             hint_type: HintType::Identity,
         };
 
-        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        let result = manager
+            .retrieve(&store as &dyn MemoryProvider, &mut query, None)
+            .await
+            .unwrap();
         assert!(
             !result.memories.is_empty(),
             "Identity hint should search all labels and hit Knowledge nodes"
         );
         assert!(
-            result
-                .memories
-                .iter()
-                .any(|m| m.label == labels::KNOWLEDGE),
+            result.memories.iter().any(|m| m.label == labels::KNOWLEDGE),
             "expected at least one Knowledge node, got: {:?}",
             result
                 .memories
@@ -514,7 +521,12 @@ mod tests {
         let id = store.store_procedural(&node).unwrap();
 
         // extract_node_content should format it as "当 X 时，优先 Y".
-        let content = store.get_node_content(id.as_u64()).ok().flatten().unwrap_or_default();        assert!(
+        let content = store
+            .get_node_content(id.as_u64())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        assert!(
             content.starts_with("当"),
             "Procedural content should start with '当', got: {}",
             content
@@ -571,13 +583,14 @@ mod tests {
                 if let Some(ts) = n
                     .get_property("created_at")
                     .and_then(grafeo_common::types::Value::as_timestamp)
-                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
-                        match earliest_time {
-                            None => earliest_time = Some(dt),
-                            Some(earliest) if dt < earliest => earliest_time = Some(dt),
-                            _ => {}
-                        }
+                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros())
+                {
+                    match earliest_time {
+                        None => earliest_time = Some(dt),
+                        Some(earliest) if dt < earliest => earliest_time = Some(dt),
+                        _ => {}
                     }
+                }
             }
         }
 
@@ -652,13 +665,14 @@ mod tests {
                 && let Some(ts) = n
                     .get_property("created_at")
                     .and_then(grafeo_common::types::Value::as_timestamp)
-                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
-                        match earliest_time {
-                            None => earliest_time = Some(dt),
-                            Some(earliest) if dt < earliest => earliest_time = Some(dt),
-                            _ => {}
-                        }
-                    }
+                && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros())
+            {
+                match earliest_time {
+                    None => earliest_time = Some(dt),
+                    Some(earliest) if dt < earliest => earliest_time = Some(dt),
+                    _ => {}
+                }
+            }
         }
 
         let span_days = (chrono::Utc::now() - earliest_time.unwrap()).num_days();
@@ -674,5 +688,4 @@ mod tests {
             .unwrap();
         assert!(found.is_none());
     }
-
 }

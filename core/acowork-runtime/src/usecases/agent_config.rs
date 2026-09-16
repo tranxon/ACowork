@@ -162,15 +162,11 @@ impl ConfigField {
             ConfigField::DistillerEnabled => "distiller_enabled",
             ConfigField::DistillerModel => "distiller_model",
             ConfigField::DistillerIntervalMinutes => "distiller_interval_minutes",
-            ConfigField::DistillerAccumulationThreshold => {
-                "distiller_accumulation_threshold"
-            }
+            ConfigField::DistillerAccumulationThreshold => "distiller_accumulation_threshold",
             ConfigField::DistillerIdleMinutes => "distiller_idle_minutes",
             ConfigField::MemoryForgettingEnabled => "memory_forgetting_enabled",
             ConfigField::MemoryForgettingHalfLifeDays => "memory_forgetting_half_life_days",
-            ConfigField::MemoryForgettingDormantThreshold => {
-                "memory_forgetting_dormant_threshold"
-            }
+            ConfigField::MemoryForgettingDormantThreshold => "memory_forgetting_dormant_threshold",
             ConfigField::MemoryForgettingArchiveDays => "memory_forgetting_archive_days",
             ConfigField::SessionLanguage => "session_language",
         }

@@ -35,7 +35,7 @@ use acowork_core::providers::traits::{ChatMessage, ChatRequest, Provider};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::providers::compat::{CompatCache, COMPAT_PROFILE_TTL_SECS};
+use crate::providers::compat::{COMPAT_PROFILE_TTL_SECS, CompatCache};
 use crate::providers::openai::OpenAIProvider;
 
 const MODEL: &str = "test-model";
@@ -157,8 +157,7 @@ impl MockLlm {
 // Fixtures
 // ═══════════════════════════════════════════════════════════════════════
 
-const OK_BODY: &str =
-    r#"{"choices":[{"message":{"content":"hello-e2e"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+const OK_BODY: &str = r#"{"choices":[{"message":{"content":"hello-e2e"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
 const CONTENT_400: &str = r#"{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API"}}"#;
 const TOOLS_400: &str =
     r#"{"error":{"message":"parallel_tool_calls is not supported by this deployment"}}"#;
@@ -290,9 +289,16 @@ async fn content_integrity_400_is_surfaced_without_fallback_and_not_recorded() {
     // first try — the failed batch did not poison anything.
     let server2 = MockLlm::start(vec![(200, OK_BODY)]).await;
     let p2 = provider(&server2, cache);
-    let ok = p2.chat(chat_request()).await.expect("healthy request succeeds");
+    let ok = p2
+        .chat(chat_request())
+        .await
+        .expect("healthy request succeeds");
     assert_eq!(ok.content, "hello-e2e");
-    assert_eq!(server2.bodies().len(), 1, "no fallback chain for a healthy request");
+    assert_eq!(
+        server2.bodies().len(),
+        1,
+        "no fallback chain for a healthy request"
+    );
     server2.stop().await;
 }
 
@@ -322,20 +328,35 @@ async fn tools_schema_single_success_not_durable_then_confirmed_and_fast_path_wi
     let p = provider(&server, cache.clone());
 
     // Chat 1 + 2: still candidates only.
-    p.chat(chat_request()).await.expect("chat1 succeeds via FB4");
-    assert!(cache.get(&cache_key()).is_none(), "one success must not be durable");
+    p.chat(chat_request())
+        .await
+        .expect("chat1 succeeds via FB4");
+    assert!(
+        cache.get(&cache_key()).is_none(),
+        "one success must not be durable"
+    );
     assert_eq!(server.bodies().len(), 5);
 
-    p.chat(chat_request()).await.expect("chat2 succeeds via FB4");
-    assert!(cache.get(&cache_key()).is_none(), "two successes must still be candidates");
+    p.chat(chat_request())
+        .await
+        .expect("chat2 succeeds via FB4");
+    assert!(
+        cache.get(&cache_key()).is_none(),
+        "two successes must still be candidates"
+    );
     assert_eq!(server.bodies().len(), 10);
 
     // Chat 3: third distinct confirmation promotes to durable.
-    p.chat(chat_request()).await.expect("chat3 succeeds via FB4");
+    p.chat(chat_request())
+        .await
+        .expect("chat3 succeeds via FB4");
     let durable = cache
         .get(&cache_key())
         .expect("third confirmation promotes to durable");
-    assert!(durable.strip_tools, "durable learned strip_tools (provider truly rejects tools)");
+    assert!(
+        durable.strip_tools,
+        "durable learned strip_tools (provider truly rejects tools)"
+    );
 
     // The durable profile is persisted as class=tools_schema (give the
     // spawned persist task a beat to flush).
@@ -349,7 +370,9 @@ async fn tools_schema_single_success_not_durable_then_confirmed_and_fast_path_wi
 
     // Chat 4: fast path — exactly ONE HTTP request, tools (and temperature,
     // learned alongside) omitted from the wire body.
-    p.chat(chat_request()).await.expect("fast-path chat succeeds");
+    p.chat(chat_request())
+        .await
+        .expect("fast-path chat succeeds");
     let bodies = server.bodies();
     assert_eq!(bodies.len(), 16, "fast path must be a single HTTP request");
     let fast = &bodies[15];
@@ -373,9 +396,16 @@ async fn expired_durable_is_reprobed_and_renewed_by_matching_fallback_success() 
     let (_dir, path) = tmp_cache_path("ttl");
     // Seed an expired durable (promoted long ago) — as if the process had
     // been offline past the lease. get() must treat it as a miss.
-    seed_durable_file(&path, now_ts() - COMPAT_PROFILE_TTL_SECS - 60, "tools_schema");
+    seed_durable_file(
+        &path,
+        now_ts() - COMPAT_PROFILE_TTL_SECS - 60,
+        "tools_schema",
+    );
     let cache = CompatCache::load(path.clone());
-    assert!(cache.get(&cache_key()).is_none(), "expired lease = miss (re-probe)");
+    assert!(
+        cache.get(&cache_key()).is_none(),
+        "expired lease = miss (re-probe)"
+    );
 
     // Re-probe: plain request fails with the same class; FB4 again succeeds.
     let server = MockLlm::start(vec![
@@ -387,13 +417,19 @@ async fn expired_durable_is_reprobed_and_renewed_by_matching_fallback_success() 
     ])
     .await;
     let p = provider(&server, cache.clone());
-    p.chat(chat_request()).await.expect("re-probe chat succeeds");
+    p.chat(chat_request())
+        .await
+        .expect("re-probe chat succeeds");
 
     let renewed = cache
         .get(&cache_key())
         .expect("matching re-probe success renews the lease");
     assert!(renewed.strip_tools);
-    assert_eq!(server.bodies().len(), 5, "expired lease went through the full cold chain");
+    assert_eq!(
+        server.bodies().len(),
+        5,
+        "expired lease went through the full cold chain"
+    );
     server.stop().await;
 }
 
@@ -415,12 +451,19 @@ async fn fast_path_failure_invalidates_and_content_errors_surface_not_masked() {
     // surface the error — NOT keep retrying or masking it.
     let server = MockLlm::start(vec![(400, CONTENT_400), (400, CONTENT_400)]).await;
     let p = provider(&server, cache.clone());
-    let err = p.chat(chat_request()).await.expect_err("content error must surface");
+    let err = p
+        .chat(chat_request())
+        .await
+        .expect_err("content error must surface");
     assert!(format!("{err}").contains("reasoning_content"));
 
     // Request 1 = fast path (profile applied). Request 2 = cold path re-probe
     // of the ORIGINAL request, which also fails with the content error.
-    assert_eq!(server.bodies().len(), 2, "fast-path failure + one cold re-probe");
+    assert_eq!(
+        server.bodies().len(),
+        2,
+        "fast-path failure + one cold re-probe"
+    );
     assert!(
         cache.get(&cache_key()).is_none(),
         "failed fast path must invalidate the durable profile"
@@ -428,7 +471,10 @@ async fn fast_path_failure_invalidates_and_content_errors_surface_not_masked() {
     // Invalidate persists immediately — allow the spawned task to flush.
     tokio::time::sleep(Duration::from_millis(120)).await;
     let entries = disk_entries(&path);
-    assert_eq!(entries["entries"].as_object().map(|m| m.len()).unwrap_or(0), 0);
+    assert_eq!(
+        entries["entries"].as_object().map(|m| m.len()).unwrap_or(0),
+        0
+    );
     server.stop().await;
 }
 
@@ -463,7 +509,10 @@ async fn legacy_v1_file_is_discarded_and_next_request_stays_healthy() {
     // File was proactively rewritten as empty v2.
     let entries = disk_entries(&path);
     assert_eq!(entries["version"], 2);
-    assert_eq!(entries["entries"].as_object().map(|m| m.len()).unwrap_or(0), 0);
+    assert_eq!(
+        entries["entries"].as_object().map(|m| m.len()).unwrap_or(0),
+        0
+    );
 
     // The next request goes out plain (tools intact) and succeeds — no
     // strip_tools rule survived the upgrade.
@@ -472,7 +521,9 @@ async fn legacy_v1_file_is_discarded_and_next_request_stays_healthy() {
     p.chat(chat_request()).await.expect("healthy request");
     let bodies = server.bodies();
     assert_eq!(bodies.len(), 1);
-    assert!(bodies[0].contains("\"tools\""), "request must still carry tools");
+    assert!(
+        bodies[0].contains("\"tools\""),
+        "request must still carry tools"
+    );
     server.stop().await;
 }
-

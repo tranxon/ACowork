@@ -306,34 +306,22 @@ pub trait WorkspaceQueryService: Send + Sync {
     async fn list_workspaces(&self) -> Result<WorkspacesListResponse, WorkspaceError>;
 
     /// `GET /workspaces/tree` — list directory contents.
-    async fn list_tree(
-        &self,
-        params: &ListTreeParams,
-    ) -> Result<TreeResponse, WorkspaceError>;
+    async fn list_tree(&self, params: &ListTreeParams) -> Result<TreeResponse, WorkspaceError>;
 
     /// `GET /workspaces/file` — read a UTF-8 text file's content.
-    async fn read_file(
-        &self,
-        params: &ReadFileParams,
-    ) -> Result<WorkspaceFileDto, WorkspaceError>;
+    async fn read_file(&self, params: &ReadFileParams) -> Result<WorkspaceFileDto, WorkspaceError>;
 
     /// `GET /workspaces/raw/{path}` — read a file's raw bytes (ADR-055
     /// L2-7). Served verbatim for the HTML preview iframe, with the same
     /// `resolve_within` path-traversal guard as [`Self::read_file`].
-    async fn read_file_raw(
-        &self,
-        params: &ReadFileParams,
-    ) -> Result<RawFileDto, WorkspaceError>;
+    async fn read_file_raw(&self, params: &ReadFileParams) -> Result<RawFileDto, WorkspaceError>;
 
     /// `GET /workspaces/find` — fuzzy-search file/dir names.
     ///
     /// Implementation walks the workspace with `ignore::WalkBuilder`
     /// (gitignore-aware), scores each entry against the query, and
     /// returns the top `limit` matches sorted by score.
-    async fn find_files(
-        &self,
-        params: &FindFilesParams,
-    ) -> Result<FindResponse, WorkspaceError>;
+    async fn find_files(&self, params: &FindFilesParams) -> Result<FindResponse, WorkspaceError>;
 
     /// `GET /workspaces/search` — ripgrep-style content search.
     ///

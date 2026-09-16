@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use acowork_core::manifest::AgentManifest;
-use acowork_memory::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
 use acowork_memory::MemoryProvider;
+use acowork_memory::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
 use chrono::Utc;
 
 /// Outcome counters of one bootstrap run.
@@ -47,7 +47,10 @@ pub fn bootstrap_autobiographical_from_manifest(
 ) -> BootstrapOutcome {
     match provider.find_autobiographical_by_category(AutobioCategory::Identity) {
         Ok(existing) if !existing.is_empty() => {
-            tracing::debug!(count = existing.len(), "Autobiographical nodes already exist, skipping manifest bootstrap");
+            tracing::debug!(
+                count = existing.len(),
+                "Autobiographical nodes already exist, skipping manifest bootstrap"
+            );
             return BootstrapOutcome {
                 skipped_existing: true,
                 ..BootstrapOutcome::default()

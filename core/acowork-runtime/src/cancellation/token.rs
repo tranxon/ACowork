@@ -104,24 +104,24 @@ impl CancelHandle {
     /// Returns `true` if this call performed the transition, `false` if the
     /// token was already cancelled (i.e. another holder called `cancel()` first).
     pub fn cancel(&self, reason: CancellationReason) -> bool {
-            // AcqRel on success / Acquire on failure — pairs the write to `reason`
-            // (under Mutex below) with the state flip.
-            let prev = self.inner.state.compare_exchange(
-                STATE_ACTIVE,
-                STATE_CANCELLED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            if prev.is_ok() {
-                // First cancel — record reason and wake everyone.
-                // Lock poisoning is unrecoverable for this primitive; we treat it
-                // as a programmer error and panic rather than silently drop the
-                // reason.
-                *self
-                    .inner
-                    .reason
-                    .lock()
-                    .expect("CancelHandle reason mutex poisoned") = Some(reason);
+        // AcqRel on success / Acquire on failure — pairs the write to `reason`
+        // (under Mutex below) with the state flip.
+        let prev = self.inner.state.compare_exchange(
+            STATE_ACTIVE,
+            STATE_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if prev.is_ok() {
+            // First cancel — record reason and wake everyone.
+            // Lock poisoning is unrecoverable for this primitive; we treat it
+            // as a programmer error and panic rather than silently drop the
+            // reason.
+            *self
+                .inner
+                .reason
+                .lock()
+                .expect("CancelHandle reason mutex poisoned") = Some(reason);
             // notify_waiters wakes all currently-registered Notified futures;
             // any Notified future created after this point will resolve on
             // first poll because Notify is level-triggered.

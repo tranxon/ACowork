@@ -288,4 +288,3 @@ pub struct OnContextBuiltParams {
     pub sections: ContextSections,
     pub total_token_estimate: usize,
 }
-

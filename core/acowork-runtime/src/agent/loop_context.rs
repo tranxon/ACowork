@@ -13,9 +13,7 @@ use std::sync::Arc;
 use acowork_core::providers::traits::Provider;
 
 use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
-use crate::agent::context::{
-    count_chat_request_chars, patch_session_totals, ContextBuilder,
-};
+use crate::agent::context::{ContextBuilder, count_chat_request_chars, patch_session_totals};
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
@@ -135,11 +133,7 @@ impl AgentLoop {
                 // Total Output / Cache Read / Cache Write alongside the
                 // per-turn figures.  ADR-066 §2 routes all four cumulative
                 // session fields through `patch_session_totals`.
-                let session_tokens = self
-                    .session
-                    .conversation
-                    .as_ref()
-                    .and_then(|c| c.tokens());
+                let session_tokens = self.session.conversation.as_ref().and_then(|c| c.tokens());
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
                     context_window: effective_window,
                     input_tokens: total_tokens,
@@ -185,7 +179,9 @@ impl AgentLoop {
                 ctx_info.agent_total_output_tokens = Some(agent_out);
                 ctx_info.agent_total_cache_read_tokens = Some(agent_cache_read);
                 ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
-                let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
+                let _ = self
+                    .session_core
+                    .try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         }
     }
@@ -200,7 +196,8 @@ impl AgentLoop {
     /// are unavailable.
     pub(crate) fn context_trim_budget(&self, model_name: &str) -> u64 {
         let resolved = self.resolved_effective_context_window(model_name);
-        self.core.context_trim_budget_with(Some(resolved), model_name)
+        self.core
+            .context_trim_budget_with(Some(resolved), model_name)
     }
 
     /// ADR-074: resolve this session's effective context window through the
@@ -209,10 +206,7 @@ impl AgentLoop {
     /// persisted value — and computed fresh on every call (never cached), so
     /// agent-layer changes always reach sessions without an override.
     fn resolved_effective_context_window(&self, model_name: &str) -> u64 {
-        let session_override = self
-            .session
-            .conversation()
-            .and_then(|c| c.context_window());
+        let session_override = self.session.conversation().and_then(|c| c.context_window());
         let caps = self.core.get_model_capabilities(model_name);
         crate::agent::session_config::resolve_effective_context_window(
             session_override,
@@ -268,11 +262,9 @@ impl AgentLoop {
 
     /// Projected input INCLUDING not-yet-appended tool results (measured
     /// before they land in history).
-    pub(crate) fn projected_input_tokens_with(
-        &self,
-        pending_extra_tokens: u64,
-    ) -> u64 {
-        self.projected_input_tokens().saturating_add(pending_extra_tokens)
+    pub(crate) fn projected_input_tokens_with(&self, pending_extra_tokens: u64) -> u64 {
+        self.projected_input_tokens()
+            .saturating_add(pending_extra_tokens)
     }
 
     /// Absolute token count at which compaction fires: `CONTEXT_COMPACT_PERCENT`
@@ -529,7 +521,13 @@ impl AgentLoop {
     /// [`Self::resolve_distill_model`] but returns `None` instead of
     /// falling through.
     fn try_global_default_target(&self) -> Option<ResolvedDistill> {
-        let (pid, mid) = self.core.default_compact_model.read().unwrap().as_ref()?.clone();
+        let (pid, mid) = self
+            .core
+            .default_compact_model
+            .read()
+            .unwrap()
+            .as_ref()?
+            .clone();
         if !self.core.is_default_compact_provider_available() {
             return None;
         }
@@ -597,8 +595,7 @@ impl AgentLoop {
             .map(str::to_string)
             .unwrap_or_default();
 
-        let same_provider =
-            resolved.provider_id == session_pid || resolved.provider_id.is_empty();
+        let same_provider = resolved.provider_id == session_pid || resolved.provider_id.is_empty();
         if same_provider {
             return (
                 self.core.provider.clone(),
@@ -686,7 +683,9 @@ impl AgentLoop {
             );
 
             // Notify frontend that compaction has started (both manual and auto paths).
-            let _ = self.session_core.try_send_chunk(ChunkEvent::CompactingStarted);
+            let _ = self
+                .session_core
+                .try_send_chunk(ChunkEvent::CompactingStarted);
 
             // Build combined text from history for model-aware token counting.
             let combined_text: String =
@@ -854,9 +853,10 @@ impl AgentLoop {
                     // rows land AFTER the compaction offset and the restorer
                     // picks them up on resume). Hoist it out of the apply
                     // match — the inner arm can only mutate it.
-                    let mut injected_round_for_persistence: Option<
-                        (acowork_core::providers::traits::ChatMessage, acowork_core::providers::traits::ChatMessage),
-                    > = None;
+                    let mut injected_round_for_persistence: Option<(
+                        acowork_core::providers::traits::ChatMessage,
+                        acowork_core::providers::traits::ChatMessage,
+                    )> = None;
                     let (level, removed) = match self
                         .session
                         .history
@@ -873,11 +873,11 @@ impl AgentLoop {
                             let pending_todo_write_inject =
                                 self.session.history.find_last_todo_write_round();
 
-                            match self
-                                .session
-                                .history
-                                .apply_compression(plan, &marker_text, min_ratio)
-                            {
+                            match self.session.history.apply_compression(
+                                plan,
+                                &marker_text,
+                                min_ratio,
+                            ) {
                                 Ok(outcome) => {
                                     tracing::info!(
                                         level = outcome.level,
@@ -909,9 +909,7 @@ impl AgentLoop {
                                     // the in-memory splice was skipped
                                     // prevents duplicate synthetic rows on
                                     // disk across consecutive compressions.
-                                    if let Some((assistant, tool)) =
-                                        pending_todo_write_inject
-                                    {
+                                    if let Some((assistant, tool)) = pending_todo_write_inject {
                                         // ADR-060 v2 §5.4: idempotency is
                                         // enforced inside
                                         // `inject_todo_write_round_after_marker`
@@ -1021,19 +1019,15 @@ impl AgentLoop {
                         // rows become standalone Tool messages whose
                         // `tool_call_id` matches the assistant's tool_calls
                         // (verified by the orphan-tool sanitiser).
-                        if let Some((assistant, tool)) =
-                            injected_round_for_persistence.take()
-                        {
+                        if let Some((assistant, tool)) = injected_round_for_persistence.take() {
                             if let Some(tool_calls) = &assistant.tool_calls {
                                 for tc in tool_calls {
                                     let call_meta = serde_json::json!({
                                         "tool_name": tc.function.name,
                                         "tool_call_id": tc.id,
                                     });
-                                    let call_id = format!(
-                                        "inject-call-{}",
-                                        uuid::Uuid::new_v4().simple()
-                                    );
+                                    let call_id =
+                                        format!("inject-call-{}", uuid::Uuid::new_v4().simple());
                                     conversation.append_message_with_id(
                                         "tool_call",
                                         &tc.function.arguments,
@@ -1054,10 +1048,8 @@ impl AgentLoop {
                                         "todo_write".to_string()
                                     }),
                             });
-                            let result_id = format!(
-                                "inject-result-{}",
-                                uuid::Uuid::new_v4().simple()
-                            );
+                            let result_id =
+                                format!("inject-result-{}", uuid::Uuid::new_v4().simple());
                             conversation.append_message_with_id(
                                 "tool_result",
                                 &tool.content,
@@ -1149,7 +1141,9 @@ impl AgentLoop {
             // the "compacting..." indicator (both success and error paths).
             // Also send updated context usage so the frontend shows the new
             // token count and percentage after compaction.
-            let _ = self.session_core.try_send_chunk(ChunkEvent::CompactingEnded);
+            let _ = self
+                .session_core
+                .try_send_chunk(ChunkEvent::CompactingEnded);
 
             // Re-emit the runtime session-state snapshot now that
             // `last_input` reflects the post-compaction history size (via
@@ -1182,11 +1176,7 @@ impl AgentLoop {
                 // Pull cumulative session totals for the post-compaction
                 // snapshot so the frontend status panel can update both
                 // per-turn and cumulative fields in one push.
-                let session_tokens = self
-                    .session
-                    .conversation
-                    .as_ref()
-                    .and_then(|c| c.tokens());
+                let session_tokens = self.session.conversation.as_ref().and_then(|c| c.tokens());
                 let ctx_info = acowork_core::protocol::ContextUsageInfo {
                     context_window: effective_window,
                     input_tokens: total_tokens,
@@ -1229,7 +1219,9 @@ impl AgentLoop {
                 ctx_info.agent_total_output_tokens = Some(agent_out);
                 ctx_info.agent_total_cache_read_tokens = Some(agent_cache_read);
                 ctx_info.agent_total_cache_write_tokens = Some(agent_cache_write);
-                let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
+                let _ = self
+                    .session_core
+                    .try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
 
             // Failure tail: every distill tier failed (no summary produced).
@@ -1240,10 +1232,7 @@ impl AgentLoop {
             // treats `CompactionFailed` as non-retryable → GiveUp → Idle, so
             // the agent never keeps looping with an un-compactable context.
             if compaction_failed {
-                let detail = last_err
-                    .as_ref()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default();
+                let detail = last_err.as_ref().map(|e| e.to_string()).unwrap_or_default();
                 return Err(crate::error::RuntimeError::CompactionFailed(detail));
             }
         } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
@@ -1323,25 +1312,18 @@ impl AgentLoop {
         // Some(Low/Medium/High/...) = explicit level sent to LLM.
         // The fallback to caps.default_reasoning_effort is kept for safety in case
         // the session state was not initialized yet (e.g. direct AgentLoop usage).
-        let reasoning_effort = self
-            .session
-            .reasoning_effort()
-            .cloned()
-            .or_else(|| {
-                caps
-                    .as_ref()
-                    .and_then(|c| c.default_reasoning_effort.as_deref())
-                    .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
-            });
+        let reasoning_effort = self.session.reasoning_effort().cloned().or_else(|| {
+            caps.as_ref()
+                .and_then(|c| c.default_reasoning_effort.as_deref())
+                .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
+        });
         context_builder.set_reasoning_effort(reasoning_effort.clone());
         // Cache for emergency trim retry in call_llm_streaming_inner()
         // where context_builder is immutable.
         self.last_reasoning_effort = reasoning_effort;
 
         // Resolve thinking_mode (Anthropic: "extended" vs "adaptive")
-        let thinking_mode = caps
-            .as_ref()
-            .and_then(|c| c.thinking_mode.clone());
+        let thinking_mode = caps.as_ref().and_then(|c| c.thinking_mode.clone());
         context_builder.set_thinking_mode(thinking_mode.clone());
         self.last_thinking_mode = thinking_mode;
 
@@ -1436,7 +1418,9 @@ impl AgentLoop {
         // transient tools. Empty vec naturally skips.
         if !self.pending_transient_tool_msgs.is_empty() {
             let count = self.pending_transient_tool_msgs.len();
-            chat_request.messages.append(&mut self.pending_transient_tool_msgs);
+            chat_request
+                .messages
+                .append(&mut self.pending_transient_tool_msgs);
             debug_assert!(self.pending_transient_tool_msgs.is_empty());
             tracing::debug!(count, "Injected transient tool results into chat request");
         }
@@ -1704,8 +1688,11 @@ impl AgentLoop {
                 // so it is monotonic for the session's lifetime and
                 // survives restarts — unlike the `max_iterations` per-burst
                 // loop counter which resets on Continue (loop_.rs).
-                ctx_usage.iteration =
-                    self.session.conversation.as_ref().map(|c| c.bump_llm_call_counter());
+                ctx_usage.iteration = self
+                    .session
+                    .conversation
+                    .as_ref()
+                    .map(|c| c.bump_llm_call_counter());
 
                 if !self
                     .session_core
@@ -1877,8 +1864,7 @@ impl AgentLoop {
                  SUGGESTION: re-run with narrower parameters (pipe through 'head -N' or \
                  'tail -N' for pagination, use tighter grep patterns to reduce matches, \
                  or search fewer files/directories) to get a complete result.]",
-                original_bytes,
-                orig_tokens,
+                original_bytes, orig_tokens,
             );
 
             *result = format!("{kept}{truncation_marker}");
@@ -1916,9 +1902,7 @@ mod tests {
     use crate::agent::agent_core::BuiltinToolEntry;
     use crate::agent::context::ContextBuilder;
     use crate::config::RuntimeConfig;
-    use acowork_core::protocol::{
-        ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry,
-    };
+    use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
     use acowork_core::providers::mock::{MockProvider, MockResponse};
     use acowork_core::providers::traits::{
         ChatMessage, ChatRequest, ChatResponse, MessageRole, StreamEvent, UsageInfo,
@@ -2054,11 +2038,7 @@ mod tests {
         loop_.session.model = Some(model.to_string());
     }
 
-    fn set_provider_compact(
-        loop_: &mut AgentLoop,
-        provider: &str,
-        compact: Option<&str>,
-    ) {
+    fn set_provider_compact(loop_: &mut AgentLoop, provider: &str, compact: Option<&str>) {
         loop_
             .core
             .provider_compact_models
@@ -2076,8 +2056,14 @@ mod tests {
         // byte-identical duplicate staged by `run_inner`. Request order:
         // A → B → D (Block C removed in v2).
         let mut loop_ = build_loop();
-        loop_.session.history.append(ChatMessage::user("First turn"));
-        loop_.session.history.append(ChatMessage::assistant("First reply"));
+        loop_
+            .session
+            .history
+            .append(ChatMessage::user("First turn"));
+        loop_
+            .session
+            .history
+            .append(ChatMessage::assistant("First reply"));
         let current = ChatMessage::user("Second turn");
         loop_.session.history.append(current.clone());
         loop_.pending_user_message = Some(current.clone());
@@ -2143,18 +2129,24 @@ mod tests {
         loop_.session.history.append(ChatMessage::user("Turn"));
         // A REAL tool_call on the assistant turn keeps the tool result
         // from being classified as orphaned by sanitize_messages.
-        loop_.session.history.append(ChatMessage::assistant_with_tools(
-            "",
-            vec![ToolCall {
-                id: "toolu_1".to_string(),
-                call_type: "function".to_string(),
-                function: FunctionCall {
-                    name: "test_tool".to_string(),
-                    arguments: "{}".to_string(),
-                },
-            }],
-        ));
-        loop_.session.history.append(ChatMessage::tool("toolu_1", "ok"));
+        loop_
+            .session
+            .history
+            .append(ChatMessage::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "toolu_1".to_string(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "test_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }],
+            ));
+        loop_
+            .session
+            .history
+            .append(ChatMessage::tool("toolu_1", "ok"));
         loop_.pending_user_message = None;
 
         let mut builder = ContextBuilder::new("Kernel".to_string());
@@ -2167,7 +2159,11 @@ mod tests {
             "tool iteration: last message must be the tool result, no Block D"
         );
         assert_eq!(
-            request.messages.iter().filter(|m| m.content == "Turn").count(),
+            request
+                .messages
+                .iter()
+                .filter(|m| m.content == "Turn")
+                .count(),
             1,
             "no Block D means the user turn appears exactly once"
         );
@@ -2357,7 +2353,12 @@ mod tests {
         assert!(loop_.core.is_default_compact_provider_available());
 
         // Revoke the key -> no longer available.
-        loop_.core.provider_key_vault.write().unwrap().remove("deepseek");
+        loop_
+            .core
+            .provider_key_vault
+            .write()
+            .unwrap()
+            .remove("deepseek");
         assert!(!loop_.core.is_default_compact_provider_available());
     }
 
@@ -2460,7 +2461,11 @@ mod tests {
             targets.len() <= 2,
             "expected at most 2 distinct targets (global default + maybe one other), got {targets:?}"
         );
-        assert!(targets.iter().any(|t| matches!(t.tier, DistillTier::GlobalDefault)));
+        assert!(
+            targets
+                .iter()
+                .any(|t| matches!(t.tier, DistillTier::GlobalDefault))
+        );
     }
 
     // ── compact_history_if_needed: call-phase fallback integration ────
@@ -2507,14 +2512,8 @@ mod tests {
         fn name(&self) -> &str {
             "tier1-fail-then-succeed"
         }
-        async fn chat(
-            &self,
-            request: ChatRequest,
-        ) -> acowork_core::error::Result<ChatResponse> {
-            self.call_log
-                .lock()
-                .unwrap()
-                .push(request.model.clone());
+        async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
+            self.call_log.lock().unwrap().push(request.model.clone());
             let mut resp = self.responses.lock().unwrap();
             let next = if resp.is_empty() {
                 MockResponse::Text {
@@ -2534,20 +2533,17 @@ mod tests {
                     }),
                     ..Default::default()
                 }),
-                MockResponse::Error { message } => Err(
-                    acowork_core::AcoworkError::Provider(
-                        acowork_core::providers::ProviderError::unknown(message),
-                    ),
-                ),
+                MockResponse::Error { message } => Err(acowork_core::AcoworkError::Provider(
+                    acowork_core::providers::ProviderError::unknown(message),
+                )),
                 _ => unimplemented!(),
             }
         }
         async fn chat_stream(
             &self,
             _request: ChatRequest,
-        ) -> acowork_core::error::Result<
-            Box<dyn futures_core::Stream<Item = StreamEvent> + Send>,
-        > {
+        ) -> acowork_core::error::Result<Box<dyn futures_core::Stream<Item = StreamEvent> + Send>>
+        {
             unimplemented!()
         }
         async fn chat_token_count(
@@ -2566,10 +2562,7 @@ mod tests {
         fn name(&self) -> &str {
             "always-fail"
         }
-        async fn chat(
-            &self,
-            _request: ChatRequest,
-        ) -> acowork_core::error::Result<ChatResponse> {
+        async fn chat(&self, _request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
             Err(acowork_core::AcoworkError::Provider(
                 acowork_core::providers::ProviderError::unknown("permanent failure".to_string()),
             ))
@@ -2577,9 +2570,8 @@ mod tests {
         async fn chat_stream(
             &self,
             _request: ChatRequest,
-        ) -> acowork_core::error::Result<
-            Box<dyn futures_core::Stream<Item = StreamEvent> + Send>,
-        > {
+        ) -> acowork_core::error::Result<Box<dyn futures_core::Stream<Item = StreamEvent> + Send>>
+        {
             unimplemented!()
         }
         async fn chat_token_count(
@@ -2641,7 +2633,9 @@ mod tests {
             });
         }
 
-        let _ = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let _ = loop_
+            .compact_history_if_needed("deepseek-v4-pro", true)
+            .await;
 
         let log = call_log.lock().unwrap();
         assert!(
@@ -2690,7 +2684,9 @@ mod tests {
         }
 
         let tokens_before = loop_.session.history.token_count();
-        let _ = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let _ = loop_
+            .compact_history_if_needed("deepseek-v4-pro", true)
+            .await;
         let tokens_after = loop_.session.history.token_count();
 
         // No compaction marker — the trim path was taken instead.
@@ -2733,8 +2729,7 @@ mod tests {
                 content: "<summary>ok</summary>".to_string(),
             },
             MockResponse::Text {
-                content: "<summary>a valid compact model summary output here</summary>"
-                    .to_string(),
+                content: "<summary>a valid compact model summary output here</summary>".to_string(),
             },
         ]);
         let call_log = provider.log();
@@ -2756,7 +2751,9 @@ mod tests {
             });
         }
 
-        let _ = loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let _ = loop_
+            .compact_history_if_needed("deepseek-v4-pro", true)
+            .await;
 
         // Only ONE LLM call: LowQuality breaks the chain instead of
         // stepping down to a weaker model.

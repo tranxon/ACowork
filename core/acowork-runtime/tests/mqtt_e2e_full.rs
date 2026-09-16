@@ -10,12 +10,12 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use acowork_core::mqtt_proto::{
-    self, control_command::Command, data_envelope::Payload, AvailableMcps,
-    AvailableProviders, AvailableSearches, ChatMessage, ControlCommand, DataEnvelope,
-    LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef, SearchRef,
+    self, AvailableMcps, AvailableProviders, AvailableSearches, ChatMessage, ControlCommand,
+    DataEnvelope, LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef, SearchRef,
+    control_command::Command, data_envelope::Payload,
 };
-use acowork_gateway::mqtt::{start_broker, GatewayMqttClient};
-use acowork_runtime::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
+use acowork_gateway::mqtt::{GatewayMqttClient, start_broker};
+use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
 use prost::Message as _;
 
 /// Reserve a unique broker port for the current test.
@@ -55,9 +55,11 @@ const TEST_INSTANCE_ID: &str = "6d3f0c2a-9b1e-4c7a-a5d8-2e4f6b8a0c1d";
 #[test]
 fn integration_broker_starts() {
     let port = fresh_broker_port();
-    let broker = start_broker("127.0.0.1", port)
-        .expect("broker should start in separate thread");
-    assert_eq!(broker.listen_addr.to_string(), format!("127.0.0.1:{}", port));
+    let broker = start_broker("127.0.0.1", port).expect("broker should start in separate thread");
+    assert_eq!(
+        broker.listen_addr.to_string(),
+        format!("127.0.0.1:{}", port)
+    );
     drop(broker);
 }
 
@@ -80,31 +82,29 @@ fn integration_gateway_and_runtime_connect() {
         // Runtime client connects
         let cache = new_shared_cache();
         let (control_tx, mut _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.agent",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Test Agent",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
-                username: None,
-                password: None,
-            },
-        )
+        let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
         .await
         .expect("runtime connect");
 
@@ -132,36 +132,37 @@ fn integration_control_message_flow() {
     rt.block_on(async {
         // Gateway publisher
         let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         // Runtime with control_rx
         let cache = new_shared_cache();
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _runtime = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.agent",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
-                username: None,
-                password: None,
-            },
-        ).await.unwrap();
+        let _runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
+        .await
+        .unwrap();
 
         // Publish control message from Gateway
         let cmd = ControlCommand {
@@ -179,18 +180,15 @@ fn integration_control_message_flow() {
             .expect("publish");
 
         // Runtime receives via control_rx (with timeout)
-        let received = tokio::time::timeout(
-            Duration::from_secs(3),
-            control_rx.recv(),
-        ).await
+        let received = tokio::time::timeout(Duration::from_secs(3), control_rx.recv())
+            .await
             .expect("timeout")
             .expect("control_rx closed");
 
         let (_topic, payload_bytes) = received;
 
         // Verify it's valid ControlCommand protobuf
-        let env = DataEnvelope::decode(payload_bytes.as_slice())
-            .expect("decode DataEnvelope");
+        let env = DataEnvelope::decode(payload_bytes.as_slice()).expect("decode DataEnvelope");
 
         match env.payload {
             Some(Payload::ControlCommand(ctrl)) => {
@@ -225,35 +223,37 @@ fn integration_control_stop_flow() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port).await.unwrap();
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
+            .await
+            .unwrap();
 
         let cache = new_shared_cache();
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.agent",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
-                username: None,
-                password: None,
-            },
-        ).await.unwrap();
+        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
+        .await
+        .unwrap();
 
         let cmd = ControlCommand {
             instance_id: TEST_INSTANCE_ID.into(),
@@ -262,7 +262,9 @@ fn integration_control_stop_flow() {
                 reason: String::new(),
             })),
         };
-        gw.publish_control_command(TEST_INSTANCE_ID, cmd).await.unwrap();
+        gw.publish_control_command(TEST_INSTANCE_ID, cmd)
+            .await
+            .unwrap();
 
         // 10s timeout (was 2s, raised after ADR-044 Phase 2 fixed the
         // cross-test port bind). Parallel `cargo test` runs 5 brokers
@@ -272,21 +274,14 @@ fn integration_control_stop_flow() {
         // macOS dev box. Single retry below guards the long tail.
         let mut payload_opt = None;
         for attempt in 0..2 {
-            match tokio::time::timeout(
-                Duration::from_secs(10),
-                control_rx.recv(),
-            )
-            .await
-            {
+            match tokio::time::timeout(Duration::from_secs(10), control_rx.recv()).await {
                 Ok(Some(p)) => {
                     payload_opt = Some(p);
                     break;
                 }
                 Ok(None) => panic!("control_rx closed unexpectedly on attempt {}", attempt),
                 Err(_) if attempt == 0 => {
-                    eprintln!(
-                        "control_stop_flow: 10s timeout on attempt 0, retrying once"
-                    );
+                    eprintln!("control_stop_flow: 10s timeout on attempt 0, retrying once");
                     // Re-publish in case the original message was lost in
                     // a parallel broker poll forward race.
                     let _ = gw
@@ -309,11 +304,16 @@ fn integration_control_stop_flow() {
         let (_topic, payload) = payload_opt.expect("retry must populate payload_opt");
 
         let env = DataEnvelope::decode(payload.as_slice()).unwrap();
-        assert!(matches!(env.payload, Some(Payload::ControlCommand(
-            ControlCommand { command: Some(Command::Stop(_)), .. }
-        ))));
+        assert!(matches!(
+            env.payload,
+            Some(Payload::ControlCommand(ControlCommand {
+                command: Some(Command::Stop(_)),
+                ..
+            }))
+        ));
 
-        drop(gw); drop(_rt);
+        drop(gw);
+        drop(_rt);
     });
     drop(broker);
 }
@@ -329,34 +329,36 @@ fn integration_multiple_messages() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port).await.unwrap();
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
+            .await
+            .unwrap();
         let cache = new_shared_cache();
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.agent",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
-                username: None,
-                password: None,
-            },
-        ).await.unwrap();
+        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+            username: None,
+            password: None,
+        })
+        .await
+        .unwrap();
         let messages = ["msg-1", "msg-2", "msg-3"];
         for (i, content) in messages.iter().enumerate() {
             let cmd = ControlCommand {
@@ -369,7 +371,9 @@ fn integration_multiple_messages() {
                     params_json: String::new(),
                 })),
             };
-            gw.publish_control_command(TEST_INSTANCE_ID, cmd).await.unwrap();
+            gw.publish_control_command(TEST_INSTANCE_ID, cmd)
+                .await
+                .unwrap();
         }
 
         let mut received = Vec::new();
@@ -380,7 +384,9 @@ fn integration_multiple_messages() {
             // default parallel scheduling once 5 brokers compete for the
             // same Tokio reactor.
             let (_, payload) = tokio::time::timeout(Duration::from_secs(10), control_rx.recv())
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             let env = DataEnvelope::decode(payload.as_slice()).unwrap();
             if let Some(Payload::ControlCommand(ctrl)) = env.payload
                 && let Some(Command::ChatMessage(msg)) = ctrl.command
@@ -391,7 +397,8 @@ fn integration_multiple_messages() {
 
         assert_eq!(received, ["msg-1", "msg-2", "msg-3"]);
 
-        drop(gw); drop(_rt);
+        drop(gw);
+        drop(_rt);
     });
     drop(broker);
 }
@@ -418,31 +425,32 @@ fn integration_lwt_offline_on_disconnect() {
         rt.block_on(async {
             let cache = new_shared_cache();
             let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
-            let runtime = RuntimeMqttClient::connect(
-                MqttConnectConfig {
-                    host: "127.0.0.1",
-                    port,
-                    agent_id: "com.test.lwt",
-                    instance_id: TEST_INSTANCE_ID,
-                    agent_name: "LWT Agent",
-                    agent_version: "1.0.0",
-                    config_json: "{}",
-                    available_cache: cache,
-                    control_tx,
-                    identity_update_tx: None,
-                    provider_update_tx: None,
-                    search_update_tx: None,
-                    embedding_update_tx: None,
-                    node_id: None,
-                    lsps_update_tx: None,
-                    node_proxy_update_tx: None,
-                    http_advertise_endpoint: None,
-                    http_port: None,
-                    work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
-                    username: None,
-                    password: None,
-                },
-            ).await.unwrap();
+            let runtime = RuntimeMqttClient::connect(MqttConnectConfig {
+                host: "127.0.0.1",
+                port,
+                agent_id: "com.test.lwt",
+                instance_id: TEST_INSTANCE_ID,
+                agent_name: "LWT Agent",
+                agent_version: "1.0.0",
+                config_json: "{}",
+                available_cache: cache,
+                control_tx,
+                identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
+                embedding_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
+                node_proxy_update_tx: None,
+                http_advertise_endpoint: None,
+                http_port: None,
+                work_dir: std::env::temp_dir()
+                    .join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                username: None,
+                password: None,
+            })
+            .await
+            .unwrap();
 
             // connect() returns only after bootstrap published the retained
             // "online" status — the checker in Phase 2 sees a pre-existing
@@ -467,8 +475,13 @@ fn integration_lwt_offline_on_disconnect() {
         opts.set_keep_alive(Duration::from_secs(5));
         let (client, mut events) = rumqttc::AsyncClient::new(opts, 10);
 
-        client.subscribe(&format!("acowork/agents/{}/status", TEST_INSTANCE_ID), rumqttc::QoS::AtLeastOnce)
-            .await.unwrap();
+        client
+            .subscribe(
+                &format!("acowork/agents/{}/status", TEST_INSTANCE_ID),
+                rumqttc::QoS::AtLeastOnce,
+            )
+            .await
+            .unwrap();
 
         let status = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -481,7 +494,9 @@ fn integration_lwt_offline_on_disconnect() {
                     _ => continue,
                 }
             }
-        }).await.expect("should receive retained LWT message");
+        })
+        .await
+        .expect("should receive retained LWT message");
 
         assert_eq!(status, "offline", "LWT should publish offline status");
 
@@ -524,44 +539,44 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
         // directly; this one needs the *Runtime MQTT poll loop* to
         // perform the write, which only happens after a retained
         // message arrives on `acowork/global/mcps`.
-        let work_dir = std::env::temp_dir().join(format!(
-            "acowork-catalog-e2e-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let work_dir =
+            std::env::temp_dir().join(format!("acowork-catalog-e2e-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
 
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.catalog",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Catalog Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: work_dir.clone(),
-                username: None,
-                password: None,
-            },
-        ).await.unwrap();
+        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.catalog",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Catalog Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: work_dir.clone(),
+            username: None,
+            password: None,
+        })
+        .await
+        .unwrap();
 
         // ── 2. Gateway publishes `acowork/global/mcps` (retained) ───
         // Mimics build_available_mcps in
         // acowork-gateway/src/mqtt/global_resources_publisher.rs.
-        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port).await.unwrap();
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
+            .await
+            .unwrap();
 
         let payload = AvailableMcps {
             version: 1,
@@ -596,9 +611,14 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
             version: 1,
             payload: Some(Payload::AvailableMcps(payload)),
         };
-        gw.publish_envelope("acowork/global/mcps", &envelope, acowork_gateway::mqtt::MqttQoS::AtLeastOnce, true)
-            .await
-            .expect("gateway publish should succeed");
+        gw.publish_envelope(
+            "acowork/global/mcps",
+            &envelope,
+            acowork_gateway::mqtt::MqttQoS::AtLeastOnce,
+            true,
+        )
+        .await
+        .expect("gateway publish should succeed");
         eprintln!("[test] gateway published available_mcps (retained)");
 
         // ── 3. Wait for Runtime poll loop to receive and persist ────
@@ -693,39 +713,35 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         // ── 1. Spin up Runtime with a real work_dir ───────────────────
-        let work_dir = std::env::temp_dir().join(format!(
-            "acowork-provider-e2e-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let work_dir =
+            std::env::temp_dir().join(format!("acowork-provider-e2e-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
 
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.providers",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Provider Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: work_dir.clone(),
-                username: None,
-                password: None,
-            },
-        )
+        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.providers",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Provider Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: work_dir.clone(),
+            username: None,
+            password: None,
+        })
         .await
         .unwrap();
 
@@ -795,10 +811,9 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
         );
 
         // ── 4. Verify provider list and protocol_type (C1 regression) ─
-        let cfg =
-            acowork_runtime::agent_config::load_agent_provider_config(&work_dir)
-                .expect("load should succeed")
-                .expect("file should now exist");
+        let cfg = acowork_runtime::agent_config::load_agent_provider_config(&work_dir)
+            .expect("load should succeed")
+            .expect("file should now exist");
         assert_eq!(cfg.providers.len(), 2, "should have both providers");
         assert_eq!(cfg.version, 42, "version should match MQTT payload");
 
@@ -853,39 +868,35 @@ fn integration_searches_retained_persists_to_agent_search_json() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         // ── 1. Spin up Runtime with a real work_dir ───────────────────
-        let work_dir = std::env::temp_dir().join(format!(
-            "acowork-search-e2e-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let work_dir =
+            std::env::temp_dir().join(format!("acowork-search-e2e-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
 
         let cache = new_shared_cache();
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let _rt = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.searches",
-                instance_id: TEST_INSTANCE_ID,
-                agent_name: "Search Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-                work_dir: work_dir.clone(),
-                username: None,
-                password: None,
-            },
-        )
+        let _rt = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.searches",
+            instance_id: TEST_INSTANCE_ID,
+            agent_name: "Search Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+            work_dir: work_dir.clone(),
+            username: None,
+            password: None,
+        })
         .await
         .unwrap();
 
@@ -951,10 +962,9 @@ fn integration_searches_retained_persists_to_agent_search_json() {
         );
 
         // ── 4. Verify catalog landed on disk ──────────────────────────
-        let cfg =
-            acowork_runtime::agent_config::load_agent_search_config(&work_dir)
-                .expect("load should succeed")
-                .expect("file should now exist");
+        let cfg = acowork_runtime::agent_config::load_agent_search_config(&work_dir)
+            .expect("load should succeed")
+            .expect("file should now exist");
         assert_eq!(cfg.catalog.len(), 2, "catalog should have both entries");
         assert_eq!(cfg.catalog[0].id, "tavily");
         assert_eq!(cfg.catalog[1].id, "searxng");

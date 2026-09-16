@@ -56,8 +56,7 @@ pub struct SessionHandle {
     /// Owned by [`SessionState`]; shared with SessionHandle so
     /// [`SessionManager::snapshot_session_state`] can read it directly.
     /// Written by [`AgentLoop::emit_session_state`] on every status transition.
-    pub(crate) snapshot:
-        Arc<std::sync::RwLock<SessionRuntimeSnapshot>>,
+    pub(crate) snapshot: Arc<std::sync::RwLock<SessionRuntimeSnapshot>>,
     /// Per-session workspace ID. Single source of truth, shared with [`SessionCore`].
     /// Written synchronously by [`SessionManager::set_session_workspace`],
     /// read by `list_sessions` and `session_workspace_id`.

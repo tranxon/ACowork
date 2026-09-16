@@ -428,7 +428,13 @@
     "headLabel": "HEAD",
     "workingTreeLabel": "Working Tree",
     "commitPickerLabel": "Select a revision",
-    "commitPickerLoading": "Loading commits…"
+    "commitPickerLoading": "Loading commits…",
+    "commitPickerSearchPlaceholder": "Search message, author, or hash",
+    "commitPickerShowing": "Showing {{start}}-{{end}} of {{total}}",
+    "commitPickerNoMatches": "No matching commits",
+    "commitPickerPageOf": "Page {{current}} of {{total}}",
+    "commitPickerPrevPage": "Previous page",
+    "commitPickerNextPage": "Next page"
   },
   "fileTree": {
     "deleteConfirmOk": "Delete",

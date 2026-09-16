@@ -139,9 +139,7 @@ pub(crate) async fn enable_debug_mode_and_fill_slot(
             // engineer sees the asymmetry, but report NewlyEnabled so
             // the Desktop can retry; the slot will be filled on a
             // subsequent enable call (after the wiring bug is fixed).
-            tracing::error!(
-                "enable_debug_mode returned without a DebugService — slot stays empty"
-            );
+            tracing::error!("enable_debug_mode returned without a DebugService — slot stays empty");
             DebugEnableOutcome::NewlyEnabled
         }
     }
@@ -285,12 +283,12 @@ mod tests {
     #[tokio::test]
     async fn enable_debug_mode_and_fill_slot_is_idempotent() {
         let session_manager = build_test_session_manager().await;
-        let mqtt_client_slot: SharedMqttClientSlot =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client_slot: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_manager_slot: SharedSessionManagerSlot =
             Arc::new(tokio::sync::RwLock::new(Some(session_manager.clone())));
-        let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let debug_service_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
         // 1. Empty slot → NewlyEnabled.
         let outcome = enable_debug_mode_and_fill_slot(
@@ -325,17 +323,12 @@ mod tests {
         );
 
         // 3. Empty session_manager_slot → SessionManagerUnavailable.
-        let empty_sm_slot: SharedSessionManagerSlot =
-            Arc::new(tokio::sync::RwLock::new(None));
+        let empty_sm_slot: SharedSessionManagerSlot = Arc::new(tokio::sync::RwLock::new(None));
         let fresh_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
             Arc::new(tokio::sync::Mutex::new(None));
-        let outcome3 = enable_debug_mode_and_fill_slot(
-            &fresh_slot,
-            &mqtt_client_slot,
-            &empty_sm_slot,
-            19876,
-        )
-        .await;
+        let outcome3 =
+            enable_debug_mode_and_fill_slot(&fresh_slot, &mqtt_client_slot, &empty_sm_slot, 19876)
+                .await;
         assert_eq!(
             outcome3,
             DebugEnableOutcome::SessionManagerUnavailable,
@@ -353,12 +346,12 @@ mod tests {
     #[tokio::test]
     async fn filled_slot_serves_debug_state_rpc() {
         let session_manager = build_test_session_manager().await;
-        let mqtt_client_slot: SharedMqttClientSlot =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client_slot: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_manager_slot: SharedSessionManagerSlot =
             Arc::new(tokio::sync::RwLock::new(Some(session_manager.clone())));
-        let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let debug_service_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
         let outcome = enable_debug_mode_and_fill_slot(
             &debug_service_slot,
@@ -402,19 +395,16 @@ mod tests {
     #[tokio::test]
     async fn disable_debug_mode_and_clear_slot_is_idempotent() {
         let session_manager = build_test_session_manager().await;
-        let mqtt_client_slot: SharedMqttClientSlot =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client_slot: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_manager_slot: SharedSessionManagerSlot =
             Arc::new(tokio::sync::RwLock::new(Some(session_manager.clone())));
-        let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let debug_service_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
         // 1. Empty slot → AlreadyDisabled.
-        let outcome = disable_debug_mode_and_clear_slot(
-            &debug_service_slot,
-            &session_manager_slot,
-        )
-        .await;
+        let outcome =
+            disable_debug_mode_and_clear_slot(&debug_service_slot, &session_manager_slot).await;
         assert_eq!(
             outcome,
             DebugDisableOutcome::AlreadyDisabled,
@@ -433,11 +423,8 @@ mod tests {
             debug_service_slot.lock().await.is_some(),
             "enable should have populated the slot"
         );
-        let outcome2 = disable_debug_mode_and_clear_slot(
-            &debug_service_slot,
-            &session_manager_slot,
-        )
-        .await;
+        let outcome2 =
+            disable_debug_mode_and_clear_slot(&debug_service_slot, &session_manager_slot).await;
         assert_eq!(
             outcome2,
             DebugDisableOutcome::NewlyDisabled,
@@ -481,13 +468,8 @@ mod tests {
                     Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
                 ),
             ))));
-        let empty_sm_slot: SharedSessionManagerSlot =
-            Arc::new(tokio::sync::RwLock::new(None));
-        let outcome3 = disable_debug_mode_and_clear_slot(
-            &leaked_slot,
-            &empty_sm_slot,
-        )
-        .await;
+        let empty_sm_slot: SharedSessionManagerSlot = Arc::new(tokio::sync::RwLock::new(None));
+        let outcome3 = disable_debug_mode_and_clear_slot(&leaked_slot, &empty_sm_slot).await;
         assert_eq!(
             outcome3,
             DebugDisableOutcome::SessionManagerUnavailable,
@@ -502,12 +484,12 @@ mod tests {
     #[tokio::test]
     async fn disable_is_safe_to_double_call() {
         let session_manager = build_test_session_manager().await;
-        let mqtt_client_slot: SharedMqttClientSlot =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let mqtt_client_slot: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_manager_slot: SharedSessionManagerSlot =
             Arc::new(tokio::sync::RwLock::new(Some(session_manager.clone())));
-        let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let debug_service_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(None));
 
         let _ = enable_debug_mode_and_fill_slot(
             &debug_service_slot,
@@ -517,17 +499,11 @@ mod tests {
         )
         .await;
 
-        let first = disable_debug_mode_and_clear_slot(
-            &debug_service_slot,
-            &session_manager_slot,
-        )
-        .await;
+        let first =
+            disable_debug_mode_and_clear_slot(&debug_service_slot, &session_manager_slot).await;
         assert_eq!(first, DebugDisableOutcome::NewlyDisabled);
-        let second = disable_debug_mode_and_clear_slot(
-            &debug_service_slot,
-            &session_manager_slot,
-        )
-        .await;
+        let second =
+            disable_debug_mode_and_clear_slot(&debug_service_slot, &session_manager_slot).await;
         assert_eq!(
             second,
             DebugDisableOutcome::AlreadyDisabled,

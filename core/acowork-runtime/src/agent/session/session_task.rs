@@ -15,11 +15,11 @@ use tokio::sync::mpsc;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
 use crate::agent::inbound::InboundMessage;
-use crate::cancellation::CancelHandle;
 use crate::agent::loop_::{AgentLoop, ChunkEvent, SessionChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_core::SessionCore;
 use crate::agent::session_state::SessionState;
+use crate::cancellation::CancelHandle;
 use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
 use crate::usecases::attachment::on_disk_name;
@@ -71,9 +71,7 @@ pub enum SessionMessage {
     /// endpoint after it rebuilds the prompt from `prompts/*.md`,
     /// including the required `system.md`). The next `build_chat_request`
     /// uses the new value — no agent restart needed.
-    UpdateSystemPrompt {
-        system_prompt: String,
-    },
+    UpdateSystemPrompt { system_prompt: String },
     /// ADR-030 C3: Sidecar came online (LSP relay became ready, embed model
     /// switched, ...) and we want to surface a new builtin tool to this
     /// session. Carries a pre-decorated `BuiltinToolEntry` so each session
@@ -87,9 +85,7 @@ pub enum SessionMessage {
     /// ADR-030 C3: Sidecar went away (LSP relay died, embed sidecar
     /// restart, ...). Removing the named builtin tool from this session's
     /// dispatch list. `name` should match `BuiltinToolEntry::name()`.
-    RemoveDynamicBuiltinTool {
-        name: String,
-    },
+    RemoveDynamicBuiltinTool { name: String },
     /// Update the title of the session's conversation
     UpdateSessionTitle { title: String },
     /// Update the workspace directory path for tool execution.
@@ -197,10 +193,7 @@ impl std::fmt::Debug for SessionMessage {
                     "shell_approval_threshold",
                     &overrides.shell_approval_threshold,
                 )
-                .field(
-                    "approval_timeout_secs",
-                    &overrides.approval_timeout_secs,
-                )
+                .field("approval_timeout_secs", &overrides.approval_timeout_secs)
                 .finish(),
             SessionMessage::UpdateWorkspaceContext { context_text } => f
                 .debug_struct("UpdateWorkspaceContext")
@@ -274,11 +267,12 @@ impl std::fmt::Debug for SessionMessage {
                 .field("embed_model_id", embed_model_id)
                 .field("embed_dimension", embed_dimension)
                 .field("embed_provider_id", embed_provider_id)
-                .field("embed_api_key_redacted", &embed_api_key.as_ref().map(|_| "***"))
+                .field(
+                    "embed_api_key_redacted",
+                    &embed_api_key.as_ref().map(|_| "***"),
+                )
                 .finish(),
-            SessionMessage::DisableEmbedConfig => {
-                f.debug_tuple("DisableEmbedConfig").finish()
-            }
+            SessionMessage::DisableEmbedConfig => f.debug_tuple("DisableEmbedConfig").finish(),
             SessionMessage::SystemNotification { content } => f
                 .debug_struct("SystemNotification")
                 .field("len", &content.len())
@@ -421,11 +415,7 @@ impl SessionTask {
         // template are replaced; new tools are appended.
         for entry in dynamic_builtin_tools {
             let name = entry.name();
-            if let Some(existing) = core_mut
-                .builtin_tools
-                .iter()
-                .position(|e| e.name() == name)
-            {
+            if let Some(existing) = core_mut.builtin_tools.iter().position(|e| e.name() == name) {
                 core_mut.builtin_tools[existing] = entry;
             } else {
                 core_mut.builtin_tools.push(entry);
@@ -458,7 +448,8 @@ impl SessionTask {
             core_mut.update_provider(new_provider, model);
         } else {
             let raw = core_mut.provider.clone();
-            let retry_config = crate::providers::reliable::RetryConfig::from(&core_mut.config.timeouts.retry);
+            let retry_config =
+                crate::providers::reliable::RetryConfig::from(&core_mut.config.timeouts.retry);
             let mut reliable = crate::providers::reliable::ReliableProvider::new(raw, retry_config);
             if let Some(status) = &session_core.retry_session_status
                 && let Some(handle) = &session_core.retry_wait_handle
@@ -567,7 +558,9 @@ impl SessionTask {
         // Mirror the identity onto SessionState so compaction paths
         // (loop_context / loop_session) can inject the user's preferred
         // language into the compact model's system prompt.
-        agent_loop.session.set_identity_context(identity_context.clone());
+        agent_loop
+            .session
+            .set_identity_context(identity_context.clone());
 
         // ADR-012: Apply per-session model from SessionState.
         // For new sessions, model is set from provider_config during creation.
@@ -611,11 +604,7 @@ impl SessionTask {
         if let Some(ref conv) = agent_loop.session.conversation
             && let Some(persisted) = conv.tokens()
         {
-            let model_name = agent_loop
-                .session
-                .model
-                .as_deref()
-                .unwrap_or("unknown");
+            let model_name = agent_loop.session.model.as_deref().unwrap_or("unknown");
             if let Some(caps) = agent_loop.core.get_model_capabilities(model_name) {
                 let max_output = agent_loop
                     .core
@@ -848,10 +837,7 @@ impl SessionTask {
                 }) => {
                     let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
-                    if content.trim().is_empty()
-                        && !has_attached
-                        && !has_content_parts
-                    {
+                    if content.trim().is_empty() && !has_attached && !has_content_parts {
                         tracing::warn!(
                             session_id = %session_id,
                             "SessionTask received empty chat message, ignoring"
@@ -1003,49 +989,62 @@ impl SessionTask {
                     // the chat turn with the same `ChunkEvent::Error` shape used
                     // by `agent_loop.run` failures below, so the frontend sees a
                     // consistent error surface regardless of which stage failed.
-                    let final_content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>> =
-                        match attached_items.as_deref() {
-                            Some(items) if !items.is_empty() => {
-                                match crate::agent::attachment_to_image::derive_image_parts(
-                                    agent_loop.core.attachment_service(),
-                                    items,
-                                ).await {
-                                    Ok(derived) => crate::agent::attachment_to_image::merge_content_parts(
-                                        content_parts, derived,
-                                    ),
-                                    Err(e) => {
-                                        tracing::error!(
-                                            session_id = %session_id,
-                                            error = %e,
-                                            "Failed to derive image content_parts from attached_items"
-                                        );
-                                        if let Some(ref tx) = chunk_tx {
-                                            let (user_message, detail, error_type) = e.error_info();
-                                            let event = SessionChunkEvent {
-                                                session_id: session_id.clone(),
-                                                event: ChunkEvent::Error {
-                                                    user_message,
-                                                    detail,
-                                                    error_type,
-                                                    message_id: message_id.clone(),
-                                                },
-                                            };
-                                            if tx.send(event).await.is_err() {
-                                                tracing::warn!(
-                                                    session_id = %session_id,
-                                                    "Failed to send Error chunk event (derive failure)"
-                                                );
-                                            }
+                    let final_content_parts: Option<
+                        Vec<acowork_core::providers::traits::ContentPart>,
+                    > = match attached_items.as_deref() {
+                        Some(items) if !items.is_empty() => {
+                            match crate::agent::attachment_to_image::derive_image_parts(
+                                agent_loop.core.attachment_service(),
+                                items,
+                            )
+                            .await
+                            {
+                                Ok(derived) => {
+                                    crate::agent::attachment_to_image::merge_content_parts(
+                                        content_parts,
+                                        derived,
+                                    )
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        session_id = %session_id,
+                                        error = %e,
+                                        "Failed to derive image content_parts from attached_items"
+                                    );
+                                    if let Some(ref tx) = chunk_tx {
+                                        let (user_message, detail, error_type) = e.error_info();
+                                        let event = SessionChunkEvent {
+                                            session_id: session_id.clone(),
+                                            event: ChunkEvent::Error {
+                                                user_message,
+                                                detail,
+                                                error_type,
+                                                message_id: message_id.clone(),
+                                            },
+                                        };
+                                        if tx.send(event).await.is_err() {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                "Failed to send Error chunk event (derive failure)"
+                                            );
                                         }
-                                        continue;
                                     }
+                                    continue;
                                 }
                             }
-                            _ => content_parts,
-                        };
+                        }
+                        _ => content_parts,
+                    };
 
                     match agent_loop
-                        .run(&enriched_content, &mut context_builder, final_content_parts, Some(message_id.clone()), Some(raw_user_message.as_str()), attached_items.as_deref())
+                        .run(
+                            &enriched_content,
+                            &mut context_builder,
+                            final_content_parts,
+                            Some(message_id.clone()),
+                            Some(raw_user_message.as_str()),
+                            attached_items.as_deref(),
+                        )
                         .await
                     {
                         Ok(response) => {
@@ -1177,11 +1176,7 @@ impl SessionTask {
                     // tool_definitions in one shot. `apply_builtin_tools_update`
                     // re-resolves through the shared policy, so no manual
                     // override is needed here.
-                    apply_builtin_tools_update(
-                        &mut agent_loop.core,
-                        &mut context_builder,
-                        entries,
-                    );
+                    apply_builtin_tools_update(&mut agent_loop.core, &mut context_builder, entries);
                 }
                 Some(SessionMessage::UpdateSystemPrompt { system_prompt }) => {
                     tracing::info!(
@@ -1218,10 +1213,7 @@ impl SessionTask {
                     };
                     // Rebuild dispatch list + LLM tool_definitions in one
                     // place (single source of truth for the reroute).
-                    refresh_builtin_tools_dependents(
-                        &mut agent_loop.core,
-                        &mut context_builder,
-                    );
+                    refresh_builtin_tools_dependents(&mut agent_loop.core, &mut context_builder);
                     tracing::info!(
                         session_id = %session_id,
                         tool = %tool_name,
@@ -1280,9 +1272,11 @@ impl SessionTask {
                     let next = identity_context.unwrap_or_default();
                     context_builder.set_identity_context(next.clone());
                     // Keep SessionState in sync so compaction sees the latest value.
-                    agent_loop.session.set_identity_context(
-                        if next.is_empty() { None } else { Some(next) },
-                    );
+                    agent_loop.session.set_identity_context(if next.is_empty() {
+                        None
+                    } else {
+                        Some(next)
+                    });
                 }
                 Some(SessionMessage::ProviderListUpdated) => {
                     // The shared global_provider_list on AgentCore is already updated
@@ -1375,7 +1369,8 @@ impl SessionTask {
                     );
                     match action {
                         crate::agent::loop_::CompressionAction::CompressSummary => {
-                            let model_name = agent_loop.session.model().unwrap_or("default").to_string();
+                            let model_name =
+                                agent_loop.session.model().unwrap_or("default").to_string();
                             if let Err(e) = agent_loop
                                 .compact_history_if_needed(&model_name, true)
                                 .await
@@ -1392,16 +1387,16 @@ impl SessionTask {
                                         event: ChunkEvent::Error {
                                             user_message,
                                             detail,
-                                    error_type,
-                                    message_id: String::new(),
-                                },
-                            };
-                            if tx.send(event).await.is_err() {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    "Failed to send Error chunk event (manual compress action)"
-                                );
-                            }
+                                            error_type,
+                                            message_id: String::new(),
+                                        },
+                                    };
+                                    if tx.send(event).await.is_err() {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            "Failed to send Error chunk event (manual compress action)"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1445,9 +1440,7 @@ impl SessionTask {
                     // pass None to keep the original call shape.
                     let api_key_ref = embed_api_key.as_deref();
 
-                    if needs_migration
-                        && let Some(ref admin) = agent_loop.core.memory_admin
-                    {
+                    if needs_migration && let Some(ref admin) = agent_loop.core.memory_admin {
                         let admin = admin.clone();
                         let old_dim = admin.embedding_dim();
                         tracing::info!(
@@ -1468,9 +1461,8 @@ impl SessionTask {
                                 embed_dimension,
                                 &agent_loop.core.config.timeouts,
                             );
-                        let migration_provider =
-                            std::sync::Arc::new(migration_provider)
-                                as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
+                        let migration_provider = std::sync::Arc::new(migration_provider)
+                            as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
 
                         // Bridge async embed into a sync closure for
                         // MemoryAdminService::migrate_embedding_dimension.
@@ -1527,8 +1519,9 @@ impl SessionTask {
                     // different dimension are automatically filtered out.
                     let new_emb: Arc<dyn crate::embedding::EmbeddingProvider> =
                         if let Some(ref old_provider) = agent_loop.core.embedding_provider {
-                            Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
-                                vec![
+                            Arc::new(
+                                crate::embedding::FallbackEmbeddingProvider::with_providers(
+                                    vec![
                                 (Box::new(new_onnx_provider), 500),
                                 (
                                     Box::new(
@@ -1539,15 +1532,18 @@ impl SessionTask {
                                     5000,
                                 ),
                             ],
-                                crate::embedding::EmbeddingConfig::default(),
+                                    crate::embedding::EmbeddingConfig::default(),
+                                )
+                                .with_locked_dimension(embed_dimension),
                             )
-                            .with_locked_dimension(embed_dimension))
                         } else {
-                            Arc::new(crate::embedding::FallbackEmbeddingProvider::with_providers(
-                                vec![(Box::new(new_onnx_provider), 500)],
-                                crate::embedding::EmbeddingConfig::default(),
+                            Arc::new(
+                                crate::embedding::FallbackEmbeddingProvider::with_providers(
+                                    vec![(Box::new(new_onnx_provider), 500)],
+                                    crate::embedding::EmbeddingConfig::default(),
+                                )
+                                .with_locked_dimension(embed_dimension),
                             )
-                            .with_locked_dimension(embed_dimension))
                         };
                     agent_loop.core.update_embedding_provider(new_emb);
                 }
@@ -1632,7 +1628,10 @@ fn rebuild_context_tool_definitions(
         })
         .collect();
     tracing::info!(
-        old_count = context_builder.tool_definitions().map(|t| t.len()).unwrap_or(0),
+        old_count = context_builder
+            .tool_definitions()
+            .map(|t| t.len())
+            .unwrap_or(0),
         new_count = new_tool_definitions.len(),
         "Rebuilding context builder tool definitions from builtin_tools"
     );
@@ -1679,10 +1678,7 @@ fn apply_builtin_tools_update(
 /// MUST NOT call `rebuild_all_tools` / `rebuild_context_tool_definitions`
 /// separately — that would re-introduce the duplicated flow that this
 /// function deprecates.
-fn refresh_builtin_tools_dependents(
-    core: &mut AgentCore,
-    context_builder: &mut ContextBuilder,
-) {
+fn refresh_builtin_tools_dependents(core: &mut AgentCore, context_builder: &mut ContextBuilder) {
     core.rebuild_all_tools();
     rebuild_context_tool_definitions(&core.builtin_tools, context_builder);
 }
@@ -1950,8 +1946,14 @@ mod tests {
         );
         // The on-disk suffix must come from the format, NOT the old
         // hardcoded `.bin` (the safe_extension whitelist regression).
-        assert!(s.contains(".pdf)"), "docx should land with real extension, got: {s}");
-        assert!(!s.contains(".bin"), "must not regress to .bin fallback, got: {s}");
+        assert!(
+            s.contains(".pdf)"),
+            "docx should land with real extension, got: {s}"
+        );
+        assert!(
+            !s.contains(".bin"),
+            "must not regress to .bin fallback, got: {s}"
+        );
     }
 
     /// Office docs all emit their real extension in the hint path —
@@ -1960,13 +1962,18 @@ mod tests {
     /// document format" error back.
     #[test]
     fn test_build_attachment_hint_office_docs_emit_real_extensions() {
-        for (fmt, ext) in [("pdf", "pdf"), ("docx", "docx"), ("pptx", "pptx"), ("xlsx", "xlsx")] {
+        for (fmt, ext) in [
+            ("pdf", "pdf"),
+            ("docx", "docx"),
+            ("pptx", "pptx"),
+            ("xlsx", "xlsx"),
+        ] {
             let items = vec![acowork_core::protocol::AttachedItem::FileUpload {
                 document_id: "0123456789ab-3".to_string(),
                 filename: format!("report.{fmt}"),
                 format: fmt.to_string(),
                 size_bytes: 100,
-            client_id: None,
+                client_id: None,
             }];
             let s = build_attachment_hint("x", Some(&items), Some("/work"));
             assert!(
@@ -2006,7 +2013,7 @@ mod tests {
             acowork_core::protocol::AttachedItem::AttachedFile {
                 abs_path: "/work/src/lib.rs".to_string(),
                 name: "lib.rs".to_string(),
-            client_id: None,
+                client_id: None,
             },
             acowork_core::protocol::AttachedItem::FileUpload {
                 document_id: "0123456789ab-3".to_string(),
@@ -2022,14 +2029,20 @@ mod tests {
                 size_bytes: 1,
                 width: Some(800),
                 height: Some(600),
-            client_id: None,
+                client_id: None,
             },
         ];
         let s = build_attachment_hint("look at these", Some(&items), Some("/work"));
         let ws_idx = s.find("/work/src/lib.rs").expect("workspace hint present");
         let doc_idx = s.find("report.docx").expect("file upload hint present");
-        assert!(ws_idx < doc_idx, "workspace hint must come before upload hint, got: {s}");
-        assert!(!s.contains("screen.png"), "image_upload must not appear in hint (multimodal path)");
+        assert!(
+            ws_idx < doc_idx,
+            "workspace hint must come before upload hint, got: {s}"
+        );
+        assert!(
+            !s.contains("screen.png"),
+            "image_upload must not appear in hint (multimodal path)"
+        );
     }
 
     /// `AttachedFolder` (Add to Chat directory attach) gets no hint

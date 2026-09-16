@@ -14,7 +14,9 @@ use crate::tools::output;
 use crate::tools::path_utils;
 
 // Re-export for backward compatibility — existing tests import from wrappers
-pub use crate::tools::workspace_resolver::{SharedResolver, WorkspaceAccess, WorkspaceDir, WorkspaceResolver};
+pub use crate::tools::workspace_resolver::{
+    SharedResolver, WorkspaceAccess, WorkspaceDir, WorkspaceResolver,
+};
 use std::time::Instant;
 
 /// Wrap a raw tool with the standard decorator stack:
@@ -207,10 +209,7 @@ pub struct PathGuardedTool {
 
 impl PathGuardedTool {
     pub fn new(inner: Arc<dyn Tool>, resolver: SharedResolver) -> Self {
-        Self {
-            inner,
-            resolver,
-        }
+        Self { inner, resolver }
     }
 
     /// Validate that a path is within any of the allowed directories
@@ -407,8 +406,7 @@ impl Tool for PathGuardedTool {
                                         token_usage: None,
                                     });
                                 }
-                                params["path"] =
-                                    serde_json::Value::String(abs_path_str);
+                                params["path"] = serde_json::Value::String(abs_path_str);
                             }
                             Err(e) => {
                                 return Ok(ToolResult {
@@ -976,10 +974,7 @@ mod tests {
         // inner tool truncated anything. This is the headline safety net.
         let huge = "x".repeat(1_000_000);
         let wrapped = OutputBoundedTool::new(mock(&huge));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         assert!(result.ok, "wrapper must not flip ok=true to false");
         // Wrapper caps at MAX_OUTPUT_BYTES then appends TRUNCATED_OUTPUT_MARKER
@@ -1013,12 +1008,12 @@ mod tests {
         // Fast path: small content → no allocation, no marker, byte-for-byte.
         let payload = "shell stdout: 5 KB total\nfinal result: ok\n";
         let wrapped = OutputBoundedTool::new(mock(payload));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
-        assert_eq!(result.content, payload, "wrapper must not mutate small output");
+        assert_eq!(
+            result.content, payload,
+            "wrapper must not mutate small output"
+        );
         assert!(
             !result.content.contains("TRUNCATED"),
             "wrapper must not add a marker to small output"
@@ -1033,15 +1028,14 @@ mod tests {
         // the inner marker is more specific (carries a concrete re-query
         // command like `grep -n`).
         let mut content = "x".repeat(30 * 1024);
-        content.push_str("\n[... 1024 bytes omitted from middle. \
-            Use 'grep -n PATTERN file' to query the missing section.]\n");
+        content.push_str(
+            "\n[... 1024 bytes omitted from middle. \
+            Use 'grep -n PATTERN file' to query the missing section.]\n",
+        );
         assert!(content.len() < output::MAX_OUTPUT_BYTES);
 
         let wrapped = OutputBoundedTool::new(mock(&content));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         // Inner marker preserved verbatim.
         assert!(
@@ -1054,7 +1048,9 @@ mod tests {
         );
         // Wrapper's generic marker NOT present (because content was under cap).
         assert!(
-            !result.content.contains("OUTPUT TRUNCATED: exceeded tool-level"),
+            !result
+                .content
+                .contains("OUTPUT TRUNCATED: exceeded tool-level"),
             "wrapper added its own marker on top of inner marker"
         );
     }
@@ -1073,10 +1069,7 @@ mod tests {
             error: Some("Failed: out of memory".to_string()),
         });
         let wrapped = OutputBoundedTool::new(mock_err);
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         assert!(!result.ok);
         // Content untouched.
@@ -1100,10 +1093,7 @@ mod tests {
         // so a payload that exactly fills the budget passes through.
         let payload = "y".repeat(output::MAX_OUTPUT_BYTES);
         let wrapped = OutputBoundedTool::new(mock(&payload));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         assert_eq!(
             result.content.len(),
@@ -1123,14 +1113,15 @@ mod tests {
         // `>= MAX` off-by-one bug is caught.
         let payload = "y".repeat(output::MAX_OUTPUT_BYTES + 1);
         let wrapped = OutputBoundedTool::new(mock(&payload));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         assert!(result.content.contains("OUTPUT TRUNCATED"));
         // First MAX_OUTPUT_BYTES bytes preserved.
-        assert!(result.content.starts_with(&"y".repeat(output::MAX_OUTPUT_BYTES)));
+        assert!(
+            result
+                .content
+                .starts_with(&"y".repeat(output::MAX_OUTPUT_BYTES))
+        );
     }
 
     #[test]
@@ -1211,15 +1202,8 @@ mod tests {
     async fn integration_full_stack_passes_normal_through() {
         // Happy path: small content, no rate limit, no path issue.
         // All three layers must pass and content comes back unchanged.
-        let stack = full_stack(
-            mock_inner("hello from inner"),
-            &["/tmp/ws"],
-            60,
-        );
-        let r = stack
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let stack = full_stack(mock_inner("hello from inner"), &["/tmp/ws"], 60);
+        let r = stack.execute(serde_json::json!({}), None).await.unwrap();
         assert!(r.ok);
         assert_eq!(r.content, "hello from inner");
     }
@@ -1229,10 +1213,7 @@ mod tests {
         // Headline scenario: inner dumps 1 MB. The outermost layer
         // (OutputBoundedTool) must catch it and append the marker.
         let stack = full_stack(mock_huge_1mb(), &["/tmp/ws"], 60);
-        let r = stack
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let r = stack.execute(serde_json::json!({}), None).await.unwrap();
         assert!(r.ok);
         assert!(
             r.content.contains("OUTPUT TRUNCATED"),
@@ -1274,10 +1255,7 @@ mod tests {
         }
         let stack = full_stack(Arc::new(FsTool), &["/tmp/allowed"], 60);
         let r = stack
-            .execute(
-                serde_json::json!({ "path": "/etc/passwd" }),
-                None,
-            )
+            .execute(serde_json::json!({ "path": "/etc/passwd" }), None)
             .await
             .unwrap();
         assert!(!r.ok);
@@ -1287,7 +1265,10 @@ mod tests {
             "expected path-guard error, got: {err}"
         );
         // Content field is empty — wrapper did NOT touch it.
-        assert!(r.content.is_empty(), "wrapper must not write to error result");
+        assert!(
+            r.content.is_empty(),
+            "wrapper must not write to error result"
+        );
         // And the wrapper's TRUNCATED_OUTPUT_MARKER must NOT appear.
         assert!(!r.content.contains("OUTPUT TRUNCATED"));
     }
@@ -1334,25 +1315,22 @@ mod tests {
 
         // First two calls succeed; inner counter goes 0 → 2.
         for i in 0..2 {
-            let r = stack
-                .execute(serde_json::json!({}), None)
-                .await
-                .unwrap();
+            let r = stack.execute(serde_json::json!({}), None).await.unwrap();
             assert!(r.ok, "call {i} should succeed");
             assert_eq!(r.content, format!("call #{i}"));
         }
         // Third call: rate-limit blocks at RateLimitedTool.
-        let r = stack
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let r = stack.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!r.ok, "3rd call must be rate-limited");
         assert!(
             r.error.as_deref().unwrap().contains("Rate limit"),
             "expected rate-limit error, got: {:?}",
             r.error
         );
-        assert!(r.content.is_empty(), "wrapper must not write to error result");
+        assert!(
+            r.content.is_empty(),
+            "wrapper must not write to error result"
+        );
         assert!(!r.content.contains("OUTPUT TRUNCATED"));
         // Counter confirms the inner tool was called exactly twice —
         // rate-limit really did block the third call before inner ran.
@@ -1384,11 +1362,11 @@ mod tests {
         assert_eq!(stack.name(), "chain_check");
         assert_eq!(stack.spec().name, "chain_check");
         // Schema must also pass through untouched.
-        assert_eq!(stack.spec().input_schema, serde_json::json!({"type": "object"}));
         assert_eq!(
-            stack.spec().description,
-            format!("Mock {}", "chain_check")
+            stack.spec().input_schema,
+            serde_json::json!({"type": "object"})
         );
+        assert_eq!(stack.spec().description, format!("Mock {}", "chain_check"));
     }
 
     #[tokio::test]
@@ -1407,10 +1385,7 @@ mod tests {
             error: None,
         });
         let stack = full_stack(inner, &["/tmp/ws"], 60);
-        let r = stack
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let r = stack.execute(serde_json::json!({}), None).await.unwrap();
         assert_eq!(r.content.len(), output::MAX_OUTPUT_BYTES);
         assert!(
             !r.content.contains("OUTPUT TRUNCATED"),
@@ -1543,16 +1518,15 @@ mod tests {
             crate::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
         ));
         let stack = full_stack(
-            Arc::new(crate::tools::builtin::glob_search::GlobSearchTool::new(&empty)),
+            Arc::new(crate::tools::builtin::glob_search::GlobSearchTool::new(
+                &empty,
+            )),
             &[dir.path().to_str().unwrap()],
             60,
         );
         let work_dir = dir.path().to_str().unwrap();
         let r = stack
-            .execute(
-                serde_json::json!({ "pattern": "*.log" }),
-                Some(work_dir),
-            )
+            .execute(serde_json::json!({ "pattern": "*.log" }), Some(work_dir))
             .await
             .unwrap();
         assert!(r.ok, "glob_search should succeed: {:?}", r.error);
@@ -1593,10 +1567,7 @@ mod tests {
         );
         let work_dir = dir.path().to_str().unwrap();
         let r = stack
-            .execute(
-                serde_json::json!({ "pattern": "ERROR" }),
-                Some(work_dir),
-            )
+            .execute(serde_json::json!({ "pattern": "ERROR" }), Some(work_dir))
             .await
             .unwrap();
         assert!(r.ok, "content_search should succeed: {:?}", r.error);
@@ -1616,10 +1587,7 @@ mod tests {
         // Empty payload: below the cap, so the fast path must return it
         // byte-for-byte with no marker and no allocation surprises.
         let wrapped = OutputBoundedTool::new(mock(""));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         assert!(result.ok);
         assert_eq!(result.content, "", "empty content must stay empty");
@@ -1637,18 +1605,13 @@ mod tests {
         // emit half a character.
         let huge = "字".repeat(20_000);
         let wrapped = OutputBoundedTool::new(mock(&huge));
-        let result = wrapped
-            .execute(serde_json::json!({}), None)
-            .await
-            .unwrap();
+        let result = wrapped.execute(serde_json::json!({}), None).await.unwrap();
 
         assert!(result.ok);
         // Budget: cap + ASCII marker + slack.
         assert!(
             result.content.len()
-                <= output::MAX_OUTPUT_BYTES
-                    + output::TRUNCATED_OUTPUT_MARKER.len()
-                    + 16,
+                <= output::MAX_OUTPUT_BYTES + output::TRUNCATED_OUTPUT_MARKER.len() + 16,
             "got {} bytes",
             result.content.len()
         );
@@ -1706,10 +1669,8 @@ mod tests {
         let wrapped = OutputBoundedTool::new(Arc::new(PanickingTool));
         // tokio::spawn gives us a JoinHandle: if the panic propagates
         // out of the wrapper the task dies and join returns Err(panic).
-        let joined = tokio::spawn(async move {
-            wrapped.execute(serde_json::json!({}), None).await
-        })
-        .await;
+        let joined =
+            tokio::spawn(async move { wrapped.execute(serde_json::json!({}), None).await }).await;
 
         match joined {
             Err(e) => assert!(

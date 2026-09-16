@@ -449,13 +449,13 @@ async fn post_enable(
     .await;
 
     match outcome {
-        crate::startup::debug_enable::DebugEnableOutcome::AlreadyEnabled => Ok(Json(
-            DebugHttpResponse::ok(EnableDebugResult {
+        crate::startup::debug_enable::DebugEnableOutcome::AlreadyEnabled => {
+            Ok(Json(DebugHttpResponse::ok(EnableDebugResult {
                 enabled: true,
                 already_enabled: true,
                 debug_port,
-            }),
-        )),
+            })))
+        }
         crate::startup::debug_enable::DebugEnableOutcome::NewlyEnabled => {
             tracing::info!(
                 debug_port,

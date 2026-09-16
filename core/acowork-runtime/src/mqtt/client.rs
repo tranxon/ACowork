@@ -19,17 +19,15 @@ use std::sync::Arc;
 
 use prost::Message as _;
 use rumqttc::{AsyncClient, LastWill, QoS};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
-    data_envelope, session_message,
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
-    ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
-    IterationLimitPausedPayload, LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport,
-    NewDataAvailablePayload, NodeInfo, RecordCompletePayload,
-    SessionMessage, StoppedPayload, StreamDeltaPayload,
-    StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
+    ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload, IterationLimitPausedPayload,
+    LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport, NewDataAvailablePayload,
+    NodeInfo, RecordCompletePayload, SessionMessage, StoppedPayload, StreamDeltaPayload,
+    StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload, data_envelope, session_message,
 };
 use acowork_mqtt_session::{
     ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState, SessionStateRx,
@@ -341,9 +339,8 @@ pub struct MqttConnectConfig<'a> {
     /// `available_cache` but does not notify SessionManager (suitable for
     /// tests and Standalone mode where there is no SessionManager).
     #[cfg_attr(not(test), allow(dead_code))]
-    pub identity_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>,
-    >,
+    pub identity_update_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>>,
     /// Sink for provider list updates. The MQTT event loop sends
     /// `ProviderUpdate` here whenever `acowork/global/providers` retained
     /// is received. The receiver (held by `agent_init.rs` → `gateway_loop`)
@@ -353,9 +350,7 @@ pub struct MqttConnectConfig<'a> {
     /// Optional: when None, the MQTT event loop still updates
     /// `available_cache` but does not notify SessionManager.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub provider_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<ProviderUpdate>,
-    >,
+    pub provider_update_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderUpdate>>,
     /// Sink for search update updates. The MQTT event loop sends
     /// `SearchUpdate` here whenever `acowork/global/searches` retained
     /// is received. The receiver (held by `agent_init.rs` → `gateway_loop`)
@@ -365,9 +360,7 @@ pub struct MqttConnectConfig<'a> {
     /// Optional: when None, the MQTT event loop still updates
     /// `available_cache` but does not notify SessionManager.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub search_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<SearchUpdate>,
-    >,
+    pub search_update_tx: Option<tokio::sync::mpsc::UnboundedSender<SearchUpdate>>,
     /// Sink for embedding-model updates. The MQTT event loop sends
     /// [`EmbeddingUpdate`] here whenever `acowork/global/embedding_models`
     /// retained is received (initial snapshot or hot-push after the embed
@@ -380,9 +373,7 @@ pub struct MqttConnectConfig<'a> {
     /// Optional: when None, the MQTT event loop still updates
     /// `available_cache` but does not notify SessionManager.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub embedding_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<EmbeddingUpdate>,
-    >,
+    pub embedding_update_tx: Option<tokio::sync::mpsc::UnboundedSender<EmbeddingUpdate>>,
     /// Node id this Runtime belongs to (ADR-055 §6.7, Phase 4). When
     /// set, bootstrap subscribes to `acowork/nodes/{node_id}/lsps` and
     /// the poll loop forwards relay state changes to `lsps_update_tx`.
@@ -398,9 +389,7 @@ pub struct MqttConnectConfig<'a> {
     /// Optional: when None, the MQTT event loop drops the update
     /// (suitable for tests and Standalone mode).
     #[cfg_attr(not(test), allow(dead_code))]
-    pub lsps_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<LspRelayUpdate>,
-    >,
+    pub lsps_update_tx: Option<tokio::sync::mpsc::UnboundedSender<LspRelayUpdate>>,
     /// Per-agent workspace directory (`work_dir`). Used by the MQTT poll
     /// task to persist `acowork/global/mcps` into `agent_mcp.json::catalog`
     /// so the Tools-panel `PUT /agents/{id}/mcp-servers` validation can
@@ -423,9 +412,7 @@ pub struct MqttConnectConfig<'a> {
     ///
     /// Optional: None disables live endpoint re-publication (standalone
     /// Runtimes have no node).
-    pub node_proxy_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<String>,
-    >,
+    pub node_proxy_update_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// §6.3.3 / ADR-055 D3: the node reverse-proxy base URL injected
     /// at spawn time (`--http-advertise-endpoint`). Cached in
     /// `BootstrapData` so `run_bootstrap` can re-publish the retained
@@ -583,9 +570,8 @@ struct RuntimeHandler {
     /// Sink for control commands (`acowork/agents/{id}/sessions/control/#`).
     control_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
     /// Sink for user-profile updates (ADR-042).
-    identity_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>,
-    >,
+    identity_update_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>>,
     /// Sink for provider list updates.
     provider_update_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderUpdate>>,
     /// Sink for search updates.
@@ -607,9 +593,7 @@ struct RuntimeHandler {
     /// (`agent_init.rs`) re-publishes this Runtime's retained
     /// `http_endpoint` so the Gateway keeps routing through the node.
     /// `None` standalone / tests.
-    node_proxy_update_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<String>,
-    >,
+    node_proxy_update_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Last known node reverse-proxy base URL — dedupes the node's
     /// 60 s heartbeat, which re-delivers an unchanged NodeInfo.
     last_node_proxy_base: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -674,18 +658,19 @@ impl MqttClientHandler for RuntimeHandler {
                 // 感知模板。`{agent_id}` 模板为旧兼容保留，env 同样替换以
                 // 支持扩展。
                 let bootstrap_instance_id = self.bootstrap_data.instance_id.clone();
-                let resolve_instance_id = |value: &str| {
-                    value.replace("{instance_id}", &bootstrap_instance_id)
-                };
-                let resolve_agent_id = |value: &str| {
-                    value.replace("{agent_id}", &self.agent_id)
-                };
+                let resolve_instance_id =
+                    |value: &str| value.replace("{instance_id}", &bootstrap_instance_id);
+                let resolve_agent_id = |value: &str| value.replace("{agent_id}", &self.agent_id);
                 let defs: Vec<acowork_core::protocol::McpServerConfigDef> = servers
                     .into_iter()
                     .map(|s| acowork_core::protocol::McpServerConfigDef {
                         name: s.name.clone(),
                         transport: mcp_transport_to_def(s.transport),
-                        url: if s.url.is_empty() { None } else { Some(s.url.clone()) },
+                        url: if s.url.is_empty() {
+                            None
+                        } else {
+                            Some(s.url.clone())
+                        },
                         command: s.command.clone(),
                         args: s.args.clone(),
                         env: s
@@ -712,10 +697,9 @@ impl MqttClientHandler for RuntimeHandler {
                         },
                     })
                     .collect();
-                if let Err(e) = crate::agent_config::save_agent_mcp_config_catalog(
-                    &self.work_dir,
-                    &defs,
-                ) {
+                if let Err(e) =
+                    crate::agent_config::save_agent_mcp_config_catalog(&self.work_dir, &defs)
+                {
                     tracing::warn!(
                         agent_id = %self.agent_id,
                         error = %e,
@@ -740,11 +724,12 @@ impl MqttClientHandler for RuntimeHandler {
                             let keys = extract_provider_keys(&p.providers);
                             // ADR-056: forward the global default compact
                             // model reference.
-                            let dcm = p.default_compact_model.as_ref()
-                                .map(|r| acowork_core::protocol::CompactModelRef {
+                            let dcm = p.default_compact_model.as_ref().map(|r| {
+                                acowork_core::protocol::CompactModelRef {
                                     provider_id: r.provider_id.clone(),
                                     model_id: r.model_id.clone(),
-                                });
+                                }
+                            });
                             (list, p.version, keys, dcm)
                         }
                         None => (vec![], 0, vec![], None),
@@ -790,15 +775,14 @@ impl MqttClientHandler for RuntimeHandler {
                 }
             } else if topic == "acowork/global/searches" {
                 // Persist search provider catalog to agent_search.json
-                let (search_list, key_vault) =
-                    match cache_write.searches.as_ref() {
-                        Some(s) => {
-                            let list = map_search_refs_to_list_items(&s.providers);
-                            let keys = extract_search_keys(&s.providers);
-                            (list, keys)
-                        }
-                        None => (vec![], vec![]),
-                    };
+                let (search_list, key_vault) = match cache_write.searches.as_ref() {
+                    Some(s) => {
+                        let list = map_search_refs_to_list_items(&s.providers);
+                        let keys = extract_search_keys(&s.providers);
+                        (list, keys)
+                    }
+                    None => (vec![], vec![]),
+                };
                 drop(cache_write);
 
                 // Persist catalog to agent_search.json
@@ -843,9 +827,7 @@ impl MqttClientHandler for RuntimeHandler {
                 let update = {
                     let models = cache_write.embedding_models.as_ref();
                     match models {
-                        Some(m) if !m.endpoint.is_empty()
-                            && !m.active_model_id.is_empty() =>
-                        {
+                        Some(m) if !m.endpoint.is_empty() && !m.active_model_id.is_empty() => {
                             Some(EmbeddingUpdate {
                                 endpoint: m.endpoint.clone(),
                                 model_id: m.active_model_id.clone(),
@@ -880,9 +862,7 @@ impl MqttClientHandler for RuntimeHandler {
         }
 
         if topic.starts_with(&self.bootstrap_data.control_filter_prefix) {
-            let _ = self
-                .control_tx
-                .send((topic.to_string(), payload.to_vec()));
+            let _ = self.control_tx.send((topic.to_string(), payload.to_vec()));
         } else if let Some(lsps_topic) = self.node_lsps_topic.as_deref()
             && topic == lsps_topic
         {
@@ -946,12 +926,7 @@ impl MqttClientHandler for RuntimeHandler {
             );
         }
         if let Some(tx) = self.first_conn_tx.lock().await.take() {
-            let _ = tx.send(
-                result
-                    .as_ref()
-                    .map_err(|e| e.to_string())
-                    .map(|_| ()),
-            );
+            let _ = tx.send(result.as_ref().map_err(|e| e.to_string()).map(|_| ()));
         }
         result.map_err(|e| e.to_string())
     }
@@ -978,9 +953,7 @@ impl RuntimeMqttClient {
     /// Connect to the MQTT broker and perform the Phase 2 startup sequence.
     ///
     /// ADR-034 Phase 8: takes a single `MqttConnectConfig` struct.
-    pub async fn connect(
-        cfg: MqttConnectConfig<'_>,
-    ) -> Result<Self, RuntimeMqttClientError> {
+    pub async fn connect(cfg: MqttConnectConfig<'_>) -> Result<Self, RuntimeMqttClientError> {
         // ADR-073: the broker client id identifies THIS RUNTIME INSTANCE.
         // Two instances of the same package must never share a client id
         // (the broker would disconnect one); the package `agent_id` is
@@ -1000,20 +973,10 @@ impl RuntimeMqttClient {
             status_topic: format!("acowork/agents/{}/status", instance_id),
             meta_topic: format!("acowork/agents/{}/meta", instance_id),
             config_topic: format!("acowork/agents/{}/config", instance_id),
-            control_filter: format!(
-                "acowork/agents/{}/sessions/control/#",
-                instance_id
-            ),
-            control_filter_prefix: format!(
-                "acowork/agents/{}/sessions/control/",
-                instance_id
-            ),
-            node_lsps_topic: cfg
-                .node_id
-                .map(acowork_core::node::node_lsps_topic),
-            node_info_topic: cfg
-                .node_id
-                .map(acowork_core::node::node_info_topic),
+            control_filter: format!("acowork/agents/{}/sessions/control/#", instance_id),
+            control_filter_prefix: format!("acowork/agents/{}/sessions/control/", instance_id),
+            node_lsps_topic: cfg.node_id.map(acowork_core::node::node_lsps_topic),
+            node_info_topic: cfg.node_id.map(acowork_core::node::node_info_topic),
             ready_topic: format!("acowork/agents/{}/ready", instance_id),
             ready_ever: std::sync::atomic::AtomicBool::new(false),
             http_advertise_endpoint: cfg.http_advertise_endpoint.map(|s| s.to_string()),
@@ -1056,8 +1019,7 @@ impl RuntimeMqttClient {
         // topic as a readiness probe). The sender is consumed on
         // the first ConnAck only; subsequent reconnects just
         // re-run bootstrap and log.
-        let (first_conn_tx, first_conn_rx) =
-            oneshot::channel::<Result<(), String>>();
+        let (first_conn_tx, first_conn_rx) = oneshot::channel::<Result<(), String>>();
 
         let handler = RuntimeHandler {
             bootstrap_data: bootstrap_data.clone(),
@@ -1219,9 +1181,7 @@ impl RuntimeMqttClient {
             client
                 .subscribe(lsps_topic, QoS::AtLeastOnce)
                 .await
-                .map_err(|e| {
-                    RuntimeMqttClientError::Subscribe(format!("node lsps: {}", e))
-                })?;
+                .map_err(|e| RuntimeMqttClientError::Subscribe(format!("node lsps: {}", e)))?;
         }
 
         // Step 7: PUBLISH `ready = true` (Retained) — gated on the
@@ -1277,9 +1237,7 @@ impl RuntimeMqttClient {
             client
                 .subscribe(info_topic, QoS::AtLeastOnce)
                 .await
-                .map_err(|e| {
-                    RuntimeMqttClientError::Subscribe(format!("node info: {}", e))
-                })?;
+                .map_err(|e| RuntimeMqttClientError::Subscribe(format!("node info: {}", e)))?;
         }
 
         // Step 9: PUBLISH `http_endpoint` (Retained) — §6.3.3 /
@@ -1369,7 +1327,8 @@ impl RuntimeMqttClient {
         retain: bool,
     ) -> Result<(), RuntimeMqttClientError> {
         let payload = prost::Message::encode_to_vec(envelope);
-        self.client().await
+        self.client()
+            .await
             .publish(topic, qos.into(), retain, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -1380,7 +1339,8 @@ impl RuntimeMqttClient {
     pub async fn publish_status(&self, online: bool) -> Result<(), RuntimeMqttClientError> {
         let topic = format!("acowork/agents/{}/status", self.instance_id);
         let payload = if online { "online" } else { "offline" };
-        self.client().await
+        self.client()
+            .await
             .publish(topic, QoS::AtLeastOnce, true, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("status: {}", e)))?;
@@ -1412,7 +1372,8 @@ impl RuntimeMqttClient {
             .store(ready, std::sync::atomic::Ordering::Release);
         let topic = format!("acowork/agents/{}/ready", self.instance_id);
         let payload = if ready { "true" } else { "false" };
-        self.client().await
+        self.client()
+            .await
             .publish(topic, QoS::AtLeastOnce, true, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("ready: {}", e)))?;
@@ -1455,7 +1416,8 @@ impl RuntimeMqttClient {
         qos: MqttQoS,
         retain: bool,
     ) -> Result<(), RuntimeMqttClientError> {
-        self.client().await
+        self.client()
+            .await
             .publish(topic, qos.into(), retain, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -1468,7 +1430,8 @@ impl RuntimeMqttClient {
         filter: &str,
         qos: MqttQoS,
     ) -> Result<(), RuntimeMqttClientError> {
-        self.client().await
+        self.client()
+            .await
             .subscribe(filter, qos.into())
             .await
             .map_err(|e| RuntimeMqttClientError::Subscribe(format!("'{}': {}", filter, e)))?;
@@ -1499,7 +1462,10 @@ impl RuntimeMqttClient {
         event_type: &str,
         envelope: &DataEnvelope,
     ) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/sessions/{}", self.instance_id, event_type);
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}",
+            self.instance_id, event_type
+        );
         self.publish_envelope(&topic, envelope, MqttQoS::AtLeastOnce, false)
             .await
     }
@@ -1639,9 +1605,13 @@ impl MqttChunkPublisher {
         event_type: &str,
         envelope: &DataEnvelope,
     ) -> Result<(), RuntimeMqttClientError> {
-        let topic = format!("acowork/agents/{}/sessions/{}", self.instance_id, event_type);
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}",
+            self.instance_id, event_type
+        );
         let bytes = prost::Message::encode_to_vec(envelope);
-        self.client().await
+        self.client()
+            .await
             .publish(topic, QoS::AtLeastOnce, false, bytes)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("lifecycle: {}", e)))
@@ -1673,7 +1643,8 @@ impl MqttChunkPublisher {
             self.instance_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.client().await
+        self.client()
+            .await
             .publish(topic, QoS::AtLeastOnce, false, bytes)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("session_opened: {}", e)))
@@ -1703,7 +1674,8 @@ impl MqttChunkPublisher {
             self.instance_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.client().await
+        self.client()
+            .await
             .publish(topic, QoS::AtMostOnce, false, bytes)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("session_not_opened: {}", e)))
@@ -1746,9 +1718,9 @@ impl MqttChunkPublisher {
         );
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionConfig(
-                config.clone(),
-            )),
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::SessionConfig(config.clone()),
+            ),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
         if let Err(e) = self
@@ -1783,9 +1755,9 @@ impl MqttChunkPublisher {
         );
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionState(
-                state.clone(),
-            )),
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::SessionState(state.clone()),
+            ),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
         if let Err(e) = self
@@ -1806,7 +1778,8 @@ impl MqttChunkPublisher {
     /// Publish a session event envelope to the broker at QoS 0 (default for
     /// `messages/*` streaming events per ADR-035 D1 / `mqtt.md` §8.3).
     async fn publish(&self, session_id: &str, event_type: &str, payload: &[u8]) {
-        self.publish_with_qos(session_id, event_type, payload, QoS::AtMostOnce, false).await;
+        self.publish_with_qos(session_id, event_type, payload, QoS::AtMostOnce, false)
+            .await;
     }
 
     /// Publish a session event envelope at the given QoS.
@@ -1848,12 +1821,7 @@ impl MqttChunkPublisher {
 
     /// Publish a chunk event via MQTT (QoS 0, protobuf DataEnvelope).
     #[allow(dead_code)]
-    pub(crate) async fn publish_chunk(
-        &self,
-        session_id: &str,
-        message_id: &str,
-        delta: &str,
-    ) {
+    pub(crate) async fn publish_chunk(&self, session_id: &str, message_id: &str, delta: &str) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let d = delta.to_string();
@@ -2018,7 +1986,11 @@ impl MqttChunkPublisher {
     pub(crate) async fn publish_compacting(&self, session_id: &str, started: bool) {
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
-        let event_type = if started { "compacting_started" } else { "compacting_ended" };
+        let event_type = if started {
+            "compacting_started"
+        } else {
+            "compacting_ended"
+        };
         let payload = CompactingPayload {
             session_id: sid.clone(),
         };
@@ -2045,7 +2017,12 @@ impl MqttChunkPublisher {
     /// immediately receives the question content without needing an HTTP
     /// round-trip. The retained message is cleared (zero-byte publish)
     /// when the user answers – see `ClearRetainedEvent`.
-    pub(crate) async fn publish_ask_question(&self, session_id: &str, message_id: &str, question_json: &str) {
+    pub(crate) async fn publish_ask_question(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        question_json: &str,
+    ) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let qj = question_json.to_string();
@@ -2063,7 +2040,8 @@ impl MqttChunkPublisher {
             payload: Some(data_envelope::Payload::SessionMessage(event)),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.publish_with_qos(&sid, "ask_question", &bytes, QoS::AtLeastOnce, true).await;
+        self.publish_with_qos(&sid, "ask_question", &bytes, QoS::AtLeastOnce, true)
+            .await;
     }
 
     /// Publish a todo_updated event via MQTT (QoS 0).
@@ -2117,11 +2095,7 @@ impl MqttChunkPublisher {
     }
 
     /// Publish a loop_detected_paused event via MQTT (QoS 1).
-    pub(crate) async fn publish_loop_detected_paused(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) {
+    pub(crate) async fn publish_loop_detected_paused(&self, session_id: &str, message: &str) {
         let sid = session_id.to_string();
         let msg = message.to_string();
         let agent_id = self.agent_id.clone();
@@ -2146,10 +2120,7 @@ impl MqttChunkPublisher {
     /// Publish a tool_approval_needed event via MQTT (QoS 1).
     ///
     /// ADR-034 Phase 8: takes a single `ToolApprovalNeededEvent` struct.
-    pub(crate) async fn publish_tool_approval_needed(
-        &self,
-        ev: ToolApprovalNeededEvent<'_>,
-    ) {
+    pub(crate) async fn publish_tool_approval_needed(&self, ev: ToolApprovalNeededEvent<'_>) {
         let sid = ev.session_id.to_string();
         let rid = ev.request_id.to_string();
         let tn = ev.tool_name.to_string();
@@ -2179,7 +2150,8 @@ impl MqttChunkPublisher {
             payload: Some(data_envelope::Payload::SessionMessage(event)),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.publish_with_qos(&sid, "tool_approval_needed", &bytes, QoS::AtLeastOnce, true).await;
+        self.publish_with_qos(&sid, "tool_approval_needed", &bytes, QoS::AtLeastOnce, true)
+            .await;
     }
 
     /// Publish a new_data_available event via MQTT (QoS 0).
@@ -2255,7 +2227,8 @@ impl MqttChunkPublisher {
         // 1 on both endpoints the broker preserves relative order
         // end-to-end; combined with the `seq` payload the Desktop is
         // also robust to any rare reorder.
-        self.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce, false).await;
+        self.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce, false)
+            .await;
     }
 
     /// Publish a `record_complete` event via MQTT (QoS 1, ADR-035 C1/O2).
@@ -2308,16 +2281,18 @@ impl MqttChunkPublisher {
         let event = SessionMessage {
             agent_id,
             session_id: sid.clone(),
-            event: Some(session_message::Event::RecordComplete(RecordCompletePayload {
-                session_id: sid.clone(),
-                role,
-                message_id: mid,
-                content: final_content,
-                tool_name,
-                tool_call_id,
-                is_error,
-                seq: Some(seq),
-            })),
+            event: Some(session_message::Event::RecordComplete(
+                RecordCompletePayload {
+                    session_id: sid.clone(),
+                    role,
+                    message_id: mid,
+                    content: final_content,
+                    tool_name,
+                    tool_call_id,
+                    is_error,
+                    seq: Some(seq),
+                },
+            )),
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -2328,7 +2303,8 @@ impl MqttChunkPublisher {
         // terminal event; losing it leaves the message stuck. The
         // per-session `seq` makes the frame position self-healing on
         // the Desktop (see `insertBySeq`).
-        self.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce, false).await;
+        self.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce, false)
+            .await;
     }
 }
 
@@ -2370,7 +2346,10 @@ mod tests {
     fn decode_lsps_ready_endpoint() {
         let payload = encode_available_lsps("http://192.168.1.10:19878", true);
         let update = decode_lsps_payload(&payload);
-        assert_eq!(update.endpoint.as_deref(), Some("http://192.168.1.10:19878"));
+        assert_eq!(
+            update.endpoint.as_deref(),
+            Some("http://192.168.1.10:19878")
+        );
     }
 
     #[test]
@@ -2418,7 +2397,10 @@ mod tests {
     #[test]
     fn decode_node_proxy_base_extracts_endpoint() {
         let payload = encode_node_info("http://192.168.1.20:19900");
-        assert_eq!(decode_node_proxy_base(&payload).as_deref(), Some("http://192.168.1.20:19900"));
+        assert_eq!(
+            decode_node_proxy_base(&payload).as_deref(),
+            Some("http://192.168.1.20:19900")
+        );
     }
 
     #[test]
@@ -2444,45 +2426,42 @@ mod tests {
         // `Broker::start()` (it joins the server threads), so the
         // Gateway exposes only `start_broker`.
         let port = 18980;
-        let broker = acowork_gateway::mqtt::start_broker("127.0.0.1", port)
-            .expect("broker should start");
+        let broker =
+            acowork_gateway::mqtt::start_broker("127.0.0.1", port).expect("broker should start");
 
         let cache = crate::mqtt::available_cache::new_shared_cache();
-        let (control_tx, _control_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         // Throwaway work_dir — the test only verifies bootstrap + publishes,
         // not the MCP catalog poll task. A temp path keeps the poll task's
         // filesystem writes (if any) from polluting the project tree.
         let work_dir = std::env::temp_dir().join("acowork-test-mqtt-client-18980");
 
-        let client = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.agent",
-                // ADR-073: broker client id + topics are keyed on the
-                // instance id (two instances of one package may coexist).
-                instance_id: "aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d",
-                agent_name: "Test Agent",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                work_dir,
-                username: None,
-                password: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-            },
-        )
+        let client = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            // ADR-073: broker client id + topics are keyed on the
+            // instance id (two instances of one package may coexist).
+            instance_id: "aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d",
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir,
+            username: None,
+            password: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+        })
         .await
         .expect("Runtime MQTT client should connect");
 
@@ -2495,7 +2474,10 @@ mod tests {
         sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_eventloop) = SubClient::new(sub_opts, 10);
         sub_client
-            .subscribe("acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/#", QoS::AtLeastOnce)
+            .subscribe(
+                "acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/#",
+                QoS::AtLeastOnce,
+            )
             .await
             .unwrap();
 
@@ -2516,8 +2498,9 @@ mod tests {
         }
 
         assert!(
-            received_topics
-                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/status".to_string()),
+            received_topics.contains(
+                &"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/status".to_string()
+            ),
             "should receive status: {:?}",
             received_topics
         );
@@ -2528,8 +2511,9 @@ mod tests {
             received_topics
         );
         assert!(
-            received_topics
-                .contains(&"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/config".to_string()),
+            received_topics.contains(
+                &"acowork/agents/aa11bb22-cc33-4dd4-8e5e-6f7f8a9b0c1d/config".to_string()
+            ),
             "should receive config: {:?}",
             received_topics
         );
@@ -2545,43 +2529,40 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_idempotency() {
         let port = 18981;
-        let broker = acowork_gateway::mqtt::start_broker("127.0.0.1", port)
-            .expect("broker should start");
+        let broker =
+            acowork_gateway::mqtt::start_broker("127.0.0.1", port).expect("broker should start");
 
         let cache = crate::mqtt::available_cache::new_shared_cache();
-        let (control_tx, _control_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         // Throwaway work_dir (see test_runtime_mqtt_client_connects_and_publishes
         // for rationale — bootstrap idempotency test never inspects the poll task).
         let work_dir = std::env::temp_dir().join("acowork-test-mqtt-bootstrap-18981");
 
-        let client = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.bootstrap",
-                // ADR-073: instance-scoped identity (see first test).
-                instance_id: "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d",
-                agent_name: "Bootstrap Test",
-                agent_version: "1.0.0",
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                embedding_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                node_proxy_update_tx: None,
-                work_dir,
-                username: None,
-                password: None,
-                http_advertise_endpoint: None,
-                http_port: None,
-            },
-        )
+        let client = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.bootstrap",
+            // ADR-073: instance-scoped identity (see first test).
+            instance_id: "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d",
+            agent_name: "Bootstrap Test",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir,
+            username: None,
+            password: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+        })
         .await
         .expect("Runtime MQTT client should connect");
 
@@ -2612,7 +2593,10 @@ mod tests {
         sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_loop) = SubClient::new(sub_opts, 10);
         sub_client
-            .subscribe("acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/#", QoS::AtLeastOnce)
+            .subscribe(
+                "acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/#",
+                QoS::AtLeastOnce,
+            )
             .await
             .unwrap();
 
@@ -2631,15 +2615,20 @@ mod tests {
         }
 
         assert!(
-            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/status".to_string()),
+            received.contains(
+                &"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/status".to_string()
+            ),
             "should receive status after multiple bootstraps"
         );
         assert!(
-            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/meta".to_string()),
+            received
+                .contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/meta".to_string()),
             "should receive meta after multiple bootstraps"
         );
         assert!(
-            received.contains(&"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/config".to_string()),
+            received.contains(
+                &"acowork/agents/0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d/config".to_string()
+            ),
             "should receive config after multiple bootstraps"
         );
 

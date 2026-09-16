@@ -24,12 +24,14 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use acowork_core::mqtt_proto::{WorkspaceFsChangeEvent, DataEnvelope, data_envelope};
+use acowork_core::mqtt_proto::{DataEnvelope, WorkspaceFsChangeEvent, data_envelope};
 
 use crate::http::server::SharedMqttClientSlot;
 use crate::mqtt::client::{MqttQoS, RuntimeMqttClient};
 use crate::tools::workspace_resolver::WorkspaceResolver;
-use crate::workspace::fs_watcher::{WorkspaceFsEventSink, WorkspaceFsWatcher, WorkspaceFsWatcherError};
+use crate::workspace::fs_watcher::{
+    WorkspaceFsEventSink, WorkspaceFsWatcher, WorkspaceFsWatcherError,
+};
 
 /// Shared handle type — same late-bind pattern as every other
 /// ADR-040 slot. Created empty in Phase A, kept in the boot context
@@ -78,9 +80,7 @@ impl WorkspaceFsEventSink for MqttFsEventSink {
         // slot lock across the publish await.
         let client = self.mqtt_slot.lock().await.clone();
         let Some(client) = client else {
-            tracing::debug!(
-                "MQTT client not ready — workspace fs event dropped"
-            );
+            tracing::debug!("MQTT client not ready — workspace fs event dropped");
             return;
         };
         let client: RuntimeMqttClient = client.lock().await.clone();
@@ -235,7 +235,10 @@ impl WorkspaceWatcherSet {
             .map(|(id, h)| (id.clone(), h.root.clone()))
             .collect();
         for (id, root) in current {
-            if !desired.iter().any(|(did, droot)| *did == id && *droot == root) {
+            if !desired
+                .iter()
+                .any(|(did, droot)| *did == id && *droot == root)
+            {
                 self.stop_watcher(&id);
             }
         }

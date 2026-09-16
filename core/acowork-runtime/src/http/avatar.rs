@@ -20,6 +20,7 @@
 
 use std::path::PathBuf;
 
+use acowork_core::agent_overrides::{AVATAR_EXTENSIONS, has_avatar_extension};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -27,7 +28,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use acowork_core::agent_overrides::{AVATAR_EXTENSIONS, has_avatar_extension};
 use serde::{Deserialize, Serialize};
 
 use crate::http::server::HttpState;
@@ -345,5 +345,4 @@ mod tests {
         assert!(!has_avatar_extension("assets/evil.sh"));
         assert!(!has_avatar_extension("assets/noext"));
     }
-
 }

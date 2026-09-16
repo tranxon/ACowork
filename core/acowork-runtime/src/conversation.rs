@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::error::Result;
 use crate::agent::session_state::TodoItem;
-use acowork_core::providers::traits::UsageInfo;
+use crate::error::Result;
 use acowork_core::protocol::ContextUsageSection;
+use acowork_core::providers::traits::UsageInfo;
 
 /// Format version for the JSONL conversation file.
 ///
@@ -424,8 +424,7 @@ impl ConversationWriter {
                     } else {
                         None
                     };
-                    if let Err(e) = self.write_entry(&entry, abs_offset.is_some())
-                    {
+                    if let Err(e) = self.write_entry(&entry, abs_offset.is_some()) {
                         tracing::error!("Failed to write conversation entry: {}", e);
                     } else {
                         // ADR-022: Increment committed_lines AFTER the entry
@@ -438,10 +437,7 @@ impl ConversationWriter {
                             if let Ok(mut guard) = self.last_compaction_offset.lock() {
                                 *guard = Some(abs);
                             }
-                            tracing::debug!(
-                                abs_offset = abs,
-                                "Recorded compaction offset"
-                            );
+                            tracing::debug!(abs_offset = abs, "Recorded compaction offset");
                         }
                     }
                 }
@@ -467,10 +463,7 @@ impl ConversationWriter {
                             if let Ok(mut guard) = self.last_compaction_offset.lock() {
                                 *guard = Some(abs);
                             }
-                            tracing::debug!(
-                                abs_offset = abs,
-                                "Recorded compaction offset (sync)"
-                            );
+                            tracing::debug!(abs_offset = abs, "Recorded compaction offset (sync)");
                         }
                     }
                     // Always reply, even on failure, so the caller never
@@ -700,11 +693,7 @@ impl ConversationSession {
         // synchronously via `WriterCommand::AppendCompactionEntry`, so the
         // value is fresh as long as compaction writes are awaited
         // (see `append_compaction_event`).
-        let last_compaction_offset = self
-            .last_compaction_offset
-            .lock()
-            .ok()
-            .and_then(|g| *g);
+        let last_compaction_offset = self.last_compaction_offset.lock().ok().and_then(|g| *g);
         SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -801,12 +790,7 @@ impl ConversationSession {
     /// the `SessionRuntimeSnapshot`. This allows `build_session_state_snapshot()`
     /// to produce a complete `SessionState` proto without needing the caller
     /// to pass in the runtime fields.
-    pub fn update_runtime_state_cache(
-        &self,
-        status: &str,
-        ratio: f64,
-        context_usage: &str,
-    ) {
+    pub fn update_runtime_state_cache(&self, status: &str, ratio: f64, context_usage: &str) {
         if let Ok(mut s) = self.last_status.lock() {
             *s = status.to_string();
         }
@@ -853,13 +837,11 @@ impl ConversationSession {
     /// Builds a `SessionConfig` snapshot and sends it through
     /// `config_change_tx`. Called by config mutators after `write_meta()`.
     pub fn notify_config_change(&self) {
-        let _ = self
-            .config_change_tx
-            .send(ConfigChange {
-                snapshot: self.build_session_config_snapshot(
-                    acowork_core::mqtt_proto::LlmAvailability::Unspecified,
-                ),
-            });
+        let _ = self.config_change_tx.send(ConfigChange {
+            snapshot: self.build_session_config_snapshot(
+                acowork_core::mqtt_proto::LlmAvailability::Unspecified,
+            ),
+        });
     }
 
     /// Notify the state relay of a runtime state change.
@@ -868,11 +850,9 @@ impl ConversationSession {
     /// `state_change_tx`. Called by state mutators (message_count, tokens)
     /// and by `emit_session_state()` (status, ratio, context_usage).
     pub fn notify_state_change(&self) {
-        let _ = self
-            .state_change_tx
-            .send(StateChange {
-                snapshot: self.build_session_state_snapshot(),
-            });
+        let _ = self.state_change_tx.send(StateChange {
+            snapshot: self.build_session_state_snapshot(),
+        });
     }
 
     /// Write the current in-memory state to the per-session meta file.
@@ -921,7 +901,11 @@ impl ConversationSession {
         config: SessionConfig,
         max_sessions: usize,
         committed_lines: Arc<AtomicUsize>,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<ConfigChange>, mpsc::UnboundedReceiver<StateChange>)> {
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<ConfigChange>,
+        mpsc::UnboundedReceiver<StateChange>,
+    )> {
         let conversations_dir = work_dir.join("conversations");
         std::fs::create_dir_all(&conversations_dir)?;
 
@@ -942,12 +926,8 @@ impl ConversationSession {
 
         // ADR-024: no JSONL header — file starts at line 0.
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(
-            file,
-            rx,
-            last_compaction_offset.clone(),
-            committed_lines,
-        );
+        let writer =
+            ConversationWriter::new(file, rx, last_compaction_offset.clone(), committed_lines);
         std::thread::spawn(move || writer.run());
 
         // Meta-change notification channel. The receiver is consumed by the
@@ -1018,7 +998,11 @@ impl ConversationSession {
         work_dir: &Path,
         session_id: &str,
         committed_lines: Arc<AtomicUsize>,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<ConfigChange>, mpsc::UnboundedReceiver<StateChange>)> {
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<ConfigChange>,
+        mpsc::UnboundedReceiver<StateChange>,
+    )> {
         let conversations_dir = work_dir.join("conversations");
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
@@ -1028,8 +1012,9 @@ impl ConversationSession {
             .open(&file_path)?;
 
         // ADR-024: read metadata from per-session meta file.
-        let meta = read_session_meta(&conversations_dir, session_id)
-            .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to read session meta: {}", e)))?;
+        let meta = read_session_meta(&conversations_dir, session_id).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("Failed to read session meta: {}", e))
+        })?;
 
         // ADR-024: no JSONL header, meta_end is always 0.
 
@@ -1048,12 +1033,8 @@ impl ConversationSession {
         let last_compaction_offset = Arc::new(std::sync::Mutex::new(meta.last_compaction_offset));
 
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(
-            file,
-            rx,
-            last_compaction_offset.clone(),
-            committed_lines,
-        );
+        let writer =
+            ConversationWriter::new(file, rx, last_compaction_offset.clone(), committed_lines);
         std::thread::spawn(move || writer.run());
 
         let (config_tx, config_rx) = mpsc::unbounded_channel::<ConfigChange>();
@@ -1183,11 +1164,14 @@ impl ConversationSession {
             kind: Some(ENTRY_KIND_COMPACTION.to_string()),
         };
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
-        if let Err(e) = self
-            .sender
-            .send(WriterCommand::AppendCompactionEntry { entry, done: done_tx })
-        {
-            tracing::error!("Failed to send compaction event to conversation writer: {}", e);
+        if let Err(e) = self.sender.send(WriterCommand::AppendCompactionEntry {
+            entry,
+            done: done_tx,
+        }) {
+            tracing::error!(
+                "Failed to send compaction event to conversation writer: {}",
+                e
+            );
             return;
         }
         // Block until the writer has flushed the entry + updated the shared
@@ -1449,8 +1433,8 @@ impl ConversationSession {
     /// clears the override: the field is normalized to `None` and omitted
     /// from disk, so "cleared" and "never set" are the same state.
     pub fn update_context_window(&self, context_window: Option<u64>) {
-        let normalized = context_window
-            .filter(|n| crate::agent::session_config::is_valid_context_window(*n));
+        let normalized =
+            context_window.filter(|n| crate::agent::session_config::is_valid_context_window(*n));
         if let Ok(mut c) = self.context_window.lock() {
             *c = normalized;
         }
@@ -1922,24 +1906,18 @@ impl Clone for ConversationSession {
                 self.workspace_id.lock().ok().and_then(|w| w.clone()),
             ),
             model: std::sync::Mutex::new(self.model.lock().ok().and_then(|m| m.clone())),
-            provider: std::sync::Mutex::new(
-                self.provider.lock().ok().and_then(|p| p.clone()),
-            ),
+            provider: std::sync::Mutex::new(self.provider.lock().ok().and_then(|p| p.clone())),
             reasoning_effort: std::sync::Mutex::new(
                 self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             ),
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
-            context_window: std::sync::Mutex::new(
-                self.context_window.lock().ok().and_then(|c| *c),
-            ),
+            context_window: std::sync::Mutex::new(self.context_window.lock().ok().and_then(|c| *c)),
             todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             llm_call_counter: std::sync::Mutex::new(
                 self.llm_call_counter.lock().ok().and_then(|c| *c),
             ),
-            model_ratio: std::sync::Mutex::new(
-                self.model_ratio.lock().ok().and_then(|r| *r),
-            ),
+            model_ratio: std::sync::Mutex::new(self.model_ratio.lock().ok().and_then(|r| *r)),
             message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
             last_meta_write: std::sync::Mutex::new(
                 self.last_meta_write
@@ -1955,13 +1933,21 @@ impl Clone for ConversationSession {
             state_change_tx: self.state_change_tx.clone(),
             config_version: AtomicU64::new(self.config_version.load(Ordering::Relaxed)),
             last_status: std::sync::Mutex::new(
-                self.last_status.lock().ok().map(|s| s.clone()).unwrap_or_default(),
+                self.last_status
+                    .lock()
+                    .ok()
+                    .map(|s| s.clone())
+                    .unwrap_or_default(),
             ),
             last_ratio: std::sync::Mutex::new(
                 self.last_ratio.lock().ok().map(|r| *r).unwrap_or(0.0),
             ),
             last_context_usage: std::sync::Mutex::new(
-                self.last_context_usage.lock().ok().map(|s| s.clone()).unwrap_or_default(),
+                self.last_context_usage
+                    .lock()
+                    .ok()
+                    .map(|s| s.clone())
+                    .unwrap_or_default(),
             ),
             // ADR-067: the sections cache is owned per-session — each clone
             // starts empty and receives its own writes. Sharing it (Arc)
@@ -2078,8 +2064,7 @@ pub fn read_session_meta(
 ) -> std::io::Result<SessionMeta> {
     let path = meta_path(conversations_dir, session_id);
     let data = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&data)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&data).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Scan all session meta files and return them sorted by `last_active_at` descending.
@@ -2120,10 +2105,7 @@ pub fn scan_sessions_from_meta(conversations_dir: &Path) -> Vec<(String, Session
 /// `SessionManager`.  By design it can only prune sessions that have been
 /// evicted from memory (idle timeout), because active sessions constantly
 /// update their `last_active_at` and will never be the oldest.
-pub(crate) fn prune_excess_sessions(
-    conversations_dir: &Path,
-    max_sessions: usize,
-) -> usize {
+pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usize) -> usize {
     if max_sessions == 0 {
         return 0;
     }
@@ -2364,11 +2346,7 @@ pub fn scan_sessions_async(
     conversations_dir: PathBuf,
     page: Option<u32>,
     size: Option<u32>,
-) -> tokio::task::JoinHandle<(
-    Vec<SessionInfo>,
-    usize,
-    (u64, u64, u64, u64),
-)> {
+) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
         // ADR-024: scan per-session meta files instead of index.json.
         let sessions = scan_sessions_from_meta(&conversations_dir);
@@ -2390,19 +2368,23 @@ pub fn scan_sessions_async(
         // `total_cache_write` is always summed (Anthropic charges 1.25×
         // for `cache_creation_input_tokens` regardless of the regular
         // input count).
-        let (agent_total_input, agent_total_output, agent_total_cache_read, agent_total_cache_write) =
-            sessions.iter().fold(
-                (0u64, 0u64, 0u64, 0u64),
-                |(acc_in, acc_out, acc_cr, acc_cw), (_, meta)| {
-                    let t = meta.tokens.as_ref();
-                    (
-                        acc_in.saturating_add(t.map(|t| t.total_input).unwrap_or(0)),
-                        acc_out.saturating_add(t.map(|t| t.total_output).unwrap_or(0)),
-                        acc_cr.saturating_add(t.map(|t| t.total_cache_read).unwrap_or(0)),
-                        acc_cw.saturating_add(t.map(|t| t.total_cache_write).unwrap_or(0)),
-                    )
-                },
-            );
+        let (
+            agent_total_input,
+            agent_total_output,
+            agent_total_cache_read,
+            agent_total_cache_write,
+        ) = sessions.iter().fold(
+            (0u64, 0u64, 0u64, 0u64),
+            |(acc_in, acc_out, acc_cr, acc_cw), (_, meta)| {
+                let t = meta.tokens.as_ref();
+                (
+                    acc_in.saturating_add(t.map(|t| t.total_input).unwrap_or(0)),
+                    acc_out.saturating_add(t.map(|t| t.total_output).unwrap_or(0)),
+                    acc_cr.saturating_add(t.map(|t| t.total_cache_read).unwrap_or(0)),
+                    acc_cw.saturating_add(t.map(|t| t.total_cache_write).unwrap_or(0)),
+                )
+            },
+        );
 
         let total = sessions.len();
         let page = page.unwrap_or(1).max(1) as usize;
@@ -2695,7 +2677,11 @@ pub fn read_messages_since(
         } else {
             line_char_offset
         };
-        let delta_content: String = sl.accumulated_content.chars().skip(effective_offset).collect();
+        let delta_content: String = sl
+            .accumulated_content
+            .chars()
+            .skip(effective_offset)
+            .collect();
         StreamingLineDelta {
             line: sl.line_number,
             role: sl.role,
@@ -2804,12 +2790,17 @@ pub fn read_messages_since_cursor(
         // If cursor was behind the streaming line before reading complete
         // lines, the char_offset belongs to a previous (flushed) streaming
         // line and must be reset to 0.
-        let effective_offset = if cursor.line_number < sl.line_number || cursor.char_offset > current_len {
-            0
-        } else {
-            cursor.char_offset
-        };
-        let delta_content: String = sl.accumulated_content.chars().skip(effective_offset).collect();
+        let effective_offset =
+            if cursor.line_number < sl.line_number || cursor.char_offset > current_len {
+                0
+            } else {
+                cursor.char_offset
+            };
+        let delta_content: String = sl
+            .accumulated_content
+            .chars()
+            .skip(effective_offset)
+            .collect();
         Some(StreamingLineDelta {
             line: sl.line_number,
             role: sl.role,
@@ -2877,7 +2868,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "Hello", None);
@@ -2931,7 +2923,8 @@ mod tests {
             .join("meta")
             .join(format!("{}.json", session_id));
         assert!(meta_path.exists(), "Per-session meta file must exist");
-        let meta: SessionMeta = serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        let meta: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
         assert_eq!(meta.version, CONVERSATION_FORMAT_VERSION);
         assert_eq!(meta.session_id, session_id);
         assert_eq!(meta.agent_id, agent_id);
@@ -3011,7 +3004,8 @@ mod tests {
         let ids = vec![
             (
                 "20260503_100000_aaaaaa",
-                (base - chrono::Duration::hours(3)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                (base - chrono::Duration::hours(3))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
             (
                 "20260503_120000_bbbbbb",
@@ -3019,7 +3013,8 @@ mod tests {
             ),
             (
                 "20260503_110000_cccccc",
-                (base - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                (base - chrono::Duration::hours(1))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
         ];
         for (id, ts) in &ids {
@@ -3178,7 +3173,8 @@ mod tests {
                 model: None,
                 provider: None,
             },
-            0, Arc::new(AtomicUsize::new(0)), // unlimited in tests
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
         )
         .unwrap();
         session.append_message("user", "First message", None);
@@ -3190,7 +3186,9 @@ mod tests {
         });
 
         // Resume session
-        let (resumed, _config_rx2, _state_rx2) = ConversationSession::resume(work_dir, session_id, Arc::new(AtomicUsize::new(0))).unwrap();
+        let (resumed, _config_rx2, _state_rx2) =
+            ConversationSession::resume(work_dir, session_id, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(resumed.agent_id(), agent_id);
 
@@ -3327,7 +3325,10 @@ mod tests {
             });
 
             let tokens = session.tokens().expect("tokens should be set");
-            assert_eq!(tokens.last_input, 3_500, "last_input is the most recent raw value");
+            assert_eq!(
+                tokens.last_input, 3_500,
+                "last_input is the most recent raw value"
+            );
             assert_eq!(tokens.last_output, 450);
             assert_eq!(tokens.total_input, 4_500);
             assert_eq!(tokens.total_output, 650);
@@ -3458,7 +3459,8 @@ mod tests {
                 "last_input is the most recent raw value, not the sum"
             );
             assert_eq!(
-                tokens.total_input, u64::MAX,
+                tokens.total_input,
+                u64::MAX,
                 "saturating_add caps total_input at u64::MAX"
             );
             assert_eq!(tokens.total_output, u64::MAX);
@@ -3541,14 +3543,9 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let (session, _config_rx, _state_rx) = ConversationSession::new(
-                &dir,
-                "tok_compaction_preserve",
-                cfg,
-                0,
-                committed,
-            )
-            .unwrap();
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_compaction_preserve", cfg, 0, committed)
+                    .unwrap();
 
             // Simulate a previous main-dialog LLM call: 10_000 input, 500 output.
             session.accumulate_llm_usage(&UsageInfo {
@@ -3620,14 +3617,8 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let (session, _config_rx, _state_rx) = ConversationSession::new(
-                &dir,
-                "tok_history_anchor",
-                cfg,
-                0,
-                committed,
-            )
-            .unwrap();
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_history_anchor", cfg, 0, committed).unwrap();
 
             // Pre-anchor state: simulate a previous main-dialog call (last_input
             // = 10_000) followed by a compaction summary call that preserves
@@ -3761,7 +3752,7 @@ mod tests {
                 total_cache_write: 4_000,
             }),
             llm_call_counter: Some(7),
-             model_ratio: None,
+            model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
         };
@@ -3810,8 +3801,8 @@ mod tests {
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 1_000,
                 completion_tokens: 200,
-                cache_read_tokens: 400,    // Anthropic-style cache hit
-                cache_write_tokens: 200,   // Anthropic-style cache write
+                cache_read_tokens: 400,  // Anthropic-style cache hit
+                cache_write_tokens: 200, // Anthropic-style cache write
                 ..Default::default()
             });
             session.accumulate_llm_usage(&UsageInfo {
@@ -3822,7 +3813,9 @@ mod tests {
                 ..Default::default()
             });
 
-            let tokens = session.tokens().expect("tokens should be set after 2 calls");
+            let tokens = session
+                .tokens()
+                .expect("tokens should be set after 2 calls");
             // Per-turn: most recent raw Provider value.
             assert_eq!(tokens.last_cache_read, 1_200);
             assert_eq!(tokens.last_cache_write, 0);
@@ -3911,14 +3904,8 @@ mod tests {
             };
             let committed = Arc::new(AtomicUsize::new(0));
             let (session, _config_rx, _state_rx) =
-                ConversationSession::new(
-                    &dir,
-                    "tok_acc_cache_overflow",
-                    cfg,
-                    0,
-                    committed,
-                )
-                .unwrap();
+                ConversationSession::new(&dir, "tok_acc_cache_overflow", cfg, 0, committed)
+                    .unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 1,
@@ -3937,11 +3924,13 @@ mod tests {
 
             let tokens = session.tokens().expect("tokens should be set");
             assert_eq!(
-                tokens.total_cache_read, u64::MAX,
+                tokens.total_cache_read,
+                u64::MAX,
                 "saturating_add caps total_cache_read at u64::MAX"
             );
             assert_eq!(
-                tokens.total_cache_write, u64::MAX,
+                tokens.total_cache_write,
+                u64::MAX,
                 "saturating_add caps total_cache_write at u64::MAX"
             );
         });
@@ -3968,14 +3957,8 @@ mod tests {
             };
             let committed = Arc::new(AtomicUsize::new(0));
             let (session, _config_rx, _state_rx) =
-                ConversationSession::new(
-                    &dir,
-                    "tok_acc_compaction_cache",
-                    cfg,
-                    0,
-                    committed,
-                )
-                .unwrap();
+                ConversationSession::new(&dir, "tok_acc_compaction_cache", cfg, 0, committed)
+                    .unwrap();
 
             // Main-dialog LLM call establishes the per-turn baseline.
             session.accumulate_llm_usage(&UsageInfo {
@@ -4115,8 +4098,7 @@ mod tests {
             .unwrap();
 
             let join = scan_sessions_async(conv_dir, None, None);
-            let (sessions, _total, (agent_in, agent_out, agent_cr, agent_cw)) =
-                join.await.unwrap();
+            let (sessions, _total, (agent_in, agent_out, agent_cr, agent_cw)) = join.await.unwrap();
 
             assert_eq!(sessions.len(), 2);
             assert_eq!(
@@ -4140,10 +4122,16 @@ mod tests {
         // ADR-024: old JSON without optional fields defaults correctly.
         let old_json = r#"{"version":2,"session_id":"old","agent_id":"com.test","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","message_count":0,"corrupted":false}"#;
         let meta: SessionMeta = serde_json::from_str(old_json).unwrap();
-        assert_eq!(meta.tokens, None, "old JSON without tokens field should default to None");
+        assert_eq!(
+            meta.tokens, None,
+            "old JSON without tokens field should default to None"
+        );
         assert_eq!(meta.model, None);
         assert_eq!(meta.provider, None);
-        assert_eq!(meta.todos, None, "pre-ADR-060 JSON without todos field should default to None");
+        assert_eq!(
+            meta.todos, None,
+            "pre-ADR-060 JSON without todos field should default to None"
+        );
     }
 
     #[test]
@@ -4185,12 +4173,9 @@ mod tests {
         session.set_todos(&items);
 
         // Restart: a fresh session resumes from the persisted meta file.
-        let (resumed, _cfg_rx, _state_rx) = ConversationSession::resume(
-            temp_dir.path(),
-            sid,
-            Arc::new(AtomicUsize::new(0)),
-        )
-        .unwrap();
+        let (resumed, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
         assert_eq!(
             resumed.todos(),
             Some(items),
@@ -4199,13 +4184,14 @@ mod tests {
 
         // Clearing the list also persists: an emptied todo list resumes as None.
         resumed.set_todos(&[]);
-        let (resumed2, _cfg_rx, _state_rx) = ConversationSession::resume(
-            temp_dir.path(),
-            sid,
-            Arc::new(AtomicUsize::new(0)),
-        )
-        .unwrap();
-        assert_eq!(resumed2.todos(), None, "emptied todo list must persist as None");
+        let (resumed2, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
+        assert_eq!(
+            resumed2.todos(),
+            None,
+            "emptied todo list must persist as None"
+        );
     }
 
     // ── raw-entry pagination tests ───────────────────────────────
@@ -4246,7 +4232,13 @@ mod tests {
         // ADR-050: forward semantics — offset=0 anchors at the OLDEST end.
         let dir = TempDir::new().unwrap();
         let entries: Vec<ConversationEntry> = (1..=10)
-            .map(|i| make_entry(&i.to_string(), if i % 2 == 0 { "assistant" } else { "user" }, &format!("m{}", i)))
+            .map(|i| {
+                make_entry(
+                    &i.to_string(),
+                    if i % 2 == 0 { "assistant" } else { "user" },
+                    &format!("m{}", i),
+                )
+            })
             .collect();
         let path = write_test_jsonl(&dir, "sess-raw-limit", &entries);
 
@@ -4263,7 +4255,13 @@ mod tests {
         // 10 raw entries; from_tail=true, limit=3 → last 3 entries.
         let dir = TempDir::new().unwrap();
         let entries: Vec<ConversationEntry> = (1..=10)
-            .map(|i| make_entry(&i.to_string(), if i % 2 == 0 { "assistant" } else { "user" }, &format!("m{}", i)))
+            .map(|i| {
+                make_entry(
+                    &i.to_string(),
+                    if i % 2 == 0 { "assistant" } else { "user" },
+                    &format!("m{}", i),
+                )
+            })
             .collect();
         let path = write_test_jsonl(&dir, "sess-raw-tail", &entries);
 
@@ -4307,8 +4305,13 @@ mod tests {
         // Union of pages = whole file. Sort with a numeric-aware comparator
         // so the assertion reads the natural order (`e1..e12`), not the
         // lexicographic order (`e1, e10, e11, e12, e2, ...`).
-        let mut all: Vec<&str> = p0.messages.iter().chain(&p1.messages).chain(&p2.messages)
-            .map(|e| e.content.as_str()).collect();
+        let mut all: Vec<&str> = p0
+            .messages
+            .iter()
+            .chain(&p1.messages)
+            .chain(&p2.messages)
+            .map(|e| e.content.as_str())
+            .collect();
         all.sort_by_key(|s| s.trim_start_matches('e').parse::<u32>().unwrap());
         let expected: Vec<String> = (1..=12).map(|i| format!("e{}", i)).collect();
         assert_eq!(all, expected.iter().map(|s| s.as_str()).collect::<Vec<_>>());
@@ -4362,9 +4365,21 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut entries = vec![make_entry("1", "user", "user-msg")];
         for i in 0..20 {
-            entries.push(make_entry(&format!("t{}", i * 3 + 2), "thought", &format!("think-{}", i)));
-            entries.push(make_entry(&format!("c{}", i * 3 + 3), "tool_call", &format!("call-{}", i)));
-            entries.push(make_entry(&format!("r{}", i * 3 + 4), "tool_result", &format!("result-{}", i)));
+            entries.push(make_entry(
+                &format!("t{}", i * 3 + 2),
+                "thought",
+                &format!("think-{}", i),
+            ));
+            entries.push(make_entry(
+                &format!("c{}", i * 3 + 3),
+                "tool_call",
+                &format!("call-{}", i),
+            ));
+            entries.push(make_entry(
+                &format!("r{}", i * 3 + 4),
+                "tool_result",
+                &format!("result-{}", i),
+            ));
         }
         entries.push(make_entry("last", "assistant", "final-reply"));
         assert_eq!(entries.len(), 62);
@@ -4375,7 +4390,10 @@ mod tests {
         assert_eq!(page1.messages.len(), 50);
         assert_eq!(page1.total, 62);
         assert!(
-            page1.messages.iter().any(|m| m.role == "user" && m.content == "user-msg"),
+            page1
+                .messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "user-msg"),
             "page 1 (offset=0, limit=50) MUST include the user message at idx 0"
         );
 
@@ -4388,7 +4406,8 @@ mod tests {
         );
         // The last entry of the tail is the final assistant reply.
         assert_eq!(
-            page2.messages.last().unwrap().content, "final-reply",
+            page2.messages.last().unwrap().content,
+            "final-reply",
             "page 2 ends on the final assistant reply"
         );
     }
@@ -4431,7 +4450,11 @@ mod tests {
         // limit large enough to span the entire file in raw entries
         let page = read_messages_paginated(&path, 0, 50, false).unwrap();
         // Expect: all 7 entries (4 pre-compaction + compaction + 2 post-compaction)
-        assert_eq!(page.messages.len(), 7, "display path must show full history");
+        assert_eq!(
+            page.messages.len(),
+            7,
+            "display path must show full history"
+        );
         assert_eq!(page.total, 7);
 
         // Pre-compaction content must appear.
@@ -4482,7 +4505,10 @@ mod tests {
         let page2 = read_messages_paginated(&path, 2, 50, false).unwrap();
         assert_eq!(page2.messages.len(), 5, "5 entries after the first 2");
         assert!(
-            page2.messages.iter().any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
+            page2
+                .messages
+                .iter()
+                .any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
             "page 2 must include the compaction marker"
         );
         assert!(
@@ -4513,9 +4539,15 @@ mod tests {
         // offset=0 anchors at the OLDEST entry (clamped).
         let page = read_messages_paginated(&path, 0, 50, false).unwrap();
         // Expect: all 5 entries (old-u1, old-a1, compaction, new-u2, new-a2)
-        assert_eq!(page.messages.len(), 5, "forward pagination must show full history");
+        assert_eq!(
+            page.messages.len(),
+            5,
+            "forward pagination must show full history"
+        );
         assert!(
-            page.messages.iter().any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
+            page.messages
+                .iter()
+                .any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
             "compaction marker must appear"
         );
         assert!(
@@ -4630,8 +4662,7 @@ mod tests {
 
         // Frontend sends line_number=2 (matches streaming line) with a stale
         // offset of 100 that belonged to the previous (longer) assistant line.
-        let result =
-            read_messages_since(&path, 2, 100, &map, "sess-stale-exceeds", 0).unwrap();
+        let result = read_messages_since(&path, 2, 100, &map, "sess-stale-exceeds", 0).unwrap();
         let streaming = result.streaming.expect("streaming line expected");
         assert_eq!(streaming.line, 2);
         assert_eq!(
@@ -4657,12 +4688,16 @@ mod tests {
         // Cursor at 0, limit 50 → all 3 messages, has_more=false
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
             50,
             &map,
             "sess-cursor-basic",
             0,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 3);
         assert!(!result.has_more);
         assert_eq!(result.new_cursor.line_number, 3);
@@ -4682,9 +4717,16 @@ mod tests {
         // Cursor at 0, limit 3 → first 3 messages, has_more=true
         let r1 = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
-            3, &map, "sess-cursor-batch", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
+            3,
+            &map,
+            "sess-cursor-batch",
+            0,
+        )
+        .unwrap();
         assert_eq!(r1.messages.len(), 3);
         assert!(r1.has_more);
         assert_eq!(r1.new_cursor.line_number, 3);
@@ -4692,26 +4734,23 @@ mod tests {
         assert_eq!(r1.messages[2].content, "msg2");
 
         // Cursor at 3, limit 3 → next 3 messages, has_more=true
-        let r2 = read_messages_since_cursor(
-            &path, r1.new_cursor, 3, &map, "sess-cursor-batch", 0,
-        ).unwrap();
+        let r2 = read_messages_since_cursor(&path, r1.new_cursor, 3, &map, "sess-cursor-batch", 0)
+            .unwrap();
         assert_eq!(r2.messages.len(), 3);
         assert!(r2.has_more);
         assert_eq!(r2.new_cursor.line_number, 6);
         assert_eq!(r2.messages[0].content, "msg3");
 
         // Cursor at 6, limit 3 → next 3, has_more=true
-        let r3 = read_messages_since_cursor(
-            &path, r2.new_cursor, 3, &map, "sess-cursor-batch", 0,
-        ).unwrap();
+        let r3 = read_messages_since_cursor(&path, r2.new_cursor, 3, &map, "sess-cursor-batch", 0)
+            .unwrap();
         assert_eq!(r3.messages.len(), 3);
         assert!(r3.has_more);
         assert_eq!(r3.new_cursor.line_number, 9);
 
         // Cursor at 9, limit 3 → last 1 message, has_more=false
-        let r4 = read_messages_since_cursor(
-            &path, r3.new_cursor, 3, &map, "sess-cursor-batch", 0,
-        ).unwrap();
+        let r4 = read_messages_since_cursor(&path, r3.new_cursor, 3, &map, "sess-cursor-batch", 0)
+            .unwrap();
         assert_eq!(r4.messages.len(), 1);
         assert!(!r4.has_more);
         assert_eq!(r4.new_cursor.line_number, 10);
@@ -4729,9 +4768,16 @@ mod tests {
         // Cursor at line 1 (caught up), char_offset 3 → delta "lo world"
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 1, char_offset: 3 },
-            50, &map, "sess-cursor-same", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 1,
+                char_offset: 3,
+            },
+            50,
+            &map,
+            "sess-cursor-same",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 0); // no new complete lines
         assert!(!result.has_more);
         let streaming = result.streaming.expect("streaming line expected");
@@ -4757,9 +4803,16 @@ mod tests {
         // Cursor at line 1 (behind streaming line 2), stale char_offset 10
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 1, char_offset: 10 },
-            50, &map, "sess-cursor-newline", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 1,
+                char_offset: 10,
+            },
+            50,
+            &map,
+            "sess-cursor-newline",
+            0,
+        )
+        .unwrap();
         // Should return line 1 (the complete assistant message)
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].content, "previous text");
@@ -4768,7 +4821,10 @@ mod tests {
         assert_eq!(streaming.content, "reasoning...");
         // Cursor advances to line 2, char_offset = full streaming content length
         assert_eq!(result.new_cursor.line_number, 2);
-        assert_eq!(result.new_cursor.char_offset, "reasoning...".chars().count());
+        assert_eq!(
+            result.new_cursor.char_offset,
+            "reasoning...".chars().count()
+        );
     }
 
     #[test]
@@ -4785,9 +4841,16 @@ mod tests {
         // Cursor at line 2 (matches streaming line), stale char_offset 100
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 2, char_offset: 100 },
-            50, &map, "sess-cursor-stale", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 2,
+                char_offset: 100,
+            },
+            50,
+            &map,
+            "sess-cursor-stale",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 0); // no new complete lines
         let streaming = result.streaming.expect("streaming line expected");
         assert_eq!(streaming.content, "Hello");
@@ -4811,36 +4874,56 @@ mod tests {
         // Cursor at 0 (way behind), limit 50 — batch 1
         let r1 = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
-            50, &map, "sess-cursor-bg", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
+            50,
+            &map,
+            "sess-cursor-bg",
+            0,
+        )
+        .unwrap();
         assert_eq!(r1.messages.len(), 50);
         assert!(r1.has_more);
         assert_eq!(r1.new_cursor.line_number, 50);
         // Streaming delta NOT returned (cursor at 50 < streaming at 100)
-        assert!(r1.streaming.is_none(), "no streaming delta during batch catch-up");
+        assert!(
+            r1.streaming.is_none(),
+            "no streaming delta during batch catch-up"
+        );
         assert_eq!(r1.new_cursor.char_offset, 0);
 
         // Batch 2: cursor at 50, limit 50 — catches up to line 100
-        let r2 = read_messages_since_cursor(
-            &path, r1.new_cursor, 50, &map, "sess-cursor-bg", 0,
-        ).unwrap();
+        let r2 = read_messages_since_cursor(&path, r1.new_cursor, 50, &map, "sess-cursor-bg", 0)
+            .unwrap();
         assert_eq!(r2.messages.len(), 50);
         assert!(!r2.has_more);
         assert_eq!(r2.new_cursor.line_number, 100);
         // Streaming delta IS returned now (cursor at 100 == streaming at 100)
-        let s2 = r2.streaming.as_ref().expect("streaming should be returned when caught up");
-        assert_eq!(s2.content, "streaming content", "full content on first caught-up poll");
+        let s2 = r2
+            .streaming
+            .as_ref()
+            .expect("streaming should be returned when caught up");
+        assert_eq!(
+            s2.content, "streaming content",
+            "full content on first caught-up poll"
+        );
         assert_eq!(s2.char_offset, "streaming content".chars().count());
-        assert_eq!(r2.new_cursor.char_offset, "streaming content".chars().count());
+        assert_eq!(
+            r2.new_cursor.char_offset,
+            "streaming content".chars().count()
+        );
 
         // Batch 3: cursor at 100, no new complete lines, streaming delta only
-        let r3 = read_messages_since_cursor(
-            &path, r2.new_cursor, 50, &map, "sess-cursor-bg", 0,
-        ).unwrap();
+        let r3 = read_messages_since_cursor(&path, r2.new_cursor, 50, &map, "sess-cursor-bg", 0)
+            .unwrap();
         assert_eq!(r3.messages.len(), 0);
         assert!(!r3.has_more);
-        let s3 = r3.streaming.as_ref().expect("streaming delta on caught-up poll");
+        let s3 = r3
+            .streaming
+            .as_ref()
+            .expect("streaming delta on caught-up poll");
         assert_eq!(s3.content, "", "no new streaming chars");
     }
 
@@ -4854,9 +4937,16 @@ mod tests {
 
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 1, char_offset: 0 },
-            50, &map, "sess-cursor-caughtup", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 1,
+                char_offset: 0,
+            },
+            50,
+            &map,
+            "sess-cursor-caughtup",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 0);
         assert!(!result.has_more);
         assert_eq!(result.new_cursor.line_number, 1);
@@ -4873,9 +4963,16 @@ mod tests {
 
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 999, char_offset: 0 },
-            50, &map, "sess-cursor-clamp", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 999,
+                char_offset: 0,
+            },
+            50,
+            &map,
+            "sess-cursor-clamp",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 0);
         assert!(!result.has_more);
         // Cursor is clamped to total_lines (1)
@@ -4897,9 +4994,16 @@ mod tests {
         // File has 3 lines, cache says 3 — should return all 3.
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
-            50, &map, "sess-cursor-cached", 3,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
+            50,
+            &map,
+            "sess-cursor-cached",
+            3,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 3);
         assert!(!result.has_more);
         assert_eq!(result.new_cursor.line_number, 3);
@@ -4908,9 +5012,16 @@ mod tests {
         // File has 3 lines, cache says 0 — should fall back to file scan.
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
-            50, &map, "sess-cursor-cached", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
+            50,
+            &map,
+            "sess-cursor-cached",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 3);
         assert_eq!(result.total_lines, 3);
     }
@@ -4925,9 +5036,16 @@ mod tests {
 
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
-            50, &map, "empty", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
+            50,
+            &map,
+            "empty",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 0);
         assert!(!result.has_more);
         assert_eq!(result.total_lines, 0);
@@ -4944,9 +5062,16 @@ mod tests {
 
         let result = read_messages_since_cursor(
             &path,
-            DeliveryCursor { line_number: 0, char_offset: 0 },
-            0, &map, "sess-cursor-lim0", 0,
-        ).unwrap();
+            DeliveryCursor {
+                line_number: 0,
+                char_offset: 0,
+            },
+            0,
+            &map,
+            "sess-cursor-lim0",
+            0,
+        )
+        .unwrap();
         assert_eq!(result.messages.len(), 0);
         assert!(result.has_more); // 0 < 1
         assert_eq!(result.new_cursor.line_number, 0);
@@ -4964,10 +5089,7 @@ mod tests {
     /// thread flushing new lines while session is in background).
     fn append_test_jsonl(path: &Path, entries: &[ConversationEntry]) {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(path)
-            .unwrap();
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         for e in entries {
             serde_json::to_writer(&mut file, e).unwrap();
             writeln!(file).unwrap();
@@ -4989,7 +5111,10 @@ mod tests {
 
         // Step 1: Full load — read all messages via pagination.
         // SessionManager.reset_delivery_cursor(sid, total_lines=2)
-        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 2,
+            char_offset: 0,
+        };
 
         // Step 2: Incremental poll — no new data, cursor already at end.
         let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
@@ -5025,7 +5150,10 @@ mod tests {
         let sid = "e2e-bg";
 
         // Full load done — cursor at 2
-        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 2,
+            char_offset: 0,
+        };
 
         // Session goes to background. Writer appends 100 more lines.
         let new_entries: Vec<ConversationEntry> = (0..100)
@@ -5068,19 +5196,25 @@ mod tests {
         let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
 
         // Full load — cursor at 1
-        let mut cursor = DeliveryCursor { line_number: 1, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 1,
+            char_offset: 0,
+        };
 
         // Streaming line starts at line 1, content "Hello"
         {
             let mut m = map.write().unwrap();
-            m.insert(sid.to_string(), StreamingLine {
-                line_number: 1,
-                role: "assistant".to_string(),
-                message_id: uuid::Uuid::new_v4().to_string(),
-                accumulated_content: "Hello".to_string(),
-                started_at: chrono::Utc::now().to_rfc3339(),
-                started_at_ms: 0,
-            });
+            m.insert(
+                sid.to_string(),
+                StreamingLine {
+                    line_number: 1,
+                    role: "assistant".to_string(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    accumulated_content: "Hello".to_string(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    started_at_ms: 0,
+                },
+            );
         }
 
         // Poll 1: streaming delta "Hello" (full content, cursor caught up)
@@ -5115,14 +5249,17 @@ mod tests {
         // New streaming line starts at line 2, content "Next"
         {
             let mut m = map.write().unwrap();
-            m.insert(sid.to_string(), StreamingLine {
-                line_number: 2,
-                role: "thought".to_string(),
-                message_id: uuid::Uuid::new_v4().to_string(),
-                accumulated_content: "Next".to_string(),
-                started_at: chrono::Utc::now().to_rfc3339(),
-                started_at_ms: 0,
-            });
+            m.insert(
+                sid.to_string(),
+                StreamingLine {
+                    line_number: 2,
+                    role: "thought".to_string(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    accumulated_content: "Next".to_string(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    started_at_ms: 0,
+                },
+            );
         }
 
         // Poll 3: flushed line + new streaming delta
@@ -5150,10 +5287,16 @@ mod tests {
         let sid = "e2e-reset";
 
         // Simulate: cursor was at 3 (some incremental polls happened)
-        let cursor_before = DeliveryCursor { line_number: 3, char_offset: 0 };
+        let cursor_before = DeliveryCursor {
+            line_number: 3,
+            char_offset: 0,
+        };
 
         // Full load happens — reset_delivery_cursor(sid, total_lines=10)
-        let cursor = DeliveryCursor { line_number: 10, char_offset: 0 };
+        let cursor = DeliveryCursor {
+            line_number: 10,
+            char_offset: 0,
+        };
 
         // Incremental poll — should return nothing (cursor at end)
         let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
@@ -5187,7 +5330,10 @@ mod tests {
         let map = make_streaming_map(sid, 15, "assistant", "streaming content");
 
         // Cursor at 5 (after initial full load), limit=3
-        let mut cursor = DeliveryCursor { line_number: 5, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 5,
+            char_offset: 0,
+        };
 
         // Batch 1: lines 5-7, has_more=true, NO streaming delta
         let r1 = read_messages_since_cursor(&path, cursor, 3, &map, sid, 0).unwrap();
@@ -5218,7 +5364,10 @@ mod tests {
         assert_eq!(r4.messages.len(), 1);
         assert!(!r4.has_more);
         // Cursor at 15 == streaming.line_number(15) → streaming delta returned!
-        let s4 = r4.streaming.as_ref().expect("streaming delta when caught up");
+        let s4 = r4
+            .streaming
+            .as_ref()
+            .expect("streaming delta when caught up");
         assert_eq!(s4.content, "streaming content");
         assert_eq!(s4.line, 15);
         cursor = r4.new_cursor;
@@ -5237,18 +5386,24 @@ mod tests {
         let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
 
         // Full load — cursor at 1
-        let mut cursor = DeliveryCursor { line_number: 1, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 1,
+            char_offset: 0,
+        };
 
         // Streaming line at 1, initially empty
         {
-            map.write().unwrap().insert(sid.to_string(), StreamingLine {
-                line_number: 1,
-                role: "assistant".to_string(),
-                message_id: uuid::Uuid::new_v4().to_string(),
-                accumulated_content: String::new(),
-                started_at: chrono::Utc::now().to_rfc3339(),
-                started_at_ms: 0,
-            });
+            map.write().unwrap().insert(
+                sid.to_string(),
+                StreamingLine {
+                    line_number: 1,
+                    role: "assistant".to_string(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    accumulated_content: String::new(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    started_at_ms: 0,
+                },
+            );
         }
 
         // Poll 1: streaming exists but empty → delta is "", char_offset=0
@@ -5260,7 +5415,11 @@ mod tests {
         assert_eq!(cursor.char_offset, 0);
 
         // Content grows to "abc"
-        map.write().unwrap().get_mut(sid).unwrap().accumulated_content = "abc".to_string();
+        map.write()
+            .unwrap()
+            .get_mut(sid)
+            .unwrap()
+            .accumulated_content = "abc".to_string();
 
         // Poll 2: delta = "abc" (from offset 0)
         let r2 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
@@ -5271,7 +5430,11 @@ mod tests {
         assert_eq!(cursor.char_offset, 3);
 
         // Content grows to "abcdef"
-        map.write().unwrap().get_mut(sid).unwrap().accumulated_content = "abcdef".to_string();
+        map.write()
+            .unwrap()
+            .get_mut(sid)
+            .unwrap()
+            .accumulated_content = "abcdef".to_string();
 
         // Poll 3: delta = "def" (from offset 3)
         let r3 = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
@@ -5296,18 +5459,24 @@ mod tests {
         let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
 
         // Full load — cursor at 2
-        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 2,
+            char_offset: 0,
+        };
 
         // Streaming line at 2, content "final answer"
         {
-            map.write().unwrap().insert(sid.to_string(), StreamingLine {
-                line_number: 2,
-                role: "assistant".to_string(),
-                message_id: uuid::Uuid::new_v4().to_string(),
-                accumulated_content: "final answer".to_string(),
-                started_at: chrono::Utc::now().to_rfc3339(),
-                started_at_ms: 0,
-            });
+            map.write().unwrap().insert(
+                sid.to_string(),
+                StreamingLine {
+                    line_number: 2,
+                    role: "assistant".to_string(),
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    accumulated_content: "final answer".to_string(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    started_at_ms: 0,
+                },
+            );
         }
 
         // Poll 1: streaming delta "final answer"
@@ -5350,10 +5519,16 @@ mod tests {
         let map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
 
         // Full load — cursor at 2
-        let mut cursor = DeliveryCursor { line_number: 2, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 2,
+            char_offset: 0,
+        };
 
         // Compaction happens: compaction record written to JSONL
-        append_test_jsonl(&path, &[make_compaction_entry("3", "<summary>compacted</summary>")]);
+        append_test_jsonl(
+            &path,
+            &[make_compaction_entry("3", "<summary>compacted</summary>")],
+        );
 
         // compacting_ended: one-shot incremental poll
         let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
@@ -5375,22 +5550,32 @@ mod tests {
         let sid = "e2e-cumulative";
 
         // Full load — cursor at 1
-        let mut cursor = DeliveryCursor { line_number: 1, char_offset: 0 };
+        let mut cursor = DeliveryCursor {
+            line_number: 1,
+            char_offset: 0,
+        };
         let mut total_delivered = 0;
 
         // 5 rounds of: write 3 lines → poll → verify
         for round in 0..5 {
             let round_entries: Vec<ConversationEntry> = (0..3)
-                .map(|i| make_entry(
-                    &format!("r{}c{}", round, i),
-                    "user",
-                    &format!("round{}-msg{}", round, i),
-                ))
+                .map(|i| {
+                    make_entry(
+                        &format!("r{}c{}", round, i),
+                        "user",
+                        &format!("round{}-msg{}", round, i),
+                    )
+                })
                 .collect();
             append_test_jsonl(&path, &round_entries);
 
             let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
-            assert_eq!(r.messages.len(), 3, "round {} should deliver 3 messages", round);
+            assert_eq!(
+                r.messages.len(),
+                3,
+                "round {} should deliver 3 messages",
+                round
+            );
             assert!(!r.has_more);
             total_delivered += r.messages.len();
             cursor = r.new_cursor;
@@ -5541,13 +5726,12 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let change = rt.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                config_rx.recv(),
-            )
-            .await
+            tokio::time::timeout(std::time::Duration::from_secs(1), config_rx.recv()).await
         });
-        assert!(change.is_ok(), "config_change_tx should have sent a notification");
+        assert!(
+            change.is_ok(),
+            "config_change_tx should have sent a notification"
+        );
         let change = change.unwrap().unwrap();
         assert_eq!(change.snapshot.model_id, "notify-test");
     }

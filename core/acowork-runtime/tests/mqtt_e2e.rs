@@ -10,8 +10,7 @@
 //! Broker startup tests run in a separate OS thread via start_broker.
 
 use acowork_core::mqtt_proto::{
-    self, control_command::Command,
-    ChatMessage, ControlCommand, DataEnvelope,
+    self, ChatMessage, ControlCommand, DataEnvelope, control_command::Command,
     data_envelope::Payload,
 };
 use acowork_gateway::mqtt::broker::build_broker_config;
@@ -96,7 +95,10 @@ fn test_control_command_stop() {
             reason: "user_requested".into(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     assert!(matches!(decoded.payload, Some(Payload::ControlCommand(_))));
@@ -118,7 +120,10 @@ fn test_parse_control_message() {
             params_json: String::new(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
 
     let action = control_handler::parse_control_payload(
@@ -127,7 +132,11 @@ fn test_parse_control_message() {
     );
 
     match action {
-        Some(ControlAction::SendMessage { session_id, content, .. }) => {
+        Some(ControlAction::SendMessage {
+            session_id,
+            content,
+            ..
+        }) => {
             assert_eq!(session_id, "sid-1");
             assert_eq!(content, "hi");
         }
@@ -144,10 +153,14 @@ fn test_parse_control_stop() {
             reason: String::new(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
 
-    let action = control_handler::parse_control_payload("acowork/agents/a/sessions/control/stop", &bytes);
+    let action =
+        control_handler::parse_control_payload("acowork/agents/a/sessions/control/stop", &bytes);
     assert!(matches!(action, Some(ControlAction::StopGeneration { .. })));
 }
 
@@ -162,7 +175,10 @@ fn test_parse_control_cancel_tool() {
             tool_call_id: "call_abc123".into(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
 
     let action = control_handler::parse_control_payload(
@@ -170,7 +186,10 @@ fn test_parse_control_cancel_tool() {
         &bytes,
     );
     match action {
-        Some(ControlAction::CancelTool { session_id, tool_call_id }) => {
+        Some(ControlAction::CancelTool {
+            session_id,
+            tool_call_id,
+        }) => {
             assert_eq!(session_id, "s");
             assert_eq!(tool_call_id, "call_abc123");
         }
@@ -186,7 +205,10 @@ fn test_parse_control_create_session() {
         instance_id: INSTANCE_ID.into(),
         command: Some(Command::CreateSession(mqtt_proto::CreateSession {})),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let action = control_handler::parse_control_payload("", &bytes);
     assert!(matches!(action, Some(ControlAction::CreateSession)));
@@ -219,7 +241,10 @@ fn test_available_providers_roundtrip() {
         }],
     };
 
-    let env = DataEnvelope { version: 1, payload: Some(Payload::AvailableProviders(providers)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::AvailableProviders(providers)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
 
@@ -274,7 +299,10 @@ fn phase9_chat_message_rich_fields_via_params_json() {
             params_json: params_json.clone(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let _decoded = DataEnvelope::decode(bytes.as_slice()).expect("decode");
 
@@ -317,14 +345,20 @@ fn phase9_stop_with_reason_roundtrip() {
             reason: "iteration_limit".into(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     // decode round-trip just verifies wire stability; dispatch reads the
     // original envelope bytes.
     let _ = decoded;
 
-    let action = control_handler::parse_control_payload("acowork/agents/com.acowork.test/sessions/sess-stop/control/stop", &bytes);
+    let action = control_handler::parse_control_payload(
+        "acowork/agents/com.acowork.test/sessions/sess-stop/control/stop",
+        &bytes,
+    );
     match action {
         Some(ControlAction::StopGeneration { session_id, reason }) => {
             assert_eq!(session_id, "sess-stop");
@@ -349,12 +383,25 @@ fn phase9_model_switch_provider_id_normalization() {
             provider_id: String::new(),
         })),
     };
-    let env_same = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd_same)) };
-    let action_same = control_handler::parse_control_payload("acowork/agents/com.acowork.test/sessions/s/control/model_switch", &env_same.encode_to_vec());
+    let env_same = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd_same)),
+    };
+    let action_same = control_handler::parse_control_payload(
+        "acowork/agents/com.acowork.test/sessions/s/control/model_switch",
+        &env_same.encode_to_vec(),
+    );
     match action_same {
-        Some(ControlAction::ModelSwitch { model_id, provider_id, .. }) => {
+        Some(ControlAction::ModelSwitch {
+            model_id,
+            provider_id,
+            ..
+        }) => {
             assert_eq!(model_id, "gpt-4o-mini");
-            assert_eq!(provider_id, None, "empty provider_id must normalize to None (legacy same-provider semantics)");
+            assert_eq!(
+                provider_id, None,
+                "empty provider_id must normalize to None (legacy same-provider semantics)"
+            );
         }
         other => panic!("Expected ModelSwitch, got {:?}", other),
     }
@@ -368,12 +415,26 @@ fn phase9_model_switch_provider_id_normalization() {
             provider_id: "minimax".into(),
         })),
     };
-    let env_x = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd_x)) };
-    let action_x = control_handler::parse_control_payload("acowork/agents/com.acowork.test/sessions/s/control/model_switch", &env_x.encode_to_vec());
+    let env_x = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd_x)),
+    };
+    let action_x = control_handler::parse_control_payload(
+        "acowork/agents/com.acowork.test/sessions/s/control/model_switch",
+        &env_x.encode_to_vec(),
+    );
     match action_x {
-        Some(ControlAction::ModelSwitch { model_id, provider_id, .. }) => {
+        Some(ControlAction::ModelSwitch {
+            model_id,
+            provider_id,
+            ..
+        }) => {
             assert_eq!(model_id, "MiniMax-Text-01");
-            assert_eq!(provider_id, Some("minimax".to_string()), "non-empty provider_id must surface as Some for Runtime to rebuild Provider");
+            assert_eq!(
+                provider_id,
+                Some("minimax".to_string()),
+                "non-empty provider_id must surface as Some for Runtime to rebuild Provider"
+            );
         }
         other => panic!("Expected ModelSwitch, got {:?}", other),
     }
@@ -396,15 +457,24 @@ fn phase9_compress_action_summary_vs_tool_results() {
                 compress_type: compress_type_i32,
             })),
         };
-        let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+        let env = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::ControlCommand(cmd)),
+        };
         let bytes = env.encode_to_vec();
         let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
         // decode round-trip verifies wire stability; dispatch reads envelope bytes.
         let _ = decoded;
 
-        let action = control_handler::parse_control_payload("acowork/agents/com.acowork.test/sessions/s/control/compress_action", &bytes);
+        let action = control_handler::parse_control_payload(
+            "acowork/agents/com.acowork.test/sessions/s/control/compress_action",
+            &bytes,
+        );
         match action {
-            Some(ControlAction::CompressAction { session_id, compress_type }) => {
+            Some(ControlAction::CompressAction {
+                session_id,
+                compress_type,
+            }) => {
                 assert_eq!(session_id, "s");
                 assert_eq!(
                     compress_type, compress_type_i32,
@@ -431,7 +501,10 @@ fn phase9_workspace_switch_unknown_id_dispatches() {
             workspace_id: "ghost-workspace-xyz".into(), // deliberately not installed
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     // decode round-trip verifies wire stability; dispatch reads envelope bytes.
@@ -442,10 +515,15 @@ fn phase9_workspace_switch_unknown_id_dispatches() {
         &bytes,
     );
     match action {
-        Some(ControlAction::WorkspaceSwitch { session_id, workspace_id }) => {
+        Some(ControlAction::WorkspaceSwitch {
+            session_id,
+            workspace_id,
+        }) => {
             assert_eq!(session_id, "s");
-            assert_eq!(workspace_id, "ghost-workspace-xyz",
-                "control_handler must NOT pre-filter unknown IDs — fallback policy is downstream");
+            assert_eq!(
+                workspace_id, "ghost-workspace-xyz",
+                "control_handler must NOT pre-filter unknown IDs — fallback policy is downstream"
+            );
         }
         other => panic!("Expected WorkspaceSwitch, got {:?}", other),
     }
@@ -465,7 +543,10 @@ fn test_control_command_open_session_encode_decode() {
             session_id: "sess-closed-001".into(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     match decoded.payload {
@@ -485,7 +566,10 @@ fn test_parse_control_open_session() {
             session_id: "sess-002".into(),
         })),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
 
     let action = control_handler::parse_control_payload(
@@ -509,7 +593,10 @@ fn test_session_opened_event_roundtrip() {
         provider: "openai".into(),
         last_active_at: "2026-07-17T12:34:56Z".into(),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::SessionOpened(evt)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::SessionOpened(evt)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     match decoded.payload {
@@ -531,7 +618,10 @@ fn test_session_not_opened_event_roundtrip() {
         attempted_command: "chat_message".into(),
         reason: "session_closed".into(),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::SessionNotOpened(evt)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::SessionNotOpened(evt)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     match decoded.payload {
@@ -549,9 +639,7 @@ fn test_session_lifecycle_state_machine_enum() {
     // Pure type-level smoke test: verifies SessionLifecycleState variants
     // exist and compare correctly. Runtime semantics are covered by
     // SessionManager integration tests.
-    use acowork_runtime::agent::session::{
-        SessionLifecycleState as S, SessionOpenOutcome as O,
-    };
+    use acowork_runtime::agent::session::{SessionLifecycleState as S, SessionOpenOutcome as O};
     assert_eq!(S::NotFound, S::NotFound);
     assert_eq!(S::Closed, S::Closed);
     assert_eq!(S::Active, S::Active);
@@ -577,11 +665,9 @@ fn test_session_lifecycle_state_machine_enum() {
 
 #[tokio::test]
 async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
-    use acowork_core::providers::traits::{ChatMessage as CoreChatMessage, ContentPart};
     use acowork_core::protocol::AttachedItem;
-    use acowork_runtime::agent::attachment_to_image::{
-        derive_image_parts, merge_content_parts,
-    };
+    use acowork_core::providers::traits::{ChatMessage as CoreChatMessage, ContentPart};
+    use acowork_runtime::agent::attachment_to_image::{derive_image_parts, merge_content_parts};
     use std::sync::Arc;
 
     // Stub AttachmentService: returns the fake bytes for `img-1` /
@@ -603,10 +689,7 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
         async fn read_file(
             &self,
             document_id: &str,
-        ) -> Result<
-            Vec<u8>,
-            acowork_runtime::usecases::attachment::AttachmentError,
-        > {
+        ) -> Result<Vec<u8>, acowork_runtime::usecases::attachment::AttachmentError> {
             match document_id {
                 "img-1" => Ok(b"\x89PNG\r\n\x1a\nfake-png".to_vec()),
                 "img-2" => Ok(b"\xff\xd8\xff\xe0fake-jpg".to_vec()),
@@ -716,7 +799,10 @@ fn test_control_command_active_heartbeat_encode_decode() {
         instance_id: INSTANCE_ID.into(),
         command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
     let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
     match decoded.payload {
@@ -738,7 +824,10 @@ fn test_parse_control_active_heartbeat() {
         instance_id: INSTANCE_ID.into(),
         command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
     };
-    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let env = DataEnvelope {
+        version: 1,
+        payload: Some(Payload::ControlCommand(cmd)),
+    };
     let bytes = env.encode_to_vec();
 
     let action = control_handler::parse_control_payload(

@@ -217,7 +217,10 @@ mod tests {
         let err = RuntimeError::Core(acowork_core::AcoworkError::Provider(
             ProviderError::network("error sending request for url".to_string()),
         ));
-        assert!(err.is_retryable(), "network errors must be retried at iteration level");
+        assert!(
+            err.is_retryable(),
+            "network errors must be retried at iteration level"
+        );
     }
 
     #[test]
@@ -241,9 +244,10 @@ mod tests {
 
     #[test]
     fn is_retryable_io() {
-        let err = RuntimeError::Core(acowork_core::AcoworkError::Io(
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "tcp timeout"),
-        ));
+        let err = RuntimeError::Core(acowork_core::AcoworkError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "tcp timeout",
+        )));
         assert!(err.is_retryable());
     }
 

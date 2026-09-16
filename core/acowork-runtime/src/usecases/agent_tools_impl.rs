@@ -46,14 +46,14 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use async_trait::async_trait;
 use acowork_core::protocol::AgentSearchConfig;
+use async_trait::async_trait;
 
 use crate::agent_config;
 use crate::usecases::agent_tools::{
-    AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse,
-    McpToolsResponse, MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody,
-    PutMcpToolsBody, PutSearchConfigBody, SearchConfigResponse,
+    AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse, McpToolsResponse,
+    MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutMcpToolsBody,
+    PutSearchConfigBody, SearchConfigResponse,
 };
 
 /// Concrete [`AgentToolsService`] backed by the
@@ -97,13 +97,8 @@ impl AgentToolsService for RuntimeAgentToolsService {
         //    (catalog ∪ local). Empty body is allowed and means
         //    "explicitly no servers active" (Some(vec![])).
         if !body.servers.is_empty() {
-            let merged_names: Vec<String> = cfg
-                .merged()
-                .into_iter()
-                .map(|s| s.name)
-                .collect();
-            let merged: HashSet<&str> =
-                merged_names.iter().map(|s| s.as_str()).collect();
+            let merged_names: Vec<String> = cfg.merged().into_iter().map(|s| s.name).collect();
+            let merged: HashSet<&str> = merged_names.iter().map(|s| s.as_str()).collect();
             let unknown: Vec<String> = body
                 .servers
                 .iter()

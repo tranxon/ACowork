@@ -634,11 +634,10 @@ impl AgentLoop {
                                 raw_preview = %raw.preview(200),
                                 "Accumulated tool call arguments are not valid JSON and could not be recovered"
                             );
-                            tc.function.arguments =
-                                crate::tools::arguments::make_incomplete_marker(
-                                    &tc.function.name,
-                                    &raw,
-                                );
+                            tc.function.arguments = crate::tools::arguments::make_incomplete_marker(
+                                &tc.function.name,
+                                &raw,
+                            );
                         }
                     }
                 }

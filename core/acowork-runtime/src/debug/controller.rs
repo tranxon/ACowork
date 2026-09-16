@@ -115,10 +115,7 @@ impl ContextSnapshotSections {
 
     /// Total token estimate across all sections.
     pub fn total_token_estimate(&self) -> usize {
-        self.sections
-            .iter()
-            .map(|s| s.content.token_estimate)
-            .sum()
+        self.sections.iter().map(|s| s.content.token_estimate).sum()
     }
 }
 
@@ -312,12 +309,9 @@ impl DebugController {
     /// contain. The size/token/hash metadata is recomputed so
     /// `getSection(iteration, "messages")` returns values consistent with
     /// the lazy-loaded content.
-    pub fn store_messages_with_meta(
-        &mut self,
-        iteration: u32,
-        messages: Arc<Vec<ChatMessage>>,
-    ) {
-        self.messages_by_iteration.insert(iteration, messages.clone());
+    pub fn store_messages_with_meta(&mut self, iteration: u32, messages: Arc<Vec<ChatMessage>>) {
+        self.messages_by_iteration
+            .insert(iteration, messages.clone());
 
         if let Some(snap) = self.context_snapshots.get_mut(&iteration)
             && let Some(section) = snap.sections.find_mut("messages")

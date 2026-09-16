@@ -234,7 +234,8 @@ pub fn make_incomplete_marker(tool_name: &str, hint: &str) -> String {
 /// 保留旧 `loop_llm::make_incomplete_marker(name, raw_len)` 的语义兼容性，
 /// 后续应替换为 [`make_incomplete_marker`] 并传入真实 hint。
 pub fn make_incomplete_marker_with_len(tool_name: &str, raw_len: usize) -> String {
-    let stub = format!("<raw arguments were {raw_len} bytes; original content not preserved by caller>");
+    let stub =
+        format!("<raw arguments were {raw_len} bytes; original content not preserved by caller>");
     make_incomplete_marker(tool_name, &stub)
 }
 
@@ -343,7 +344,10 @@ mod tests {
 
     #[test]
     fn resolve_garbage() {
-        assert!(matches!(resolve("not even JSON"), ResolvedArgs::Invalid { .. }));
+        assert!(matches!(
+            resolve("not even JSON"),
+            ResolvedArgs::Invalid { .. }
+        ));
     }
 
     #[test]

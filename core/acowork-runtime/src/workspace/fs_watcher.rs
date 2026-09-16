@@ -171,10 +171,7 @@ impl WorkspaceFsWatcher {
         }
         // Watch targets that joined the set (NonRecursive — one level).
         for new in desired.difference(&self.watched) {
-            if let Err(e) = self
-                .notify_watcher
-                .watch(new, RecursiveMode::NonRecursive)
-            {
+            if let Err(e) = self.notify_watcher.watch(new, RecursiveMode::NonRecursive) {
                 tracing::debug!(
                     workspace_id = %self.workspace_id,
                     path = %new.display(),
@@ -418,22 +415,42 @@ mod tests {
     fn ingest_maps_create_modify_remove() {
         let dir = Path::new("/tmp/ws");
         let mut w = watcher_at(dir);
-        w.ingest(notify_event(EventKind::Create(notify::event::CreateKind::Any), Path::new("/tmp/ws/new.txt")));
+        w.ingest(notify_event(
+            EventKind::Create(notify::event::CreateKind::Any),
+            Path::new("/tmp/ws/new.txt"),
+        ));
         w.ingest(notify_event(
             EventKind::Modify(notify::event::ModifyKind::Any),
             Path::new("/tmp/ws/edit.txt"),
         ));
         w.ingest(notify_event(
-            EventKind::Modify(notify::event::ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::Any,
+            )),
             Path::new("/tmp/ws/touched.txt"),
         ));
-        w.ingest(notify_event(EventKind::Remove(notify::event::RemoveKind::Any), Path::new("/tmp/ws/gone.txt")));
+        w.ingest(notify_event(
+            EventKind::Remove(notify::event::RemoveKind::Any),
+            Path::new("/tmp/ws/gone.txt"),
+        ));
 
-        assert_eq!(w.pending.get(Path::new("new.txt")), Some(&FsChangeKind::Created));
-        assert_eq!(w.pending.get(Path::new("edit.txt")), Some(&FsChangeKind::Modified));
+        assert_eq!(
+            w.pending.get(Path::new("new.txt")),
+            Some(&FsChangeKind::Created)
+        );
+        assert_eq!(
+            w.pending.get(Path::new("edit.txt")),
+            Some(&FsChangeKind::Modified)
+        );
         // Metadata modify also maps to Modified (ADR-058 §3.1).
-        assert_eq!(w.pending.get(Path::new("touched.txt")), Some(&FsChangeKind::Modified));
-        assert_eq!(w.pending.get(Path::new("gone.txt")), Some(&FsChangeKind::Deleted));
+        assert_eq!(
+            w.pending.get(Path::new("touched.txt")),
+            Some(&FsChangeKind::Modified)
+        );
+        assert_eq!(
+            w.pending.get(Path::new("gone.txt")),
+            Some(&FsChangeKind::Deleted)
+        );
     }
 
     #[test]
@@ -441,10 +458,22 @@ mod tests {
         let dir = Path::new("/tmp/ws");
         let mut w = watcher_at(dir);
         let p = Path::new("/tmp/ws/f.txt");
-        w.ingest(notify_event(EventKind::Create(notify::event::CreateKind::Any), p));
-        w.ingest(notify_event(EventKind::Modify(notify::event::ModifyKind::Any), p));
-        w.ingest(notify_event(EventKind::Modify(notify::event::ModifyKind::Any), p));
-        assert_eq!(w.pending.get(Path::new("f.txt")), Some(&FsChangeKind::Created));
+        w.ingest(notify_event(
+            EventKind::Create(notify::event::CreateKind::Any),
+            p,
+        ));
+        w.ingest(notify_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            p,
+        ));
+        w.ingest(notify_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            p,
+        ));
+        assert_eq!(
+            w.pending.get(Path::new("f.txt")),
+            Some(&FsChangeKind::Created)
+        );
     }
 
     #[test]
@@ -452,8 +481,14 @@ mod tests {
         let dir = Path::new("/tmp/ws");
         let mut w = watcher_at(dir);
         let p = Path::new("/tmp/ws/tmp-file.txt");
-        w.ingest(notify_event(EventKind::Create(notify::event::CreateKind::Any), p));
-        w.ingest(notify_event(EventKind::Remove(notify::event::RemoveKind::Any), p));
+        w.ingest(notify_event(
+            EventKind::Create(notify::event::CreateKind::Any),
+            p,
+        ));
+        w.ingest(notify_event(
+            EventKind::Remove(notify::event::RemoveKind::Any),
+            p,
+        ));
         assert!(!w.pending.contains_key(Path::new("tmp-file.txt")));
         // Window closes when the buffer empties.
         assert!(w.pending.is_empty());
@@ -464,16 +499,28 @@ mod tests {
         let dir = Path::new("/tmp/ws");
         let mut w = watcher_at(dir);
         let p = Path::new("/tmp/ws/old.txt");
-        w.ingest(notify_event(EventKind::Modify(notify::event::ModifyKind::Any), p));
-        w.ingest(notify_event(EventKind::Remove(notify::event::RemoveKind::Any), p));
-        assert_eq!(w.pending.get(Path::new("old.txt")), Some(&FsChangeKind::Deleted));
+        w.ingest(notify_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            p,
+        ));
+        w.ingest(notify_event(
+            EventKind::Remove(notify::event::RemoveKind::Any),
+            p,
+        ));
+        assert_eq!(
+            w.pending.get(Path::new("old.txt")),
+            Some(&FsChangeKind::Deleted)
+        );
     }
 
     #[test]
     fn out_of_bounds_paths_are_dropped() {
         let dir = Path::new("/tmp/ws");
         let mut w = watcher_at(dir);
-        w.ingest(notify_event(EventKind::Create(notify::event::CreateKind::Any), Path::new("/tmp/other/x.txt")));
+        w.ingest(notify_event(
+            EventKind::Create(notify::event::CreateKind::Any),
+            Path::new("/tmp/other/x.txt"),
+        ));
         assert!(w.pending.is_empty());
     }
 
@@ -481,8 +528,14 @@ mod tests {
     async fn flush_emits_batched_event_and_resets_window() {
         let dir = Path::new("/tmp/ws");
         let mut w = watcher_at(dir);
-        w.ingest(notify_event(EventKind::Create(notify::event::CreateKind::Any), Path::new("/tmp/ws/a.txt")));
-        w.ingest(notify_event(EventKind::Modify(notify::event::ModifyKind::Any), Path::new("/tmp/ws/b.txt")));
+        w.ingest(notify_event(
+            EventKind::Create(notify::event::CreateKind::Any),
+            Path::new("/tmp/ws/a.txt"),
+        ));
+        w.ingest(notify_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            Path::new("/tmp/ws/b.txt"),
+        ));
 
         let sink = sink();
         w.flush(sink.as_ref()).await;
@@ -553,7 +606,14 @@ mod tests {
                 }
             }
         }
-        assert!(saw_created, "created.txt must surface as Created (got {:?})", events.iter().flat_map(|e| e.changes.iter().map(|c| (c.path.clone(), c.kind))).collect::<Vec<_>>());
+        assert!(
+            saw_created,
+            "created.txt must surface as Created (got {:?})",
+            events
+                .iter()
+                .flat_map(|e| e.changes.iter().map(|c| (c.path.clone(), c.kind)))
+                .collect::<Vec<_>>()
+        );
         // deleted.txt was created+deleted — either cancelled in the same
         // window (no event) or split across windows (Deleted). Both are
         // valid per ADR-058; only a phantom Created would be a bug.

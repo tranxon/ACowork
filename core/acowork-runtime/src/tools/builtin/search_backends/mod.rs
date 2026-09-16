@@ -176,10 +176,9 @@ impl WebSearchEngine {
         // Snapshot the shared state into locals to avoid holding locks
         // across the `.await` boundary below.
         let providers: Vec<SearchProviderListItem> = {
-            let guard = self
-                .provider_list
-                .read()
-                .map_err(|e| SearchBackendError::Api(format!("Provider list lock poisoned: {e}")))?;
+            let guard = self.provider_list.read().map_err(|e| {
+                SearchBackendError::Api(format!("Provider list lock poisoned: {e}"))
+            })?;
             guard.clone()
         };
         if providers.is_empty() {

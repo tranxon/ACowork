@@ -145,15 +145,45 @@ impl BenchE2e {
 /// - `N*` = distractor Active nodes (share partial words, not ground truth).
 const CORPUS: &[(&str, &str, f32, f32)] = &[
     ("A1", "User prefers dark mode for the code editor", 0.9, 0.8),
-    ("A2", "User lives in Shanghai near the Huangpu river", 0.9, 0.8),
-    ("A3", "User works at Acme Corp as a backend engineer", 0.9, 0.8),
-    ("A4", "User speaks Japanese and writes fluent code", 0.9, 0.8),
+    (
+        "A2",
+        "User lives in Shanghai near the Huangpu river",
+        0.9,
+        0.8,
+    ),
+    (
+        "A3",
+        "User works at Acme Corp as a backend engineer",
+        0.9,
+        0.8,
+    ),
+    (
+        "A4",
+        "User speaks Japanese and writes fluent code",
+        0.9,
+        0.8,
+    ),
     ("A5", "User keeps two cats named Mochi and Tofu", 0.9, 0.8),
-    ("D1", "User used to prefer dark mode in the terminal", 0.9, 0.1),
+    (
+        "D1",
+        "User used to prefer dark mode in the terminal",
+        0.9,
+        0.1,
+    ),
     ("D2", "Old note about the Shanghai office address", 0.9, 0.1),
-    ("D3", "User previously worked at Acme Corp in sales", 0.9, 0.1),
+    (
+        "D3",
+        "User previously worked at Acme Corp in sales",
+        0.9,
+        0.1,
+    ),
     ("N1", "User prefers a light theme during winter", 0.9, 0.5),
-    ("N2", "User reads books about backend architecture", 0.9, 0.5),
+    (
+        "N2",
+        "User reads books about backend architecture",
+        0.9,
+        0.5,
+    ),
 ];
 
 /// Fixed query set: (query text, ground-truth relevant corpus key).

@@ -34,12 +34,7 @@ pub trait SessionControlService: Send + Sync {
     async fn update_title(&self, session_id: &str, title: String) -> Result<()>;
 
     /// Switch the LLM model for a session.
-    async fn model_switch(
-        &self,
-        session_id: &str,
-        model: String,
-        provider: String,
-    ) -> Result<()>;
+    async fn model_switch(&self, session_id: &str, model: String, provider: String) -> Result<()>;
 
     /// Change the reasoning effort level for a session.
     async fn reasoning_effort(&self, session_id: &str, effort: String) -> Result<()>;

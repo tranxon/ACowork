@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use crate::config::RuntimeConfig;
-use acowork_core::protocol::{AgentProviderConfig, ProtocolType};
 use crate::agent::session::SessionManagerConfig;
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
+use crate::config::RuntimeConfig;
+use acowork_core::protocol::{AgentProviderConfig, ProtocolType};
 
 /// Intermediate context produced by Phase A (per-agent initialization).
 ///
@@ -32,35 +32,30 @@ pub(crate) struct AgentBootContext {
     /// ADR-042: receiver for `acowork/global/user_profile` retained updates.
     /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
     /// `SessionManager::update_user_identity`.
-    pub identity_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
-    >,
+    pub identity_update_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>>,
     /// Receiver for `acowork/global/providers` updates.
     /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
     /// `SessionManager::update_global_provider_list`.
-    pub provider_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>,
-    >,
+    pub provider_update_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>>,
     /// Receiver for `acowork/global/searches` updates.
     /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
     /// `SessionManager::update_search_config`.
-    pub search_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
-    >,
+    pub search_update_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>>,
     /// Receiver for `acowork/global/embedding_models` updates (ADR-033).
     /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
     /// `SessionManager::handle_embedding_config_update` so sessions rebuild
     /// their embedding provider when the embed sidecar becomes ready or
     /// the active model switches.
-    pub embedding_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
-    >,
+    pub embedding_update_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>>,
     /// Receiver for node LSP relay state changes (ADR-055 §6.7,
     /// Phase 4). Consumed by `gateway_loop::mqtt_only_loop` and
     /// forwarded to `SessionManager::handle_lsp_relay_update`.
-    pub lsps_update_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
-    >,
+    pub lsps_update_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>>,
     /// Control command receiver (from MQTT control topics)
     pub control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
     #[allow(dead_code)]
@@ -129,7 +124,6 @@ pub(crate) struct AgentBootContext {
     // `prompts/` — `None` is the normal "no override" state and the LLM
     // call site resolves to the built-in constant via
     // `core.<field>.read().unwrap().as_deref().unwrap_or(const)`.
-
     /// Override for `crate::prompt::SEARCH_SYSTEM_PROMPT`
     /// (package file: `prompts/search.md`).
     pub search_prompt: Option<String>,
@@ -221,7 +215,9 @@ pub(crate) struct AgentBootContext {
     /// ADR-033: Dispatch receiver for Runtime HTTP → agent loop.
     /// HTTP handlers send (session_id, InboundMessage); gateway loop
     /// forwards to the right session's AgentLoop.
-    pub http_dispatch_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, crate::agent::inbound::InboundMessage)>>,
+    pub http_dispatch_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<(String, crate::agent::inbound::InboundMessage)>,
+    >,
 
     /// ADR-033: Shared handle to the Grafeo memory store. Cloned into
     /// the Runtime HTTP server at Phase A and populated by Phase B once
@@ -266,16 +262,20 @@ pub(crate) struct AgentBootContext {
     pub agent_core_shared: crate::http::SharedAgentCore,
 
     /// ADR-040: Late-bind slot for session metadata service.
-    pub session_metadata_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+    pub session_metadata_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
     /// ADR-040: Late-bind slot for memory query service.
-    pub memory_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+    pub memory_query_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
     /// ADR-040: Late-bind slot for workspace query service
     /// (read-only: `list_workspaces` / `list_tree` / `read_file` /
     /// `find_files` / `search_files`).
-    pub workspace_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
+    pub workspace_query_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
     /// ADR-040: Late-bind slot for workspace mutation service
     /// (workspace CRUD + file/dir mutation).
-    pub workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+    pub workspace_mutation_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
     /// ADR-078: Late-bind slot for the git query service (read-only
     /// `/git/status` `/git/diff` `/git/log`). Same sync-work_dir
     /// pattern as the workspace services — populated in Phase B.
@@ -284,18 +284,22 @@ pub(crate) struct AgentBootContext {
     /// (the four `/agents/{id}/mcp-servers` and
     /// `/agents/{id}/search-config` HTTP handlers). Populated in
     /// Phase B (sync — no async resource dependency like memory).
-    pub agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
+    pub agent_tools_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
     /// ADR-040 follow-up: Late-bind slot for per-agent runtime config
     /// (`agent_config.json`) persistence. Mirrors `agent_tools_slot` —
     /// populated in Phase B (sync — no async resource dependency).
-    pub agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+    pub agent_config_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
     /// ADR-046: Late-bind slot for the attachment blob store
     /// (`<work_dir>/files/<document_id>`). Same Phase B pattern as
     /// `agent_tools_slot` / `agent_config_slot`.
-    pub attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+    pub attachment_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
     /// ADR-047: Late-bind slot for session config service
     /// (`GET/PUT /sessions/{sid}/config`). Populated in Phase B.
-    pub session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
+    pub session_config_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
     /// Late-bind slot for the consolidation timer. Populated in Phase B
     /// after `AgentCore::start_consolidation_pipeline()` stores the timer.
     /// Used by `GET /memory/consolidation/status`.
@@ -310,8 +314,7 @@ pub(crate) struct AgentBootContext {
     /// controllers (DevMode must be active for this to be set; outside
     /// DevMode the slot stays empty and the `/api/debug/*` routes
     /// return 503 with "Debug service not ready").
-    pub debug_service_slot:
-        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+    pub debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
 
     /// Late-bind slot for `SessionManager`. Populated by Phase B once
     /// the session manager is constructed; cloned into the HTTP server

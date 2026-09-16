@@ -253,11 +253,8 @@ impl DebugService for RuntimeDebugService {
         // `POST /agents/{id}/prompts/reload` handler also calls it
         // directly (without going through this trait), which is what lets
         // the Debug panel reload while DevMode is still disabled.
-        crate::package::prompt_builder::reload_prompts_into_core(
-            &self.package_dir,
-            &core_arc,
-        )
-        .map_err(|e| DebugError::Internal(e.to_string()))?;
+        crate::package::prompt_builder::reload_prompts_into_core(&self.package_dir, &core_arc)
+            .map_err(|e| DebugError::Internal(e.to_string()))?;
 
         tracing::info!(
             package_dir = %self.package_dir.display(),

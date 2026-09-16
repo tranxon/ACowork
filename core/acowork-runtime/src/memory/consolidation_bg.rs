@@ -20,10 +20,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use acowork_memory::consolidation::{
-    SchedulerConfig, TripleExtractorLlm,
-};
 use acowork_memory::EpisodicDecayConfig;
+use acowork_memory::consolidation::{SchedulerConfig, TripleExtractorLlm};
 use chrono::Utc;
 use tokio::sync::Mutex;
 
@@ -480,7 +478,8 @@ fn build_embedding_bridge(
     }
     Some(Arc::new(move |text: &str| -> Vec<f32> {
         let text_owned = text.to_string();
-        match tokio::task::block_in_place(|| handle.block_on(embedding_provider.embed(&text_owned))) {
+        match tokio::task::block_in_place(|| handle.block_on(embedding_provider.embed(&text_owned)))
+        {
             Ok(vec) => vec,
             Err(e) => {
                 tracing::warn!(error = %e, "Embedding failed during consolidation, using zero vector");
@@ -877,14 +876,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_consolidation_bg_task_starts_and_stops() {
-        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
-            acowork_grafeo::GrafeoStore::new_in_memory().unwrap(),
-        );
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
 
         struct NoopLlm;
         #[async_trait::async_trait]
         impl TripleExtractorLlm for NoopLlm {
-            async fn chat(&self, _messages: Vec<acowork_memory::consolidation::LlmMessage>) -> std::result::Result<acowork_memory::consolidation::LlmResponse, String> {
+            async fn chat(
+                &self,
+                _messages: Vec<acowork_memory::consolidation::LlmMessage>,
+            ) -> std::result::Result<acowork_memory::consolidation::LlmResponse, String>
+            {
                 Ok(acowork_memory::consolidation::LlmResponse {
                     content: "[]".to_string(),
                     usage_tokens: None,
@@ -897,15 +899,28 @@ mod tests {
             struct DummyEmbeddingProvider;
             #[async_trait::async_trait]
             impl EmbeddingProvider for DummyEmbeddingProvider {
-                fn name(&self) -> &str { "dummy" }
-                async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                fn name(&self) -> &str {
+                    "dummy"
+                }
+                async fn embed(
+                    &self,
+                    _text: &str,
+                ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
                     Ok(vec![0.0; 384])
                 }
-                async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                async fn embed_batch(
+                    &self,
+                    texts: &[&str],
+                ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError>
+                {
                     Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
                 }
-                fn dimension(&self) -> usize { 384 }
-                async fn is_available(&self) -> bool { true }
+                fn dimension(&self) -> usize {
+                    384
+                }
+                async fn is_available(&self) -> bool {
+                    true
+                }
             }
             Arc::new(DummyEmbeddingProvider)
         };
@@ -1066,7 +1081,8 @@ mod distiller_fixture {
         }
     }
 
-    pub fn build_distiller_test_fixture() -> (Arc<acowork_grafeo::GrafeoStore>, Arc<MockDistillerLlm>) {
+    pub fn build_distiller_test_fixture()
+    -> (Arc<acowork_grafeo::GrafeoStore>, Arc<MockDistillerLlm>) {
         let store = Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
         let provider: Arc<dyn acowork_memory::MemoryProvider> = store.clone();
         // Seed 2 unconsolidated Fact episodes.

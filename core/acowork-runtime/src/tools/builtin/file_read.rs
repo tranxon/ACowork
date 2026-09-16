@@ -23,7 +23,7 @@ impl FileReadTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "file_read".to_string(),
-            description: "Read a specific range of lines from a file, with line numbers. This is a fragment reader — both start_line (1-based) and end_line (inclusive) are required. Read at most 100 lines per call; for longer ranges, paginate across multiple calls. Always use content_search first to locate the relevant line numbers before calling this tool.".to_string(),
+            description: "Read up to 100 lines of a file (start_line..end_line, 1-based, inclusive). Hard limit: 100 lines per call — any larger range is REJECTED with a paginate hint, wasting a round-trip. Safe pattern when you don't know file length: request start_line=N, end_line=N+99 (a sliding 100-line window). For longer reads, paginate across multiple calls. Always use content_search FIRST to anchor start_line at the relevant code; never guess a large end_line to \"read the whole file\". start_line and end_line are both required.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -185,7 +185,28 @@ impl Tool for FileReadTool {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                let summary = format!("\n[Lines {}-{} of {total}]", s + 1, e);
+                // Next-page hint: when the response fills the cap AND
+                // the file has more lines after `e`, tell the caller
+                // exactly what the next call should look like. This is
+                // positive-feedback pagination training — without it,
+                // an LLM that just hit the 100-line cap has to guess
+                // the next start_line, which is exactly the failure
+                // mode this tool exists to prevent. The hint only
+                // fires when (a) the cap was hit (so it's relevant to
+                // paginating callers, not single-shot reads) and (b)
+                // there's actually more content (so we never dangle a
+                // bogus hint at the end of a complete read).
+                let next_page_hint = if e - s == super::MAX_LINES_PER_CALL && e < total {
+                    format!(
+                        "\n[Next page: start_line={}, end_line={}]",
+                        e + 1,
+                        e + super::MAX_LINES_PER_CALL
+                    )
+                } else {
+                    String::new()
+                };
+
+                let summary = format!("\n[Lines {}-{} of {total}]{}", s + 1, e, next_page_hint);
 
                 let content = format!("{numbered}{summary}");
                 // No truncate_output here: the OutputBoundedTool wrapper
@@ -647,5 +668,98 @@ mod tests {
             "must mention the 100-line cap: {desc}"
         );
         assert!(desc.contains("paginate"), "must teach pagination: {desc}");
+    }
+
+    #[test]
+    fn e2e_spec_description_opens_with_the_cap_as_primacy_anchor() {
+        // The cap message must appear in the FIRST sentence so an LLM
+        // scanning the description (primacy bias) sees the constraint
+        // before reading the rest. If this drifts past the first
+        // period, models that skim the description will miss it.
+        let desc = FileReadTool::spec_value().description;
+        let first_sentence = desc.split('.').next().unwrap_or("");
+        assert!(
+            first_sentence.contains("100"),
+            "first sentence must lead with the cap: {desc}"
+        );
+    }
+
+    // ── Next-page hint (positive-feedback pagination) ───────────
+
+    #[tokio::test]
+    async fn e2e_response_at_max_with_more_after_emits_next_page_hint() {
+        // File has 250 lines, request 1-100 (exactly the cap). Response
+        // MUST include the next-page hint so an LLM that just hit the
+        // cap knows the exact start_line/end_line for the next call.
+        // This is the positive-feedback mechanism that prevents the
+        // "guess a large range" failure mode.
+        let (_dir, p) = build_lines_file(250);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": MAX_LINES_PER_CALL
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result
+                .content
+                .contains("[Next page: start_line=101, end_line=200]"),
+            "must hint the exact next call: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_response_at_max_at_file_end_omits_next_page_hint() {
+        // File has exactly 100 lines, request 1-100. Hit the cap but
+        // there's nothing after — the hint would dangle. Must NOT emit.
+        let (_dir, p) = build_lines_file(MAX_LINES_PER_CALL);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": MAX_LINES_PER_CALL
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            !result.content.contains("Next page"),
+            "must not hint past EOF: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_response_below_max_omits_next_page_hint() {
+        // Single-shot read of 10 lines from a 100-line file. No hint
+        // expected — the LLM isn't paginating.
+        let (_dir, p) = build_lines_file(100);
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": p.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 10
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            !result.content.contains("Next page"),
+            "single-shot read must not hint: {}",
+            result.content
+        );
     }
 }

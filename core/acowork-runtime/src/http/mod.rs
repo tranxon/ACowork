@@ -16,6 +16,5 @@ pub mod skills;
 
 pub use server::{
     RuntimeHttpServer, RuntimeHttpServerError, SharedAgentCore, SharedDegradation,
-    SharedDispatchSender, SharedEmbedDimension,
-    SharedMemoryStore, SharedMqttClientSlot,
+    SharedDispatchSender, SharedEmbedDimension, SharedMemoryStore, SharedMqttClientSlot,
 };

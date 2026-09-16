@@ -184,9 +184,7 @@ Strict output rules — read carefully:
 pub fn truncate_title_for_display(s: &str) -> String {
     // Sentence-ending punctuation only. NO `.` — see doc above.
     // Half-width + full-width pairs for both English and CJK.
-    const BREAK_CHARS: &[char] = &[
-        ',', '，', '!', '！', '?', '？', ';', '；', '\n',
-    ];
+    const BREAK_CHARS: &[char] = &[',', '，', '!', '！', '?', '？', ';', '；', '\n'];
 
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= SESSION_TITLE_MAX_CHARS {
@@ -266,7 +264,10 @@ mod tests {
     #[test]
     fn build_compaction_system_prompt_whitespace_identity_returns_base_unchanged() {
         let base = "You are a summarizer.";
-        assert_eq!(build_compaction_system_prompt(base, Some("   \n\t  ")), base);
+        assert_eq!(
+            build_compaction_system_prompt(base, Some("   \n\t  ")),
+            base
+        );
     }
 
     #[test]
@@ -277,11 +278,23 @@ mod tests {
         // base preserved at the head
         assert!(out.starts_with(base), "base must be preserved at the start");
         // identity text embedded verbatim
-        assert!(out.contains(identity), "identity text must be embedded verbatim");
+        assert!(
+            out.contains(identity),
+            "identity text must be embedded verbatim"
+        );
         // explicit pointers so the LLM knows where to look for the language field
-        assert!(out.contains("User identity context"), "must label the identity block");
-        assert!(out.contains("Language field"), "must point the LLM at the Language field");
-        assert!(out.contains("preferred language"), "must include a language directive");
+        assert!(
+            out.contains("User identity context"),
+            "must label the identity block"
+        );
+        assert!(
+            out.contains("Language field"),
+            "must point the LLM at the Language field"
+        );
+        assert!(
+            out.contains("preferred language"),
+            "must include a language directive"
+        );
     }
 
     #[test]
@@ -342,8 +355,7 @@ mod tests {
     // here so the test can assert about dropped characters without exposing
     // the original private constant. Kept in sync intentionally.
     // (NOTE: `.` is NOT included — see the doc comment in truncate_title_for_display.)
-    const BREAK_CHARS_USED: &[char] =
-        &[',', '，', '!', '！', '?', '？', ';', '；', '\n'];
+    const BREAK_CHARS_USED: &[char] = &[',', '，', '!', '！', '?', '？', ';', '；', '\n'];
 
     #[test]
     fn truncate_chinese_with_full_stop_breaks_at_last_break() {
@@ -363,7 +375,10 @@ mod tests {
         // Sanity: the cut should be at the last `，` before position 60.
         // Locate the last `，` in the first 60 chars and confirm.
         let window: Vec<char> = input.chars().take(SESSION_TITLE_MAX_CHARS).collect();
-        let last_break = window.iter().rposition(|c| BREAK_CHARS_USED.contains(c)).unwrap();
+        let last_break = window
+            .iter()
+            .rposition(|c| BREAK_CHARS_USED.contains(c))
+            .unwrap();
         let expected: String = window[..last_break].iter().collect();
         assert_eq!(out, expected);
     }
@@ -388,7 +403,9 @@ mod tests {
         // If the budget starts with a break char (pos 0), the break
         // candidate is filtered out (we require pos > 0). Otherwise we
         // would return an empty string for inputs starting with `,`.
-        let input = String::from(",rest of title that is also quite long and goes way past sixty characters in total really");
+        let input = String::from(
+            ",rest of title that is also quite long and goes way past sixty characters in total really",
+        );
         // Make sure it's longer than the budget.
         assert!(input.chars().count() > SESSION_TITLE_MAX_CHARS);
         let out = truncate_title_for_display(&input);
@@ -453,8 +470,8 @@ mod tests {
     #[test]
     fn title_prompt_forbids_ascii_punctuation() {
         for forbidden in [
-            '.', ',', '!', '?', ';', ':', '-', '_', '/', '\\', '|', '\'', '"', '`', '(', ')',
-            '[', ']', '{', '}', '<', '>', '…', '*', '#', '@', '~', '^', '+', '=', '%', '$', '&',
+            '.', ',', '!', '?', ';', ':', '-', '_', '/', '\\', '|', '\'', '"', '`', '(', ')', '[',
+            ']', '{', '}', '<', '>', '…', '*', '#', '@', '~', '^', '+', '=', '%', '$', '&',
         ] {
             // The prompt lists these in a single "do NOT use" line, so
             // even one occurrence of the char in the prose is enough to
@@ -473,8 +490,8 @@ mod tests {
     #[test]
     fn title_prompt_forbids_fullwidth_cjk_punctuation() {
         for forbidden in [
-            '，', '。', '！', '？', '；', '：', '—', '…', '「', '」', '『', '（', '）', '【',
-            '】', '《', '》', '、', '·',
+            '，', '。', '！', '？', '；', '：', '—', '…', '「', '」', '『', '（', '）', '【', '】',
+            '《', '》', '、', '·',
         ] {
             assert!(
                 TITLE_PROMPT.contains(forbidden),

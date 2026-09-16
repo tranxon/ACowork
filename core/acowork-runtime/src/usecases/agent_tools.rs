@@ -292,8 +292,5 @@ pub type PutMcpToolsBody = crate::agent_config::AgentMcpToolsConfig;
 #[derive(Debug, Clone, Serialize)]
 pub struct McpToolsResponse {
     pub agent_id: String,
-    pub servers: std::collections::HashMap<
-        String,
-        Vec<crate::agent_config::AgentMcpToolItem>,
-    >,
+    pub servers: std::collections::HashMap<String, Vec<crate::agent_config::AgentMcpToolItem>>,
 }

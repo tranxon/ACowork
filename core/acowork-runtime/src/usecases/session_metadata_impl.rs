@@ -49,8 +49,9 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         // the AgentTokenService merge so the in-process counters
         // recover the cache totals on first scan (e.g. after a
         // process restart, matching the in/out recovery path).
-        let (sessions, total_count, (disk_in, disk_out, disk_cache_read, disk_cache_write)) =
-            join.await.map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
+        let (sessions, total_count, (disk_in, disk_out, disk_cache_read, disk_cache_write)) = join
+            .await
+            .map_err(|e| RuntimeError::Io(std::io::Error::other(e)))?;
 
         // ADR-028 / ADR-066: merge disk totals into live counters and
         // read back.
@@ -97,18 +98,15 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
     }
 
     async fn get_latest_session(&self) -> Result<Option<(String, Option<String>)>> {
-        self.latest_session.read().map(|g| g.clone()).map_err(|_| {
-            RuntimeError::Io(std::io::Error::other(
-                "latest_session lock poisoned",
-            ))
-        })
+        self.latest_session
+            .read()
+            .map(|g| g.clone())
+            .map_err(|_| RuntimeError::Io(std::io::Error::other("latest_session lock poisoned")))
     }
 
     async fn get_session(&self, session_id: &str) -> Result<SessionDetail> {
-        let meta = conversation::read_session_meta(
-            &self.work_dir.join("conversations"),
-            session_id,
-        )?;
+        let meta =
+            conversation::read_session_meta(&self.work_dir.join("conversations"), session_id)?;
 
         // Live state snapshot from SessionManager's shared snapshots.
         // Construct the full JSON object the desktop panel expects
@@ -119,32 +117,29 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                 .read()
                 .map_err(|_| RuntimeError::Io(std::io::Error::other("lock poisoned")))?;
             match snaps.get(session_id) {
-                Some(snap) => {
-                    match snap.read() {
-                        Ok(guard) => {
-                            let status: serde_json::Value =
-                                serde_json::from_str(&guard.status)
-                                    .unwrap_or(serde_json::Value::Null);
-                            let todos: Option<serde_json::Value> = guard
-                                .todos_json
-                                .as_deref()
-                                .and_then(|s| serde_json::from_str(s).ok());
-                            let context_usage: Option<serde_json::Value> = guard
-                                .context_usage
-                                .as_deref()
-                                .and_then(|s| serde_json::from_str(s).ok());
-                            Some(serde_json::json!({
-                                "status": status,
-                                "model": guard.model,
-                                "provider": guard.provider,
-                                "ratio": guard.ratio,
-                                "todos": todos,
-                                "context_usage": context_usage,
-                            }))
-                        }
-                        Err(_) => None,
+                Some(snap) => match snap.read() {
+                    Ok(guard) => {
+                        let status: serde_json::Value =
+                            serde_json::from_str(&guard.status).unwrap_or(serde_json::Value::Null);
+                        let todos: Option<serde_json::Value> = guard
+                            .todos_json
+                            .as_deref()
+                            .and_then(|s| serde_json::from_str(s).ok());
+                        let context_usage: Option<serde_json::Value> = guard
+                            .context_usage
+                            .as_deref()
+                            .and_then(|s| serde_json::from_str(s).ok());
+                        Some(serde_json::json!({
+                            "status": status,
+                            "model": guard.model,
+                            "provider": guard.provider,
+                            "ratio": guard.ratio,
+                            "todos": todos,
+                            "context_usage": context_usage,
+                        }))
                     }
-                }
+                    Err(_) => None,
+                },
                 None => None,
             }
         };

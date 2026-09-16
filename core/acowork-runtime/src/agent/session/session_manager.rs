@@ -24,13 +24,15 @@ use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::loop_::SessionChunkEvent;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
-use crate::agent::session_state::{SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots};
+use crate::agent::session_state::{
+    SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots,
+};
+use crate::agent_config::AgentConfig;
 use crate::cancellation::CancelHandle;
 use crate::config::DEFAULT_TEMPERATURE;
 use crate::conversation::{ConversationSession, read_session_meta};
 use crate::debug::controller::DebugController;
 use crate::error::{Result, RuntimeError};
-use crate::agent_config::AgentConfig;
 use crate::tools::mcp_manager::McpConnectionFailure;
 use crate::tools::mcp_manager::McpManager;
 use crate::tools::workspace_resolver::{WorkspaceResolver, format_workspace_context_for_session};
@@ -481,7 +483,8 @@ pub struct SessionManager {
     /// data has been delivered to the frontend.  The frontend never sends
     /// coordinates; it polls with `incremental=true` and the backend uses
     /// this cursor to determine what to return.
-    session_delivery_cursors: std::sync::RwLock<HashMap<String, crate::conversation::DeliveryCursor>>,
+    session_delivery_cursors:
+        std::sync::RwLock<HashMap<String, crate::conversation::DeliveryCursor>>,
     /// Shared streaming lines map (keyed by session_id), cloned into each
     /// SessionCore and used by the HTTP handler for `read_messages_since`.
     streaming_lines: crate::conversation::StreamingStateMap,
@@ -642,8 +645,7 @@ impl SessionManager {
             // `enable_debug_mode`) can find it. The template sender from
             // `runtime_debug_handles` is per-session-tagged, so we share
             // the channel handle but bind it to the new session_id.
-            let per_session_sender =
-                handles.debug_event_tx.for_session(session_id.clone());
+            let per_session_sender = handles.debug_event_tx.for_session(session_id.clone());
             self.debug_event_senders
                 .write()
                 .await
@@ -670,7 +672,8 @@ impl SessionManager {
         self.pending_workspaces.remove(&session_id);
         // Store per-session committed_lines for HTTP handler access.
         if let Some(ref cl) = committed_lines {
-            self.session_committed_lines.insert(session_id.clone(), cl.clone());
+            self.session_committed_lines
+                .insert(session_id.clone(), cl.clone());
         }
         let initial_work_dir = if let Some(ref resolver) = self.resolver {
             let guard = resolver.read().unwrap();
@@ -691,8 +694,8 @@ impl SessionManager {
         // For sessions without a persistent conversation, create a dummy
         // committed_lines counter.  This session won't produce JSONL writes
         // (no writer thread), so the counter stays at 0 — which is accurate.
-        let session_committed_lines = committed_lines
-            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let session_committed_lines =
+            committed_lines.unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
 
         // Extract the snapshot Arc before session_state is moved into SessionTask.
         // The snapshot is already populated with persistent data by
@@ -867,9 +870,9 @@ impl SessionManager {
         // Create the JSONL file and index entry
         // ADR-024: read agent_config.json for max_sessions override;
         // fall back to RuntimeConfig default if absent.
-        let max_sessions = crate::agent_config::load_agent_config(
-            std::path::Path::new(&self.core.config.work_dir),
-        )
+        let max_sessions = crate::agent_config::load_agent_config(std::path::Path::new(
+            &self.core.config.work_dir,
+        ))
         .unwrap_or_default()
         .unwrap_or_default()
         .max_sessions
@@ -961,22 +964,21 @@ impl SessionManager {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
         {
-            tracing::warn!(
-                "ACOWORK_DISABLE_SESSION_RESUME set; skipping JSONL history restore"
-            );
+            tracing::warn!("ACOWORK_DISABLE_SESSION_RESUME set; skipping JSONL history restore");
             None
         } else {
             conversation.as_ref().and_then(|conv| {
                 let path = conv.session_path();
                 // ADR-024: read compaction offset from per-session meta file.
-                let compaction_abs = path
-                    .parent()
-                    .and_then(|conversations_dir| {
-                        crate::conversation::read_session_meta(conversations_dir, conv.session_id())
-                            .ok()
-                            .and_then(|m| m.last_compaction_offset)
-                    });
-                match crate::agent::session::restorer::restore_history_from_jsonl(path, compaction_abs) {
+                let compaction_abs = path.parent().and_then(|conversations_dir| {
+                    crate::conversation::read_session_meta(conversations_dir, conv.session_id())
+                        .ok()
+                        .and_then(|m| m.last_compaction_offset)
+                });
+                match crate::agent::session::restorer::restore_history_from_jsonl(
+                    path,
+                    compaction_abs,
+                ) {
                     Ok(outcome) if !outcome.messages.is_empty() => {
                         tracing::info!(
                             session_id = %conv.session_id(),
@@ -1046,7 +1048,8 @@ impl SessionManager {
 
             if let Some(ref effort_str) = persisted_effort {
                 // Session already has a persisted value; restore it.
-                let effort = acowork_core::providers::traits::ReasoningEffort::from_str_loose(effort_str);
+                let effort =
+                    acowork_core::providers::traits::ReasoningEffort::from_str_loose(effort_str);
                 session_state.set_reasoning_effort(effort);
             } else {
                 // No persisted value: initialize from provider capabilities default.
@@ -1061,7 +1064,11 @@ impl SessionManager {
                     .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
                     .or_else(|| {
                         // Model supports reasoning but has no explicit default → Auto
-                        if caps.as_ref().and_then(|c| c.supports_reasoning).unwrap_or(false) {
+                        if caps
+                            .as_ref()
+                            .and_then(|c| c.supports_reasoning)
+                            .unwrap_or(false)
+                        {
                             Some(acowork_core::providers::traits::ReasoningEffort::Auto)
                         } else {
                             None
@@ -1109,10 +1116,9 @@ impl SessionManager {
         // budget. Trim is the safety net for the "resumed under a smaller
         // model" case — it never invokes an LLM.
         if let Some(outcome) = restored {
-            session_state.history_mut().load_restored(
-                outcome.messages,
-                outcome.last_injected_todo_call_id,
-            );
+            session_state
+                .history_mut()
+                .load_restored(outcome.messages, outcome.last_injected_todo_call_id);
 
             // Restore the token-counting scene from meta: the last
             // API-counted input (authoritative anchor for the resumed
@@ -1124,7 +1130,9 @@ impl SessionManager {
             if let Some(conv) = session_state.conversation() {
                 let last_input = conv.tokens().map(|t| t.last_input);
                 let model_ratio = conv.model_ratio();
-                session_state.history_mut().restore_anchor(last_input, model_ratio);
+                session_state
+                    .history_mut()
+                    .restore_anchor(last_input, model_ratio);
             }
 
             // NOTE: restore does not perform placeholder compression.
@@ -1226,7 +1234,10 @@ impl SessionManager {
         self.urgent_stops.remove(session_id);
         self.cancel_handles.remove(session_id);
         self.session_committed_lines.remove(session_id);
-        self.session_delivery_cursors.write().unwrap().remove(session_id);
+        self.session_delivery_cursors
+            .write()
+            .unwrap()
+            .remove(session_id);
 
         tracing::info!(session_id = %session_id, "SessionManager: closed session");
         Ok(())
@@ -1306,7 +1317,10 @@ impl SessionManager {
             self.urgent_stops.remove(session_id);
             self.cancel_handles.remove(session_id);
             self.session_committed_lines.remove(session_id);
-            self.session_delivery_cursors.write().unwrap().remove(session_id);
+            self.session_delivery_cursors
+                .write()
+                .unwrap()
+                .remove(session_id);
 
             // Wait for the task to finish so that Drop runs before we
             // finalize on-disk state.
@@ -1335,7 +1349,10 @@ impl SessionManager {
             self.pending_workspaces.remove(session_id);
             self.urgent_stops.remove(session_id);
             self.session_committed_lines.remove(session_id);
-            self.session_delivery_cursors.write().unwrap().remove(session_id);
+            self.session_delivery_cursors
+                .write()
+                .unwrap()
+                .remove(session_id);
             tracing::info!(session_id = %session_id, "Session already evicted, skipping task close");
         }
 
@@ -1469,7 +1486,10 @@ impl SessionManager {
                     self.session_configs.write().unwrap().remove(session_id);
                     self.urgent_stops.remove(session_id);
                     self.session_committed_lines.remove(session_id);
-                    self.session_delivery_cursors.write().unwrap().remove(session_id);
+                    self.session_delivery_cursors
+                        .write()
+                        .unwrap()
+                        .remove(session_id);
                     tracing::warn!(
                         session_id = %session_id,
                         task_finished = was_finished,
@@ -1495,11 +1515,7 @@ impl SessionManager {
     /// single entry point for transitioning Closed/NotFound → Active, and
     /// other handlers route through `dispatch_inbound` (which publishes
     /// `SessionNotOpened` when missing) or call [`Self::open`] directly.
-    pub fn get_lifecycle_state(
-        &self,
-        session_id: &str,
-        work_dir: &Path,
-    ) -> SessionLifecycleState {
+    pub fn get_lifecycle_state(&self, session_id: &str, work_dir: &Path) -> SessionLifecycleState {
         if self.sessions.contains_key(session_id) {
             return SessionLifecycleState::Active;
         }
@@ -1523,11 +1539,7 @@ impl SessionManager {
     /// Frontend should call this explicitly via the MQTT `open_session`
     /// command; runtime dispatch paths should rely on the explicit lifecycle
     /// contract and remove their own lazy-resume fallbacks.
-    pub async fn open(
-        &mut self,
-        session_id: &str,
-        work_dir: &Path,
-    ) -> Result<SessionOpenOutcome> {
+    pub async fn open(&mut self, session_id: &str, work_dir: &Path) -> Result<SessionOpenOutcome> {
         if self.sessions.contains_key(session_id) {
             return Ok(SessionOpenOutcome::AlreadyActive);
         }
@@ -1547,13 +1559,14 @@ impl SessionManager {
         // The writer thread (inside ConversationSession) increments it;
         // the session's AgentCore reads it via clone_for_session.
         let committed_lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (conv, config_rx, state_rx) = ConversationSession::resume(work_dir, session_id, committed_lines.clone())
-            .map_err(|e| {
-                RuntimeError::Config(format!(
-                    "Session not found on disk: {} ({})",
-                    session_id, e
-                ))
-            })?;
+        let (conv, config_rx, state_rx) = ConversationSession::resume(
+            work_dir,
+            session_id,
+            committed_lines.clone(),
+        )
+        .map_err(|e| {
+            RuntimeError::Config(format!("Session not found on disk: {} ({})", session_id, e))
+        })?;
 
         // ADR-043: Spawn config + state change relays.
         if let Some(chunk_tx) = self.config.chunk_tx.clone() {
@@ -1587,8 +1600,12 @@ impl SessionManager {
             ));
         }
 
-        self.create_session_with_id_and_conversation(session_id.to_string(), Some(conv), Some(committed_lines))
-            .await?;
+        self.create_session_with_id_and_conversation(
+            session_id.to_string(),
+            Some(conv),
+            Some(committed_lines),
+        )
+        .await?;
 
         tracing::info!(
             session_id = %session_id,
@@ -1880,7 +1897,10 @@ After installation, ask the user to re-enable the MCP server.",
 
         let (registry, wrappers, _specs, failures) = self
             .mcp_manager
-            .connect(&configs, &crate::agent_config::AgentMcpToolsConfig::default())
+            .connect(
+                &configs,
+                &crate::agent_config::AgentMcpToolsConfig::default(),
+            )
             .await;
 
         // Store MCP tool wrappers (Arc<dyn Tool>) for dispatch
@@ -1958,10 +1978,7 @@ After installation, ask the user to re-enable the MCP server.",
     /// but do NOT fail the call - the template update already
     /// succeeded, and closed sessions will pick up the new state via
     /// the on-disk file on their next open.
-    pub fn apply_builtin_tools_enabled(
-        &mut self,
-        entries: &[crate::agent_config::AgentToolEntry],
-    ) {
+    pub fn apply_builtin_tools_enabled(&mut self, entries: &[crate::agent_config::AgentToolEntry]) {
         tracing::info!(
             entry_count = entries.len(),
             enabled_count = entries.iter().filter(|e| e.enabled).count(),
@@ -2098,9 +2115,7 @@ After installation, ask the user to re-enable the MCP server.",
     /// tools that became available after startup.
     pub fn handle_lsp_relay_update(&mut self, endpoint: Option<String>) {
         let Some(resolver) = self.resolver.clone() else {
-            tracing::warn!(
-                "SessionManager: no workspace resolver — cannot register codebase tool"
-            );
+            tracing::warn!("SessionManager: no workspace resolver — cannot register codebase tool");
             return;
         };
 
@@ -2148,7 +2163,9 @@ After installation, ask the user to re-enable the MCP server.",
                     std::path::Path::new(&self.core.config.work_dir),
                     "codebase",
                 );
-                tracing::info!("SessionManager: codebase tool unregistered (node LSP relay unavailable)");
+                tracing::info!(
+                    "SessionManager: codebase tool unregistered (node LSP relay unavailable)"
+                );
             }
         }
     }
@@ -2364,11 +2381,7 @@ After installation, ask the user to re-enable the MCP server.",
     /// ADR-047: config persistence is now synchronous via `apply_config()`,
     /// bypassing the serial inference queue. LLM-side effects are deferred
     /// to the next turn boundary.
-    pub fn route_reasoning_effort(
-        &self,
-        session_id: &str,
-        effort: String,
-    ) -> Result<()> {
+    pub fn route_reasoning_effort(&self, session_id: &str, effort: String) -> Result<()> {
         tracing::info!(
             session_id = %session_id,
             effort = %effort,
@@ -2537,7 +2550,10 @@ After installation, ask the user to re-enable the MCP server.",
     /// every active session's `SessionConfig` after a state transition.
     pub fn snapshot_active_conversations(
         &self,
-    ) -> Vec<(String, std::sync::Arc<crate::conversation::ConversationSession>)> {
+    ) -> Vec<(
+        String,
+        std::sync::Arc<crate::conversation::ConversationSession>,
+    )> {
         self.sessions
             .iter()
             .filter_map(|(sid, h)| h.conversation.as_ref().map(|c| (sid.clone(), c.clone())))
@@ -2608,11 +2624,19 @@ After installation, ask the user to re-enable the MCP server.",
             return;
         }
 
-        let Ok(configs) = self.session_configs.read() else { return; };
-        let Some(conv) = configs.get(session_id) else { return; };
-        let Some(persisted) = conv.tokens() else { return; };
+        let Ok(configs) = self.session_configs.read() else {
+            return;
+        };
+        let Some(conv) = configs.get(session_id) else {
+            return;
+        };
+        let Some(persisted) = conv.tokens() else {
+            return;
+        };
         let model_name = conv.model().unwrap_or_else(|| "unknown".to_string());
-        let Some(caps) = self.core.get_model_capabilities(&model_name) else { return; };
+        let Some(caps) = self.core.get_model_capabilities(&model_name) else {
+            return;
+        };
         let max_output = self.core.max_output_tokens_limit_for_model(&model_name);
 
         // Session-effective window: Layer 0 override over the per-agent
@@ -2754,7 +2778,10 @@ After installation, ask the user to re-enable the MCP server.",
         let mut cursors = self.session_delivery_cursors.write().unwrap();
         cursors.insert(
             session_id.to_string(),
-            crate::conversation::DeliveryCursor { line_number, char_offset },
+            crate::conversation::DeliveryCursor {
+                line_number,
+                char_offset,
+            },
         );
     }
 
@@ -2917,7 +2944,6 @@ After installation, ask the user to re-enable the MCP server.",
         (model, provider)
     }
 
-
     /// Reap completed sessions (remove handles for tasks that have finished).
     ///
     /// Call this periodically to avoid memory leaks from accumulated
@@ -2999,7 +3025,10 @@ After installation, ask the user to re-enable the MCP server.",
                 self.session_configs.write().unwrap().remove(session_id);
                 self.urgent_stops.remove(session_id);
                 self.session_committed_lines.remove(session_id);
-                self.session_delivery_cursors.write().unwrap().remove(session_id);
+                self.session_delivery_cursors
+                    .write()
+                    .unwrap()
+                    .remove(session_id);
                 tracing::info!(session_id = %session_id, "Evicted idle session from memory (idle > {:?})", idle_timeout);
             }
         }
@@ -3067,11 +3096,7 @@ After installation, ask the user to re-enable the MCP server.",
     /// Convenience alias for callers that already hold a resolver guard.
     /// Delegates to [`set_session_workspace`] which handles resolver
     /// resolution internally.
-    pub fn set_session_workspace_with_resolver(
-        &mut self,
-        session_id: &str,
-        workspace_id: &str,
-    ) {
+    pub fn set_session_workspace_with_resolver(&mut self, session_id: &str, workspace_id: &str) {
         self.set_session_workspace(session_id, workspace_id);
     }
 
@@ -3264,7 +3289,6 @@ After installation, ask the user to re-enable the MCP server.",
             .insert(session_id.to_string(), workspace_id.to_string());
     }
 
-
     /// Initialize debug mode at runtime (called when Gateway pushes EnableDebugMode).
     ///
     /// ADR-048: no TCP listener is started anymore. This wires up:
@@ -3304,11 +3328,8 @@ After installation, ask the user to re-enable the MCP server.",
             let event_rx = event_bus.subscribe();
             // ADR-073: debug event topics are per-instance.
             let instance_id = self.core.config.instance_id().to_string();
-            let publisher = crate::mqtt::DebugEventMqttPublisher::new(
-                instance_id,
-                mqtt_client,
-                event_rx,
-            );
+            let publisher =
+                crate::mqtt::DebugEventMqttPublisher::new(instance_id, mqtt_client, event_rx);
             tokio::spawn(async move {
                 publisher.run().await;
             });
@@ -3316,9 +3337,7 @@ After installation, ask the user to re-enable the MCP server.",
                 "DebugEventMqttPublisher subscribed — debug events will be published to MQTT"
             );
         } else {
-            tracing::warn!(
-                "DevMode started without MQTT client — debug events have no consumer"
-            );
+            tracing::warn!("DevMode started without MQTT client — debug events have no consumer");
         }
 
         let debug_event_tx = event_bus.sender_template();
@@ -3347,7 +3366,10 @@ After installation, ask the user to re-enable the MCP server.",
                 // but is tagged with this session_id so events emitted
                 // by the AgentLoop land on the right receiver.
                 let per_session_sender = debug_event_tx.for_session(sid);
-                senders.insert(per_session_sender.session_id().to_string(), per_session_sender);
+                senders.insert(
+                    per_session_sender.session_id().to_string(),
+                    per_session_sender,
+                );
             }
         }
 
@@ -3666,8 +3688,7 @@ fn handle_session_task_panic(
     // (2) Push a terminal Error chunk so the frontend can clear any
     //     "replying…" / "agent is running" UI immediately.
     if let Some(tx) = chunk_tx {
-        let user_message =
-            "The agent's session task terminated unexpectedly. \
+        let user_message = "The agent's session task terminated unexpectedly. \
              Please start a new session to continue.";
         let chunk = SessionChunkEvent {
             session_id: session_id.to_string(),
@@ -3738,8 +3759,6 @@ pub(crate) fn format_user_profile_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
 
     #[allow(dead_code)]
     fn make_tool_spec(name: &str) -> (String, serde_json::Value) {
@@ -4103,20 +4122,18 @@ mod tests {
     /// requiring a full AgentCore.
     #[test]
     fn test_e2e_cursor_store_with_read_messages() {
-        use crate::conversation::{read_messages_since_cursor, ConversationEntry};
+        use crate::conversation::{ConversationEntry, read_messages_since_cursor};
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
-        let entries = vec![
-            ConversationEntry {
-                id: "1".to_string(),
-                ts: chrono::Utc::now().to_rfc3339(),
-                role: "user".to_string(),
-                content: "hello".to_string(),
-                metadata: None,
-                kind: None,
-            },
-        ];
+        let entries = vec![ConversationEntry {
+            id: "1".to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            metadata: None,
+            kind: None,
+        }];
         let path = dir.path().join("conversations").join("e2e.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         {
@@ -4140,7 +4157,15 @@ mod tests {
         assert_eq!(cursor.line_number, 1);
 
         // Step 2: Incremental poll — nothing new
-        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
+        let r = read_messages_since_cursor(
+            &path,
+            cursor,
+            50,
+            &map,
+            sid,
+            store.committed_lines_for(sid),
+        )
+        .unwrap();
         assert_eq!(r.messages.len(), 0);
         assert!(!r.has_more);
         store.advance(sid, r.new_cursor.line_number, r.new_cursor.char_offset);
@@ -4148,7 +4173,10 @@ mod tests {
         // Step 3: Write new line (simulates flush + writer incrementing committed_lines)
         {
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             let e = ConversationEntry {
                 id: "2".to_string(),
                 ts: chrono::Utc::now().to_rfc3339(),
@@ -4161,19 +4189,38 @@ mod tests {
             writeln!(f).unwrap();
         }
         // Simulate writer thread incrementing committed_lines
-        store.committed_lines.get(sid).unwrap()
+        store
+            .committed_lines
+            .get(sid)
+            .unwrap()
             .store(2, std::sync::atomic::Ordering::Relaxed);
 
         // Step 4: Incremental poll — delivers new line
         let cursor = store.get(sid);
-        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
+        let r = read_messages_since_cursor(
+            &path,
+            cursor,
+            50,
+            &map,
+            sid,
+            store.committed_lines_for(sid),
+        )
+        .unwrap();
         assert_eq!(r.messages.len(), 1);
         assert_eq!(r.messages[0].content, "world");
         store.advance(sid, r.new_cursor.line_number, r.new_cursor.char_offset);
 
         // Step 5: Incremental poll — nothing new
         let cursor = store.get(sid);
-        let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
+        let r = read_messages_since_cursor(
+            &path,
+            cursor,
+            50,
+            &map,
+            sid,
+            store.committed_lines_for(sid),
+        )
+        .unwrap();
         assert_eq!(r.messages.len(), 0);
         assert!(!r.has_more);
     }
@@ -4462,15 +4509,15 @@ mod tests {
             Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
         ));
 
-        let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new_for_test(vec![
-            crate::tools::workspace_resolver::WorkspaceDir {
+        let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new_for_test(
+            vec![crate::tools::workspace_resolver::WorkspaceDir {
                 id: "ws-1".to_string(),
                 path: "/tmp/ws-1".to_string(),
                 access: crate::tools::workspace_resolver::WorkspaceAccess::ReadWrite,
                 last_active: false,
                 prompt_file: None,
-            },
-        ])));
+            }],
+        )));
         let mut manager = SessionManager::new(core, SessionManagerConfig::default());
         manager.set_resolver(resolver);
 

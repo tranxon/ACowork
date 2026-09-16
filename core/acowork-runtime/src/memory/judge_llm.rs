@@ -68,7 +68,7 @@ pub async fn evaluate_retrieval_llm(
         max_tokens: Some(128),  // Short response
         tools: None,
         reasoning_effort: None,
-    thinking_mode: None,
+        thinking_mode: None,
     };
 
     match provider.chat(request).await {

@@ -238,7 +238,10 @@ fn lookup_entry(name: &str) -> Option<PromptEntry> {
     PROMPT_ENTRIES.iter().copied().find(|e| e.name == name)
 }
 
-fn resolve_prompt_path(package_dir: &std::path::Path, name: &str) -> Option<(PromptEntry, PathBuf)> {
+fn resolve_prompt_path(
+    package_dir: &std::path::Path,
+    name: &str,
+) -> Option<(PromptEntry, PathBuf)> {
     let entry = lookup_entry(name)?;
     // Defense in depth: even though `lookup_entry` only matches the
     // canonical names, reject any name with path separators to keep
@@ -281,10 +284,7 @@ fn build_meta(entry: PromptEntry, path: &std::path::Path) -> PromptMeta {
 /// current `overridden` / `size_bytes` status. `id` mismatch returns an
 /// empty list (404-equivalent for the listing endpoint — see ADR-034
 /// "tolerate misconfigured Gateway" pattern).
-async fn list_prompts(
-    State(state): State<HttpState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn list_prompts(State(state): State<HttpState>, Path(id): Path<String>) -> Response {
     if !state.instance_matches(&id) {
         return (
             StatusCode::NOT_FOUND,
@@ -445,7 +445,12 @@ async fn put_prompt(
         return err_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "io_error",
-            format!("failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e),
+            format!(
+                "failed to rename {} -> {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            ),
         );
     }
     tracing::info!(
@@ -509,10 +514,7 @@ fn err_response(status: StatusCode, code: &str, message: String) -> Response {
 ///   `OVERRIDABLE_PROMPTS` entry with no matching `AgentCore` field).
 ///   Surfaces loudly rather than silently dropping a prompt; treat as a
 ///   bug.
-async fn post_reload_prompts(
-    State(state): State<HttpState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn post_reload_prompts(State(state): State<HttpState>, Path(id): Path<String>) -> Response {
     if !state.instance_matches(&id) {
         return err_response(
             StatusCode::NOT_FOUND,
@@ -536,8 +538,7 @@ async fn post_reload_prompts(
         return err_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "agent_core_not_ready",
-            "AgentCore slot is empty — Phase B has not yet constructed the core"
-                .to_string(),
+            "AgentCore slot is empty — Phase B has not yet constructed the core".to_string(),
         );
     };
 
@@ -595,10 +596,7 @@ async fn rebuild_and_dispatch_system_prompt(state: &HttpState) -> bool {
             return false;
         }
     };
-    let skill_mode = crate::cli::resolve_skill_mode(
-        &manifest,
-        &state.work_dir.to_string_lossy(),
-    );
+    let skill_mode = crate::cli::resolve_skill_mode(&manifest, &state.work_dir.to_string_lossy());
     let system_prompt = match crate::package::prompt_builder::build_system_prompt_with_mode(
         &state.package_dir,
         skill_mode,

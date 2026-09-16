@@ -4,10 +4,10 @@
 //! (external interaction handle), and `SessionManager` (lifecycle manager
 //! for multiple concurrent sessions).
 
+pub mod restorer;
 pub(crate) mod session_handle;
 pub mod session_manager;
 pub mod session_task;
-pub mod restorer;
 
 pub use session_manager::{
     SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,

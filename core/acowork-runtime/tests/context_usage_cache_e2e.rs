@@ -23,17 +23,13 @@
 //!      tokens leaves cache fields at `None` (legacy scalar path
 //!      unaffected).
 
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use acowork_core::protocol::{ContextUsageInfo, ModelCapabilitiesInfo};
 use acowork_core::providers::traits::UsageInfo;
-use acowork_runtime::agent::context::{
-    build_context_usage_from_persisted, patch_session_totals,
-};
-use acowork_runtime::conversation::{
-    ConversationSession, SessionConfig, SessionTokens,
-};
+use acowork_runtime::agent::context::{build_context_usage_from_persisted, patch_session_totals};
+use acowork_runtime::conversation::{ConversationSession, SessionConfig, SessionTokens};
 use tempfile::TempDir;
 
 const AGENT_ID: &str = "com.acowork.test.cache_e2e";
@@ -70,12 +66,7 @@ fn caps(context_window: u64, max_output_tokens: u64) -> ModelCapabilitiesInfo {
     }
 }
 
-fn usage_with_cache(
-    prompt: u64,
-    completion: u64,
-    cache_read: u64,
-    cache_write: u64,
-) -> UsageInfo {
+fn usage_with_cache(prompt: u64, completion: u64, cache_read: u64, cache_write: u64) -> UsageInfo {
     UsageInfo {
         prompt_tokens: prompt,
         completion_tokens: completion,
@@ -165,12 +156,9 @@ async fn push_path_carries_total_cache_fields_after_resume() {
     session.close().await.expect("close");
 
     // Resume reads the persisted SessionTokens.
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("resume");
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume");
     let persisted = resumed.0.tokens().expect("persisted tokens");
 
     // Sanity-check the persisted snapshot covers the cumulative cache fields.
@@ -232,12 +220,8 @@ async fn cumulative_cache_accumulates_across_calls() {
     session.accumulate_llm_usage(&usage_with_cache(20_000, 1_500, 7_500, 1_500));
     session.close().await.expect("close");
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .unwrap();
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let persisted = resumed.0.tokens().unwrap();
 
     let info = build_context_usage_from_persisted(
@@ -275,12 +259,8 @@ async fn openai_zero_cache_write_surfaces_as_some_zero() {
     session.accumulate_llm_usage(&usage_with_cache(5_000, 400, 2_500, 0));
     session.close().await.expect("close");
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .unwrap();
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let persisted = resumed.0.tokens().unwrap();
 
     let info = build_context_usage_from_persisted(
@@ -322,12 +302,8 @@ async fn anthropic_cache_write_round_trips() {
     session.accumulate_llm_usage(&usage_with_cache(14_000, 1_200, 8_000, 0));
     session.close().await.expect("close");
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .unwrap();
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let persisted = resumed.0.tokens().unwrap();
 
     let info = build_context_usage_from_persisted(

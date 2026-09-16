@@ -28,10 +28,10 @@
        matches the brand-mark (≈ 11.9 % of the chip side). -->
   <path d="M110 402 L256 110 L402 402"
         fill="none"
-        stroke="#282828"
+        stroke="#383838"
         stroke-width="61"
         stroke-linecap="round"
         stroke-linejoin="round"/>
   <!-- Dot with C-notch from the bite mask, sitting below the A's apex. -->
-  <circle cx="256" cy="317" r="62" fill="#282828" mask="url(#bite)"/>
+  <circle cx="256" cy="317" r="62" fill="#383838" mask="url(#bite)"/>
 </svg>

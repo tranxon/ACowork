@@ -14,8 +14,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use acowork_core::mqtt_proto::{
-    AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
-    AvailableSearches, AvailableUsers, BootstrapState, DataEnvelope,
+    AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders, AvailableSearches,
+    AvailableUsers, BootstrapState, DataEnvelope,
 };
 
 /// Global-resource snapshot that carries a monotonic `version` used to
@@ -46,7 +46,6 @@ impl_versioned!(
     AvailableLsps,
     AvailableUsers,
 );
-
 
 /// In-memory snapshot of all global resource available states.
 ///
@@ -176,7 +175,11 @@ impl AvailableResourceCache {
                 if !self.is_newer_or_first(&self.embedding_models, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = self.embedding_models.as_ref().map(|c| c.version).unwrap_or(0),
+                        current_version = self
+                            .embedding_models
+                            .as_ref()
+                            .map(|c| c.version)
+                            .unwrap_or(0),
                         "Rejected stale AvailableEmbeddingModels retained re-delivery"
                     );
                     return;
@@ -216,7 +219,8 @@ impl AvailableResourceCache {
                 if !self.is_newer_or_first(&self.user_profile, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = self.user_profile.as_ref().map(|c| c.version).unwrap_or(0),
+                        current_version =
+                            self.user_profile.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableUsers retained re-delivery"
                     );
                     return;
@@ -410,7 +414,7 @@ impl AvailableResourceCache {
             city: active.city.clone(),
             country: active.country.clone(),
             occupation: active.occupation.clone(),
-            avatar: None,        // not carried in UserProfileRef
+            avatar: None,         // not carried in UserProfileRef
             builtin_avatar: None, // not carried in UserProfileRef
             communication_style: active.communication_style.clone(),
             custom,
@@ -438,34 +442,36 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                AvailableProviders {
-                    version: 5,
-                    // ADR-056: No global default compact model in this fixture.
-                    default_compact_model: None,
-                    providers: vec![
-                        acowork_core::mqtt_proto::ProviderRef {
-                            id: "openai".to_string(),
-                            base_url: "https://api.openai.com/v1".to_string(),
-                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
-                            models: vec![],
-                            compact_model: String::new(),
-                            custom: false,
-                            api_key: "sk-test".to_string(),
-                        },
-                        // Local provider — empty key by design, still callable.
-                        acowork_core::mqtt_proto::ProviderRef {
-                            id: "ollama-local".to_string(),
-                            base_url: "http://localhost:11434/v1".to_string(),
-                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Ollama as i32,
-                            models: vec![],
-                            compact_model: String::new(),
-                            custom: false,
-                            api_key: String::new(),
-                        },
-                    ],
-                },
-            )),
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                    AvailableProviders {
+                        version: 5,
+                        // ADR-056: No global default compact model in this fixture.
+                        default_compact_model: None,
+                        providers: vec![
+                            acowork_core::mqtt_proto::ProviderRef {
+                                id: "openai".to_string(),
+                                base_url: "https://api.openai.com/v1".to_string(),
+                                protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
+                                models: vec![],
+                                compact_model: String::new(),
+                                custom: false,
+                                api_key: "sk-test".to_string(),
+                            },
+                            // Local provider — empty key by design, still callable.
+                            acowork_core::mqtt_proto::ProviderRef {
+                                id: "ollama-local".to_string(),
+                                base_url: "http://localhost:11434/v1".to_string(),
+                                protocol_type: acowork_core::mqtt_proto::LlmProtocol::Ollama as i32,
+                                models: vec![],
+                                compact_model: String::new(),
+                                custom: false,
+                                api_key: String::new(),
+                            },
+                        ],
+                    },
+                ),
+            ),
         };
         let payload = prost::Message::encode_to_vec(&envelope);
 
@@ -484,23 +490,28 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                AvailableProviders {
-                    version: 1,
-                    default_compact_model: None,
-                    providers: vec![acowork_core::mqtt_proto::ProviderRef {
-                        id: "ollama-local".to_string(),
-                        base_url: "http://localhost:11434/v1".to_string(),
-                        protocol_type: acowork_core::mqtt_proto::LlmProtocol::Ollama as i32,
-                        models: vec![],
-                        compact_model: String::new(),
-                        custom: false,
-                        api_key: String::new(),
-                    }],
-                },
-            )),
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                    AvailableProviders {
+                        version: 1,
+                        default_compact_model: None,
+                        providers: vec![acowork_core::mqtt_proto::ProviderRef {
+                            id: "ollama-local".to_string(),
+                            base_url: "http://localhost:11434/v1".to_string(),
+                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Ollama as i32,
+                            models: vec![],
+                            compact_model: String::new(),
+                            custom: false,
+                            api_key: String::new(),
+                        }],
+                    },
+                ),
+            ),
         };
-        cache.update_from_mqtt("acowork/global/providers", &prost::Message::encode_to_vec(&envelope));
+        cache.update_from_mqtt(
+            "acowork/global/providers",
+            &prost::Message::encode_to_vec(&envelope),
+        );
         assert!(cache.is_provider_available("ollama-local"));
     }
 
@@ -511,23 +522,28 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                AvailableProviders {
-                    version: 1,
-                    default_compact_model: None,
-                    providers: vec![acowork_core::mqtt_proto::ProviderRef {
-                        id: "anthropic".to_string(),
-                        base_url: "https://api.anthropic.com/v1".to_string(),
-                        protocol_type: acowork_core::mqtt_proto::LlmProtocol::Anthropic as i32,
-                        models: vec![],
-                        compact_model: String::new(),
-                        custom: false,
-                        api_key: String::new(),
-                    }],
-                },
-            )),
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                    AvailableProviders {
+                        version: 1,
+                        default_compact_model: None,
+                        providers: vec![acowork_core::mqtt_proto::ProviderRef {
+                            id: "anthropic".to_string(),
+                            base_url: "https://api.anthropic.com/v1".to_string(),
+                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Anthropic as i32,
+                            models: vec![],
+                            compact_model: String::new(),
+                            custom: false,
+                            api_key: String::new(),
+                        }],
+                    },
+                ),
+            ),
         };
-        cache.update_from_mqtt("acowork/global/providers", &prost::Message::encode_to_vec(&envelope));
+        cache.update_from_mqtt(
+            "acowork/global/providers",
+            &prost::Message::encode_to_vec(&envelope),
+        );
         assert!(!cache.is_provider_available("anthropic"));
     }
 
@@ -537,15 +553,20 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                AvailableProviders {
-                    version: 1,
-                    default_compact_model: None,
-                    providers: vec![],
-                },
-            )),
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                    AvailableProviders {
+                        version: 1,
+                        default_compact_model: None,
+                        providers: vec![],
+                    },
+                ),
+            ),
         };
-        cache.update_from_mqtt("acowork/global/providers", &prost::Message::encode_to_vec(&envelope));
+        cache.update_from_mqtt(
+            "acowork/global/providers",
+            &prost::Message::encode_to_vec(&envelope),
+        );
         assert!(!cache.is_provider_available("ghost-provider"));
     }
 
@@ -553,7 +574,10 @@ mod tests {
     fn test_update_from_mqtt_invalid_payload() {
         let mut cache = AvailableResourceCache::new();
         cache.update_from_mqtt("acowork/global/providers", b"not protobuf");
-        assert!(cache.providers.is_none(), "invalid payload should not update cache");
+        assert!(
+            cache.providers.is_none(),
+            "invalid payload should not update cache"
+        );
     }
 
     #[test]
@@ -616,8 +640,8 @@ mod tests {
 
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                AvailableUsers {
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(AvailableUsers {
                     version: 7,
                     active_user: Some(UserProfileRef {
                         user_id: "u-1".to_string(),
@@ -630,14 +654,16 @@ mod tests {
                         communication_style: Some("concise".to_string()),
                         custom_json: r#"{"theme":"dark"}"#.to_string(),
                     }),
-                },
-            )),
+                }),
+            ),
         };
         let payload = prost::Message::encode_to_vec(&envelope);
 
         cache.update_from_mqtt("acowork/global/user_profile", &payload);
 
-        let profile = cache.active_user_profile().expect("active user should be present");
+        let profile = cache
+            .active_user_profile()
+            .expect("active user should be present");
         assert_eq!(profile.user_id, "u-1");
         assert_eq!(profile.display_name, "大鱼");
         assert_eq!(profile.language, "zh-CN");
@@ -645,7 +671,10 @@ mod tests {
         assert_eq!(profile.city.as_deref(), Some("Beijing"));
         assert_eq!(profile.occupation.as_deref(), Some("Software Engineer"));
         assert_eq!(profile.communication_style.as_deref(), Some("concise"));
-        assert_eq!(profile.custom.get("theme").map(String::as_str), Some("dark"));
+        assert_eq!(
+            profile.custom.get("theme").map(String::as_str),
+            Some("dark")
+        );
         assert!(profile.is_active); // wire always carries active
     }
 
@@ -657,12 +686,14 @@ mod tests {
             "acowork/global/user_profile",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                    AvailableUsers {
-                        version: 0,
-                        active_user: None,
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                        AvailableUsers {
+                            version: 0,
+                            active_user: None,
+                        },
+                    ),
+                ),
             }),
         );
         assert!(cache.active_user_profile().is_none());
@@ -682,12 +713,14 @@ mod tests {
             "acowork/global/user_profile",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 3,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                    AvailableUsers {
-                        version: 3,
-                        active_user: None,
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                        AvailableUsers {
+                            version: 3,
+                            active_user: None,
+                        },
+                    ),
+                ),
             }),
         );
         // envelope has landed:
@@ -707,25 +740,29 @@ mod tests {
             "acowork/global/user_profile",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                    AvailableUsers {
-                        version: 1,
-                        active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
-                            user_id: "u-1".into(),
-                            display_name: "Test".into(),
-                            language: "en-US".into(),
-                            timezone: "UTC".into(),
-                            city: None,
-                            country: None,
-                            occupation: None,
-                            communication_style: None,
-                            custom_json: "not valid json".into(),
-                        }),
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                        AvailableUsers {
+                            version: 1,
+                            active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
+                                user_id: "u-1".into(),
+                                display_name: "Test".into(),
+                                language: "en-US".into(),
+                                timezone: "UTC".into(),
+                                city: None,
+                                country: None,
+                                occupation: None,
+                                communication_style: None,
+                                custom_json: "not valid json".into(),
+                            }),
+                        },
+                    ),
+                ),
             }),
         );
-        let profile = cache.active_user_profile().expect("should still return Some");
+        let profile = cache
+            .active_user_profile()
+            .expect("should still return Some");
         assert!(profile.custom.is_empty());
     }
 
@@ -735,16 +772,16 @@ mod tests {
     fn bootstrap_envelope(instance_id: &str, version: u64, phase: i32) -> Vec<u8> {
         prost::Message::encode_to_vec(&DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::BootstrapState(
-                BootstrapState {
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::BootstrapState(BootstrapState {
                     protocol_version: 1,
                     instance_id: instance_id.to_string(),
                     version,
                     phase,
                     phase_detail: "test".to_string(),
                     issued_at_ms: 0,
-                },
-            )),
+                }),
+            ),
         })
     }
 
@@ -756,7 +793,11 @@ mod tests {
 
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 1, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                1,
+                acowork_core::mqtt_proto::BootstrapPhase::Booting as i32,
+            ),
         );
 
         let bs = cache.bootstrap_snapshot().expect("first snapshot accepted");
@@ -771,7 +812,11 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 2, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                2,
+                acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
+            ),
         );
         assert!(cache.is_bootstrap_ready());
     }
@@ -781,12 +826,20 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 3, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                3,
+                acowork_core::mqtt_proto::BootstrapPhase::Booting as i32,
+            ),
         );
         // Newer version, same instance → accepted.
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 4, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                4,
+                acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
+            ),
         );
         let bs = cache.bootstrap_snapshot().unwrap();
         assert_eq!(bs.version, 4);
@@ -794,7 +847,11 @@ mod tests {
         // Identical version (retained re-delivery) → idempotent accept.
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 4, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                4,
+                acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
+            ),
         );
         assert_eq!(cache.bootstrap_snapshot().unwrap().version, 4);
     }
@@ -804,12 +861,20 @@ mod tests {
         let mut cache = AvailableResourceCache::new();
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 5, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                5,
+                acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
+            ),
         );
         // Older version, same instance → rejected, current snapshot kept.
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 3, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                3,
+                acowork_core::mqtt_proto::BootstrapPhase::Booting as i32,
+            ),
         );
         let bs = cache.bootstrap_snapshot().unwrap();
         assert_eq!(bs.version, 5);
@@ -824,48 +889,56 @@ mod tests {
             "acowork/global/providers",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                    AvailableProviders {
-                        version: 9,
-                        default_compact_model: None,
-                        providers: vec![acowork_core::mqtt_proto::ProviderRef {
-                            id: "openai".to_string(),
-                            base_url: "https://api.openai.com/v1".to_string(),
-                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
-                            models: vec![],
-                            compact_model: String::new(),
-                            custom: false,
-                            api_key: "sk-old-generation".to_string(),
-                        }],
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                        AvailableProviders {
+                            version: 9,
+                            default_compact_model: None,
+                            providers: vec![acowork_core::mqtt_proto::ProviderRef {
+                                id: "openai".to_string(),
+                                base_url: "https://api.openai.com/v1".to_string(),
+                                protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
+                                models: vec![],
+                                compact_model: String::new(),
+                                custom: false,
+                                api_key: "sk-old-generation".to_string(),
+                            }],
+                        },
+                    ),
+                ),
             }),
         );
         cache.update_from_mqtt(
             "acowork/global/user_profile",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                    AvailableUsers {
-                        version: 4,
-                        active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
-                            user_id: "u-old".into(),
-                            display_name: "Old".into(),
-                            language: "en".into(),
-                            timezone: "UTC".into(),
-                            city: None,
-                            country: None,
-                            occupation: None,
-                            communication_style: None,
-                            custom_json: "{}".into(),
-                        }),
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                        AvailableUsers {
+                            version: 4,
+                            active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
+                                user_id: "u-old".into(),
+                                display_name: "Old".into(),
+                                language: "en".into(),
+                                timezone: "UTC".into(),
+                                city: None,
+                                country: None,
+                                occupation: None,
+                                communication_style: None,
+                                custom_json: "{}".into(),
+                            }),
+                        },
+                    ),
+                ),
             }),
         );
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-A", 6, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+            &bootstrap_envelope(
+                "gen-A",
+                6,
+                acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
+            ),
         );
         assert!(cache.providers.is_some());
         assert!(cache.user_profile.is_some());
@@ -873,17 +946,31 @@ mod tests {
         // New generation BOOTING snapshot → accepted; old resources cleared.
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-B", 1, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+            &bootstrap_envelope(
+                "gen-B",
+                1,
+                acowork_core::mqtt_proto::BootstrapPhase::Booting as i32,
+            ),
         );
         assert_eq!(cache.bootstrap_instance_id(), Some("gen-B"));
-        assert!(cache.providers.is_none(), "old-generation providers must be cleared");
-        assert!(cache.user_profile.is_none(), "old-generation user profile must be cleared");
+        assert!(
+            cache.providers.is_none(),
+            "old-generation providers must be cleared"
+        );
+        assert!(
+            cache.user_profile.is_none(),
+            "old-generation user profile must be cleared"
+        );
         assert!(!cache.is_bootstrap_ready());
 
         // New generation reaches READY.
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-B", 2, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+            &bootstrap_envelope(
+                "gen-B",
+                2,
+                acowork_core::mqtt_proto::BootstrapPhase::Ready as i32,
+            ),
         );
         assert!(cache.is_bootstrap_ready());
         // A further generation switch (another Gateway restart) follows
@@ -895,7 +982,11 @@ mod tests {
         // re-delivered alongside the new one).
         cache.update_from_mqtt(
             "acowork/global/bootstrap",
-            &bootstrap_envelope("gen-C", 1, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+            &bootstrap_envelope(
+                "gen-C",
+                1,
+                acowork_core::mqtt_proto::BootstrapPhase::Booting as i32,
+            ),
         );
         assert_eq!(cache.bootstrap_instance_id(), Some("gen-C"));
         assert!(
@@ -908,7 +999,10 @@ mod tests {
     fn test_bootstrap_empty_instance_id_rejected() {
         let mut cache = AvailableResourceCache::new();
         cache.update_from_mqtt("acowork/global/bootstrap", &bootstrap_envelope("", 1, 0));
-        assert!(cache.bootstrap_snapshot().is_none(), "empty instance_id must be rejected");
+        assert!(
+            cache.bootstrap_snapshot().is_none(),
+            "empty instance_id must be rejected"
+        );
     }
 
     #[test]
@@ -924,13 +1018,15 @@ mod tests {
         let providers = |version: u64| {
             prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                    AvailableProviders {
-                        version,
-                        default_compact_model: None,
-                        providers: vec![],
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                        AvailableProviders {
+                            version,
+                            default_compact_model: None,
+                            providers: vec![],
+                        },
+                    ),
+                ),
             })
         };
         cache.update_from_mqtt("acowork/global/providers", &providers(7));
@@ -955,31 +1051,38 @@ mod tests {
             "acowork/global/user_profile",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                    AvailableUsers {
-                        version: 2,
-                        active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
-                            user_id: "u-1".into(),
-                            display_name: "Test".into(),
-                            language: "en-US".into(),
-                            timezone: "UTC".into(),
-                            city: None,
-                            country: None,
-                            occupation: None,
-                            communication_style: None,
-                            custom_json: "{}".into(),
-                        }),
-                    },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                        AvailableUsers {
+                            version: 2,
+                            active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
+                                user_id: "u-1".into(),
+                                display_name: "Test".into(),
+                                language: "en-US".into(),
+                                timezone: "UTC".into(),
+                                city: None,
+                                country: None,
+                                occupation: None,
+                                communication_style: None,
+                                custom_json: "{}".into(),
+                            }),
+                        },
+                    ),
+                ),
             }),
         );
         cache.update_from_mqtt(
             "acowork/global/user_profile",
             &prost::Message::encode_to_vec(&DataEnvelope {
                 version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
-                    AvailableUsers { version: 3, active_user: None },
-                )),
+                payload: Some(
+                    acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                        AvailableUsers {
+                            version: 3,
+                            active_user: None,
+                        },
+                    ),
+                ),
             }),
         );
         assert!(cache.user_profile.is_some());

@@ -339,8 +339,9 @@ impl ReliableProvider {
     fn compute_wait(&self, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
         // Prefer server-suggested wait time when configured; otherwise fall back to backoff strategy.
         let base_ms = if self.retry_config.honor_retry_after {
-            retry_after_ms
-                .unwrap_or_else(|| self.retry_config.backoff.wait_duration(attempt).as_millis() as u64)
+            retry_after_ms.unwrap_or_else(|| {
+                self.retry_config.backoff.wait_duration(attempt).as_millis() as u64
+            })
         } else {
             self.retry_config.backoff.wait_duration(attempt).as_millis() as u64
         };
@@ -354,7 +355,6 @@ impl ReliableProvider {
 
         Duration::from_millis(jittered_ms)
     }
-
 }
 
 #[async_trait]
@@ -586,7 +586,9 @@ mod tests {
 
     #[test]
     fn test_is_minimax_balance_code() {
-        assert!(acowork_core::providers::error_patterns::is_minimax_balance_code("error code 1113"));
+        assert!(
+            acowork_core::providers::error_patterns::is_minimax_balance_code("error code 1113")
+        );
         assert!(acowork_core::providers::error_patterns::is_minimax_balance_code("code 1311"));
         assert!(!acowork_core::providers::error_patterns::is_minimax_balance_code("generic error"));
     }

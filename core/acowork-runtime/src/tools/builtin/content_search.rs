@@ -295,14 +295,15 @@ impl Tool for ContentSearchTool {
                 match output_mode {
                     "files_with_matches" => {
                         if content.lines().find(|line| re.is_match(line)).is_some()
-                            && file_set.insert(rel_str.clone()) {
-                                results.push(rel_str);
-                                total_matches += 1;
-                                if results.len() >= max_results {
-                                    truncated = true;
-                                    break 'outer;
-                                }
+                            && file_set.insert(rel_str.clone())
+                        {
+                            results.push(rel_str);
+                            total_matches += 1;
+                            if results.len() >= max_results {
+                                truncated = true;
+                                break 'outer;
                             }
+                        }
                     }
                     "count" => {
                         let count = content.lines().filter(|line| re.is_match(line)).count();
@@ -373,10 +374,11 @@ impl Tool for ContentSearchTool {
                                     });
                             if let Some(next) = next_idx
                                 && next != usize::MAX
-                                    && next > match_line + context_after + context_before + 1
-                                    && results.len() < max_results {
-                                        results.push("--".to_string());
-                                    }
+                                && next > match_line + context_after + context_before + 1
+                                && results.len() < max_results
+                            {
+                                results.push("--".to_string());
+                            }
 
                             total_matches += 1;
                         }

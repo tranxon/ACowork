@@ -85,7 +85,7 @@
 
 use std::time::{Duration, Instant};
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
@@ -381,7 +381,10 @@ async fn apply_pull_body(
     let mut cache_guard = cache.write().await;
 
     // ADR-059 §5.3: pre-emptive generation switch.
-    let local_instance = cache_guard.bootstrap_instance_id().unwrap_or("").to_string();
+    let local_instance = cache_guard
+        .bootstrap_instance_id()
+        .unwrap_or("")
+        .to_string();
     if !remote_instance_id.is_empty()
         && !local_instance.is_empty()
         && remote_instance_id != local_instance
@@ -461,8 +464,8 @@ async fn apply_pull_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_core::mqtt_proto::{BootstrapState, LlmProtocol, ProviderRef};
     use crate::mqtt::new_shared_cache;
+    use acowork_core::mqtt_proto::{BootstrapState, LlmProtocol, ProviderRef};
     use mockito::Server;
 
     #[test]
@@ -524,16 +527,14 @@ mod tests {
         let envelope = DataEnvelope {
             version: 1,
             payload: Some(
-                acowork_core::mqtt_proto::data_envelope::Payload::BootstrapState(
-                    BootstrapState {
-                        protocol_version: 1,
-                        instance_id: instance_id.to_string(),
-                        version,
-                        phase,
-                        phase_detail: "test".to_string(),
-                        issued_at_ms: 0,
-                    },
-                ),
+                acowork_core::mqtt_proto::data_envelope::Payload::BootstrapState(BootstrapState {
+                    protocol_version: 1,
+                    instance_id: instance_id.to_string(),
+                    version,
+                    phase,
+                    phase_detail: "test".to_string(),
+                    issued_at_ms: 0,
+                }),
             ),
         };
         BASE64.encode(prost::Message::encode_to_vec(&envelope))
@@ -621,7 +622,10 @@ mod tests {
         let url = format!("{}/api/global-resources", server.url());
         let outcome = try_pull_once(&client, &url, &cache).await;
 
-        assert!(matches!(outcome, PullOutcome::NotReady(RETRY_AFTER_DONT_RETRY)));
+        assert!(matches!(
+            outcome,
+            PullOutcome::NotReady(RETRY_AFTER_DONT_RETRY)
+        ));
     }
 
     #[tokio::test]
@@ -771,12 +775,8 @@ mod tests {
         // time, which must map to Transient (retryable), never Fatal.
         let cache = new_shared_cache();
         let client = reqwest::Client::new();
-        let outcome = try_pull_once(
-            &client,
-            "http://127.0.0.1:1/api/global-resources",
-            &cache,
-        )
-        .await;
+        let outcome =
+            try_pull_once(&client, "http://127.0.0.1:1/api/global-resources", &cache).await;
 
         assert!(matches!(outcome, PullOutcome::Transient(_)));
     }

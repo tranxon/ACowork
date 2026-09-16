@@ -28,10 +28,7 @@ pub trait AgentTokenService: Send + Sync {
     /// `(input, output, cache_read, cache_write)`.  Pass `None` for any
     /// dimension whose scan yielded no data (e.g. legacy meta files
     /// without cache fields, or empty agent directories).
-    fn merge_token_totals(
-        &self,
-        scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
-    );
+    fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>));
 
     /// Snapshot the current agent-scoped cumulative token totals.
     ///

@@ -92,10 +92,7 @@ pub fn resolve_effective_reasoning_effort(
     // persisted value. Centralising the chain here means HTTP/MQTT
     // reads see the same effective value that the in-memory session
     // already has.
-    if caps
-        .and_then(|c| c.supports_reasoning)
-        .unwrap_or(false)
-    {
+    if caps.and_then(|c| c.supports_reasoning).unwrap_or(false) {
         return Some(ReasoningEffort::Auto);
     }
 
@@ -144,11 +141,7 @@ pub fn apply_llm_effects(
                 &agent_loop.core.provider_key_vault,
                 agent_loop.core.compat_cache.as_ref(),
             ) {
-                agent_loop.update_provider(
-                    new_provider,
-                    model.clone(),
-                    Some(provider_id.clone()),
-                );
+                agent_loop.update_provider(new_provider, model.clone(), Some(provider_id.clone()));
             } else {
                 tracing::warn!(
                     provider_id = %provider_id,

@@ -19,8 +19,8 @@ pub mod session_handle;
 
 // Re-export MemoryManager and types from acowork-memory.
 pub use acowork_memory::{
-    InjectedMemory, MemoryManager, MemoryManagerConfig,
-    RetrieveAndInjectResult, RetrievalResult, RetrievedMemory,
+    InjectedMemory, MemoryManager, MemoryManagerConfig, RetrievalResult, RetrieveAndInjectResult,
+    RetrievedMemory,
 };
 
 pub use consolidation_bg::{

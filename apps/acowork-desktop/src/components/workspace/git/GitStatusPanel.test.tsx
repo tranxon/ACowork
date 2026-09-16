@@ -3,8 +3,8 @@
  *
  * Flat list of uncommitted changes with a right-click menu. Covers:
  *   1. Row rendering: path, status icon by state, staged badge, oldPath.
- *   2. Click a normal row → openFile in the editor.
- *   3. Click a deleted row → redirect to Show Diff (ADR-078 decision 6).
+ *   2. Double-click a normal row → openFile in the editor.
+ *   3. Double-click a deleted row → redirect to Show Diff (ADR-078 decision 6).
  *   4. Right-click menu → Show Diff / Show Log / Open in editor actions.
  *   5. Empty states: clean, notRepo, gitUnavailable, loading, error.
  */
@@ -144,7 +144,7 @@ describe("GitStatusPanel", () => {
     expect(screen.getByText("← src/a.ts")).toBeTruthy();
   });
 
-  it("clicking a normal row opens the file in the editor", () => {
+  it("double-clicking a normal row opens the file in the editor", () => {
     setEntry({
       data: {
         isRepo: true,
@@ -164,11 +164,11 @@ describe("GitStatusPanel", () => {
       loading: false,
     });
     render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
-    fireEvent.click(screen.getByTestId("git-status-row"));
+    fireEvent.doubleClick(screen.getByTestId("git-status-row"));
     expect(fileEditorMocks.openFile).toHaveBeenCalledWith("a1", "ws1", "src/a.ts");
   });
 
-  it("clicking a deleted row redirects to Show Diff (decision 6)", async () => {
+  it("double-clicking a deleted row redirects to Show Diff (decision 6)", async () => {
     setEntry({
       data: {
         isRepo: true,
@@ -191,7 +191,7 @@ describe("GitStatusPanel", () => {
       okResponse({ kind: "deleted", original: "HEAD content", modified: "" }),
     );
     render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
-    fireEvent.click(screen.getByTestId("git-status-row"));
+    fireEvent.doubleClick(screen.getByTestId("git-status-row"));
 
     await vi.waitFor(() => {
       expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith("a1", "ws1", "gone.ts", "HEAD", "");
@@ -419,10 +419,23 @@ describe("GitStatusPanel", () => {
     expect(screen.getByText("a.txt")).toBeTruthy();
   });
 
-  it("opens the diff against X^ vs X when clicking a row while viewing commit X", () => {
-    // Click-row in commit view defaults to "open the diff for that
-    // commit vs its first parent" — not "open the file in the editor"
-    // (the file may not exist on the worktree yet).
+  it("opens the diff for the viewed commit when double-clicking a row", () => {
+    // Double-click-row in commit view defaults to "open the diff for the
+    // viewed commit". The client only:
+    //   1. Calls `fetchDiff(<viewingRev>^, <viewingRev>, path)` —
+    //      sending git shorthand on the wire (it's a request param,
+    //      not stored data).
+    //   2. Stores the server's `baseRev` / `headRev` into the OpenFile
+    //      verbatim — banner labels and diff body are both sourced
+    //      from the backend.
+    //
+    // The backend owns all git semantics (ADR-009 v2 split): it
+    // resolves `<sha>^` to the parent SHA AND promotes the base to
+    // the file-history predecessor of `head` on `path` so the banner
+    // label matches the row above `head` in the diff banner's
+    // `CommitPicker` (which lists `git log -- <path>`). Frontend tests
+    // therefore assert the round-trip (request shorthand → stored
+    // server SHAs), not git semantics themselves.
     gitStoreMocks.viewingRev = { [KEY]: "abc1234" };
     setViewEntry("abc1234", {
       data: {
@@ -436,23 +449,79 @@ describe("GitStatusPanel", () => {
       loading: false,
     });
     gitStoreMocks.fetchDiff.mockReturnValue(
-      okResponse({ kind: "modified", original: "old", modified: "new" }) as never,
+      okResponse({
+        kind: "modified",
+        original: "old",
+        modified: "new",
+        // The backend promotes base from `abc1234^` (first-parent) to
+        // the file-history predecessor on `a.txt`; we mock whatever
+        // SHAs the server would have returned. The client contract is
+        // "store verbatim, no client-side git reasoning".
+        baseRev: "0123456789abcdef0123456789abcdef01234567",
+        headRev: "abc1234567890abcdef0123456789abcdef012345",
+      }) as never,
     );
     render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
-    fireEvent.click(screen.getByText("a.txt"));
+    fireEvent.doubleClick(screen.getByText("a.txt"));
     // Wait for the async openDiff to settle.
     return vi.waitFor(() => {
       expect(gitStoreMocks.fetchDiff).toHaveBeenCalledWith(
         "a1",
         "ws1",
         "a.txt",
-        "abc1234^", // base = X's first parent
-        "abc1234", // head = X
+        "abc1234^", // request uses git shorthand (network protocol)
+        "abc1234",
       );
+      // OpenFile stores the server's canonical SHAs (the bug fix from
+      // round 1: client never has to `slice(0, 7)` a `<sha>^` string).
       expect(fileEditorMocks.openVirtualFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          diffBaseRef: "abc1234^",
-          diffHeadRef: "abc1234",
+          diffBaseRef: "0123456789abcdef0123456789abcdef01234567",
+          diffHeadRef: "abc1234567890abcdef0123456789abcdef012345",
+        }),
+      );
+      // The two stored refs MUST differ in their first 7 chars —
+      // that's the regression we're guarding.
+      const call = fileEditorMocks.openVirtualFile.mock.calls[0][0];
+      expect(call.diffBaseRef.slice(0, 7)).not.toBe(
+        call.diffHeadRef.slice(0, 7),
+      );
+    });
+  });
+
+  it("stores headRef as empty string when server returns null headRev", () => {
+    // Worktree variant: `headRev` is null → stored as "" so the
+    // existing `!diffHeadRef → "Working Tree"` rendering contract
+    // continues to work without UI changes. We trigger openDiff via a
+    // deleted row (decision 6) since plain worktree rows open in the
+    // editor instead — openDiff is the wrong code path to exercise here.
+    setEntry({
+      data: {
+        isRepo: true,
+        branch: "main",
+        error: null,
+        truncated: false,
+        changes: [{ path: "a.txt", index: "deleted", worktree: "deleted", staged: true }],
+        rev: "",
+      },
+      loading: false,
+    });
+    gitStoreMocks.fetchDiff.mockReturnValue(
+      okResponse({
+        kind: "deleted",
+        original: "old",
+        modified: "",
+        baseRev: "0123456789abcdef0123456789abcdef01234567",
+        headRev: null,
+      }) as never,
+    );
+    render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    fireEvent.doubleClick(screen.getByText("a.txt"));
+    return vi.waitFor(() => {
+      expect(fileEditorMocks.openVirtualFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          diffBaseRef: "0123456789abcdef0123456789abcdef01234567",
+          diffHeadRef: "",
         }),
       );
     });

@@ -1240,7 +1240,13 @@
     "headLabel": "HEAD",
     "workingTreeLabel": "本地工作区",
     "commitPickerLabel": "选择版本",
-    "commitPickerLoading": "加载提交记录…"
+    "commitPickerLoading": "加载提交记录…",
+    "commitPickerSearchPlaceholder": "搜索提交信息、作者或哈希",
+    "commitPickerShowing": "显示 {{start}}-{{end}} 共 {{total}} 条",
+    "commitPickerNoMatches": "没有匹配的提交",
+    "commitPickerPageOf": "第 {{current}} / {{total}} 页",
+    "commitPickerPrevPage": "上一页",
+    "commitPickerNextPage": "下一页"
   },
   "fileTree": {
     "deleteConfirmOk": "删除",

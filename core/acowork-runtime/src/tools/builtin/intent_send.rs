@@ -25,11 +25,11 @@ pub struct IntentSendTool {
 }
 
 impl IntentSendTool {
-    pub fn new(
-        agent_id: String,
-        mqtt_slot: crate::http::server::SharedMqttClientSlot,
-    ) -> Self {
-        Self { agent_id, mqtt_slot }
+    pub fn new(agent_id: String, mqtt_slot: crate::http::server::SharedMqttClientSlot) -> Self {
+        Self {
+            agent_id,
+            mqtt_slot,
+        }
     }
 
     fn spec_value() -> ToolSpec {
@@ -290,7 +290,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.ok, "intent_send without MQTT should return ok: false");
+        assert!(
+            !result.ok,
+            "intent_send without MQTT should return ok: false"
+        );
         let err = result.error.expect("should have error message");
         assert!(
             err.contains("MQTT client not connected"),

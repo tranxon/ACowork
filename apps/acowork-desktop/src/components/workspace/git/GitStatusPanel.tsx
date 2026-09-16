@@ -170,10 +170,19 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       const editor = useFileEditorStore.getState();
       try {
         // When the panel is showing files in commit X, click-row opens
-        // the diff for that commit vs its first parent (`X^` — git's
-        // standard first-parent shorthand; root commits have no parent
-        // and the backend will surface a 400, which the user sees as a
-        // toast). Otherwise the default is HEAD vs working tree.
+        // the diff for X vs X^ (git's first-parent shorthand; root
+        // commits have no parent and the backend will surface a 400,
+        // which the user sees as a toast). Otherwise the default is
+        // HEAD vs working tree.
+        //
+        // The backend then PROMOTES the base from `X^` (first-parent)
+        // to the file-history predecessor of X on `c.path`, so the diff
+        // banner label matches the row above X in the banner's
+        // `CommitPicker` (which lists `git log -- <path>`, also file
+        // history). This is the same semantic IDE / GitKraken use by
+        // default ("what did this file look like right before this
+        // commit?"). First-parent is only retained when `X` introduced
+        // `c.path` (no file-history predecessor exists).
         const baseRef = viewingRev ? `${viewingRev}^` : "HEAD";
         const headRef = viewingRev;
         const diff: GitDiffResponse = await useGitStore
@@ -189,10 +198,11 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           gitDiffKind: diff.kind,
           language: languageForPath(c.path),
           // Store the server-canonicalised commit SHAs as the OpenFile's
-          // refs. The diff-side banner slice(0, 7) relies on these being
-          // already-canonical SHAs — passing `<sha>^` here used to slice
-          // to the same 7 chars as `<sha>` and the banner showed the
-            // same commit id on both sides (bug-fix invariant).
+          // refs. The diff-side banner `slice(0, 7)` relies on these
+          // being already-canonical SHAs — the backend does the
+          // git-rev-resolution + file-history promotion so the client
+          // never has to reason about git semantics (ADR-009 v2:
+          // gateway / desktop / runtime split).
           // Working-tree variant returns `headRev = null` so the existing
           // `!diffHeadRef → "Working Tree"` rendering still works.
           diffBaseRef: diff.baseRev,

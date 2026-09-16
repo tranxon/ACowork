@@ -64,8 +64,7 @@ pub mod web_search;
 /// then writing the merge result back to disk) would erase the user's
 /// enable/disable preference. This constant is the single source of
 /// truth for that distinction.
-pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] =
-    &["codebase", "web_search", "rag_query"];
+pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] = &["codebase", "web_search", "rag_query"];
 
 // ── Shared limits ──────────────────────────────────────────────────────
 
@@ -94,8 +93,6 @@ use std::time::Duration;
 use crate::mcp_notify::McpNotifyRef;
 use crate::tools::workspace_resolver::SharedResolver;
 use search_backends::WebSearchEngine;
-
-
 
 /// Create the standard built-in tools (without RAG).
 ///
@@ -285,18 +282,8 @@ mod tests {
         // retired from the LLM-facing tool surface. Neither tool should
         // appear in the registered builtin tools list; their source
         // files survive as dead code for future reference.
-        let (
-            resolver,
-            agent_id,
-            timeout,
-            search_kv,
-            search_pl,
-            mem,
-            mcp,
-            agent_home,
-            lsp,
-            mqtt,
-        ) = make_test_deps();
+        let (resolver, agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt) =
+            make_test_deps();
 
         let tools = all_builtin_tools(
             &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
@@ -319,18 +306,8 @@ mod tests {
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
-        let (
-            resolver,
-            agent_id,
-            timeout,
-            search_kv,
-            search_pl,
-            mem,
-            mcp,
-            agent_home,
-            lsp,
-            mqtt,
-        ) = make_test_deps();
+        let (resolver, agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt) =
+            make_test_deps();
 
         let tools = all_builtin_tools(
             &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,

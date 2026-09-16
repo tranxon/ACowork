@@ -105,15 +105,20 @@ async fn spawn_server(tag: &str) -> (u16, std::path::PathBuf) {
 async fn test_list_prompts_returns_all_8_with_overridden_false() {
     let (port, temp_dir) = spawn_server("list-all-8").await;
 
-    let resp = reqwest::get(format!("http://127.0.0.1:{}/agents/{}/prompts", port, INSTANCE_ID))
-        .await
-        .expect("GET should not error");
+    let resp = reqwest::get(format!(
+        "http://127.0.0.1:{}/agents/{}/prompts",
+        port, INSTANCE_ID
+    ))
+    .await
+    .expect("GET should not error");
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["agent_id"], AGENT_ID);
 
-    let prompts = body["prompts"].as_array().expect("prompts must be an array");
+    let prompts = body["prompts"]
+        .as_array()
+        .expect("prompts must be an array");
     assert_eq!(
         prompts.len(),
         8,
@@ -125,7 +130,10 @@ async fn test_list_prompts_returns_all_8_with_overridden_false() {
     // created it before this one — see per-test temp_dir naming).
     for p in prompts {
         let name = p["name"].as_str().expect("name");
-        assert!(!p["overridden"].as_bool().unwrap_or(true), "{name} must report overridden=false on a fresh package dir");
+        assert!(
+            !p["overridden"].as_bool().unwrap_or(true),
+            "{name} must report overridden=false on a fresh package dir"
+        );
         assert_eq!(
             p["size_bytes"].as_u64().unwrap_or(99),
             0,
@@ -184,9 +192,7 @@ async fn test_get_prompt_unknown_name_returns_404_with_canonical_list() {
 
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
-        port,
-        INSTANCE_ID,
-        "not-a-real-prompt",
+        port, INSTANCE_ID, "not-a-real-prompt",
     ))
     .await
     .expect("GET should not error");
@@ -224,9 +230,7 @@ async fn test_get_prompt_path_traversal_returns_404() {
     // `resolve_prompt_path` defence kicks in.
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
-        port,
-        INSTANCE_ID,
-        "..%2F..%2Fetc%2Fpasswd",
+        port, INSTANCE_ID, "..%2F..%2Fetc%2Fpasswd",
     ))
     .await
     .expect("GET should not error");
@@ -237,9 +241,7 @@ async fn test_get_prompt_path_traversal_returns_404() {
     // them too. Use raw URL form to be explicit.
     let resp = reqwest::get(format!(
         "http://127.0.0.1:{}/agents/{}/prompts/{}",
-        port,
-        INSTANCE_ID,
-        "..%5C..%5Cetc%5Cpasswd",
+        port, INSTANCE_ID, "..%5C..%5Cetc%5Cpasswd",
     ))
     .await
     .expect("GET should not error");
@@ -289,7 +291,9 @@ async fn test_get_prompt_existing_override_returns_content() {
     assert_eq!(body["file"], "compact-template.md");
     assert_eq!(body["overridden"], true);
     assert_eq!(
-        body["content"].as_str().expect("content must be present when overridden"),
+        body["content"]
+            .as_str()
+            .expect("content must be present when overridden"),
         payload,
     );
     // size_bytes reflects on-disk file size (NOT the trimmed content
@@ -365,8 +369,15 @@ async fn test_put_creates_prompts_dir_when_missing() {
         .send()
         .await
         .expect("PUT should not error");
-    assert_eq!(resp.status(), 200, "PUT must succeed even when prompts/ doesn't exist yet");
-    assert!(temp_dir.join("prompts").is_dir(), "prompts/ must be created");
+    assert_eq!(
+        resp.status(),
+        200,
+        "PUT must succeed even when prompts/ doesn't exist yet"
+    );
+    assert!(
+        temp_dir.join("prompts").is_dir(),
+        "prompts/ must be created"
+    );
     assert!(temp_dir.join("prompts").join("summary.md").is_file());
 }
 
@@ -485,7 +496,11 @@ async fn test_instance_id_mismatch_returns_404() {
     ))
     .await
     .unwrap();
-    assert_eq!(resp.status(), 404, "GET list with mismatched id must be 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "GET list with mismatched id must be 404"
+    );
 
     // GET single
     let resp = reqwest::get(format!(
@@ -494,7 +509,11 @@ async fn test_instance_id_mismatch_returns_404() {
     ))
     .await
     .unwrap();
-    assert_eq!(resp.status(), 404, "GET single with mismatched id must be 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "GET single with mismatched id must be 404"
+    );
 
     // PUT
     let resp = client
@@ -506,7 +525,11 @@ async fn test_instance_id_mismatch_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "PUT with mismatched id must be 404 (never write)");
+    assert_eq!(
+        resp.status(),
+        404,
+        "PUT with mismatched id must be 404 (never write)"
+    );
 }
 
 #[tokio::test]

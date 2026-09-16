@@ -30,11 +30,11 @@
 
 use std::sync::Arc;
 
-use acowork_core::providers::mock::{MockProvider, MockResponse};
 use acowork_core::EmbeddingProvider;
+use acowork_core::providers::mock::{MockProvider, MockResponse};
 use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_memory::types::{Episode, KnowledgeSubType};
 use acowork_memory::MemoryProvider;
+use acowork_memory::types::{Episode, KnowledgeSubType};
 use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::agent::agent_core::{AgentCore, BuiltinToolEntry};
@@ -115,7 +115,11 @@ struct Adr071E2e {
 /// The store is passed in so callers can seed episodes and read their REAL
 /// node ids FIRST, then build the extract JSON with those ids (GrafeoStore
 /// node ids are not 0-based sequential).
-fn build_core(enabled: bool, store: Arc<GrafeoStore>, llm_responses: Vec<MockResponse>) -> Adr071E2e {
+fn build_core(
+    enabled: bool,
+    store: Arc<GrafeoStore>,
+    llm_responses: Vec<MockResponse>,
+) -> Adr071E2e {
     let config = crate::config::RuntimeConfig::default();
     let distiller_toml = if enabled {
         "[memory.distiller]\nenabled = true\nbatch_size = 20\n"
@@ -141,12 +145,7 @@ fn build_core(enabled: bool, store: Arc<GrafeoStore>, llm_responses: Vec<MockRes
     .expect("manifest parse ok");
 
     let provider = Arc::new(MockProvider::new(llm_responses));
-    let mut core = AgentCore::new(
-        config,
-        manifest,
-        provider,
-        Vec::<BuiltinToolEntry>::new(),
-    );
+    let mut core = AgentCore::new(config, manifest, provider, Vec::<BuiltinToolEntry>::new());
 
     // Inject the providers + timer the production session_init wires in
     // Phase B (see `startup::session_init`). The timer's scheduler policy
@@ -209,10 +208,8 @@ impl Adr071E2e {
 /// stub (`None` / empty) — same pattern as `prompts_reload_e2e::spawn_server`,
 /// which documents why each unused slot can be empty.
 async fn spawn_server(e2e: &Adr071E2e) -> u16 {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "acowork-test-adr071-e2e-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("acowork-test-adr071-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -240,13 +237,10 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
         crate::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
     ));
     let session_manager_slot: Arc<
-        tokio::sync::RwLock<
-            Option<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>>,
-        >,
+        tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>>>,
     > = Arc::new(tokio::sync::RwLock::new(None));
-    let agent_core_slot: Arc<
-        std::sync::RwLock<Option<Arc<crate::agent::agent_core::AgentCore>>>,
-    > = Arc::new(std::sync::RwLock::new(Some(e2e.core.clone())));
+    let agent_core_slot: Arc<std::sync::RwLock<Option<Arc<crate::agent::agent_core::AgentCore>>>> =
+        Arc::new(std::sync::RwLock::new(Some(e2e.core.clone())));
 
     let server = crate::http::RuntimeHttpServer::start(
         temp_dir.clone(),
@@ -337,23 +331,23 @@ async fn e1_http_manual_distill_promotes_episodes() {
             .iter()
             .map(|id| extract_entry(*id, "user", "prefers", "dark_mode")),
     );
-    Arc::get_mut(&mut e2e.core).expect("unique core ref").provider = Arc::new(
-        MockProvider::new(vec![
-            MockResponse::Text {
-                content: extract_response(&extract_entries),
-            },
-            MockResponse::Text {
-                content: judge_response("promote", 0.92, "user lives in Shanghai"),
-            },
-            MockResponse::Text {
-                content: judge_response("promote", 0.90, "user prefers dark mode"),
-            },
-            // Safety margin if the cluster order differs from the seed order.
-            MockResponse::Text {
-                content: judge_response("promote", 0.80, "fallback"),
-            },
-        ]),
-    );
+    Arc::get_mut(&mut e2e.core)
+        .expect("unique core ref")
+        .provider = Arc::new(MockProvider::new(vec![
+        MockResponse::Text {
+            content: extract_response(&extract_entries),
+        },
+        MockResponse::Text {
+            content: judge_response("promote", 0.92, "user lives in Shanghai"),
+        },
+        MockResponse::Text {
+            content: judge_response("promote", 0.90, "user prefers dark mode"),
+        },
+        // Safety margin if the cluster order differs from the seed order.
+        MockResponse::Text {
+            content: judge_response("promote", 0.80, "fallback"),
+        },
+    ]));
 
     let port = spawn_server(&e2e).await;
     let base = format!("http://127.0.0.1:{port}");
@@ -389,7 +383,10 @@ async fn e1_http_manual_distill_promotes_episodes() {
         .find_knowledge_by_subject("user", "lives_in")
         .expect("lookup ok")
         .expect("Fact KnowledgeNode exists");
-    let meta = fact.promotion_metadata.as_ref().expect("promotion metadata");
+    let meta = fact
+        .promotion_metadata
+        .as_ref()
+        .expect("promotion metadata");
     assert_eq!(meta.promoted_by, "episodic_distiller");
     assert_eq!(
         meta.evidence_episode_ids.len(),
@@ -403,7 +400,10 @@ async fn e1_http_manual_distill_promotes_episodes() {
         .find_knowledge_by_subject("user", "prefers")
         .expect("lookup ok")
         .expect("Preference KnowledgeNode exists");
-    let meta = pref.promotion_metadata.as_ref().expect("promotion metadata");
+    let meta = pref
+        .promotion_metadata
+        .as_ref()
+        .expect("promotion metadata");
     assert_eq!(meta.promoted_by, "episodic_distiller");
     assert_eq!(
         meta.evidence_episode_ids.len(),
@@ -485,7 +485,10 @@ async fn e2_disabled_distiller_refuses_manual_trigger() {
     );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        body["error"].as_str().unwrap_or("").contains("distiller is disabled"),
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("distiller is disabled"),
         "409 body explains the opt-in gate: {body}"
     );
 

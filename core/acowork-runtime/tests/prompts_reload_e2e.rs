@@ -146,11 +146,7 @@ async fn spawn_server(
 /// is now `agent_core`, the dependency on DevMode is gone.
 #[tokio::test]
 async fn test_reload_prompts_returns_503_when_agent_core_slot_empty() {
-    let (port, _temp) = spawn_server(
-        "reload-503",
-        Arc::new(std::sync::RwLock::new(None)),
-    )
-    .await;
+    let (port, _temp) = spawn_server("reload-503", Arc::new(std::sync::RwLock::new(None))).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}{RELOAD_PATH}"))
@@ -189,11 +185,7 @@ async fn test_reload_prompts_returns_503_when_agent_core_slot_empty() {
 /// overrides into the wrong runtime.
 #[tokio::test]
 async fn test_reload_prompts_returns_404_when_instance_id_mismatches() {
-    let (port, _temp) = spawn_server(
-        "reload-404",
-        Arc::new(std::sync::RwLock::new(None)),
-    )
-    .await;
+    let (port, _temp) = spawn_server("reload-404", Arc::new(std::sync::RwLock::new(None))).await;
 
     let wrong_path = "/agents/com.test.WRONG/prompts/reload";
     let resp = reqwest::Client::new()
@@ -223,11 +215,8 @@ async fn test_reload_prompts_returns_404_when_instance_id_mismatches() {
 /// DevMode" bug we're fixing.
 #[tokio::test]
 async fn test_old_debug_prompts_reload_path_returns_404() {
-    let (port, _temp) = spawn_server(
-        "reload-old-404",
-        Arc::new(std::sync::RwLock::new(None)),
-    )
-    .await;
+    let (port, _temp) =
+        spawn_server("reload-old-404", Arc::new(std::sync::RwLock::new(None))).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}{OLD_RELOAD_PATH}"))

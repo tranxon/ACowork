@@ -1179,7 +1179,13 @@
     "headLabel": "HEAD",
     "workingTreeLabel": "本機工作區",
     "commitPickerLabel": "選擇版本",
-    "commitPickerLoading": "載入提交紀錄…"
+    "commitPickerLoading": "載入提交紀錄…",
+    "commitPickerSearchPlaceholder": "搜尋提交訊息、作者或雜湊",
+    "commitPickerShowing": "顯示 {{start}}-{{end}} 共 {{total}} 條",
+    "commitPickerNoMatches": "沒有符合的提交",
+    "commitPickerPageOf": "第 {{current}} / {{total}} 頁",
+    "commitPickerPrevPage": "上一頁",
+    "commitPickerNextPage": "下一頁"
   },
   "fileTree": {
     "deleteConfirmOk": "刪除",

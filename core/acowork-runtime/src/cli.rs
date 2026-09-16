@@ -280,7 +280,9 @@ async fn async_main(
     };
 
     // Phase 0: fail-fast validation of timeout configuration.
-    config.validate().map_err(crate::error::RuntimeError::Config)?;
+    config
+        .validate()
+        .map_err(crate::error::RuntimeError::Config)?;
 
     // Phase A: per-agent initialization (package, gateway, provider, tools, embedding).
     let mut agent_ctx = phase_a_init_agent(&config).await?;
@@ -291,8 +293,7 @@ async fn async_main(
         let mut session_ctx = phase_b_init_session(&mut agent_ctx, &config).await?;
 
         // Phase C: spawn subsystems (chunk_relay, MCP auto-connect, DevMode).
-        let handles =
-            phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await?;
+        let handles = phase_c_spawn_subsystems(&mut agent_ctx, &mut session_ctx, &config).await?;
 
         // ADR-065 §2.5/§5.4: in never-sleep mode the Runtime is a resident
         // process with no parent to restart it after an OS sleep/wake, so
@@ -312,7 +313,14 @@ async fn async_main(
         }
 
         // Phase D: announce ready + run Gateway message loop.
-        phase_d_run(&mut agent_ctx, session_ctx, handles, &config, log_reload_handle).await
+        phase_d_run(
+            &mut agent_ctx,
+            session_ctx,
+            handles,
+            &config,
+            log_reload_handle,
+        )
+        .await
     } else {
         // ── Standalone mode ──────────────────────────────────────────────────
         use crate::agent::loop_::AgentLoop;
@@ -338,18 +346,15 @@ async fn async_main(
         //
         // ADR-063 §3.7.5: wrap in `Arc<RwLock<Option<String>>>` for the
         // same L2 reload reasons documented in `session_init.rs`.
-        *agent_loop.core.compaction_prompt.write().unwrap() =
-            agent_ctx.compaction_prompt.clone();
+        *agent_loop.core.compaction_prompt.write().unwrap() = agent_ctx.compaction_prompt.clone();
 
         // ADR-063: 7 additional overrides. Mirror the session_init.rs
         // Phase B injection. Both Gateway and Standalone modes resolve
         // to the same package declaration because Phase A loaded once.
         *agent_loop.core.search_prompt.write().unwrap() = agent_ctx.search_prompt.clone();
-        *agent_loop.core.compact_template.write().unwrap() =
-            agent_ctx.compact_template.clone();
+        *agent_loop.core.compact_template.write().unwrap() = agent_ctx.compact_template.clone();
         *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
-        *agent_loop.core.abstention_prompt.write().unwrap() =
-            agent_ctx.abstention_prompt.clone();
+        *agent_loop.core.abstention_prompt.write().unwrap() = agent_ctx.abstention_prompt.clone();
 
         // ADR-071 D7/D9: mirror the two distiller prompt overrides for the
         // standalone path (see session_init.rs Phase B for Gateway mode).
@@ -404,7 +409,10 @@ async fn run_chat_loop(
             return Ok(());
         }
 
-        match agent_loop.run(trimmed, context_builder, None, None, Some(trimmed), None).await {
+        match agent_loop
+            .run(trimmed, context_builder, None, None, Some(trimmed), None)
+            .await
+        {
             Ok(response) => {
                 println!(
                     "

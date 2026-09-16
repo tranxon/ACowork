@@ -66,10 +66,16 @@ pub const COMPACTION_PROMPT_FILE: &str = "summary.md";
 /// Tests in this module pin all three behaviours against this list.
 pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     // ADR-053 — compaction / distillation system prompt
-    ("summary.md", "compaction/distillation system prompt (ADR-053)"),
+    (
+        "summary.md",
+        "compaction/distillation system prompt (ADR-053)",
+    ),
     // ADR-063 — Runtime prompt.rs constants (3)
     ("search.md", "SEARCH_SYSTEM_PROMPT"),
-    ("compact-template.md", "COMPACT_PROMPT (must keep {messages_text} placeholder)"),
+    (
+        "compact-template.md",
+        "COMPACT_PROMPT (must keep {messages_text} placeholder)",
+    ),
     ("title.md", "TITLE_PROMPT"),
     // ADR-068 — only the memory-side abstention override remains of
     // the original ADR-063 grafeo/memory set. The other three grafeo
@@ -82,8 +88,14 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     // dialog / compaction call sites: `extraction_prompt_override`
     // replaces the built-in `EXTRACTION_SYSTEM_PROMPT` (Step 2a) and
     // `judge_prompt_override` replaces `JUDGE_SYSTEM_PROMPT` (Step 4).
-    ("distiller-extraction.md", "distiller Step 2a extraction system prompt (ADR-071)"),
-    ("distiller-judge.md", "distiller Step 4 judge system prompt (ADR-071)"),
+    (
+        "distiller-extraction.md",
+        "distiller Step 2a extraction system prompt (ADR-071)",
+    ),
+    (
+        "distiller-judge.md",
+        "distiller Step 4 judge system prompt (ADR-071)",
+    ),
 ];
 
 /// O(1) lookup set of overridable filenames. Built lazily on first access
@@ -577,11 +589,7 @@ Be friendly and welcoming.
         // ADR-068: total was 8 before removing 3 grafeo overrides.
         fs::write(dir.join("prompts").join("summary.md"), "summary-only").unwrap();
         fs::write(dir.join("prompts").join("title.md"), "title-only").unwrap();
-        fs::write(
-            dir.join("prompts").join("abstention.md"),
-            "abstention-only",
-        )
-        .unwrap();
+        fs::write(dir.join("prompts").join("abstention.md"), "abstention-only").unwrap();
 
         reload_prompts_into_core(&dir, &core).expect("partial reload must succeed");
 
@@ -670,7 +678,11 @@ Be friendly and welcoming.
         let dir = std::env::temp_dir().join(format!("acowork-test-compaction-prompt-{name}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
-        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test agent.",
+        )
+        .unwrap();
         fs::write(dir.join("prompts").join(COMPACTION_PROMPT_FILE), summary).unwrap();
         dir
     }
@@ -680,7 +692,11 @@ Be friendly and welcoming.
         let dir = std::env::temp_dir().join("acowork-test-compaction-missing");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
-        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test agent.",
+        )
+        .unwrap();
 
         assert_eq!(load_compaction_prompt(&dir), None);
     }
@@ -739,7 +755,11 @@ Be friendly and welcoming.
         let dir = std::env::temp_dir().join("acowork-test-compaction-case-variant");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
-        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test agent.",
+        )
+        .unwrap();
         fs::write(
             dir.join("prompts").join("SUMMARY.md"),
             "Case variant summary directive.",
@@ -760,7 +780,11 @@ Be friendly and welcoming.
         let dir = std::env::temp_dir().join("acowork-test-compaction-txt-variant");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
-        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test agent.",
+        )
+        .unwrap();
         fs::write(
             dir.join("prompts").join("summary.txt"),
             "Txt summary directive.",
@@ -915,7 +939,11 @@ Be friendly and welcoming.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
 
-        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test agent.",
+        )
+        .unwrap();
         for (filename, _desc) in OVERRIDABLE_PROMPTS {
             let sentinel = format!("SENTINEL FOR {filename}");
             fs::write(dir.join("prompts").join(filename), &sentinel).unwrap();
@@ -955,12 +983,14 @@ Be friendly and welcoming.
     #[test]
     fn test_build_system_prompt_does_not_exclude_overridable_case_variant() {
         for (filename, _desc) in OVERRIDABLE_PROMPTS.iter().take(2) {
-            let dir = std::env::temp_dir().join(format!(
-                "acowork-test-excludes-case-{filename}"
-            ));
+            let dir = std::env::temp_dir().join(format!("acowork-test-excludes-case-{filename}"));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(dir.join("prompts")).unwrap();
-            fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+            fs::write(
+                dir.join("prompts").join("system.md"),
+                "You are a test agent.",
+            )
+            .unwrap();
 
             // Neighbour that LOOKS like an overridable filename but isn't:
             // same stem + `-case` suffix. Must pass the lowercase-extension

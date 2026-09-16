@@ -143,11 +143,7 @@ impl WorkspaceResolver {
     /// `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
     pub fn find_by_id_with_trace(&self, id: &str) -> Option<&WorkspaceDir> {
         let result = self.find_by_id(id);
-        let loaded_ids: Vec<&str> = self
-            .allowed_dirs
-            .iter()
-            .map(|d| d.id.as_str())
-            .collect();
+        let loaded_ids: Vec<&str> = self.allowed_dirs.iter().map(|d| d.id.as_str()).collect();
         tracing::trace!(
             queried_id = %id,
             found = result.is_some(),

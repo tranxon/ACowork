@@ -142,10 +142,7 @@ pub enum InboundMessage {
     /// rename a session's title. Phase 2 will route this via
     /// `SessionMessage::UpdateSessionTitle` directly, instead of
     /// wrapping in `SystemNotification` (fixes §7.1 G1).
-    UpdateSessionTitle {
-        session_id: String,
-        title: String,
-    },
+    UpdateSessionTitle { session_id: String, title: String },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, no front/back suppression. Proto ControlCommand fields 24/25
     // retained for wire compatibility but the runtime no longer acts on them.
@@ -169,9 +166,7 @@ pub enum InboundMessage {
     /// or when restoring a session on app startup. Idempotent for Active sessions.
     OpenSession { session_id: String },
     /// ADR-034 Phase 7: Delete a session by ID.
-    DeleteSession {
-        session_id: String,
-    },
+    DeleteSession { session_id: String },
     /// ADR-034 Phase 7: User chat message from MQTT SendMessage.
     /// Carries content and message_id for SessionMessage::ChatMessage.
     /// Also carries raw params_json so the handler can extract
@@ -191,13 +186,9 @@ pub enum InboundMessage {
         provider_id: Option<String>,
     },
     /// ADR-034 Phase 7: Per-session reasoning effort change.
-    ReasoningEffortAction {
-        effort: String,
-    },
+    ReasoningEffortAction { effort: String },
     /// ADR-034 Phase 7: Per-session workspace switch.
-    WorkspaceSwitchAction {
-        workspace_id: String,
-    },
+    WorkspaceSwitchAction { workspace_id: String },
     /// ADR-034 Phase 7: Per-session compact context.
     CompactContextAction,
     /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
@@ -226,9 +217,7 @@ pub enum InboundMessage {
     /// broadcasts `SessionMessage::UpdateSystemPrompt` to every active
     /// session's `ContextBuilder` — so editing `system.md` takes effect
     /// immediately, without an agent restart.
-    UpdateSystemPrompt {
-        system_prompt: String,
-    },
+    UpdateSystemPrompt { system_prompt: String },
 }
 
 impl InboundMessage {

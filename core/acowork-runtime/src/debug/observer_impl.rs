@@ -21,10 +21,10 @@ use super::controller::{
     ContextSnapshot, ContextSnapshotSections, DebugController, DebugState, NamedSection,
     SectionContent,
 };
+use super::events::{DebugEvent, DebugEventSender};
 use super::observer::ContextSnapshotRequest;
 use super::protocol::{DebugPhase, RequestParams};
-use super::events::{DebugEvent, DebugEventSender};
-use crate::agent::context::{compute_section_sizes, ContextBuilder};
+use crate::agent::context::{ContextBuilder, compute_section_sizes};
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
 use crate::util::text::TextPreview;
@@ -58,15 +58,16 @@ fn section_text_from_builder(key: &str, builder: &ContextBuilder) -> Option<Stri
             builder
                 .environment_override()
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    crate::agent::context::detect_environment_text().to_string()
-                }),
+                .unwrap_or_else(|| crate::agent::context::detect_environment_text().to_string()),
         ),
         "workspace_prompt_file" => builder.workspace_prompt_file().map(|s| s.to_string()),
         // Caller handles these specially.
         "tool_definitions" | "messages" => None,
         other => {
-            tracing::warn!(key = other, "section_text_from_builder: unknown section key");
+            tracing::warn!(
+                key = other,
+                "section_text_from_builder: unknown section key"
+            );
             None
         }
     }
@@ -397,12 +398,8 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         // DevMode snapshot path and `process_llm_response_usage`'s
         // always-on emission) MUST go through it so the frontend sees
         // consistent section keys regardless of DevMode state.
-        let base_sections = compute_section_sizes(
-            req.context_builder,
-            req.history,
-            &mcp_tools,
-            req.model,
-        );
+        let base_sections =
+            compute_section_sizes(req.context_builder, req.history, &mcp_tools, req.model);
 
         // Enrich each base section with DevMode-only metadata (full
         // content, token estimate, hash for `messages`). The byte size
@@ -461,8 +458,6 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         }
 
         let sections = ContextSnapshotSections { sections: named };
-
-
 
         let total_token_estimate = sections.total_token_estimate();
 
@@ -533,7 +528,9 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         if let Some(patches) = ctrl_guard.pending_patches.take() {
             match builder.apply_patches(&patches) {
                 Ok(()) => {
-                    tracing::info!("Debug: pending patches applied to context builder after resume");
+                    tracing::info!(
+                        "Debug: pending patches applied to context builder after resume"
+                    );
                     true
                 }
                 Err(e) => {

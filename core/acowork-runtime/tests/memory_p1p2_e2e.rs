@@ -51,9 +51,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 
+use acowork_core::EmbeddingProvider;
 use acowork_core::packaging::PackageOptions;
 use acowork_core::tools::traits::Tool;
-use acowork_core::EmbeddingProvider;
 
 use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::spreading::{GraphExpandConfig, get_expand_thresholds};
@@ -241,7 +241,11 @@ async fn store_episode_persists_privacy_importance_keywords_metadata() {
     assert!(!ep.consolidated, "fresh episode must be unconsolidated");
 
     // importance lands on the typed field.
-    assert!((ep.importance - 0.9).abs() < 1e-6, "importance = {}", ep.importance);
+    assert!(
+        (ep.importance - 0.9).abs() < 1e-6,
+        "importance = {}",
+        ep.importance
+    );
 
     // privacy / keywords land on metadata (the Episode struct has no dedicated
     // fields for them — the distiller reads them from metadata).
@@ -303,7 +307,11 @@ async fn store_episode_defaults_privacy_personal() {
         "personal",
         "default privacy must be personal"
     );
-    assert!((ep.importance - 0.5).abs() < 1e-6, "importance = {}", ep.importance);
+    assert!(
+        (ep.importance - 0.5).abs() < 1e-6,
+        "importance = {}",
+        ep.importance
+    );
 }
 
 /// A3 (ADR-068 E7): the tool rejects `category=autobiographical` even when the
@@ -421,7 +429,10 @@ async fn export_filters_private_knowledge() {
     assert_eq!(knowledge.len(), 1, "only public knowledge exported");
 
     let data = knowledge[0].data.as_object().expect("data is object");
-    let privacy = data.get("privacy").and_then(|v| v.as_str()).unwrap_or_default();
+    let privacy = data
+        .get("privacy")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert_eq!(privacy, "Public");
 }
 
@@ -466,7 +477,11 @@ async fn export_includes_private_when_requested() {
         .iter()
         .filter(|n| n.label == labels::KNOWLEDGE)
         .collect();
-    assert_eq!(knowledge.len(), 2, "both public and private knowledge exported");
+    assert_eq!(
+        knowledge.len(),
+        2,
+        "both public and private knowledge exported"
+    );
 }
 
 // ============================================================================
@@ -488,9 +503,14 @@ async fn retrieve_empty_injects_abstention_prompt() {
         .await
         .expect("retrieve ok");
 
-    assert!(result.memories.is_empty(), "expected no memories on empty store");
+    assert!(
+        result.memories.is_empty(),
+        "expected no memories on empty store"
+    );
     assert!(result.metrics.abstention_triggered, "abstention triggered");
-    let prompt = result.abstention_prompt.expect("abstention prompt injected");
+    let prompt = result
+        .abstention_prompt
+        .expect("abstention prompt injected");
     assert!(!prompt.is_empty(), "abstention prompt is non-empty");
     assert!(
         prompt.contains("not sure")
@@ -529,7 +549,10 @@ async fn retrieve_identity_hint_reaches_knowledge() {
         .expect("retrieve ok");
 
     assert!(
-        retrieved.memories.iter().any(|m| m.label == labels::KNOWLEDGE),
+        retrieved
+            .memories
+            .iter()
+            .any(|m| m.label == labels::KNOWLEDGE),
         "Identity hint must reach Knowledge nodes, got: {:?}",
         retrieved
             .memories
@@ -683,36 +706,33 @@ fn episodic_decay_progressive_lifecycle() {
             [("content", Value::from("a very old event record"))],
         )
         .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(
-            old_active,
-            "created_at",
-            Value::from(Timestamp::from_micros(micros_days_ago(700))),
-        );
+    e2e.store.db().set_node_property(
+        old_active,
+        "created_at",
+        Value::from(Timestamp::from_micros(micros_days_ago(700))),
+    );
 
     // Case 2: Dormant for 100 days (past archive_days = 90) → PurgeLog.
     let dormant_old = e2e
         .store
         .store_node(
             labels::EPISODIC,
-            [("content", Value::from("dormant event past archive deadline"))],
+            [(
+                "content",
+                Value::from("dormant event past archive deadline"),
+            )],
         )
         .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(
-            dormant_old,
-            "status",
-            Value::from(NodeStatus::Dormant.as_str()),
-        );
-    e2e.store
-        .db()
-        .set_node_property(
-            dormant_old,
-            "dormant_since",
-            Value::from(Timestamp::from_micros(micros_days_ago(100))),
-        );
+    e2e.store.db().set_node_property(
+        dormant_old,
+        "status",
+        Value::from(NodeStatus::Dormant.as_str()),
+    );
+    e2e.store.db().set_node_property(
+        dormant_old,
+        "dormant_since",
+        Value::from(Timestamp::from_micros(micros_days_ago(100))),
+    );
 
     // Case 3: fresh episode (retention ≈ 0.96) stays Active.
     let fresh = e2e
@@ -722,13 +742,11 @@ fn episodic_decay_progressive_lifecycle() {
             [("content", Value::from("a recent event record"))],
         )
         .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(
-            fresh,
-            "created_at",
-            Value::from(Timestamp::from_micros(micros_days_ago(10))),
-        );
+    e2e.store.db().set_node_property(
+        fresh,
+        "created_at",
+        Value::from(Timestamp::from_micros(micros_days_ago(10))),
+    );
 
     // Case 4: sediment-layer (Knowledge) node as old as case 1 — the scan
     // must never touch non-Episodic labels.
@@ -742,20 +760,24 @@ fn episodic_decay_progressive_lifecycle() {
             ],
         )
         .expect("store_node ok");
-    e2e.store
-        .db()
-        .set_node_property(
-            knowledge,
-            "created_at",
-            Value::from(Timestamp::from_micros(micros_days_ago(700))),
-        );
+    e2e.store.db().set_node_property(
+        knowledge,
+        "created_at",
+        Value::from(Timestamp::from_micros(micros_days_ago(700))),
+    );
 
     let result = e2e
         .store
         .run_episodic_decay_scan(&cfg)
         .expect("episodic decay scan ok");
-    assert_eq!(result.to_dormant, 1, "only the old Active episode goes Dormant");
-    assert_eq!(result.purged, 1, "only the stale Dormant episode is archived");
+    assert_eq!(
+        result.to_dormant, 1,
+        "only the old Active episode goes Dormant"
+    );
+    assert_eq!(
+        result.purged, 1,
+        "only the stale Dormant episode is archived"
+    );
 
     let status = |id: NodeId| -> String {
         e2e.store

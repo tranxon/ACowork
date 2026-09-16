@@ -22,11 +22,11 @@
        Circle moved up to be tangent to the inner edges of both diagonals; diameter 20.4. -->
   <path d="M32 68 L56 20 L80 68"
         fill="none"
-        stroke="#282828"
+        stroke="#383838"
         stroke-width="10"
         stroke-linecap="round"
         stroke-linejoin="round"/>
-  <circle cx="56" cy="54" r="10.2" fill="#282828" mask="url(#bite)"/>
+  <circle cx="56" cy="54" r="10.2" fill="#383838" mask="url(#bite)"/>
   <!-- tighter, cleaner wordmark -->
   <text x="106" y="71"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"

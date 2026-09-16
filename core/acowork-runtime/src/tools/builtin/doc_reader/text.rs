@@ -99,7 +99,6 @@ fn extract_whole(text: &str) -> Result<String, String> {
     // decision — "this file is too big, ask the LLM to narrow" rather
     // than "slice this output to fit".
     Ok(text.to_string())
-
 }
 
 /// Paged path: slice the requested 1-based inclusive line range.
@@ -160,7 +159,6 @@ fn extract_paged(text: &str, start: usize, end: usize) -> Result<String, String>
     // (100-line max via MAX_LINES_PER_CALL) plus that wrapper is two
     // independent bounds; either one alone would still be safe.
     Ok(selected.to_string())
-
 }
 
 /// Byte ranges `(start, end)` for each line in `text`, where `start` is

@@ -24,13 +24,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use crate::usecases::WorkspaceError;
 use crate::usecases::git_query::{
     GitChangeDto, GitCommitDto, GitDiffKind, GitDiffParams, GitDiffResponse, GitError,
-    GitIndexStatus, GitLogParams, GitLogResponse, GitQueryService, GitStatusParams,
-    GitStatusResponse, GitWorktreeStatus,
+    GitIndexStatus, GitLogPagination, GitLogParams, GitLogResponse, GitQueryService,
+    GitStatusParams, GitStatusResponse, GitWorktreeStatus,
 };
 use crate::usecases::workspace_mutation_impl::{resolve_within_static, resolve_workspace_root};
-use crate::usecases::WorkspaceError;
 
 /// Max levels to walk up from the workspace root looking for `.git`
 /// (ADR-078 decision 3 — covers the "workspace is a repo subdirectory"
@@ -220,9 +220,7 @@ fn parse_status_porcelain(
             None
         };
 
-        if let Some(change) =
-            make_change(x, y, &path, old.as_deref(), workspace_root, repo_root)
-        {
+        if let Some(change) = make_change(x, y, &path, old.as_deref(), workspace_root, repo_root) {
             changes.push(change);
         }
         if changes.len() >= STATUS_ENTRY_CAP {
@@ -326,10 +324,18 @@ fn make_change(
     // never silently rendered as "clean" (ADR-078 invariant 5). `staged` stays
     // false — a conflict is unresolved, not staged.
     let (index, worktree, staged) = if is_unmerged(x, y) {
-        (GitIndexStatus::Conflicted, GitWorktreeStatus::Conflicted, false)
+        (
+            GitIndexStatus::Conflicted,
+            GitWorktreeStatus::Conflicted,
+            false,
+        )
     } else {
         let index = index_status(x);
-        (index, worktree_status(y), index != GitIndexStatus::Unmodified)
+        (
+            index,
+            worktree_status(y),
+            index != GitIndexStatus::Unmodified,
+        )
     };
     Some(GitChangeDto {
         path: ws_path,
@@ -349,13 +355,9 @@ fn status_sort_key(c: &GitChangeDto) -> (u8, u8, &str) {
     let staged_rank = if c.staged { 0 } else { 1 };
     let type_rank = if c.worktree == GitWorktreeStatus::Untracked {
         1 // U
-    } else if c.index == GitIndexStatus::Modified
-        || c.worktree == GitWorktreeStatus::Modified
-    {
+    } else if c.index == GitIndexStatus::Modified || c.worktree == GitWorktreeStatus::Modified {
         0 // M
-    } else if c.index == GitIndexStatus::Deleted
-        || c.worktree == GitWorktreeStatus::Deleted
-    {
+    } else if c.index == GitIndexStatus::Deleted || c.worktree == GitWorktreeStatus::Deleted {
         2 // D
     } else if c.index == GitIndexStatus::Added {
         3 // A
@@ -417,9 +419,13 @@ fn parse_diff_tree_name_status(
         let path = String::from_utf8_lossy(path_tok).into_owned();
         let old_path = old_path_tok.map(|p| String::from_utf8_lossy(p).into_owned());
 
-        if let Some(change) =
-            make_commit_change(status, &path, old_path.as_deref(), workspace_root, repo_root)
-        {
+        if let Some(change) = make_commit_change(
+            status,
+            &path,
+            old_path.as_deref(),
+            workspace_root,
+            repo_root,
+        ) {
             changes.push(change);
         }
         if changes.len() >= STATUS_ENTRY_CAP {
@@ -481,6 +487,146 @@ async fn cat_file_size(
     Ok(s.trim().parse::<u64>().ok())
 }
 
+/// Resolve `rev` to a canonical commit SHA.
+///
+/// Uses `git rev-parse --verify <rev>^{commit}` so the result is always
+/// a commit SHA (not a tree / blob SHA), and `<rev>^` first-parent
+/// shorthand is expanded to the parent commit's full SHA. This is the
+/// authoritative form to surface to the UI — the client never has to
+/// reason about git's `<sha>^` / `<sha>~N` shorthand or whether
+/// `HEAD` resolves to a branch tip.
+///
+/// Returns `GitError::BadRequest` if the ref is unknown to the repo,
+/// so the caller maps to a clean 4xx rather than a misleading 5xx.
+async fn rev_parse_commit(git_bin: &str, repo_root: &Path, rev: &str) -> Result<String, GitError> {
+    let mut cmd = git_cmd(git_bin, repo_root);
+    cmd.arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("{rev}^{{commit}}"));
+    let out = run_git(cmd).await?;
+    if !out.status.success() {
+        return Err(GitError::BadRequest(format!(
+            "rev-parse failed for {rev:?}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Count commits in the repo history that touch `repo_rel_path`
+/// (already validated as repo-root-relative by the caller, or `None`
+/// for repo-wide). Powers `GitLogPagination.totalCount` so the client
+/// can render "Page X of Y" + decide whether to surface the search /
+/// pagination chrome.
+///
+/// `git rev-list --count HEAD -- <path>` is O(n) but sub-100ms for
+/// repos under ~100k commits. We accept an already-validated
+/// repo-root-relative path so this helper doesn't repeat
+/// `resolve_within_static` (which the caller has already done for
+/// `git log -- <path>`).
+async fn rev_list_count(
+    git_bin: &str,
+    repo_root: &Path,
+    repo_rel_path: Option<&str>,
+) -> Result<u32, GitError> {
+    let mut cmd = git_cmd(git_bin, repo_root);
+    cmd.arg("rev-list").arg("--count").arg("HEAD");
+    if let Some(p) = repo_rel_path.filter(|p| !p.is_empty()) {
+        cmd.arg("--").arg(p);
+    }
+    let out = run_git(cmd).await?;
+    if !out.status.success() {
+        return Err(GitError::GitFailed(format!(
+            "rev-list --count failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0))
+}
+
+/// Find the previous commit in `path`'s file-history — i.e. the commit
+/// that immediately precedes `head_ref` when listing commits that touched
+/// `path` (newest first). Used by `diff_two_refs` to pick the base ref
+/// that matches what the user sees in the diff banner's `CommitPicker`
+/// dropdown (which also lists by file).
+///
+/// Returns:
+/// - `Some(prev_sha)` — `head_ref` is the newest commit touching `path`
+///   AND there's at least one older commit touching `path` too.
+/// - `None` — `path` has no history yet, or `head_ref` is the only
+///   commit touching `path`, or `head_ref` itself isn't in
+///   `path`'s file-history (caller should fall back to first-parent).
+///
+/// Implementation: `git log -n 2 --pretty=%H <head_ref> -- <path>`.
+/// Line 1 is the newest file-history commit (expected to be `head_ref`);
+/// line 2 is the previous one. We don't validate line 1 == `head_ref`
+/// because the caller decides whether to use this signal — the function
+/// is a pure lookup and intentionally does not error on the
+/// head-not-in-file-history case (the contract is "give me line 2 of
+/// `git log` or None").
+async fn file_history_prev(
+    git_bin: &str,
+    repo_root: &Path,
+    head_ref: &str,
+    path: &str,
+) -> Result<Option<String>, GitError> {
+    let mut cmd = git_cmd(git_bin, repo_root);
+    cmd.args(["log", "-n", "2", "--pretty=%H", head_ref, "--", path]);
+    let out = run_git(cmd).await?;
+    if !out.status.success() {
+        // `git log` on a non-existent path or rev exits non-zero —
+        // not an error for this helper (caller falls back).
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 2 {
+        // File has only one (or zero) commits touching it — no prev.
+        return Ok(None);
+    }
+    Ok(Some(lines[1].trim().to_string()))
+}
+
+/// Newest commit that touched `path`, walking back from `at_ref` — line 1
+/// of `git log <at_ref> -- <path>`, i.e. exactly the commit the diff
+/// banner's `CommitPicker` renders as its first row.
+///
+/// Used by the working-tree diff variants so the base banner label is a
+/// commit the (file-scoped) picker can actually show. `HEAD` is the wrong
+/// label when HEAD did not touch `path`: the file's last committed state
+/// is, by definition, the newest commit that did. Without this the banner
+/// displays HEAD while the picker lists file-history — HEAD is then
+/// absent from the menu and unsearchable.
+///
+/// Returns `None` when `path` has no history reachable from `at_ref`
+/// (untracked file, newly-created path, or a path outside the tree), so
+/// the caller keeps its original base ref.
+///
+/// Implementation: `git log -n 1 --pretty=%H <at_ref> -- <path>`.
+async fn file_history_head(
+    git_bin: &str,
+    repo_root: &Path,
+    at_ref: &str,
+    path: &str,
+) -> Result<Option<String>, GitError> {
+    let mut cmd = git_cmd(git_bin, repo_root);
+    cmd.args(["log", "-n", "1", "--pretty=%H", at_ref, "--", path]);
+    let out = run_git(cmd).await?;
+    if !out.status.success() {
+        // Non-existent path / rev — not an error for this helper.
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
 /// `git show <rev>:<path>` — raw blob bytes for a diff side, with
 /// size pre-check (`cat-file -s` before reading, so a huge blob never
 /// enters memory — ADR-078 decision 4 > 2 MiB → `TooLarge`). `rev` is
@@ -530,7 +676,11 @@ impl GitQueryService for RuntimeGitQueryService {
         // ADR-XXX: rev=Some(h) → list files touched by commit h
         // (parsed via `git diff-tree -r --name-status -z --root --no-commit-id h`).
         // rev=None or rev=Some("") → current working-tree status (legacy path).
-        let trimmed_rev = params.rev.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let trimmed_rev = params
+            .rev
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         if let Some(rev) = trimmed_rev {
             return self.status_for_commit(&repo_root, &canonical_ws, rev).await;
@@ -594,8 +744,6 @@ impl GitQueryService for RuntimeGitQueryService {
         })
     }
 
-
-
     async fn diff(&self, params: &GitDiffParams) -> Result<GitDiffResponse, GitError> {
         // ADR-078 extension: accept arbitrary `base_ref` / `head_ref` so the
         // frontend can compare any two git revisions. The legacy semantics
@@ -610,12 +758,9 @@ impl GitQueryService for RuntimeGitQueryService {
             ));
         }
 
-        let (canonical_ws, _, _) = resolve_within_static(
-            &self.work_dir,
-            params.workspace_id.as_deref(),
-            &params.path,
-        )
-        .map_err(workspace_to_git_error)?;
+        let (canonical_ws, _, _) =
+            resolve_within_static(&self.work_dir, params.workspace_id.as_deref(), &params.path)
+                .map_err(workspace_to_git_error)?;
 
         let repo_root = discover_repo_root(&canonical_ws)
             .ok_or_else(|| GitError::NotARepo(canonical_ws.display().to_string()))?;
@@ -638,7 +783,6 @@ impl GitQueryService for RuntimeGitQueryService {
         }
     }
 
-
     async fn log(&self, params: &GitLogParams) -> Result<GitLogResponse, GitError> {
         let workspace_root = resolve_workspace_root(&self.work_dir, params.workspace_id.as_deref())
             .map_err(workspace_to_git_error)?;
@@ -647,33 +791,47 @@ impl GitQueryService for RuntimeGitQueryService {
         let repo_root = discover_repo_root(&canonical_ws)
             .ok_or_else(|| GitError::NotARepo(canonical_ws.display().to_string()))?;
 
-        let limit = params
-            .limit
-            .unwrap_or(LOG_DEFAULT_LIMIT)
-            .min(LOG_MAX_LIMIT);
+        let limit = params.limit.unwrap_or(LOG_DEFAULT_LIMIT).min(LOG_MAX_LIMIT);
+        // `skip` is 0-indexed: skip=0 returns the first `limit` commits,
+        // skip=limit returns the next `limit`, etc. Caller computes
+        // `skip = (currentPage - 1) * pageSize`.
+        let skip = params.skip.unwrap_or(0);
+
+        // Resolve `path` (workspace-root-relative) to repo-root-relative once,
+        // then reuse for `git log -- <repo_rel>` AND `git rev-list --count ... -- <repo_rel>`.
+        // Doing the resolution twice would risk divergence if the
+        // workspace layout changed mid-call, plus we'd double the
+        // filesystem stats `resolve_within_static` performs.
+        let repo_rel: Option<String> = match params.path.as_deref().filter(|p| !p.is_empty()) {
+            None => None,
+            Some(path) => {
+                let (canonical_ws, _, _) =
+                    resolve_within_static(&self.work_dir, params.workspace_id.as_deref(), path)
+                        .map_err(workspace_to_git_error)?;
+                let rel = canonical_ws
+                    .join(path)
+                    .strip_prefix(&repo_root)
+                    .map_err(|_| {
+                        GitError::InvalidPath("path is outside the repository root".into())
+                    })?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some(rel)
+            }
+        };
 
         let mut cmd = git_cmd(&self.git_bin, &repo_root);
         cmd.args([
             "log",
             "--no-ext-diff",
+            "--skip",
+            &skip.to_string(),
             "-n",
             &limit.to_string(),
             "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s",
         ]);
-        if let Some(path) = params.path.as_deref().filter(|p| !p.is_empty()) {
-            let (canonical_ws, _, _) = resolve_within_static(
-                &self.work_dir,
-                params.workspace_id.as_deref(),
-                path,
-            )
-            .map_err(workspace_to_git_error)?;
-            let repo_rel = canonical_ws
-                .join(path)
-                .strip_prefix(&repo_root)
-                .map_err(|_| GitError::InvalidPath("path is outside the repository root".into()))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            cmd.arg("--").arg(repo_rel);
+        if let Some(rel) = repo_rel.as_deref() {
+            cmd.arg("--").arg(rel);
         }
 
         let out = run_git(cmd).await?;
@@ -682,14 +840,11 @@ impl GitQueryService for RuntimeGitQueryService {
             if looks_like_not_a_repo(&stderr) {
                 return Err(GitError::NotARepo(stderr.trim().to_string()));
             }
-            return Err(GitError::GitFailed(format!(
-                "git log: {}",
-                stderr.trim()
-            )));
+            return Err(GitError::GitFailed(format!("git log: {}", stderr.trim())));
         }
 
         let text = String::from_utf8_lossy(&out.stdout);
-        let commits = text
+        let commits: Vec<GitCommitDto> = text
             .lines()
             .filter(|l| !l.is_empty())
             .map(|line| {
@@ -709,7 +864,41 @@ impl GitQueryService for RuntimeGitQueryService {
             })
             .collect();
 
-        Ok(GitLogResponse { commits })
+        // `totalCount` powers the client's "Page X of Y" + search / pagination
+        // chrome collapse. `git rev-list --count` is O(n) but stays sub-100ms
+        // for repos up to ~100k commits; we already pay this kind of cost
+        // elsewhere in the status path. Failure here is non-fatal — fall back
+        // to "at least the page we got back" so the dropdown still works on
+        // a partially-broken repo (mirrors how `assemble_diff` / `read_blob`
+        // degrade on `Missing`).
+        let total_count = match rev_list_count(&self.git_bin, &repo_root, repo_rel.as_deref()).await
+        {
+            Ok(n) => n,
+            Err(_) => skip + commits.len() as u32,
+        };
+        let total_pages = if limit == 0 {
+            0
+        } else {
+            total_count.div_ceil(limit).max(1)
+        };
+        // `limit > 0` is guaranteed by the guard above; the `checked_div`
+        // dance keeps clippy's `manual_checked_ops` lint happy.
+        let current_page = if limit == 0 {
+            1
+        } else {
+            // SAFETY: limit > 0 (guarded above).
+            skip.checked_div(limit).unwrap_or(0) + 1
+        };
+
+        Ok(GitLogResponse {
+            commits,
+            pagination: GitLogPagination {
+                current_page,
+                total_pages,
+                page_size: limit,
+                total_count,
+            },
+        })
     }
 }
 
@@ -792,11 +981,8 @@ impl RuntimeGitQueryService {
             )));
         }
 
-        let (mut changes, truncated) = parse_diff_tree_name_status(
-            &out.stdout,
-            repo_root,
-            workspace_root,
-        );
+        let (mut changes, truncated) =
+            parse_diff_tree_name_status(&out.stdout, repo_root, workspace_root);
         changes.sort_by(|a, b| status_sort_key(a).cmp(&status_sort_key(b)));
 
         Ok(GitStatusResponse {
@@ -870,23 +1056,46 @@ impl RuntimeGitQueryService {
         abs_path: &Path,
         repo_rel: &str,
     ) -> Result<GitDiffResponse, GitError> {
-        let original = match read_blob(&self.git_bin, repo_root, "HEAD", repo_rel).await? {
+        // `diff_clean` is only reached for the worktree branch — base is
+        // always "HEAD", head is the working tree (None on the wire).
+        // Promote the label to the file-history head for the same reason
+        // as `diff_with_worktree` (see `file_history_head`): the banner
+        // must show a commit the file-scoped `CommitPicker` lists.
+        let effective_base_ref =
+            match file_history_head(&self.git_bin, repo_root, "HEAD", repo_rel).await? {
+                Some(head_sha) => head_sha,
+                None => "HEAD".to_string(),
+            };
+        let base_rev = rev_parse_commit(&self.git_bin, repo_root, &effective_base_ref).await?;
+        let original = match read_blob(&self.git_bin, repo_root, &effective_base_ref, repo_rel)
+            .await?
+        {
             BlobRead::Missing => Vec::new(),
-            BlobRead::TooLarge => return Ok(binary_diff_response()),
+            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev.clone()), None)),
             BlobRead::Ok(bytes) => bytes,
         };
         let modified = match std::fs::metadata(abs_path) {
-            Ok(md) if md.len() > DIFF_SIZE_CAP => return Ok(binary_diff_response()),
+            Ok(md) if md.len() > DIFF_SIZE_CAP => {
+                return Ok(binary_diff_response(Some(base_rev), None));
+            }
             Ok(_) => std::fs::read(abs_path)?,
             Err(_) => Vec::new(),
         };
-        Ok(assemble_diff(original, modified, false, false))
+        Ok(assemble_diff(
+            original,
+            modified,
+            false,
+            false,
+            Some(base_rev),
+            None,
+        ))
     }
 
     /// Working-tree variant: `original = base_ref:<path>`, `modified =
     /// <working-tree>`. Mirrors the original ADR-078 implementation
     /// (untracked / deleted / staged) but parameterises the base ref
-    /// instead of hard-coding "HEAD".
+    /// instead of hard-coding "HEAD". `head_rev` is always `None`
+    /// (working tree → client renders "Working Tree").
     async fn diff_with_worktree(
         &self,
         repo_root: &Path,
@@ -894,6 +1103,31 @@ impl RuntimeGitQueryService {
         repo_rel: &str,
         base_ref: &str,
     ) -> Result<GitDiffResponse, GitError> {
+        // Resolve base_ref to a canonical SHA up front — the UI labels
+        // both diff-side banners with the first 7 chars, so `<sha>^`
+        // / `HEAD` must be normalised server-side (UI has no git
+        // knowledge, per ADR-009 v2 — git semantics live here).
+        //
+        // When the caller passes the default `"HEAD"`, promote it to the
+        // file-history head (newest commit touching this path). HEAD is
+        // only the right label when HEAD itself touched the file; if a
+        // later commit moved HEAD forward by editing *other* files, the
+        // file's last committed state is still the earlier commit — and
+        // that earlier commit is what the banner's `CommitPicker`
+        // (`git log -- <path>`) lists as its first row. Labelling with
+        // HEAD instead makes that label unselectable / unsearchable in
+        // the menu. An explicit caller-chosen base (any sha) is honoured
+        // verbatim. Blob content is unchanged: `F1:path == HEAD:path`
+        // whenever no commit between them touched `path`.
+        let effective_base_ref = if base_ref == "HEAD" {
+            match file_history_head(&self.git_bin, repo_root, base_ref, repo_rel).await? {
+                Some(head_sha) => head_sha,
+                None => base_ref.to_string(),
+            }
+        } else {
+            base_ref.to_string()
+        };
+        let base_rev = rev_parse_commit(&self.git_bin, repo_root, &effective_base_ref).await?;
         let xy = self.path_status(repo_root, repo_rel).await?;
         let Some((x, y, rename_old)) = xy else {
             return self.diff_clean(repo_root, abs_path, repo_rel).await;
@@ -908,9 +1142,9 @@ impl RuntimeGitQueryService {
         let original = if is_untracked {
             Vec::new()
         } else {
-            match read_blob(&self.git_bin, repo_root, base_ref, head_repo_rel).await? {
+            match read_blob(&self.git_bin, repo_root, &effective_base_ref, head_repo_rel).await? {
                 BlobRead::Missing => Vec::new(),
-                BlobRead::TooLarge => return Ok(binary_diff_response()),
+                BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), None)),
                 BlobRead::Ok(bytes) => bytes,
             }
         };
@@ -918,17 +1152,46 @@ impl RuntimeGitQueryService {
             Vec::new()
         } else {
             match std::fs::metadata(abs_path) {
-                Ok(md) if md.len() > DIFF_SIZE_CAP => return Ok(binary_diff_response()),
+                Ok(md) if md.len() > DIFF_SIZE_CAP => {
+                    return Ok(binary_diff_response(Some(base_rev), None));
+                }
                 Ok(_) => std::fs::read(abs_path)?,
                 Err(_) => Vec::new(),
             }
         };
-        Ok(assemble_diff(original, modified, is_untracked, is_worktree_deleted))
+        Ok(assemble_diff(
+            original,
+            modified,
+            is_untracked,
+            is_worktree_deleted,
+            Some(base_rev),
+            None,
+        ))
     }
 
     /// Two-ref variant: `original = base_ref:<path>`, `modified =
     /// head_ref:<path>`. No working-tree involvement - used when the
     /// caller wants to compare two commits (or commit vs index).
+    /// Both refs are canonicalised up front so the UI can label both
+    /// banners with a clean first-7-chars hash regardless of whether
+    /// the caller passed `<sha>^`, a branch name, or `HEAD`.
+    ///
+    /// Base ref semantics: when the caller passes `head_ref^` (the
+    /// frontend's "first-parent" shortcut), we promote it to the
+    /// **file-history predecessor** of `head_ref` on `path`. This keeps
+    /// the diff banner label consistent with the `CommitPicker` list
+    /// (which is `git log -- <path>`, also file-history):
+    ///
+    /// - The right banner = `head_ref`'s commit hash (list line 1).
+    /// - The left banner  = the commit that last touched `path` before
+    ///   `head_ref` (list line 2, when present).
+    ///
+    /// Git's first-parent `<head>^` is NOT the same as the file-history
+    /// predecessor: if `<head>^` did not touch `path`, the predecessor
+    /// is some earlier commit that did. Showing `<head>^` on the left
+    /// banner when the picker's second row points elsewhere is the bug
+    /// this function fixes. Fallback to first-parent happens when
+    /// `path` has no older commit (file was introduced in `head_ref`).
     async fn diff_two_refs(
         &self,
         repo_root: &Path,
@@ -936,36 +1199,81 @@ impl RuntimeGitQueryService {
         base_ref: &str,
         head_ref: &str,
     ) -> Result<GitDiffResponse, GitError> {
-        let original = match read_blob(&self.git_bin, repo_root, base_ref, repo_rel).await? {
-            BlobRead::Missing => return Ok(binary_diff_response()),
-            BlobRead::TooLarge => return Ok(binary_diff_response()),
+        // `rev_parse_commit` is sub-millisecond; do both sides up
+        // front so a malformed ref surfaces here (clean 4xx) rather
+        // than buried inside `git show <rev>:<path>` stderr (which
+        // `read_blob` silently maps to `Missing`).
+        let requested_base_rev = rev_parse_commit(&self.git_bin, repo_root, base_ref).await?;
+        let head_rev = rev_parse_commit(&self.git_bin, repo_root, head_ref).await?;
+        // Promote the caller-requested base (usually `<head>^`) to the
+        // file-history predecessor of `head_ref` on `path`. This is the
+        // authoritative "what did this file look like right before
+        // head_ref's edit" answer — and matches the row above head in
+        // the diff banner's `CommitPicker` (`git log -- <path>`).
+        let (effective_base_ref, base_rev) =
+            match file_history_prev(&self.git_bin, repo_root, head_ref, repo_rel).await? {
+                // File-history had a predecessor. Use it as the actual base
+                // ref so `read_blob` reads the same blob the banner label
+                // promises, and the diff content is the file-scoped diff
+                // (matches IDE / GitKraken default behaviour).
+                Some(prev_sha) => {
+                    let prev_canonical =
+                        rev_parse_commit(&self.git_bin, repo_root, &prev_sha).await?;
+                    (prev_sha, prev_canonical)
+                }
+                // No predecessor (path first appears in head_ref, or head_ref
+                // is the only commit touching path). Honour the caller's
+                // base_ref verbatim — preserves the existing first-parent
+                // semantics for file-introducing commits.
+                None => (base_ref.to_string(), requested_base_rev),
+            };
+        let original = match read_blob(&self.git_bin, repo_root, &effective_base_ref, repo_rel)
+            .await?
+        {
+            BlobRead::Missing => return Ok(binary_diff_response(Some(base_rev), Some(head_rev))),
+            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), Some(head_rev))),
             BlobRead::Ok(bytes) => bytes,
         };
         let modified = match read_blob(&self.git_bin, repo_root, head_ref, repo_rel).await? {
             BlobRead::Missing => Vec::new(),
-            BlobRead::TooLarge => return Ok(binary_diff_response()),
+            BlobRead::TooLarge => return Ok(binary_diff_response(Some(base_rev), Some(head_rev))),
             BlobRead::Ok(bytes) => bytes,
         };
-        Ok(assemble_diff(original, modified, false, false))
+        Ok(assemble_diff(
+            original,
+            modified,
+            false,
+            false,
+            Some(base_rev),
+            Some(head_rev),
+        ))
     }
 }
 
 /// A binary-degraded diff (no content returned — ADR-078 decision 4).
-fn binary_diff_response() -> GitDiffResponse {
+/// `base_rev` / `head_rev` are forwarded so the client can still label
+/// the two sides even when the binary blob is hidden.
+fn binary_diff_response(base_rev: Option<String>, head_rev: Option<String>) -> GitDiffResponse {
     GitDiffResponse {
         kind: GitDiffKind::Binary,
         original: String::new(),
         modified: String::new(),
+        base_rev,
+        head_rev,
     }
 }
 
 /// Final kind classification + UTF-8 conversion. Binary is detected via
 /// a NUL byte in either side (sufficient for a text editor context).
+/// `base_rev` / `head_rev` are forwarded so the client can label both
+/// sides with the canonical commit SHA even for the no-content paths.
 fn assemble_diff(
     original: Vec<u8>,
     modified: Vec<u8>,
     is_untracked: bool,
     is_deleted: bool,
+    base_rev: Option<String>,
+    head_rev: Option<String>,
 ) -> GitDiffResponse {
     let kind = if is_untracked {
         GitDiffKind::Untracked
@@ -992,6 +1300,8 @@ fn assemble_diff(
         kind,
         original,
         modified,
+        base_rev,
+        head_rev,
     }
 }
 
@@ -1050,7 +1360,10 @@ mod tests {
     fn branch_line_with_tracking_info() {
         // `--branch` header already carries ahead/behind — v1 shows only
         // the name (ADR-078 decision 5).
-        assert_eq!(parse_branch_line(b"main...origin/main [ahead 1, behind 2]"), "main");
+        assert_eq!(
+            parse_branch_line(b"main...origin/main [ahead 1, behind 2]"),
+            "main"
+        );
     }
 
     #[test]
@@ -1168,7 +1481,11 @@ mod tests {
         for c in &changes {
             assert_eq!(c.index, GitIndexStatus::Conflicted);
             assert_eq!(c.worktree, GitWorktreeStatus::Conflicted);
-            assert!(!c.staged, "conflict must not be shown as staged: {}", c.path);
+            assert!(
+                !c.staged,
+                "conflict must not be shown as staged: {}",
+                c.path
+            );
         }
         // Conflicts sort ahead of staged+modified entries.
         let mut dtos = changes.clone();
@@ -1180,7 +1497,11 @@ mod tests {
             staged: true,
         });
         dtos.sort_by(|a, b| status_sort_key(a).cmp(&status_sort_key(b)));
-        assert!(dtos[0].path.starts_with("uu.txt") || dtos[0].path.starts_with("aa.txt") || dtos[0].path.starts_with("ud.txt"));
+        assert!(
+            dtos[0].path.starts_with("uu.txt")
+                || dtos[0].path.starts_with("aa.txt")
+                || dtos[0].path.starts_with("ud.txt")
+        );
     }
 
     #[test]
@@ -1315,7 +1636,11 @@ mod tests {
         std::fs::write(ws.join("新文件.txt"), "中文\n").unwrap();
         std::fs::write(ws.join("b.txt"), "b\n").unwrap();
         assert!(git_in(&ws, ["add", "b.txt"]).status.success());
-        assert!(git_in(&ws, ["commit", "-q", "-m", "second"]).status.success());
+        assert!(
+            git_in(&ws, ["commit", "-q", "-m", "second"])
+                .status
+                .success()
+        );
         assert!(git_in(&ws, ["mv", "b.txt", "b2.txt"]).status.success());
 
         let st = svc.status(&GitStatusParams::default()).await.unwrap();
@@ -1400,7 +1725,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await;
         assert!(matches!(d, Err(GitError::GitUnavailable(_))), "{d:?}");
@@ -1426,7 +1751,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1438,7 +1763,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1452,7 +1777,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "new.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1466,7 +1791,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "a.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1478,13 +1803,17 @@ mod tests {
         // Binary — NUL byte on either side degrades to kind=binary
         std::fs::write(ws.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
         assert!(git_in(&ws, ["add", "bin.dat"]).status.success());
-        assert!(git_in(&ws, ["commit", "-q", "-m", "add bin"]).status.success());
+        assert!(
+            git_in(&ws, ["commit", "-q", "-m", "add bin"])
+                .status
+                .success()
+        );
         std::fs::write(ws.join("bin.dat"), [0u8, 9, 9, 9]).unwrap();
         let d = svc
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "bin.dat".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1504,7 +1833,11 @@ mod tests {
         init_repo(&ws);
         std::fs::write(ws.join("b.txt"), "b\n").unwrap();
         assert!(git_in(&ws, ["add", "b.txt"]).status.success());
-        assert!(git_in(&ws, ["commit", "-q", "-m", "add b"]).status.success());
+        assert!(
+            git_in(&ws, ["commit", "-q", "-m", "add b"])
+                .status
+                .success()
+        );
         assert!(git_in(&ws, ["mv", "b.txt", "b2.txt"]).status.success());
         // content unchanged → NoChange; original must come from HEAD:old-path
         let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
@@ -1512,7 +1845,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "b2.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1533,7 +1866,11 @@ mod tests {
         init_repo(&ws);
         std::fs::write(ws.join("c.txt"), "c\n").unwrap();
         assert!(git_in(&ws, ["add", "c.txt"]).status.success());
-        assert!(git_in(&ws, ["commit", "-q", "-m", "add c"]).status.success());
+        assert!(
+            git_in(&ws, ["commit", "-q", "-m", "add c"])
+                .status
+                .success()
+        );
         std::fs::write(ws.join("c.txt"), "c staged\n").unwrap();
         assert!(git_in(&ws, ["add", "c.txt"]).status.success());
 
@@ -1542,7 +1879,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "c.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1566,7 +1903,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "../evil.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await;
         match r {
@@ -1578,6 +1915,7 @@ mod tests {
                 workspace_id: None,
                 path: Some("/etc/passwd".into()),
                 limit: None,
+                skip: None,
             })
             .await;
         match r {
@@ -1598,8 +1936,16 @@ mod tests {
         init_repo(&repo); // repo/a.txt committed
         // workspace-tracked file
         std::fs::write(repo.join("sub/ws/tracked.txt"), "t\n").unwrap();
-        assert!(git_in(&repo, ["add", "sub/ws/tracked.txt"]).status.success());
-        assert!(git_in(&repo, ["commit", "-q", "-m", "add tracked"]).status.success());
+        assert!(
+            git_in(&repo, ["add", "sub/ws/tracked.txt"])
+                .status
+                .success()
+        );
+        assert!(
+            git_in(&repo, ["commit", "-q", "-m", "add tracked"])
+                .status
+                .success()
+        );
         // modify inside + outside the workspace
         std::fs::write(repo.join("sub/ws/tracked.txt"), "t2\n").unwrap();
         std::fs::write(repo.join("outside.txt"), "out\n").unwrap();
@@ -1617,7 +1963,7 @@ mod tests {
             .diff(&GitDiffParams {
                 workspace_id: None,
                 path: "tracked.txt".into(),
-            ..Default::default()
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1633,6 +1979,7 @@ mod tests {
                 workspace_id: None,
                 path: Some("tracked.txt".into()),
                 limit: None,
+                skip: None,
             })
             .await
             .unwrap();
@@ -1653,7 +2000,11 @@ mod tests {
             std::fs::write(ws.join("a.txt"), format!("v{i}\n")).unwrap();
             assert!(git_in(&ws, ["add", "a.txt"]).status.success());
             let msg = format!("c{i}");
-            assert!(git_in(&ws, ["commit", "-q", "-m", msg.as_str()]).status.success());
+            assert!(
+                git_in(&ws, ["commit", "-q", "-m", msg.as_str()])
+                    .status
+                    .success()
+            );
         }
         let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
         let lg = svc
@@ -1661,6 +2012,7 @@ mod tests {
                 workspace_id: None,
                 path: None,
                 limit: Some(3),
+                skip: None,
             })
             .await
             .unwrap();
@@ -1672,11 +2024,10 @@ mod tests {
                 workspace_id: None,
                 path: None,
                 limit: Some(9999),
+                skip: None,
             })
             .await
             .unwrap();
         assert_eq!(lg.commits.len(), 6);
     }
 }
-
-

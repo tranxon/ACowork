@@ -161,7 +161,11 @@ pub trait MemoryQueryService: Send + Sync {
     ///
     /// Existing properties not listed in `properties` are left untouched.
     /// Returns 404 (mapped from a dedicated error) if the node is absent.
-    async fn update_node(&self, node_id: u64, properties: &HashMap<String, serde_json::Value>) -> Result<()>;
+    async fn update_node(
+        &self,
+        node_id: u64,
+        properties: &HashMap<String, serde_json::Value>,
+    ) -> Result<()>;
 }
 
 /// Input for [`MemoryQueryService::create_node`].

@@ -57,6 +57,23 @@ export interface GitDiffResponse {
   kind: "modified" | "untracked" | "deleted" | "binary" | "no_change";
   original: string;
   modified: string;
+  /**
+   * Canonical commit SHA of `baseRef` after the server resolves git
+   * shorthand (`<sha>^`, `HEAD`, branch / tag names) via
+   * `git rev-parse --verify <rev>^{commit}`. Always present.
+   *
+   * The server is the source of truth for git semantics (ADR-009 v2:
+   * gateway / desktop / runtime split) — the client never has to
+   * reason about `<sha>^` vs `<sha>` to label diff banners.
+   */
+  baseRev: string;
+  /**
+   * Canonical commit SHA of `headRef`, or `null` when the request was
+   * for HEAD-vs-working-tree (i.e. `headRef = ""`). The client renders
+   * `null` as the existing "Working Tree" label so the pre-existing
+   * `!diffHeadRef` contract is preserved verbatim.
+   */
+  headRev: string | null;
 }
 
 export interface GitCommitDto {
@@ -67,8 +84,22 @@ export interface GitCommitDto {
   subject: string;
 }
 
+/** Pagination metadata for `GitLogResponse`. Mirrors the wire
+ *  contract from `core/acowork-runtime/src/usecases/git_query.rs`
+ *  (`GitLogPagination`): 1-indexed page number, total pages given
+ *  `pageSize` and `totalCount`. The diff banner / Git status bar
+ *  history dropdown uses `totalCount > pageSize` to decide whether to
+ *  surface the search + "Page X of Y" chrome. */
+export interface GitLogPagination {
+  currentPage: number;
+  totalPages: number;
+  pageSize: number;
+  totalCount: number;
+}
+
 export interface GitLogResponse {
   commits: GitCommitDto[];
+  pagination: GitLogPagination;
 }
 
 /** Group key: `${agentId}\u0000${workspaceId}` (matches workspaceFsWatch). */
@@ -140,6 +171,7 @@ interface GitStore {
     workspaceId: string,
     path?: string,
     limit?: number,
+    skip?: number,
   ) => Promise<GitLogResponse>;
 
   /** Clear the cached status for a group (switch agent / workspace). */
@@ -307,10 +339,15 @@ export const useGitStore = create<GitStore>((set, get) => {
       return httpGet<GitDiffResponse>(`/api/agents/${agentId}/git/diff`, q);
     },
 
-    fetchLog: (agentId, workspaceId, path, limit = 50) => {
+    fetchLog: (agentId, workspaceId, path, limit = 50, skip = 0) => {
       const params: Record<string, string> = {
         ...statusParams(workspaceId),
         limit: String(Math.min(limit, 200)),
+        // `git log --skip` is 0-indexed; the caller passes
+        // `skip = (currentPage - 1) * pageSize`. `0` is the server
+        // default — we still send it explicitly so the wire format
+        // stays self-describing in logs.
+        skip: String(skip),
       };
       if (path) params.path = path;
       return httpGet<GitLogResponse>(`/api/agents/${agentId}/git/log`, params);

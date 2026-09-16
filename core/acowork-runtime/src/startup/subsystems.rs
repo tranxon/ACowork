@@ -38,9 +38,8 @@ pub(crate) struct SubsystemHandles {
     /// chunk_relay task join handle (Gateway mode only).
     pub chunk_relay: Option<tokio::task::JoinHandle<()>>,
     /// MCP startup result receiver (Gateway mode only).
-    pub mcp_startup_rx: Option<
-        tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
-    >,
+    pub mcp_startup_rx:
+        Option<tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>>,
     /// Runtime MCP channel used by run_gateway_loop.
     pub mcp_runtime_tx: tokio::sync::mpsc::Sender<crate::tools::mcp_manager::McpConnectResult>,
     pub mcp_runtime_rx: tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
@@ -65,12 +64,11 @@ pub(crate) async fn phase_c_spawn_subsystems(
     // transitions and re-publishes every active session's config snapshot
     // when the value changes. Created only when the MQTT path is wired
     // (the chunk_relay task below is the only consumer).
-    let llm_availability = ctx
-        .available_cache
-        .as_ref()
-        .map(|cache| std::sync::Arc::new(crate::agent::llm_availability::LlmAvailabilityRegistry::new(
-            cache.clone(),
-        )));
+    let llm_availability = ctx.available_cache.as_ref().map(|cache| {
+        std::sync::Arc::new(
+            crate::agent::llm_availability::LlmAvailabilityRegistry::new(cache.clone()),
+        )
+    });
 
     // ── Spawn chunk relay task first ─────────────────────────────────
     // This must run before AgentReady is sent so the chunk channel is
@@ -218,11 +216,7 @@ pub(crate) async fn phase_c_spawn_subsystems(
             debug_port,
         )
         .await;
-        tracing::info!(
-            ?outcome,
-            debug_port,
-            "Phase C DevMode activation outcome"
-        );
+        tracing::info!(?outcome, debug_port, "Phase C DevMode activation outcome");
 
         // ADR-063 §3.7.5 L2 reload: when DevMode is enabled at startup,
         // re-read every `prompts/<file>.md` from disk into the
@@ -389,24 +383,20 @@ async fn relay_chunk_event_mqtt(
             approval_timeout_secs,
         } => {
             publisher
-                .publish_tool_approval_needed(
-                    crate::mqtt::client::ToolApprovalNeededEvent {
-                        session_id: sid,
-                        request_id: &request_id,
-                        tool_name: &tool_name,
-                        action: &action,
-                        risk_level: &risk_level,
-                        reason: &reason,
-                        tool_call_id: &tool_call_id,
-                        approval_timeout_secs,
-                    },
-                )
+                .publish_tool_approval_needed(crate::mqtt::client::ToolApprovalNeededEvent {
+                    session_id: sid,
+                    request_id: &request_id,
+                    tool_name: &tool_name,
+                    action: &action,
+                    risk_level: &risk_level,
+                    reason: &reason,
+                    tool_call_id: &tool_call_id,
+                    approval_timeout_secs,
+                })
                 .await;
         }
 
-        ChunkEvent::Done {
-            message_id, ..
-        } => {
+        ChunkEvent::Done { message_id, .. } => {
             publisher.publish_done(sid, &message_id).await;
         }
 
@@ -416,7 +406,9 @@ async fn relay_chunk_event_mqtt(
             error_type: _,
             message_id,
         } => {
-            publisher.publish_error(sid, &message_id, &user_message).await;
+            publisher
+                .publish_error(sid, &message_id, &user_message)
+                .await;
         }
 
         ChunkEvent::Stopped { .. } => {
@@ -439,11 +431,7 @@ async fn relay_chunk_event_mqtt(
             title,
         } => {
             publisher
-                .publish_new_data_available(
-                    &session_id,
-                    interval_ms as u32,
-                    title.as_deref(),
-                )
+                .publish_new_data_available(&session_id, interval_ms as u32, title.as_deref())
                 .await;
         }
 
@@ -538,12 +526,7 @@ async fn relay_chunk_event_mqtt(
             timeout_ms,
         } => {
             publisher
-                .publish_tool_progress(
-                    &session_id,
-                    &tool_call_id,
-                    elapsed_ms,
-                    timeout_ms,
-                )
+                .publish_tool_progress(&session_id, &tool_call_id, elapsed_ms, timeout_ms)
                 .await;
         }
 
@@ -562,9 +545,7 @@ async fn relay_chunk_event_mqtt(
             publisher.publish_session_config(sid, &config).await;
         }
 
-        ChunkEvent::LoopDetectedPaused {
-            message, ..
-        } => {
+        ChunkEvent::LoopDetectedPaused { message, .. } => {
             publisher.publish_loop_detected_paused(sid, &message).await;
         }
     }
@@ -597,15 +578,14 @@ pub(crate) fn spawn_config_change_relay(
             // availability watcher in the chunk_relay task publishes the
             // authoritative value independently, so per-config-change
             // re-publishes don't risk carrying a stale tag.
-            let mut config = if change.snapshot.session_id.is_empty()
-                && change.snapshot.agent_id.is_empty()
-            {
-                conv.build_session_config_snapshot(
-                    acowork_core::mqtt_proto::LlmAvailability::Unspecified,
-                )
-            } else {
-                change.snapshot
-            };
+            let mut config =
+                if change.snapshot.session_id.is_empty() && change.snapshot.agent_id.is_empty() {
+                    conv.build_session_config_snapshot(
+                        acowork_core::mqtt_proto::LlmAvailability::Unspecified,
+                    )
+                } else {
+                    change.snapshot
+                };
 
             // Resolve effective reasoning_effort before publish. The
             // raw value may be empty if the session was resumed from

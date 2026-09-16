@@ -59,9 +59,9 @@ pub(crate) fn is_valid_context_window(n: u64) -> bool {
 /// agent-layer changes always reach sessions without an override, and is
 /// never written back anywhere (§3.2).
 pub(crate) fn resolve_effective_context_window(
-    session_override: Option<u64>,  // Layer 0 — from ConversationSession
-    agent_override: Option<u64>,    // Layer 1 — AgentCore.context_window_override
-    manifest_window: Option<u64>,   // Layer 2 — AgentCore.manifest_context_window
+    session_override: Option<u64>, // Layer 0 — from ConversationSession
+    agent_override: Option<u64>,   // Layer 1 — AgentCore.context_window_override
+    manifest_window: Option<u64>,  // Layer 2 — AgentCore.manifest_context_window
     model_caps: Option<&acowork_core::ModelCapabilitiesInfo>,
 ) -> u64 {
     let resolved = session_override
@@ -149,7 +149,8 @@ mod tests {
     #[test]
     fn smaller_model_window_wins() {
         // model window 8K < resolved 96K → min = 8K
-        let got = resolve_effective_context_window(Some(96_000), Some(32_000), None, Some(&caps(8_000)));
+        let got =
+            resolve_effective_context_window(Some(96_000), Some(32_000), None, Some(&caps(8_000)));
         assert_eq!(got, 8_000);
     }
 
@@ -175,4 +176,3 @@ mod tests {
         assert!(!is_valid_context_window(u64::MAX));
     }
 }
-

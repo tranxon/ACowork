@@ -27,10 +27,7 @@ impl BuiltinToolEntry {
     /// `agent_tools.json` and are loaded by the persistence layer.
     ///
     /// See ADR-029 (per-agent builtin tools).
-    pub(crate) fn with_resolved_enabled(
-        user_persisted_enabled: bool,
-        tool: Arc<dyn Tool>,
-    ) -> Self {
+    pub(crate) fn with_resolved_enabled(user_persisted_enabled: bool, tool: Arc<dyn Tool>) -> Self {
         Self {
             enabled: user_persisted_enabled,
             tool,
@@ -48,7 +45,6 @@ impl ToolRegistry {
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.push(tool);
     }
-
 
     /// Get tool by name
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -105,12 +101,11 @@ impl ToolRegistry {
             .map(|tool| {
                 let name = tool.name();
                 let user_wants = user_map.get(&name).copied().unwrap_or(false);
-                let wrapped =
-                    crate::tools::wrappers::wrap_with_security_decorators(
-                        tool.clone(),
-                        resolver.clone(),
-                        max_calls_per_minute,
-                    );
+                let wrapped = crate::tools::wrappers::wrap_with_security_decorators(
+                    tool.clone(),
+                    resolver.clone(),
+                    max_calls_per_minute,
+                );
                 BuiltinToolEntry::with_resolved_enabled(user_wants, wrapped)
             })
             .collect()
@@ -261,9 +256,13 @@ mod tests {
             crate::agent_config::AgentToolEntry::new("memory_store", false),
         ];
         let activated = reg.activate(&manifest, &resolver, 60, &enabled);
-        assert_eq!(activated.len(), 4, "all 4 are returned (disabled ones kept for introspection)");
+        assert_eq!(
+            activated.len(),
+            4,
+            "all 4 are returned (disabled ones kept for introspection)"
+        );
         let shell = activated.iter().find(|e| e.name() == "shell").unwrap();
-        let calc  = activated.iter().find(|e| e.name() == "calculator").unwrap();
+        let calc = activated.iter().find(|e| e.name() == "calculator").unwrap();
         assert!(shell.enabled);
         assert!(!calc.enabled);
     }
@@ -325,5 +324,4 @@ mod tests {
         let reg = ToolRegistry::default();
         assert!(reg.all().is_empty());
     }
-
 }

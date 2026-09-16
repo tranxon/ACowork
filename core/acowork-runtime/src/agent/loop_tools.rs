@@ -12,8 +12,8 @@
 //! - Tool result persistence and emission
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use acowork_core::providers::traits::{ChatMessage, ToolCall};
 use acowork_core::tools::traits::Tool;
@@ -28,8 +28,10 @@ use crate::security::shell_risk::{self, ShellRisk};
 use acowork_core::ShellApprovalThreshold;
 
 use super::loop_::{AgentLoop, ControlDecision};
+use super::loop_approval::{
+    APPROVAL_TIMEOUT, APPROVAL_TIMEOUT_SECS, ApprovalDecision, ApprovalHandle,
+};
 use crate::agent::inbound::InboundMessage;
-use super::loop_approval::{ApprovalDecision, ApprovalHandle, APPROVAL_TIMEOUT, APPROVAL_TIMEOUT_SECS};
 use crate::util::text::TextPreview;
 
 impl AgentLoop {
@@ -64,7 +66,8 @@ impl AgentLoop {
         let all_indices: Vec<usize> = (0..tool_calls.len()).collect();
 
         let tool_timeout = Duration::from_millis(self.core.config.timeouts.tool_timeout_ms);
-        let iteration_timeout = Duration::from_millis(self.core.config.timeouts.iteration_timeout_ms);
+        let iteration_timeout =
+            Duration::from_millis(self.core.config.timeouts.iteration_timeout_ms);
 
         // Channel to collect results from spawned tasks
         // Each item: (original_index, (content, is_transient))
@@ -106,8 +109,7 @@ impl AgentLoop {
                 // arrives between spawn and registration. The receiver is
                 // moved into the spawned task and used as the cancel branch
                 // of the `tokio::select!` below.
-                let (cancel_tx, mut cancel_rx) =
-                    tokio::sync::watch::channel(false);
+                let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
                 self.pending_tool_cancels.insert(tc.id.clone(), cancel_tx);
 
                 tokio::spawn(async move {
@@ -165,48 +167,48 @@ impl AgentLoop {
                     // Uses `try_send_chunk` (non-blocking) and
                     // `try_send` (non-blocking) so the heartbeat cannot
                     // stall the tool execution or the result channel.
-                    let heartbeat_task = if let (Some(sid), Some(ct)) =
-                        (session_id.as_ref(), chunk_tx.as_ref())
-                    {
-                        let sid = sid.clone();
-                        let ct = ct.clone();
-                        let tool_call_id = tc.id.clone();
-                        let heartbeat_interval =
-                            acowork_core::timeout_config::constants::TOOL_HEARTBEAT;
-                        Some(tokio::spawn(async move {
-                            let mut interval = tokio::time::interval(
-                                heartbeat_interval,
-                            );
-                            // Skip the first (immediate) tick so the
-                            // first heartbeat lands at 5s, not 0s.
-                            interval.tick().await;
-                            let tool_start = std::time::Instant::now();
-                            loop {
+                    let heartbeat_task =
+                        if let (Some(sid), Some(ct)) = (session_id.as_ref(), chunk_tx.as_ref()) {
+                            let sid = sid.clone();
+                            let ct = ct.clone();
+                            let tool_call_id = tc.id.clone();
+                            let heartbeat_interval =
+                                acowork_core::timeout_config::constants::TOOL_HEARTBEAT;
+                            Some(tokio::spawn(async move {
+                                let mut interval = tokio::time::interval(heartbeat_interval);
+                                // Skip the first (immediate) tick so the
+                                // first heartbeat lands at 5s, not 0s.
                                 interval.tick().await;
-                                let elapsed = tool_start.elapsed();
-                                let event = crate::agent::loop_::ChunkEvent::ToolProgress {
-                                    session_id: sid.clone(),
-                                    tool_call_id: tool_call_id.clone(),
-                                    elapsed_ms: elapsed.as_millis() as u64,
-                                    timeout_ms: tool_timeout_ms,
-                                };
-                                // try_send: non-blocking; if the
-                                // channel is full or closed, skip
-                                // this heartbeat.
-                                if ct.try_send(crate::agent::loop_::SessionChunkEvent {
-                                    session_id: sid.clone(),
-                                    event,
-                                }).is_err() {
-                                    break;
+                                let tool_start = std::time::Instant::now();
+                                loop {
+                                    interval.tick().await;
+                                    let elapsed = tool_start.elapsed();
+                                    let event = crate::agent::loop_::ChunkEvent::ToolProgress {
+                                        session_id: sid.clone(),
+                                        tool_call_id: tool_call_id.clone(),
+                                        elapsed_ms: elapsed.as_millis() as u64,
+                                        timeout_ms: tool_timeout_ms,
+                                    };
+                                    // try_send: non-blocking; if the
+                                    // channel is full or closed, skip
+                                    // this heartbeat.
+                                    if ct
+                                        .try_send(crate::agent::loop_::SessionChunkEvent {
+                                            session_id: sid.clone(),
+                                            event,
+                                        })
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    if elapsed.as_millis() as u64 >= tool_timeout_ms {
+                                        break;
+                                    }
                                 }
-                                if elapsed.as_millis() as u64 >= tool_timeout_ms {
-                                    break;
-                                }
-                            }
-                        }))
-                    } else {
-                        None
-                    };
+                            }))
+                        } else {
+                            None
+                        };
 
                     // ADR-045: tool completion vs. user cancel. When the
                     // cancel branch wins, the inner `execute_single_tool`
@@ -297,14 +299,11 @@ impl AgentLoop {
             // them now so in-flight approvals registered before this call
             // are not stranded for the full APPROVAL_TIMEOUT.
             if !self.pending_approvals.is_empty() {
-                let deferred: Vec<InboundMessage> = std::mem::take(
-                    &mut self.session.deferred_inbound,
-                );
+                let deferred: Vec<InboundMessage> =
+                    std::mem::take(&mut self.session.deferred_inbound);
                 let (decisions, others): (Vec<_>, Vec<_>) = deferred
                     .into_iter()
-                    .partition(|m| {
-                        matches!(m, InboundMessage::ApprovalDecision { .. })
-                    });
+                    .partition(|m| matches!(m, InboundMessage::ApprovalDecision { .. }));
                 self.session.deferred_inbound = others;
                 for msg in decisions {
                     self.route_inbound(msg).await;
@@ -729,14 +728,14 @@ pub(crate) async fn execute_single_tool(
     });
 
     match tool {
-            Some(tool) => match tool.execute(params, work_dir).await {
-                Ok(result) => {
-        // ADR-052: All tools return non-transient results. The transient
-        // mechanism was specific to `context_recall` (ADR-032) to prevent a
-        // recall -> compress -> recall death loop. The compression surface
-        // was retired entirely.
-        let transient = false;
-                    let content = if result.ok {
+        Some(tool) => match tool.execute(params, work_dir).await {
+            Ok(result) => {
+                // ADR-052: All tools return non-transient results. The transient
+                // mechanism was specific to `context_recall` (ADR-032) to prevent a
+                // recall -> compress -> recall death loop. The compression surface
+                // was retired entirely.
+                let transient = false;
+                let content = if result.ok {
                     result.content
                 } else {
                     // Include both the error output (stdout/stderr) and the error code
@@ -1023,12 +1022,17 @@ impl AgentLoop {
         // This final flush captures any remaining content in the last
         // streaming line (e.g., the assistant text that preceded the
         // tool_call).
-        let flushed = self.session_core.flush_streaming_line(self.session.conversation.as_deref());
+        let flushed = self
+            .session_core
+            .flush_streaming_line(self.session.conversation.as_deref());
         tracing::info!(
-            flushed_role = flushed.as_ref().map(|c| {
-                // We can't easily get the role here, but we can log content length
-                c.len()
-            }).unwrap_or(0),
+            flushed_role = flushed
+                .as_ref()
+                .map(|c| {
+                    // We can't easily get the role here, but we can log content length
+                    c.len()
+                })
+                .unwrap_or(0),
             flushed_len = flushed.as_ref().map(|c| c.len()).unwrap_or(0),
             "ADR-022 prepare_tool_calls: flush_streaming_line result"
         );
@@ -1036,12 +1040,23 @@ impl AgentLoop {
         // ADR-022: Only use legacy persistence if no streaming flush occurred.
         // When streaming already flushed thought content on role transitions,
         // persist_think_to_conversation would create a duplicate entry.
-        let streamed = self.session_core.streaming_flush_count.load(Ordering::Relaxed) > 0;
+        let streamed = self
+            .session_core
+            .streaming_flush_count
+            .load(Ordering::Relaxed)
+            > 0;
         tracing::info!(
             streamed,
-            streaming_flush_count = self.session_core.streaming_flush_count.load(Ordering::Relaxed),
+            streaming_flush_count = self
+                .session_core
+                .streaming_flush_count
+                .load(Ordering::Relaxed),
             has_reasoning = response.reasoning_content.is_some(),
-            reasoning_len = response.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
+            reasoning_len = response
+                .reasoning_content
+                .as_ref()
+                .map(|r| r.len())
+                .unwrap_or(0),
             "ADR-022 prepare_tool_calls: streamed={}",
             streamed
         );
@@ -1227,8 +1242,7 @@ impl AgentLoop {
         // Execute non-question tools in parallel
         let calls_for_parallel: Vec<ToolCall> =
             parallel_calls.iter().map(|(_, tc)| tc.clone()).collect();
-        let (parallel_results, interrupt) =
-            self.execute_tools_parallel(&calls_for_parallel).await;
+        let (parallel_results, interrupt) = self.execute_tools_parallel(&calls_for_parallel).await;
 
         // Merge results: ask_question + todo_write + parallel, mapped back to original indices
         let ask_result_map: std::collections::HashMap<usize, (String, bool)> =
@@ -1519,4 +1533,3 @@ mod tests {
         );
     }
 }
-

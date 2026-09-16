@@ -53,8 +53,7 @@ pub(crate) struct ApprovalDecision {
 /// `await_approval_decision` design is structurally impossible here.
 #[derive(Clone)]
 pub(crate) struct ApprovalHandle {
-    pub(super) request_tx:
-        mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
+    pub(super) request_tx: mpsc::Sender<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
 }
 
 impl ApprovalHandle {
@@ -463,10 +462,7 @@ mod tests {
         let tasks: Vec<_> = (0..4)
             .map(|i| {
                 let h = handle.clone();
-                let req = make_request(
-                    &format!("call_{}", i),
-                    &format!("dangerous_command_{}", i),
-                );
+                let req = make_request(&format!("call_{}", i), &format!("dangerous_command_{}", i));
                 tokio::spawn(async move {
                     let decision = h.request_approval(req).await;
                     (i, decision)
@@ -518,9 +514,12 @@ mod tests {
         );
 
         // 4. All 4 tasks must resolve within 5s with the correct decision.
-        let results = tokio::time::timeout(Duration::from_secs(5), futures_util::future::join_all(tasks))
-            .await
-            .expect("deadlock regression: tasks did not resolve within 5s");
+        let results = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures_util::future::join_all(tasks),
+        )
+        .await
+        .expect("deadlock regression: tasks did not resolve within 5s");
 
         for result in results {
             let (idx, decision) = result.expect("spawned task should not panic");
@@ -563,7 +562,9 @@ mod tests {
             .await
             .expect("approval request should arrive");
         let real_id = uuid::Uuid::new_v4().to_string();
-        agent_loop.pending_approvals.insert(real_id.clone(), decision_tx);
+        agent_loop
+            .pending_approvals
+            .insert(real_id.clone(), decision_tx);
 
         // Stale decision for a request that no longer exists.
         agent_loop
@@ -575,7 +576,11 @@ mod tests {
                 session_id: "test-session".to_string(),
             })
             .await;
-        assert_eq!(agent_loop.pending_approvals.len(), 1, "stale decision must not remove the real entry");
+        assert_eq!(
+            agent_loop.pending_approvals.len(),
+            1,
+            "stale decision must not remove the real entry"
+        );
 
         // Real decision resolves the task.
         agent_loop
@@ -631,9 +636,7 @@ mod tests {
                 .await
                 .expect("approval request should arrive");
             let request_id = uuid::Uuid::new_v4().to_string();
-            agent_loop
-                .pending_approvals
-                .insert(request_id, decision_tx);
+            agent_loop.pending_approvals.insert(request_id, decision_tx);
         }
         assert_eq!(agent_loop.pending_approvals.len(), 2);
 
@@ -645,9 +648,12 @@ mod tests {
             .await;
         assert!(agent_loop.pending_approvals.is_empty());
 
-        let results = tokio::time::timeout(Duration::from_secs(5), futures_util::future::join_all(tasks))
-            .await
-            .expect("tasks should resolve after Stop");
+        let results = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures_util::future::join_all(tasks),
+        )
+        .await
+        .expect("tasks should resolve after Stop");
         for result in results {
             let decision = result.expect("task should not panic");
             assert!(!decision.approved, "Stop must auto-reject");

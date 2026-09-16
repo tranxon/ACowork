@@ -64,28 +64,16 @@ pub enum ControlAction {
     /// User wants to create a new session.
     CreateSession,
     /// User wants to delete a session.
-    DeleteSession {
-        session_id: String,
-    },
+    DeleteSession { session_id: String },
     /// User wants to gracefully close a session (triggers distillation, preserves JSONL).
-    CloseSession {
-        session_id: String,
-    },
+    CloseSession { session_id: String },
     /// ADR-038: User wants to explicitly activate a session
     /// (transitions Closed/NotFound → Active; idempotent for Active).
-    OpenSession {
-        session_id: String,
-    },
+    OpenSession { session_id: String },
     /// User wants to update the session title.
-    UpdateSessionTitle {
-        session_id: String,
-        title: String,
-    },
+    UpdateSessionTitle { session_id: String, title: String },
     /// User wants to continue a paused session (e.g. after iteration_limit).
-    ContinueExecution {
-        session_id: String,
-        reason: String,
-    },
+    ContinueExecution { session_id: String, reason: String },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed from ControlAction —
     // push drives all streaming, no front/back suppression. Proto fields
     // retained for wire compat but mapped to None (no-op) below.
@@ -102,14 +90,9 @@ pub enum ControlAction {
         provider_id: Option<String>,
     },
     /// User wants to change reasoning effort level.
-    ReasoningEffort {
-        session_id: String,
-        effort: String,
-    },
+    ReasoningEffort { session_id: String, effort: String },
     /// User wants to trigger context compaction.
-    CompactContext {
-        session_id: String,
-    },
+    CompactContext { session_id: String },
     /// User wants to trigger a typed compression (SUMMARY / TOOL_RESULTS).
     /// Distinct from `CompactContext` which is context-window driven.
     CompressAction {
@@ -159,9 +142,7 @@ pub enum ControlAction {
     /// back to inbound-based deadline accounting after `heartbeat_timeout`.
     ActiveHeartbeat,
     /// Unknown or unimplemented command.
-    Unsupported {
-        command_type: String,
-    },
+    Unsupported { command_type: String },
 }
 
 /// Parse a raw MQTT payload (protobuf DataEnvelope bytes) into a ControlAction.
@@ -198,14 +179,18 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
         mqtt_proto::control_command::Command::OpenSession(os) => ControlAction::OpenSession {
             session_id: os.session_id,
         },
-        mqtt_proto::control_command::Command::UpdateSessionTitle(ust) => ControlAction::UpdateSessionTitle {
-            session_id: ust.session_id,
-            title: ust.title,
-        },
-        mqtt_proto::control_command::Command::ContinueExecution(ce) => ControlAction::ContinueExecution {
-            session_id: ce.session_id,
-            reason: ce.reason,
-        },
+        mqtt_proto::control_command::Command::UpdateSessionTitle(ust) => {
+            ControlAction::UpdateSessionTitle {
+                session_id: ust.session_id,
+                title: ust.title,
+            }
+        }
+        mqtt_proto::control_command::Command::ContinueExecution(ce) => {
+            ControlAction::ContinueExecution {
+                session_id: ce.session_id,
+                reason: ce.reason,
+            }
+        }
         // ADR-035 Phase 3: EnableNotify/DisableNotify proto commands are
         // no-ops now — push drives all streaming. Return None so the caller
         // skips sending an InboundMessage. We still need to handle the proto
@@ -232,11 +217,13 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
                 model_id: sw.model_id,
                 provider_id,
             }
-        },
-        mqtt_proto::control_command::Command::ReasoningEffort(re) => ControlAction::ReasoningEffort {
-            session_id: re.session_id,
-            effort: re.effort,
-        },
+        }
+        mqtt_proto::control_command::Command::ReasoningEffort(re) => {
+            ControlAction::ReasoningEffort {
+                session_id: re.session_id,
+                effort: re.effort,
+            }
+        }
         mqtt_proto::control_command::Command::CompactContext(cc) => ControlAction::CompactContext {
             session_id: cc.session_id,
         },
@@ -246,17 +233,21 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             // 0 = UNSPECIFIED, 1 = SUMMARY, 2 = TOOL_RESULTS.
             compress_type: ca.compress_type,
         },
-        mqtt_proto::control_command::Command::WorkspaceSwitch(ws) => ControlAction::WorkspaceSwitch {
-            session_id: ws.session_id,
-            workspace_id: ws.workspace_id,
-        },
-        mqtt_proto::control_command::Command::ApprovalDecision(ad) => ControlAction::ApprovalDecision {
-            session_id: ad.session_id,
-            request_id: ad.request_id,
-            approved: ad.approved,
-            allow_all_session: ad.allow_all_session,
-            reason: ad.reason,
-        },
+        mqtt_proto::control_command::Command::WorkspaceSwitch(ws) => {
+            ControlAction::WorkspaceSwitch {
+                session_id: ws.session_id,
+                workspace_id: ws.workspace_id,
+            }
+        }
+        mqtt_proto::control_command::Command::ApprovalDecision(ad) => {
+            ControlAction::ApprovalDecision {
+                session_id: ad.session_id,
+                request_id: ad.request_id,
+                approved: ad.approved,
+                allow_all_session: ad.allow_all_session,
+                reason: ad.reason,
+            }
+        }
         mqtt_proto::control_command::Command::QuestionAnswer(qa) => ControlAction::QuestionAnswer {
             session_id: qa.session_id,
             request_id: qa.request_id,
@@ -266,9 +257,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             session_id: ct.session_id,
             tool_call_id: ct.tool_call_id,
         },
-        mqtt_proto::control_command::Command::ActiveHeartbeat(_) => {
-            ControlAction::ActiveHeartbeat
-        },
+        mqtt_proto::control_command::Command::ActiveHeartbeat(_) => ControlAction::ActiveHeartbeat,
         mqtt_proto::control_command::Command::Intent(intent) => ControlAction::IntentReceived {
             from: intent.from,
             action: intent.action,
@@ -278,5 +267,3 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
 
     Some(action)
 }
-
-

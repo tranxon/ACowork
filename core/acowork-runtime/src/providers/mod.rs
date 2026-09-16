@@ -70,7 +70,14 @@ pub async fn from_http_response(response: reqwest::Response) -> acowork_core::Pr
     // Read error body (best-effort; may be empty for some providers)
     let body = response.text().await.unwrap_or_default();
     let message = if body.is_empty() {
-        format!("HTTP {} {}", status, reqwest::StatusCode::from_u16(status).ok().and_then(|s| s.canonical_reason()).unwrap_or("Error"))
+        format!(
+            "HTTP {} {}",
+            status,
+            reqwest::StatusCode::from_u16(status)
+                .ok()
+                .and_then(|s| s.canonical_reason())
+                .unwrap_or("Error")
+        )
     } else {
         body
     };

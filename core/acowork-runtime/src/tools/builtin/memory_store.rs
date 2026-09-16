@@ -81,7 +81,8 @@ impl MemoryStoreTool {
                 NOT split your text into subject/predicate/object — the \
                 distiller handles that. Describe what to remember in \
                 'content' (natural language). Estimate your confidence \
-                (0.0-1.0). Optionally provide keywords.".to_string(),
+                (0.0-1.0). Optionally provide keywords."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -205,8 +206,7 @@ impl Tool for MemoryStoreTool {
                     .iter()
                     .filter_map(|item| item.as_str().map(String::from))
                     .collect();
-                let (clean, stats) =
-                    acowork_memory::keyword::sanitize_with_stats(raw);
+                let (clean, stats) = acowork_memory::keyword::sanitize_with_stats(raw);
                 tracing::debug!(
                     target: "memory_write_keyword_gate",
                     input = stats.input_count,
@@ -689,7 +689,6 @@ mod tests {
         assert!(result.content.contains("Procedure"));
     }
 
-
     // ── ADR-068: InMemoryProvider tests via episodic write path ─────────
     // The legacy tests (basic_fact_inmemory / preference_inmemory /
     // procedure_inmemory / metadata_params_inmemory) used to assert on
@@ -698,8 +697,8 @@ mod tests {
     // a tagged Episode lands in the episodic store, carrying the
     // knowledge_subtype the distiller will use to decide promotion.
 
-    use acowork_memory::types::KnowledgeSubType;
     use crate::test_support::InMemoryProvider;
+    use acowork_memory::types::KnowledgeSubType;
 
     /// Helper: create a MemoryStoreTool backed by InMemoryProvider.
     fn test_tool_with_provider() -> (MemoryStoreTool, Arc<InMemoryProvider>) {
@@ -766,7 +765,10 @@ mod tests {
 
         let episodes = provider.all_episodes().unwrap();
         assert_eq!(episodes.len(), 1);
-        assert_eq!(episodes[0].knowledge_subtype, Some(KnowledgeSubType::Preference));
+        assert_eq!(
+            episodes[0].knowledge_subtype,
+            Some(KnowledgeSubType::Preference)
+        );
     }
 
     /// Verify procedure storage via InMemoryProvider. ADR-068: procedure
@@ -792,7 +794,10 @@ mod tests {
 
         let episodes = provider.all_episodes().unwrap();
         assert_eq!(episodes.len(), 1);
-        assert_eq!(episodes[0].knowledge_subtype, Some(KnowledgeSubType::Procedure));
+        assert_eq!(
+            episodes[0].knowledge_subtype,
+            Some(KnowledgeSubType::Procedure)
+        );
     }
 
     /// End-to-end: keywords/privacy/importance params are accepted and
@@ -839,7 +844,10 @@ mod tests {
         // First episode's metadata should carry privacy + importance +
         // confidence + (possibly) keywords.
         let ep0 = &episodes[0];
-        assert_eq!(ep0.metadata.get("privacy").and_then(|v| v.as_str()), Some("public"));
+        assert_eq!(
+            ep0.metadata.get("privacy").and_then(|v| v.as_str()),
+            Some("public")
+        );
         // Note: importance is f32 → f64 (≈0.8 has precision noise).
         let imp = ep0
             .metadata

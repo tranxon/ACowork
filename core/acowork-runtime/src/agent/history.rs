@@ -18,9 +18,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use acowork_core::protocol::ProtocolType;
-use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
 #[cfg(test)]
 use acowork_core::providers::traits::ChatRequest;
+use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
 
 use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
 use crate::error::RuntimeError;
@@ -443,10 +443,7 @@ impl HistoryManager {
         if total_input_chars > 500 && prompt_tokens > 500 {
             let ratio = total_input_chars as f64 / prompt_tokens as f64;
             self.counter.set_ratio(ratio);
-            tracing::info!(
-                ratio,
-                "Session token ratio calibrated from API usage"
-            );
+            tracing::info!(ratio, "Session token ratio calibrated from API usage");
         }
 
         tracing::debug!(
@@ -460,17 +457,15 @@ impl HistoryManager {
 
     /// Append a message to history
     pub fn append(&mut self, message: ChatMessage) {
-        let tokens = self.counter.count_message(&message, Some(&self.protocol_type));
+        let tokens = self
+            .counter
+            .count_message(&message, Some(&self.protocol_type));
         self.current_tokens += tokens;
         let was_empty = self.messages.is_empty();
         let msg_bytes = Self::single_json_bytes(&message);
         self.messages_mut().push(message);
         // ADR-067: `[]` → `[a]` adds json(a); `[...,a]` adds json(a) + 1 comma.
-        self.messages_json_bytes += if was_empty {
-            msg_bytes
-        } else {
-            msg_bytes + 1
-        };
+        self.messages_json_bytes += if was_empty { msg_bytes } else { msg_bytes + 1 };
     }
 
     /// Append multiple messages
@@ -517,10 +512,7 @@ impl HistoryManager {
         self.current_tokens = self
             .messages
             .iter()
-            .map(|m| {
-                self.counter
-                    .count_message(m, Some(&self.protocol_type))
-            })
+            .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
             .sum();
         self.recompute_messages_json_bytes();
         tracing::info!(
@@ -601,10 +593,7 @@ impl HistoryManager {
             // Drop [first_removable .. round_end)
             let dropped_tokens: u64 = self.messages[first_removable..round_end]
                 .iter()
-                .map(|m| {
-                    self.counter
-                        .count_message(m, Some(&self.protocol_type))
-                })
+                .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
                 .sum();
             self.messages_mut().drain(first_removable..round_end);
             self.current_tokens = self.current_tokens.saturating_sub(dropped_tokens);
@@ -655,10 +644,7 @@ impl HistoryManager {
         self.current_tokens = self
             .messages
             .iter()
-            .map(|m| {
-                self.counter
-                    .count_message(m, Some(&self.protocol_type))
-            })
+            .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
             .sum();
         self.recompute_messages_json_bytes();
         tracing::info!(
@@ -835,7 +821,8 @@ impl HistoryManager {
         model_name: &str,
         system_prompt: &str,
         identity_context: Option<&str>,
-    ) -> std::result::Result<(String, acowork_core::providers::traits::UsageInfo), RuntimeError> {
+    ) -> std::result::Result<(String, acowork_core::providers::traits::UsageInfo), RuntimeError>
+    {
         let messages_text = crate::episode_distill::format_messages(self.messages.as_slice());
         if messages_text.is_empty() {
             return Err(RuntimeError::Tool(
@@ -974,10 +961,7 @@ impl HistoryManager {
             }
         }
 
-        let bytes_reclaimed: usize = cleared
-            .iter()
-            .filter_map(|id| per_id_bytes.get(id))
-            .sum();
+        let bytes_reclaimed: usize = cleared.iter().filter_map(|id| per_id_bytes.get(id)).sum();
 
         ClearRoundReport {
             cleared_tool_ids: cleared,
@@ -1091,7 +1075,6 @@ impl HistoryManager {
         }
     }
 
-
     /// ADR-061 §8.2/§19.4: join the original user messages as the
     /// fallback `<user_intent>` when the compaction LLM omits the block.
     ///
@@ -1175,9 +1158,10 @@ impl HistoryManager {
                             MessageRole::User => break,
                             MessageRole::Assistant | MessageRole::Tool => {
                                 if let Some(ref tcs) = self.messages[j].tool_calls
-                                    && tcs.iter().any(|tc| tail_tool_ids.contains(&tc.id)) {
-                                        expanded = j;
-                                    }
+                                    && tcs.iter().any(|tc| tail_tool_ids.contains(&tc.id))
+                                {
+                                    expanded = j;
+                                }
                             }
                             _ => {}
                         }
@@ -1220,7 +1204,9 @@ impl HistoryManager {
             name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
         };
-        let summary_tokens = self.counter.count_message(&summary_msg, Some(&self.protocol_type));
+        let summary_tokens = self
+            .counter
+            .count_message(&summary_msg, Some(&self.protocol_type));
         self.messages_mut().insert(system_count, summary_msg);
         self.current_tokens += summary_tokens;
         self.recompute_messages_json_bytes();
@@ -1271,9 +1257,9 @@ impl HistoryManager {
         // Reverse-scan for the most recent Assistant with a todo_write call.
         let assistant_idx = self.messages.iter().rposition(|m| {
             m.role == MessageRole::Assistant
-                && m.tool_calls.as_ref().is_some_and(|tcs| {
-                    tcs.iter().any(|tc| tc.function.name == "todo_write")
-                })
+                && m.tool_calls
+                    .as_ref()
+                    .is_some_and(|tcs| tcs.iter().any(|tc| tc.function.name == "todo_write"))
         })?;
 
         let assistant = self.messages[assistant_idx].clone();
@@ -1317,9 +1303,8 @@ impl HistoryManager {
             let Some(tcs) = m.tool_calls.as_ref() else {
                 return false;
             };
-            tcs.iter().any(|tc| {
-                tc.function.name == "todo_write" && !excluded_ids.contains(&tc.id)
-            })
+            tcs.iter()
+                .any(|tc| tc.function.name == "todo_write" && !excluded_ids.contains(&tc.id))
         })?;
 
         let assistant = self.messages[assistant_idx].clone();
@@ -1443,15 +1428,13 @@ impl HistoryManager {
                 .as_ref()
                 .map(|tcs| tcs.iter().map(|tc| tc.id.as_str()).collect())
                 .unwrap_or_default();
-            let assistant_in_tail = self.messages[marker_idx + 1..]
-                .iter()
-                .any(|m| {
-                    m.role == MessageRole::Assistant
-                        && m.tool_calls.as_ref().is_some_and(|tcs| {
-                            tcs.iter()
-                                .any(|tc| assistant_call_ids.contains(&tc.id.as_str()))
-                        })
-                });
+            let assistant_in_tail = self.messages[marker_idx + 1..].iter().any(|m| {
+                m.role == MessageRole::Assistant
+                    && m.tool_calls.as_ref().is_some_and(|tcs| {
+                        tcs.iter()
+                            .any(|tc| assistant_call_ids.contains(&tc.id.as_str()))
+                    })
+            });
             if assistant_in_tail {
                 tracing::debug!(
                     tool_call_id = %tcid,
@@ -1535,8 +1518,8 @@ impl HistoryManager {
         }
 
         // No todo_write round in history at all.
-        let Some((assistant, tool)) = self
-            .find_last_todo_write_round_excluding_injected(&HashSet::new())
+        let Some((assistant, tool)) =
+            self.find_last_todo_write_round_excluding_injected(&HashSet::new())
         else {
             return RecallResult::NoTodoRoundFound;
         };
@@ -1717,7 +1700,10 @@ impl HistoryManager {
         let tool_owner_positions: Vec<usize> = (0..n_msgs)
             .filter(|&i| {
                 matches!(msgs[i].role, MessageRole::Assistant)
-                    && msgs[i].tool_calls.as_ref().is_some_and(|tcs| !tcs.is_empty())
+                    && msgs[i]
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|tcs| !tcs.is_empty())
             })
             .collect();
         let n_tool_owners = tool_owner_positions.len();
@@ -1849,10 +1835,10 @@ impl HistoryManager {
         // Defensive re-check (plan-time validation already ran; this guards
         // against callers bypassing `plan_compression`). Level 8 is exempt
         // from the ratio bar (§19.2).
-        if plan.projected_tokens > self.max_tokens
-            || (plan.level < 5 && ratio < min_ratio)
-        {
-            return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
+        if plan.projected_tokens > self.max_tokens || (plan.level < 5 && ratio < min_ratio) {
+            return Err(CompressError::InsufficientCompression {
+                projected_ratio: ratio,
+            });
         }
 
         let marker = ChatMessage {
@@ -1908,10 +1894,7 @@ impl HistoryManager {
     /// Sum `count_message` over a slice (kept messages at plan time).
     fn count_slice_tokens(&self, msgs: &[ChatMessage]) -> u64 {
         msgs.iter()
-            .map(|m| {
-                self.counter
-                    .count_message(m, Some(&self.protocol_type))
-            })
+            .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
             .sum()
     }
 
@@ -1951,7 +1934,10 @@ mod tests {
         // default-ratio estimate drifts (and previously triggered spurious
         // compaction via the removed overhead compensation).
         let mut hm = HistoryManager::new(1000);
-        hm.append(make_message(MessageRole::User, "你好世界，这是一段比较长的中文历史内容"));
+        hm.append(make_message(
+            MessageRole::User,
+            "你好世界，这是一段比较长的中文历史内容",
+        ));
         let replayed_estimate = hm.token_count();
 
         // The persisted meta says the last API count was much larger
@@ -1959,7 +1945,11 @@ mod tests {
         let api_last_input = replayed_estimate * 2;
         hm.restore_anchor(Some(api_last_input), Some(2.0));
 
-        assert_eq!(hm.token_count(), api_last_input, "anchored to API ground truth");
+        assert_eq!(
+            hm.token_count(),
+            api_last_input,
+            "anchored to API ground truth"
+        );
         assert_eq!(hm.model_ratio(), Some(2.0), "restored calibrated ratio");
 
         // A missing ratio falls back to the default (still anchored).
@@ -2037,7 +2027,10 @@ mod tests {
                 &format!("assistant reply number {i} with padding"),
             ));
         }
-        assert!(hm.token_count() > 80, "precondition: should overflow 80% of 100");
+        assert!(
+            hm.token_count() > 80,
+            "precondition: should overflow 80% of 100"
+        );
 
         let dropped = hm.fit_to_budget_lossless();
         assert!(dropped > 0, "should have dropped at least one round");
@@ -2045,7 +2038,9 @@ mod tests {
         assert!(matches!(hm.messages()[0].role, MessageRole::System));
         // At least one trailing round must remain.
         assert!(
-            hm.messages().iter().any(|m| matches!(m.role, MessageRole::User)),
+            hm.messages()
+                .iter()
+                .any(|m| matches!(m.role, MessageRole::User)),
             "at least one User message must survive"
         );
         // Final budget should be ≤ 80% of max.
@@ -2312,7 +2307,11 @@ mod tests {
                 make_tool_call("tc_beta", "bash", "{}"),
             ],
         ));
-        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+        hm.append(make_tool_message(
+            "tc_alpha",
+            "file_edit",
+            "Edited 42 bytes",
+        ));
         hm.append(make_tool_message("tc_beta", "bash", "shell output here"));
 
         let replaced = hm.abandon_tool_result("tc_alpha");
@@ -2325,7 +2324,9 @@ mod tests {
             .find(|m| m.tool_call_id.as_deref() == Some("tc_alpha"))
             .expect("tc_alpha tool message must still exist (schema preserved)");
         assert!(
-            folded.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            folded
+                .content
+                .starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
             "folded content must start with placeholder prefix, got: {:?}",
             folded.content
         );
@@ -2349,7 +2350,11 @@ mod tests {
             "checking",
             vec![make_tool_call("tc_alpha", "file_edit", "{}")],
         ));
-        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+        hm.append(make_tool_message(
+            "tc_alpha",
+            "file_edit",
+            "Edited 42 bytes",
+        ));
 
         let replaced = hm.abandon_tool_result("tc_does_not_exist");
 
@@ -2370,7 +2375,11 @@ mod tests {
             "checking",
             vec![make_tool_call("tc_alpha", "file_edit", "{}")],
         ));
-        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+        hm.append(make_tool_message(
+            "tc_alpha",
+            "file_edit",
+            "Edited 42 bytes",
+        ));
 
         assert_eq!(hm.abandon_tool_result("tc_alpha"), 1, "first fold replaces");
         assert_eq!(
@@ -2386,7 +2395,9 @@ mod tests {
             .find(|m| m.tool_call_id.as_deref() == Some("tc_alpha"))
             .expect("tc_alpha must still exist");
         assert!(
-            folded.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            folded
+                .content
+                .starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
             "content must be the single placeholder"
         );
     }
@@ -2403,7 +2414,11 @@ mod tests {
                 make_tool_call("tc_beta", "bash", "{}"),
             ],
         ));
-        hm.append(make_tool_message("tc_alpha", "file_edit", "Edited 42 bytes"));
+        hm.append(make_tool_message(
+            "tc_alpha",
+            "file_edit",
+            "Edited 42 bytes",
+        ));
         hm.append(make_tool_message("tc_beta", "bash", "shell output here"));
 
         let _ = hm.abandon_tool_result("tc_alpha");
@@ -2423,7 +2438,10 @@ mod tests {
     fn test_make_compressed_placeholder_format() {
         let p = make_compressed_placeholder("file_edit");
         assert!(p.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX));
-        assert!(p.contains("file_edit"), "tool name must appear in placeholder");
+        assert!(
+            p.contains("file_edit"),
+            "tool name must appear in placeholder"
+        );
         assert!(
             p.contains("re-invoke"),
             "placeholder must hint at re-invoking the tool (no retrieve path)"
@@ -2448,14 +2466,21 @@ mod tests {
                 make_tool_call("tc_b", "bash", "{}"),
             ],
         ));
-        hm.append(make_tool_message("tc_a", "file_edit", "long file content A"));
+        hm.append(make_tool_message(
+            "tc_a",
+            "file_edit",
+            "long file content A",
+        ));
         hm.append(make_tool_message("tc_b", "bash", "long shell output B"));
 
         let asst_idx = 0;
         let report = hm.clear_round(asst_idx);
 
         assert_eq!(report.cleared_tool_ids.len(), 2);
-        assert!(report.bytes_reclaimed > 0, "should reclaim at least the original content bytes");
+        assert!(
+            report.bytes_reclaimed > 0,
+            "should reclaim at least the original content bytes"
+        );
         // Both tool messages must now be placeholders.
         for msg in hm.messages() {
             if matches!(msg.role, MessageRole::Tool) {
@@ -2589,10 +2614,19 @@ mod tests {
         let report = hm.fix_round(1);
 
         // clear_round part: tc_alpha folded
-        assert!(report.cleared.cleared_tool_ids.contains(&"tc_alpha".to_string()));
+        assert!(
+            report
+                .cleared
+                .cleared_tool_ids
+                .contains(&"tc_alpha".to_string())
+        );
         // orphan sweep part: tc_stray removed, tc_orphan id removed from assistant
         assert_eq!(report.removed_orphan_tool_messages, 1);
-        assert!(report.removed_orphan_tool_call_ids.contains(&"tc_orphan".to_string()));
+        assert!(
+            report
+                .removed_orphan_tool_call_ids
+                .contains(&"tc_orphan".to_string())
+        );
     }
 
     #[test]
@@ -2629,7 +2663,12 @@ mod tests {
         assert_eq!(report.removed_orphan_tool_messages, 0);
         assert!(report.removed_orphan_tool_call_ids.is_empty());
         // clear_round still ran.
-        assert!(report.cleared.cleared_tool_ids.contains(&"tc_a".to_string()));
+        assert!(
+            report
+                .cleared
+                .cleared_tool_ids
+                .contains(&"tc_a".to_string())
+        );
     }
 
     // ── ADR-061 v3 §20.3.2 / PR2: recall_todo_round tests ───────────────
@@ -2650,7 +2689,10 @@ mod tests {
         // Marker but no todo_write round.
         append_marker(&mut hm);
         hm.append(make_message(MessageRole::User, "post-marker user"));
-        hm.append(make_message(MessageRole::Assistant, "post-marker assistant"));
+        hm.append(make_message(
+            MessageRole::Assistant,
+            "post-marker assistant",
+        ));
         let result = hm.recall_todo_round();
         assert!(matches!(result, RecallResult::NoTodoRoundFound));
     }
@@ -2671,7 +2713,10 @@ mod tests {
         // The todo round is already present in tail; recall must not
         // duplicate it.
         assert!(
-            matches!(result, RecallResult::SkippedAlreadyInTail | RecallResult::NoTodoRoundFound),
+            matches!(
+                result,
+                RecallResult::SkippedAlreadyInTail | RecallResult::NoTodoRoundFound
+            ),
             "expected skip or notfound, got {:?}",
             std::mem::discriminant(&result)
         );
@@ -2694,7 +2739,11 @@ mod tests {
         let r2 = hm.recall_todo_round();
 
         // r1 should inject; r2 should be skipped-already-injected.
-        assert!(matches!(r1, RecallResult::Injected { .. }), "first call: {:?}", r1);
+        assert!(
+            matches!(r1, RecallResult::Injected { .. }),
+            "first call: {:?}",
+            r1
+        );
         assert!(
             matches!(r2, RecallResult::SkippedAlreadyInjected),
             "second call: {:?}",
@@ -2786,14 +2835,15 @@ mod tests {
         // Assistant with tool_calls.
         for msg in &messages_clone {
             if msg.role == MessageRole::Tool
-                && let Some(ref tcid) = msg.tool_call_id {
-                    let has_call = messages_clone.iter().any(|m| {
-                        m.tool_calls
-                            .as_ref()
-                            .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == *tcid))
-                    });
-                    assert!(has_call, "Tool result {tcid} has matching Assistant");
-                }
+                && let Some(ref tcid) = msg.tool_call_id
+            {
+                let has_call = messages_clone.iter().any(|m| {
+                    m.tool_calls
+                        .as_ref()
+                        .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == *tcid))
+                });
+                assert!(has_call, "Tool result {tcid} has matching Assistant");
+            }
         }
     }
 
@@ -2905,10 +2955,7 @@ mod tests {
             "capture"
         }
 
-        async fn chat(
-            &self,
-            request: ChatRequest,
-        ) -> acowork_core::error::Result<ChatResponse> {
+        async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
             *self.captured.lock().unwrap() = Some(request);
             Ok(ChatResponse {
                 content: self.canned.clone(),
@@ -2920,7 +2967,10 @@ mod tests {
             &self,
             _request: ChatRequest,
         ) -> acowork_core::error::Result<
-            Box<dyn futures_core::Stream<Item = acowork_core::providers::traits::StreamEvent> + Send>,
+            Box<
+                dyn futures_core::Stream<Item = acowork_core::providers::traits::StreamEvent>
+                    + Send,
+            >,
         > {
             Err(acowork_core::error::AcoworkError::Provider(
                 acowork_core::providers::traits::ProviderError::unknown(
@@ -2951,7 +3001,8 @@ mod tests {
     async fn compact_via_llm_without_identity_keeps_system_prompt_unchanged() {
         let hm = build_history_with_messages();
         // Stub output must pass the compact_with_llm quality gate (≥20 chars).
-        let provider = CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
+        let provider =
+            CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
 
         let result = hm
             .compact_via_llm(
@@ -2983,7 +3034,8 @@ mod tests {
     async fn compact_via_llm_with_identity_embeds_language_directive_into_system() {
         let hm = build_history_with_messages();
         // Stub output must pass the compact_with_llm quality gate (≥20 chars).
-        let provider = CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
+        let provider =
+            CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
 
         let identity =
             "- Display Name: 大鱼\n- Language: zh-CN\n- Timezone: Asia/Shanghai\n- City: 上海";
@@ -3001,20 +3053,36 @@ mod tests {
         let req = provider.last_request();
         assert_eq!(req.messages.len(), 2);
         let system = &req.messages[0].content;
-        assert_eq!(system[0..crate::prompt::COMPACTION_SYSTEM_PROMPT.len()].to_string(), crate::prompt::COMPACTION_SYSTEM_PROMPT,
-            "system prompt must start with the original base prompt");
+        assert_eq!(
+            system[0..crate::prompt::COMPACTION_SYSTEM_PROMPT.len()].to_string(),
+            crate::prompt::COMPACTION_SYSTEM_PROMPT,
+            "system prompt must start with the original base prompt"
+        );
         // Identity text embedded verbatim — the LLM reads it directly
-        assert!(system.contains(identity), "identity text must be embedded verbatim");
-        assert!(system.contains("Language"), "language directive must be present");
-        assert!(system.contains("preferred language"), "language directive must be present");
+        assert!(
+            system.contains(identity),
+            "identity text must be embedded verbatim"
+        );
+        assert!(
+            system.contains("Language"),
+            "language directive must be present"
+        );
+        assert!(
+            system.contains("preferred language"),
+            "language directive must be present"
+        );
         // COMPACT_PROMPT (user) is now body-only — summarization role lives
         // in COMPACTION_SYSTEM_PROMPT (system). Assert the split:
         // - system carries the summarization role/instructions
         // - user stays focused on the conversation body, free of role leakage
-        assert!(req.messages[0].content.contains("summarizes conversations"),
-            "system prompt must carry the summarization role/instructions");
-        assert!(!req.messages[1].content.contains("summarizes conversations"),
-            "user message must stay focused on conversation body, not leak system role instructions");
+        assert!(
+            req.messages[0].content.contains("summarizes conversations"),
+            "system prompt must carry the summarization role/instructions"
+        );
+        assert!(
+            !req.messages[1].content.contains("summarizes conversations"),
+            "user message must stay focused on conversation body, not leak system role instructions"
+        );
     }
 
     #[tokio::test]
@@ -3022,7 +3090,8 @@ mod tests {
         let hm = build_history_with_messages();
         // Stub output must carry a valid <summary> block — the quality gate in
         // compact_with_llm rejects marker-less output (no raw-text fallback).
-        let provider = CaptureProvider::new("<summary>a valid compact model summary here</summary>");
+        let provider =
+            CaptureProvider::new("<summary>a valid compact model summary here</summary>");
 
         let result = hm
             .compact_via_llm(
@@ -3165,9 +3234,8 @@ mod tests {
 
     /// Find the Tool message answering `tool_call_id`.
     fn tool_msg<'a>(msgs: &'a [ChatMessage], id: &str) -> Option<&'a ChatMessage> {
-        msgs.iter().find(|m| {
-            matches!(m.role, MessageRole::Tool) && m.tool_call_id.as_deref() == Some(id)
-        })
+        msgs.iter()
+            .find(|m| matches!(m.role, MessageRole::Tool) && m.tool_call_id.as_deref() == Some(id))
     }
 
     /// v3 schema invariants over a message list:
@@ -3218,7 +3286,10 @@ mod tests {
         // their tool_call nor their tool result survives.
         for id in ["tc_1", "tc_2", "tc_3", "tc_4", "tc_5"] {
             assert!(!has_tool_call(&plan.retained, id), "{id} call must be gone");
-            assert!(!has_tool_result(&plan.retained, id), "{id} result must be gone");
+            assert!(
+                !has_tool_result(&plan.retained, id),
+                "{id} result must be gone"
+            );
         }
 
         // tc_6: kept round, folded — assistant keeps its tool_call entry and
@@ -3229,7 +3300,9 @@ mod tests {
         );
         let tool6 = tool_msg(&plan.retained, "tc_6").expect("tc_6 Tool retained");
         assert!(
-            tool6.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+            tool6
+                .content
+                .starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
             "tc_6 Tool must be a placeholder"
         );
 
@@ -3262,7 +3335,10 @@ mod tests {
                 plan.stats.assistant_messages, assts,
                 "L{level} assistant messages kept"
             );
-            assert_eq!(plan.stats.tool_messages, tools, "L{level} tool messages kept");
+            assert_eq!(
+                plan.stats.tool_messages, tools,
+                "L{level} tool messages kept"
+            );
             assert_schema_and_no_adjacency(&plan.retained, &format!("L{level} plan"));
         }
     }
@@ -3271,7 +3347,10 @@ mod tests {
     fn v3_plan_projections_monotonic_and_first_fit() {
         let hm = build_7_round_history();
         let projections: Vec<u64> = (1..=5)
-            .map(|l| hm.build_level_plan(l, hm.messages(), "Summary").projected_tokens)
+            .map(|l| {
+                hm.build_level_plan(l, hm.messages(), "Summary")
+                    .projected_tokens
+            })
             .collect();
         // v3 invariant: more aggressive levels never retain more.
         for w in projections.windows(2) {
@@ -3280,11 +3359,19 @@ mod tests {
                 "level projections must be monotonic non-increasing: {w:?}"
             );
         }
-        assert!(projections[0] > projections[4], "level 5 must be strictly smaller");
+        assert!(
+            projections[0] > projections[4],
+            "level 5 must be strictly smaller"
+        );
 
         // Relaxed 10% bar: level 1 is the first fit and wins.
-        let plan = hm.plan_compression("Summary", 0.10).expect("level 1 must fit");
-        assert_eq!(plan.level, 1, "first sufficient level wins under a relaxed bar");
+        let plan = hm
+            .plan_compression("Summary", 0.10)
+            .expect("level 1 must fit");
+        assert_eq!(
+            plan.level, 1,
+            "first sufficient level wins under a relaxed bar"
+        );
     }
 
     #[test]
@@ -3293,7 +3380,10 @@ mod tests {
         // (ratio ~0% < 10%) yet level 5 must still be accepted on the budget
         // check alone (19.2 ratio exemption).
         let mut hm = HistoryManager::new(1_000_000);
-        hm.append(make_message(MessageRole::System, &"System prompt ".repeat(600)));
+        hm.append(make_message(
+            MessageRole::System,
+            &"System prompt ".repeat(600),
+        ));
         hm.append(ChatMessage {
             role: MessageRole::User,
             content: "Previous compaction summary".to_string(),
@@ -3315,7 +3405,11 @@ mod tests {
 
         // Level 5 retains system + the LAST non-marker User (the earlier
         // marker is User-role too and must be excluded, 19.1).
-        assert_eq!(user_count(&plan.retained), 1, "only the current user message");
+        assert_eq!(
+            user_count(&plan.retained),
+            1,
+            "only the current user message"
+        );
         assert_eq!(
             plan.retained.last().map(|m| m.content.as_str()),
             Some("Question 2"),
@@ -3328,7 +3422,9 @@ mod tests {
     #[test]
     fn v3_plan_unrecoverable_overflow_when_level5_exceeds_budget() {
         let mut hm = build_7_round_history();
-        let p5 = hm.build_level_plan(5, hm.messages(), "Summary").projected_tokens;
+        let p5 = hm
+            .build_level_plan(5, hm.messages(), "Summary")
+            .projected_tokens;
         hm.set_max_tokens(p5 - 1);
         let err = hm
             .plan_compression("Summary", MIN_COMPRESSION_RATIO)
@@ -3337,7 +3433,11 @@ mod tests {
             matches!(err, CompressError::UnrecoverableOverflow { .. }),
             "level 5 cannot fit => explicit failure, history untouched: {err}"
         );
-        assert_eq!(hm.messages().len(), 29, "planning must never mutate history");
+        assert_eq!(
+            hm.messages().len(),
+            29,
+            "planning must never mutate history"
+        );
     }
 
     #[test]
@@ -3362,7 +3462,11 @@ mod tests {
             "marker sits right after the leading system block"
         );
         // 7 real users + the new marker (markers are User-role too).
-        assert_eq!(user_count(msgs), 8, "all user messages preserved plus marker");
+        assert_eq!(
+            user_count(msgs),
+            8,
+            "all user messages preserved plus marker"
+        );
         assert_schema_and_no_adjacency(msgs, "post-apply L1");
     }
 
@@ -3447,11 +3551,7 @@ mod tests {
     fn make_todo_write_assistant(tool_call_id: &str) -> ChatMessage {
         ChatMessage::assistant_with_tools(
             "",
-            vec![make_tool_call(
-                tool_call_id,
-                "todo_write",
-                "{\"todos\":[]}",
-            )],
+            vec![make_tool_call(tool_call_id, "todo_write", "{\"todos\":[]}")],
         )
     }
 
@@ -3502,9 +3602,8 @@ mod tests {
         hm.append(tool_orig);
         hm.append(make_message(MessageRole::Assistant, "Done"));
 
-        let (found_assistant, found_tool) = hm
-            .find_last_todo_write_round()
-            .expect("must find round");
+        let (found_assistant, found_tool) =
+            hm.find_last_todo_write_round().expect("must find round");
 
         // Canonical identifier: tool_call_id.
         let ass_id = &found_assistant.tool_calls.as_ref().unwrap()[0].id;
@@ -3554,18 +3653,14 @@ mod tests {
 
         // Inject the SAME round — should be a no-op (already in tail).
         let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
-        let (new_tokens, injected) =
-            hm.inject_todo_write_round_after_marker(assistant, tool);
+        let (new_tokens, injected) = hm.inject_todo_write_round_after_marker(assistant, tool);
 
         assert_eq!(
             hm.messages().len(),
             len_before,
             "no message inserted when round is already in retained tail"
         );
-        assert_eq!(
-            new_tokens, tokens_before,
-            "token count unchanged on skip"
-        );
+        assert_eq!(new_tokens, tokens_before, "token count unchanged on skip");
         assert!(
             !injected,
             "persistence gate must signal no-op when round is in retained tail"
@@ -3591,8 +3686,8 @@ mod tests {
         let removed_assistant = make_todo_write_assistant("tc_removed");
         let removed_tool = make_todo_write_tool("tc_removed");
 
-        let (_, injected) = hm
-            .inject_todo_write_round_after_marker(removed_assistant, removed_tool);
+        let (_, injected) =
+            hm.inject_todo_write_round_after_marker(removed_assistant, removed_tool);
         assert!(injected, "splice path must signal injected=true");
 
         let msgs = hm.messages();
@@ -3612,7 +3707,10 @@ mod tests {
 
         assert_eq!(assistant_after.role, MessageRole::Assistant);
         let ass_id = &assistant_after.tool_calls.as_ref().unwrap()[0].id;
-        assert_eq!(ass_id, "tc_removed", "injected assistant right after marker");
+        assert_eq!(
+            ass_id, "tc_removed",
+            "injected assistant right after marker"
+        );
         assert_eq!(tool_after.role, MessageRole::Tool);
         assert_eq!(
             tool_after.tool_call_id.as_deref(),
@@ -3658,8 +3756,7 @@ mod tests {
         let len_before = hm.messages().len();
 
         let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
-        let (new_tokens, injected) =
-            hm.inject_todo_write_round_after_marker(assistant, tool);
+        let (new_tokens, injected) = hm.inject_todo_write_round_after_marker(assistant, tool);
 
         assert_eq!(
             hm.messages().len(),
@@ -3691,8 +3788,7 @@ mod tests {
 
         let len_before = hm.messages().len();
         let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
-        let (new_tokens, injected) =
-            hm.inject_todo_write_round_after_marker(assistant, tool);
+        let (new_tokens, injected) = hm.inject_todo_write_round_after_marker(assistant, tool);
 
         assert_eq!(
             hm.messages().len(),
@@ -3730,7 +3826,8 @@ mod tests {
             "tokens must increase after injecting two messages (before={tokens_before}, after={returned_tokens})"
         );
         assert_eq!(
-            returned_tokens, hm.token_count(),
+            returned_tokens,
+            hm.token_count(),
             "returned count must match stored token_count after recalibrate"
         );
         assert!(
@@ -3781,9 +3878,9 @@ mod tests {
                 let is_orig_tool =
                     m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("tc_original");
                 let is_orig_assistant = m.role == MessageRole::Assistant
-                    && m.tool_calls.as_ref().is_some_and(|tcs| {
-                        tcs.iter().any(|tc| tc.id == "tc_original")
-                    });
+                    && m.tool_calls
+                        .as_ref()
+                        .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == "tc_original"));
                 if is_orig_tool || is_orig_assistant {
                     remove_idxs.push(i);
                 }
@@ -3854,7 +3951,11 @@ mod tests {
             marker_idx + 3,
             "two new messages inserted (Assistant + Tool) for the fresh round"
         );
-        assert_eq!(len_after_first, marker_idx + 3, "sanity: first splice length matches");
+        assert_eq!(
+            len_after_first,
+            marker_idx + 3,
+            "sanity: first splice length matches"
+        );
     }
 
     // ── ADR-067: messages_json_bytes incremental counter ──────────────
@@ -3873,7 +3974,11 @@ mod tests {
     #[test]
     fn messages_json_bytes_tracks_append_and_extend() {
         let mut hm = HistoryManager::new(10_000);
-        assert_eq!(hm.messages_json_bytes(), 2, "empty history serializes as `[]`");
+        assert_eq!(
+            hm.messages_json_bytes(),
+            2,
+            "empty history serializes as `[]`"
+        );
 
         hm.append(make_message(MessageRole::User, "hello"));
         assert_json_bytes_matches(&hm);
@@ -3901,6 +4006,10 @@ mod tests {
         assert_json_bytes_matches(&hm);
 
         hm.clear();
-        assert_eq!(hm.messages_json_bytes(), 2, "cleared history serializes as `[]`");
+        assert_eq!(
+            hm.messages_json_bytes(),
+            2,
+            "cleared history serializes as `[]`"
+        );
     }
 }

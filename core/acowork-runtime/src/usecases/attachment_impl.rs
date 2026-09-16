@@ -85,8 +85,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::usecases::attachment::{
-    name_matches_document_id, on_disk_name, AttachmentError, AttachmentService, UploadFileParams,
-    UploadedFileResponse, MAX_UPLOAD_BYTES,
+    AttachmentError, AttachmentService, MAX_UPLOAD_BYTES, UploadFileParams, UploadedFileResponse,
+    name_matches_document_id, on_disk_name,
 };
 
 /// Concrete [`AttachmentService`] backed by `<work_dir>/files/`.
@@ -118,9 +118,9 @@ impl RuntimeAttachmentService {
     async fn ensure_files_dir(&self) -> Result<PathBuf, AttachmentError> {
         let dir = self.files_dir();
         if !dir.exists() {
-            fs::create_dir_all(&dir)
-                .await
-                .map_err(|e| AttachmentError::Persistence(format!("create_dir_all {}: {}", dir.display(), e)))?;
+            fs::create_dir_all(&dir).await.map_err(|e| {
+                AttachmentError::Persistence(format!("create_dir_all {}: {}", dir.display(), e))
+            })?;
         }
         Ok(dir)
     }
@@ -164,14 +164,8 @@ impl RuntimeAttachmentService {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         let digest = hasher.finalize();
-        let prefix_hex: String = digest[..6]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        let suffix_hex: String = digest[6..8]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
+        let prefix_hex: String = digest[..6].iter().map(|b| format!("{:02x}", b)).collect();
+        let suffix_hex: String = digest[6..8].iter().map(|b| format!("{:02x}", b)).collect();
         format!("{prefix_hex}-{suffix_hex}")
     }
 
@@ -369,7 +363,11 @@ impl AttachmentService for RuntimeAttachmentService {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(AttachmentError::NotFound(document_id.to_string()))
             }
-            Err(e) => Err(AttachmentError::Persistence(format!("read {}: {}", path.display(), e))),
+            Err(e) => Err(AttachmentError::Persistence(format!(
+                "read {}: {}",
+                path.display(),
+                e
+            ))),
         }
     }
 }
@@ -412,7 +410,12 @@ mod tests {
     /// then made the `doc_reader` tool reject them as unsupported.
     #[tokio::test]
     async fn upload_writes_office_docs_with_real_extensions() {
-        for (format, expected_ext) in [("pdf", "pdf"), ("docx", "docx"), ("pptx", "pptx"), ("xlsx", "xlsx")] {
+        for (format, expected_ext) in [
+            ("pdf", "pdf"),
+            ("docx", "docx"),
+            ("pptx", "pptx"),
+            ("xlsx", "xlsx"),
+        ] {
             let (dir, svc) = fresh_service().await;
             let payload = format!("hello-{format}-bytes").into_bytes();
             let r = svc.upload_file(params(format, &payload)).await.unwrap();
@@ -461,7 +464,10 @@ mod tests {
     #[tokio::test]
     async fn upload_unknown_format_falls_back_to_bin_extension() {
         let (dir, svc) = fresh_service().await;
-        let r = svc.upload_file(params("exe", b"binary-blob")).await.unwrap();
+        let r = svc
+            .upload_file(params("exe", b"binary-blob"))
+            .await
+            .unwrap();
         let on_disk = dir
             .path()
             .join("files")
@@ -477,7 +483,11 @@ mod tests {
     async fn upload_writes_with_readable_original_name() {
         let (dir, svc) = fresh_service().await;
         let r = svc
-            .upload_file(params_with_name("2024年度报告.pdf", "pdf", b"annual-report"))
+            .upload_file(params_with_name(
+                "2024年度报告.pdf",
+                "pdf",
+                b"annual-report",
+            ))
             .await
             .unwrap();
         let on_disk = dir
@@ -533,7 +543,9 @@ mod tests {
 
         // Pre-create the files directory so we can drop a legacy blob
         // outside of `upload_file` (which would normally ensure it).
-        tokio::fs::create_dir_all(dir.path().join("files")).await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join("files"))
+            .await
+            .unwrap();
         // Drop a legacy `<id>.png` file directly (no upload).
         tokio::fs::write(dir.path().join("files").join(format!("{id}.png")), payload)
             .await
@@ -557,7 +569,9 @@ mod tests {
         // Pre-create the files directory; we drop blobs directly
         // without going through `upload_file` to fabricate the
         // ambiguous-on-disk state.
-        tokio::fs::create_dir_all(dir.path().join("files")).await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join("files"))
+            .await
+            .unwrap();
 
         // Two files for the same id: one in the legacy suffixed
         // shape, one in the new shape.
@@ -609,9 +623,7 @@ mod tests {
             .join(format!("sample_{}.png", first.document_id));
         assert!(suffixed.exists(), "suffixed blob must exist");
         let names: Vec<String> = {
-            let mut entries = tokio::fs::read_dir(dir.path().join("files"))
-                .await
-                .unwrap();
+            let mut entries = tokio::fs::read_dir(dir.path().join("files")).await.unwrap();
             let mut v = Vec::new();
             while let Some(e) = entries.next_entry().await.unwrap() {
                 v.push(e.file_name().to_string_lossy().into_owned());
@@ -670,7 +682,10 @@ mod tests {
             .path()
             .join("files")
             .join(format!("年度报告_{}.pdf", first.document_id));
-        assert!(first_path.exists(), "first-uploaded blob must remain on disk");
+        assert!(
+            first_path.exists(),
+            "first-uploaded blob must remain on disk"
+        );
         assert!(
             !second_path.exists(),
             "second upload must NOT have created a second blob ({})",
@@ -684,9 +699,7 @@ mod tests {
 
         // And exactly one match exists in the directory.
         let names: Vec<String> = {
-            let mut entries = tokio::fs::read_dir(dir.path().join("files"))
-                .await
-                .unwrap();
+            let mut entries = tokio::fs::read_dir(dir.path().join("files")).await.unwrap();
             let mut v = Vec::new();
             while let Some(e) = entries.next_entry().await.unwrap() {
                 v.push(e.file_name().to_string_lossy().into_owned());
@@ -697,7 +710,10 @@ mod tests {
             .iter()
             .filter(|n| name_matches_document_id(n, &first.document_id))
             .count();
-        assert_eq!(count, 1, "exactly one on-disk blob for one document_id (dir: {names:?})");
+        assert_eq!(
+            count, 1,
+            "exactly one on-disk blob for one document_id (dir: {names:?})"
+        );
     }
 
     /// Distinct bytes that share a sanitised stem but different ids
@@ -725,7 +741,10 @@ mod tests {
             .path()
             .join("files")
             .join(format!("report_{}.pdf", r2.document_id));
-        assert!(p1.exists() && p2.exists(), "distinct ids must land as distinct files");
+        assert!(
+            p1.exists() && p2.exists(),
+            "distinct ids must land as distinct files"
+        );
     }
 
     /// Regression guard at the pure-function level: identical bytes
@@ -753,11 +772,15 @@ mod tests {
         assert_eq!(prefix.len(), 12);
         assert_eq!(suffix.len(), 4);
         assert!(
-            prefix.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            prefix
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "prefix must be lowercase hex: {prefix:?}"
         );
         assert!(
-            suffix.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "suffix must be lowercase hex: {suffix:?}"
         );
 

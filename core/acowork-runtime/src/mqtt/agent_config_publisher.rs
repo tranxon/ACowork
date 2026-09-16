@@ -31,7 +31,7 @@ use std::sync::Arc;
 use rumqttc::AsyncClient;
 use tokio::sync::Mutex;
 
-use acowork_core::mqtt_proto::{data_envelope, AgentConfig, DataEnvelope};
+use acowork_core::mqtt_proto::{AgentConfig, DataEnvelope, data_envelope};
 
 use crate::mqtt::client::{MqttQoS, RuntimeMqttClient};
 

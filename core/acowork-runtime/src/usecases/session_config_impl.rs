@@ -102,13 +102,14 @@ impl SessionConfigService for RuntimeSessionConfigService {
             }
         }
 
-        let sessions = self.sessions.read().map_err(|e| {
-            RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e))
-        })?;
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|e| RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e)))?;
 
-        let conv = sessions.get(session_id).ok_or_else(|| {
-            RuntimeError::Config(format!("Session not found: {}", session_id))
-        })?;
+        let conv = sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
 
         // apply_config is &self (interior mutability via Mutex), so no
         // additional locking is needed beyond the RwLock read guard.
@@ -144,13 +145,14 @@ impl SessionConfigService for RuntimeSessionConfigService {
     }
 
     async fn get_config(&self, session_id: &str) -> Result<SessionConfigSnapshot> {
-        let sessions = self.sessions.read().map_err(|e| {
-            RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e))
-        })?;
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|e| RuntimeError::Config(format!("SessionConfigs lock poisoned: {}", e)))?;
 
-        let conv = sessions.get(session_id).ok_or_else(|| {
-            RuntimeError::Config(format!("Session not found: {}", session_id))
-        })?;
+        let conv = sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
 
         // Read raw in-memory snapshot first.
         let mut snapshot = conv.config_snapshot();
@@ -220,7 +222,10 @@ mod tests {
     fn resolver_persisted_wins_over_caps_default() {
         let caps = empty_caps();
         let got = resolve_effective_reasoning_effort(Some(&caps), Some("high"));
-        assert_eq!(got, Some(acowork_core::providers::traits::ReasoningEffort::High));
+        assert_eq!(
+            got,
+            Some(acowork_core::providers::traits::ReasoningEffort::High)
+        );
     }
 
     #[test]
@@ -228,7 +233,10 @@ mod tests {
         let mut caps = empty_caps();
         caps.default_reasoning_effort = Some("medium".to_string());
         let got = resolve_effective_reasoning_effort(Some(&caps), None);
-        assert_eq!(got, Some(acowork_core::providers::traits::ReasoningEffort::Medium));
+        assert_eq!(
+            got,
+            Some(acowork_core::providers::traits::ReasoningEffort::Medium)
+        );
     }
 
     #[test]
@@ -236,7 +244,10 @@ mod tests {
         let mut caps = empty_caps();
         caps.supports_reasoning = Some(true);
         let got = resolve_effective_reasoning_effort(Some(&caps), None);
-        assert_eq!(got, Some(acowork_core::providers::traits::ReasoningEffort::Auto));
+        assert_eq!(
+            got,
+            Some(acowork_core::providers::traits::ReasoningEffort::Auto)
+        );
     }
 
     #[test]
@@ -261,7 +272,10 @@ mod tests {
         let mut caps = empty_caps();
         caps.default_reasoning_effort = Some("low".to_string());
         let got = resolve_effective_reasoning_effort(Some(&caps), Some("garbage"));
-        assert_eq!(got, Some(acowork_core::providers::traits::ReasoningEffort::Low));
+        assert_eq!(
+            got,
+            Some(acowork_core::providers::traits::ReasoningEffort::Low)
+        );
     }
 
     #[test]
@@ -269,6 +283,9 @@ mod tests {
         let mut caps = empty_caps();
         caps.default_reasoning_effort = Some("auto".to_string());
         let got = resolve_effective_reasoning_effort(Some(&caps), Some(""));
-        assert_eq!(got, Some(acowork_core::providers::traits::ReasoningEffort::Auto));
+        assert_eq!(
+            got,
+            Some(acowork_core::providers::traits::ReasoningEffort::Auto)
+        );
     }
 }

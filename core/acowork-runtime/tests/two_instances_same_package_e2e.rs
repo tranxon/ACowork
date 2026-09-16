@@ -51,10 +51,10 @@ use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use tokio::sync::mpsc;
 
 use acowork_core::mqtt_proto::{
-    control_command::Command, ChatMessage, ControlCommand, DataEnvelope,
+    ChatMessage, ControlCommand, DataEnvelope, control_command::Command,
 };
-use acowork_gateway::mqtt::{start_broker, GatewayMqttClient};
-use acowork_runtime::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
+use acowork_gateway::mqtt::{GatewayMqttClient, start_broker};
+use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
 
 /// Reserve a unique broker port per `cargo test` worker. See the long
 /// comment in `mqtt_e2e_full.rs::fresh_broker_port` for why this is
@@ -77,9 +77,7 @@ const INSTANCE_B: &str = "b2c3d4e5-2222-4222-8222-bbbbbbbbbbbb";
 /// `(topic, payload)` snapshot the broker replays + any later updates.
 /// Used to assert two distinct status topics exist after both runtimes
 /// come online.
-async fn spawn_status_collector(
-    port: u16,
-) -> mpsc::UnboundedReceiver<(String, Vec<u8>)> {
+async fn spawn_status_collector(port: u16) -> mpsc::UnboundedReceiver<(String, Vec<u8>)> {
     let mut opts = MqttOptions::new("e2e:two-instances:collector", "127.0.0.1", port);
     opts.set_clean_session(true);
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
@@ -138,7 +136,8 @@ fn runtime_connect_cfg<'a>(
         node_proxy_update_tx: None,
         http_advertise_endpoint: None,
         http_port: None,
-        work_dir: std::env::temp_dir().join(format!("acowork-two-instances-{}", uuid::Uuid::new_v4())),
+        work_dir: std::env::temp_dir()
+            .join(format!("acowork-two-instances-{}", uuid::Uuid::new_v4())),
         username: None,
         password: None,
     }
@@ -254,9 +253,8 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
 
         // Decode and sanity-check the payload landed on A.
         let env = DataEnvelope::decode(got_a.1.as_slice()).expect("A decodes");
-        if let Some(
-            acowork_core::mqtt_proto::data_envelope::Payload::ControlCommand(ctrl),
-        ) = env.payload
+        if let Some(acowork_core::mqtt_proto::data_envelope::Payload::ControlCommand(ctrl)) =
+            env.payload
         {
             match ctrl.command {
                 Some(Command::ChatMessage(msg)) => {

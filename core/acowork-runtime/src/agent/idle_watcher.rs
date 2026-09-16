@@ -63,14 +63,14 @@
 //! closure so tests can inject a deterministic state without spinning a
 //! real SessionManager.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use crate::mqtt::client::MqttQoS;
 use crate::mqtt::RuntimeMqttClient;
+use crate::mqtt::client::MqttQoS;
 
 /// Default idle timeout in seconds when neither the user override nor the
 /// manifest supplies one. Matches the legacy `GatewayConfig::timeouts::
@@ -218,11 +218,7 @@ impl IdleWatcherHandle {
     /// called — currently the dispatch path always calls it).
     pub fn last_inbound_at_ms(&self) -> Option<i64> {
         let v = self.last_inbound_at_ms.load(Ordering::Relaxed);
-        if v == 0 {
-            None
-        } else {
-            Some(v)
-        }
+        if v == 0 { None } else { Some(v) }
     }
 
     /// Last recorded frontend heartbeat timestamp, in milliseconds since
@@ -232,11 +228,7 @@ impl IdleWatcherHandle {
     /// observes a stale timestamp).
     pub fn last_heartbeat_at_ms(&self) -> Option<i64> {
         let v = self.last_heartbeat_at_ms.load(Ordering::Relaxed);
-        if v == 0 {
-            None
-        } else {
-            Some(v)
-        }
+        if v == 0 { None } else { Some(v) }
     }
 }
 
@@ -301,9 +293,7 @@ pub trait SessionActivityChecker: Send + Sync {
 /// The task is **detached** (via `tokio::spawn`); dropping the returned
 /// handle does not stop the watcher. The watcher always terminates by
 /// exiting the process, never by falling out of the loop.
-pub fn spawn_idle_watcher(
-    config: IdleWatcherConfig,
-) -> Option<IdleWatcherHandle> {
+pub fn spawn_idle_watcher(config: IdleWatcherConfig) -> Option<IdleWatcherHandle> {
     if config.effective_timeout_secs == NEVER_SLEEP {
         info!(
             agent_id = %config.agent_id,
@@ -414,10 +404,7 @@ pub(crate) async fn run_watcher(
         //    If the frontend has crashed/disconnected, the heartbeat
         //    simply stops arriving and we fall through to step 3 after
         //    `heartbeat_timeout_ms`.
-        let last_hb_ms = handle
-            .last_heartbeat_at_ms
-            .load(Ordering::Relaxed)
-            .max(0) as u64;
+        let last_hb_ms = handle.last_heartbeat_at_ms.load(Ordering::Relaxed).max(0) as u64;
         let now_ms = unix_now_ms() as u64;
         let hb_age_ms = now_ms.saturating_sub(last_hb_ms);
 
@@ -434,10 +421,7 @@ pub(crate) async fn run_watcher(
         // 3. Heartbeat is stale (or never arrived). Fall back to
         //    inbound-based accounting, but use the MAX of inbound and
         //    heartbeat so the most recent signal always wins.
-        let last_inbound_ms = handle
-            .last_inbound_at_ms
-            .load(Ordering::Relaxed)
-            .max(0) as u64;
+        let last_inbound_ms = handle.last_inbound_at_ms.load(Ordering::Relaxed).max(0) as u64;
         let last_activity_ms = last_inbound_ms.max(last_hb_ms);
         let elapsed_ms = now_ms.saturating_sub(last_activity_ms);
         let elapsed_secs = elapsed_ms / 1000;

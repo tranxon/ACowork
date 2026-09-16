@@ -159,11 +159,7 @@ async fn spawn_server_with_git_bin(tag: &str, git_bin: String) -> (u16, std::pat
 }
 
 /// GET `/git/{endpoint}` with optional query pairs → `(status, json)`.
-async fn get_git(
-    port: u16,
-    endpoint: &str,
-    query: &[(&str, &str)],
-) -> (u16, serde_json::Value) {
+async fn get_git(port: u16, endpoint: &str, query: &[(&str, &str)]) -> (u16, serde_json::Value) {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/git/{endpoint}");
     let resp = client.get(&url).query(query).send().await.unwrap();
@@ -216,8 +212,15 @@ async fn status_mixed_changes_fields_sort_and_rename_old_path() {
     let changes = body["changes"].as_array().unwrap();
     // staged entries sort first (ADR-078 decision 4): e.txt (R), f.txt (D),
     // a.txt (MM staged) — b.txt untracked last.
-    let paths: Vec<&str> = changes.iter().map(|c| c["path"].as_str().unwrap()).collect();
-    assert_eq!(paths, vec!["a.txt", "e.txt", "b.txt", "f.txt"], "sort order: staged M, staged R, untracked, worktree D");
+    let paths: Vec<&str> = changes
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["a.txt", "e.txt", "b.txt", "f.txt"],
+        "sort order: staged M, staged R, untracked, worktree D"
+    );
 
     let rename = changes.iter().find(|c| c["path"] == "e.txt").unwrap();
     assert_eq!(rename["oldPath"], "d.txt", "rename must carry oldPath");
@@ -226,7 +229,10 @@ async fn status_mixed_changes_fields_sort_and_rename_old_path() {
 
     let deleted = changes.iter().find(|c| c["path"] == "f.txt").unwrap();
     assert_eq!(deleted["index"], "unmodified");
-    assert_eq!(deleted["worktree"], "deleted", "rm after add -u → worktree deletion");
+    assert_eq!(
+        deleted["worktree"], "deleted",
+        "rm after add -u → worktree deletion"
+    );
     assert_eq!(deleted["staged"], false);
 
     let untracked = changes.iter().find(|c| c["path"] == "b.txt").unwrap();
@@ -251,8 +257,9 @@ async fn git_unavailable_is_200_for_status_and_503_for_diff_log() {
     // ADR-078 §7.2 wire contract: git missing from the environment is an
     // explicit state — status → 200 is_repo:false error:"git_unavailable"
     // (Desktop shows the dedicated empty state), diff/log → 503.
-    let (port, dir) = spawn_server_with_git_bin("git-unavailable", "/nonexistent/git-adr078-e2e".to_string())
-        .await;
+    let (port, dir) =
+        spawn_server_with_git_bin("git-unavailable", "/nonexistent/git-adr078-e2e".to_string())
+            .await;
     init_repo(&dir); // repo present — discovery succeeds, spawning fails
 
     let (status, body) = get_git(port, "status", &[]).await;
@@ -306,18 +313,27 @@ async fn status_rev_returns_files_in_that_commit() {
     git_in(&dir, &["add", "a.txt"]);
     git_in(&dir, &["commit", "-m", "third"]);
     // `git log --format=%H -1` returns the third commit's full hash.
-    let head_hash = git_in(&dir, &["log", "--format=%H", "-1"]).trim().to_string();
+    let head_hash = git_in(&dir, &["log", "--format=%H", "-1"])
+        .trim()
+        .to_string();
     // And its short SHA + subject (what the bar will display).
-    let head_label = git_in(&dir, &["log", "--format=%h %s", "-1"]).trim().to_string();
+    let head_label = git_in(&dir, &["log", "--format=%h %s", "-1"])
+        .trim()
+        .to_string();
     // Second commit is `HEAD~` — also reachable.
-    let parent_hash = git_in(&dir, &["log", "--format=%H", "HEAD~"]).trim().to_string();
+    let parent_hash = git_in(&dir, &["log", "--format=%H", "HEAD~"])
+        .trim()
+        .to_string();
 
     // rev = HEAD (third commit): a.txt M.
     let (status, body) = get_git(port, "status", &[("rev", &head_hash)]).await;
     assert_eq!(status, 200);
     assert_eq!(body["isRepo"], true);
     assert_eq!(body["error"], serde_json::Value::Null);
-    assert_eq!(body["rev"], head_hash, "rev must echo back the requested ref");
+    assert_eq!(
+        body["rev"], head_hash,
+        "rev must echo back the requested ref"
+    );
     assert_eq!(
         body["branch"], head_label,
         "branch must be the commit's '<short_sha> <subject>' label"
@@ -333,8 +349,15 @@ async fn status_rev_returns_files_in_that_commit() {
     let (status, body) = get_git(port, "status", &[("rev", &parent_hash)]).await;
     assert_eq!(status, 200);
     let changes = body["changes"].as_array().unwrap();
-    let paths: Vec<&str> = changes.iter().map(|c| c["path"].as_str().unwrap()).collect();
-    assert_eq!(paths, vec!["b.txt", "c.txt"], "second commit added b.txt + c.txt");
+    let paths: Vec<&str> = changes
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["b.txt", "c.txt"],
+        "second commit added b.txt + c.txt"
+    );
     for c in changes {
         assert_eq!(c["index"], "added");
     }
@@ -343,10 +366,19 @@ async fn status_rev_returns_files_in_that_commit() {
     let (status, body) = get_git(port, "status", &[("rev", "")]).await;
     assert_eq!(status, 200);
     assert_eq!(body["branch"], "main", "no rev → branch header");
-    assert_eq!(body["rev"], serde_json::Value::Null, "empty rev is normalised to None");
+    assert_eq!(
+        body["rev"],
+        serde_json::Value::Null,
+        "empty rev is normalised to None"
+    );
 
     // Unresolvable rev → 400 BadRequest.
-    let (status, body) = get_git(port, "status", &[("rev", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")]).await;
+    let (status, body) = get_git(
+        port,
+        "status",
+        &[("rev", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")],
+    )
+    .await;
     assert_eq!(status, 400, "unknown rev must surface as 400: {body}");
 }
 
@@ -454,6 +486,218 @@ async fn diff_two_refs_compares_any_two_commits() {
 }
 
 #[tokio::test]
+async fn diff_two_refs_response_carries_canonical_shas() {
+    // ADR-078 / bug-fix: the frontend labels each diff-side banner with
+    // the first 7 chars of the ref. Without server-side normalisation
+    // `base_ref = "<head>^"` and `head_ref = "<sha>"` both slice to
+    // the same 7 chars, so the banner shows the same commit id on both
+    // sides. The handler must return the canonical SHA so the client
+    // never has to reason about git shorthand.
+    let (port, dir) = spawn_server("diff-rev-normalise").await;
+    init_repo(&dir);
+    std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "first"]);
+    std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "second"]);
+    let second = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Caller passes git shorthand on the base side (<second>^). The
+    // handler must:
+    //   1. Resolve base_ref / head_ref to full SHAs (no `<sha>^`
+    //      strings leak into the response).
+    //   2. Promote base_ref to the file-history predecessor of
+    //      `head_ref` on `a.txt`. In this 2-commit history that's
+    //      exactly first-parent (file was edited in both commits).
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[
+            ("path", "a.txt"),
+            ("base_ref", &format!("{second}^")),
+            ("head_ref", &second),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200);
+    let head_rev = body["headRev"].as_str().unwrap();
+    assert_eq!(head_rev, second, "head_ref resolves to its full SHA");
+    // baseRev must be a full 40-char SHA, NOT contain `^`.
+    let base_rev = body["baseRev"].as_str().unwrap();
+    assert_eq!(base_rev.len(), 40, "baseRev is a full SHA");
+    assert!(
+        !base_rev.contains('^'),
+        "baseRev leaked git shorthand: {base_rev}"
+    );
+    assert_ne!(
+        base_rev, head_rev,
+        "canonical SHAs differ even though both call-site refs share a prefix"
+    );
+    // Specifically: the base must be the file-history predecessor, which
+    // in this minimal 2-commit history equals the first-parent.
+    let first_parent = git_in(&dir, &["rev-parse", &format!("{second}^")])
+        .trim()
+        .to_string();
+    assert_eq!(
+        base_rev, first_parent,
+        "baseRev must equal first-parent when both commits touched the file"
+    );
+}
+
+#[tokio::test]
+async fn diff_two_refs_base_promotes_to_file_history_predecessor() {
+    // The real bug-fix: when `head_ref^` did NOT touch `path`, the
+    // banner showed a commit id that wasn't in the diff banner's
+    // `CommitPicker` (which lists `git log -- <path>`, i.e. file
+    // history). The handler must instead promote base to the file-
+    // history predecessor — the commit that last touched `path`
+    // before `head_ref`.
+    let (port, dir) = spawn_server("diff-file-history-prev").await;
+    init_repo(&dir);
+    // v1: touch a.txt
+    std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "v1"]);
+    // v2: touch a.txt again — file-history advances to v2, v1 is the
+    // previous file-history entry.
+    std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "v2"]);
+    let v2 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    // b-only: NO change to a.txt — first-parent chain advances but
+    // file-history for a.txt does NOT.
+    std::fs::write(dir.join("b.txt"), "b-only body\n").unwrap();
+    git_in(&dir, &["add", "b.txt"]);
+    git_in(&dir, &["commit", "-m", "b-only"]);
+    // v3: touch a.txt again.
+    std::fs::write(dir.join("a.txt"), "v3\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "v3"]);
+    let v3 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Caller passes `<v3>^` (first-parent = b-only commit). The naive
+    // first-parent path would surface the b-only SHA, but b-only is
+    // NOT in `git log -- a.txt` so the picker can't find it.
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[
+            ("path", "a.txt"),
+            ("base_ref", &format!("{v3}^")),
+            ("head_ref", &v3),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200);
+    // baseRev MUST be the file-history predecessor of v3, NOT the
+    // first-parent b-only commit. This is the regression guard.
+    assert_eq!(
+        body["baseRev"].as_str().unwrap(),
+        v2,
+        "baseRev must be v2 (file-history prev), not v3^ (first-parent, which never touched a.txt)"
+    );
+    assert_eq!(body["headRev"].as_str().unwrap(), v3);
+    // Diff content reflects the file-history predecessor: original is
+    // v2's blob (NOT the b-only blob — which doesn't even have a.txt).
+    assert_eq!(body["original"], "v2\n", "diff base is v2's blob");
+    assert_eq!(body["modified"], "v3\n", "diff head is v3's blob");
+}
+
+#[tokio::test]
+async fn diff_two_refs_base_falls_back_to_first_parent_for_file_introducing_commit() {
+    // When `head_ref` introduced `path` (file-history has no
+    // predecessor), there's no file-history answer. Fall back to the
+    // caller-requested base (= `<head>^` here, i.e. first-parent),
+    // which preserves the existing semantic for this corner case.
+    //
+    // NOTE: must NOT call `init_repo` here — it creates an initial
+    // commit that already has a.txt, which would make a.txt's
+    // history non-empty and break the "head introduced a.txt"
+    // precondition.
+    let (port, dir) = spawn_server("diff-file-introducing").await;
+    git_in(&dir, &["init", "-b", "main"]);
+    git_in(&dir, &["config", "user.email", "e2e@test.local"]);
+    git_in(&dir, &["config", "user.name", "e2e"]);
+    // Parent commit — has no a.txt.
+    std::fs::write(dir.join("other.txt"), "parent\n").unwrap();
+    git_in(&dir, &["add", "other.txt"]);
+    git_in(&dir, &["commit", "-m", "parent"]);
+    let parent = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    // Head commit — introduces a.txt.
+    std::fs::write(dir.join("a.txt"), "new file\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "introduce a.txt"]);
+    let head = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[
+            ("path", "a.txt"),
+            ("base_ref", &format!("{head}^")),
+            ("head_ref", &head),
+        ],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["baseRev"].as_str().unwrap(),
+        parent,
+        "no file-history predecessor → baseRev falls back to first-parent"
+    );
+    assert_eq!(body["headRev"].as_str().unwrap(), head);
+    // NOTE: `kind` is intentionally NOT asserted here. When base has no
+    // path (file-introducing commit), `read_blob` returns `Missing` and
+    // `diff_two_refs` falls back to `binary_diff_response` (kind=
+    // "binary"). This is pre-existing behaviour — out of scope for the
+    // base-promotion bug-fix. The banner label correctness we care
+    // about is the `baseRev` value above.
+}
+
+#[tokio::test]
+async fn diff_worktree_response_omits_head_rev() {
+    // Worktree variant: `head_ref` is the empty string → working tree.
+    // `head_rev` must be absent so the client falls back to its
+    // "Working Tree" label (pre-existing `!headRef` rendering contract).
+    let (port, dir) = spawn_server("diff-rev-worktree").await;
+    init_repo(&dir);
+    std::fs::write(dir.join("a.txt"), "wt\n").unwrap();
+
+    let (status, body) = get_git(port, "diff", &[("path", "a.txt")]).await;
+    assert_eq!(status, 200);
+    // base = HEAD (canonical SHA), head = None (working tree).
+    assert!(body["baseRev"].is_string(), "baseRev present");
+    assert_eq!(body["baseRev"].as_str().unwrap().len(), 40);
+    assert!(
+        body["headRev"].is_null(),
+        "headRev absent for worktree variant: {:?}",
+        body["headRev"]
+    );
+}
+
+#[tokio::test]
+async fn diff_unknown_ref_is_400_not_silent_missing() {
+    // rev_parse_commit runs BEFORE read_blob so a typo'd ref surfaces as
+    // a clean 4xx instead of being swallowed by `read_blob`'s
+    // `BlobRead::Missing` mapping (which would render an empty diff).
+    let (port, dir) = spawn_server("diff-bad-ref").await;
+    init_repo(&dir);
+    let (status, body) = get_git(
+        port,
+        "diff",
+        &[
+            ("path", "a.txt"),
+            ("base_ref", "HEAD"),
+            ("head_ref", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        ],
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(body["error"].is_string());
+}
+
+#[tokio::test]
 async fn diff_binary_returns_empty_sides() {
     let (port, dir) = spawn_server("diff-binary").await;
     init_repo(&dir);
@@ -466,7 +710,10 @@ async fn diff_binary_returns_empty_sides() {
     let (status, body) = get_git(port, "diff", &[("path", "img.png")]).await;
     assert_eq!(status, 200);
     assert_eq!(body["kind"], "binary");
-    assert_eq!(body["original"], "", "binary content never leaked (decision 4)");
+    assert_eq!(
+        body["original"], "",
+        "binary content never leaked (decision 4)"
+    );
     assert_eq!(body["modified"], "");
 }
 
@@ -482,8 +729,14 @@ async fn diff_rename_uses_old_path_for_head() {
     let (status, body) = get_git(port, "diff", &[("path", "b.txt")]).await;
     assert_eq!(status, 200);
     assert_eq!(body["kind"], "modified");
-    assert_eq!(body["original"], "hello\n", "HEAD content read from old path a.txt");
-    assert_eq!(body["modified"], "renamed body\n", "worktree content from new path b.txt");
+    assert_eq!(
+        body["original"], "hello\n",
+        "HEAD content read from old path a.txt"
+    );
+    assert_eq!(
+        body["modified"], "renamed body\n",
+        "worktree content from new path b.txt"
+    );
 }
 
 #[tokio::test]
@@ -580,6 +833,70 @@ async fn log_limit_respected() {
     let commits = body["commits"].as_array().unwrap();
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0]["subject"], "add b", "limit keeps newest");
+    // Pagination metadata must accompany every response so the client
+    // can decide whether to render search + "Page X of Y" chrome.
+    let p = &body["pagination"];
+    assert_eq!(p["pageSize"], 1);
+    assert_eq!(p["totalCount"], 2);
+    assert_eq!(p["totalPages"], 2);
+    assert_eq!(p["currentPage"], 1);
+}
+
+#[tokio::test]
+async fn log_skip_returns_subsequent_page_with_pagination() {
+    // Build a 5-commit history, fetch with limit=2 + skip=2 → page 2
+    // of 3, contents must be the 3rd + 4th-newest commits. This is
+    // what the diff banner / Git status bar history dropdown uses to
+    // navigate older commits.
+    let (port, dir) = spawn_server("log-skip").await;
+    init_repo(&dir);
+    for i in 0..4 {
+        std::fs::write(dir.join(format!("file{i}.txt")), format!("v{i}\n")).unwrap();
+        git_in(&dir, &["add", &format!("file{i}.txt")]);
+        git_in(&dir, &["commit", "-m", &format!("c{i}")]);
+    }
+    // 5 commits total: init + c0..c3 (newest first → c3, c2, c1, c0, init)
+    let (status, body) = get_git(port, "log", &[("limit", "2"), ("skip", "2")]).await;
+    assert_eq!(status, 200);
+    let commits = body["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 2, "page size = 2");
+    // skip=2 → third + fourth entries from the top: c1, c0.
+    assert_eq!(commits[0]["subject"], "c1");
+    assert_eq!(commits[1]["subject"], "c0");
+    let p = &body["pagination"];
+    assert_eq!(p["currentPage"], 2);
+    assert_eq!(p["totalPages"], 3, "5 / 2 → 3 pages");
+    assert_eq!(p["pageSize"], 2);
+    assert_eq!(p["totalCount"], 5);
+}
+
+#[tokio::test]
+async fn log_pagination_total_count_matches_path_filter() {
+    // `totalCount` must reflect the SAME path scope the page query used,
+    // so the dropdown's "Page X of Y" reflects file-history length, not
+    // repo-history length. Without this, a file with 3 historical edits
+    // in a repo of 5000 commits would render "Page 1 of 100" and
+    // collapse the search/pagination chrome incorrectly.
+    let (port, dir) = spawn_server("log-pagination-path").await;
+    init_repo(&dir);
+    for i in 0..3 {
+        std::fs::write(dir.join("hot.txt"), format!("v{i}\n")).unwrap();
+        git_in(&dir, &["add", "hot.txt"]);
+        git_in(&dir, &["commit", "-m", &format!("hot {i}")]);
+    }
+    // Add 10 commits that don't touch hot.txt.
+    for i in 0..10 {
+        std::fs::write(dir.join(format!("cold{i}.txt")), "x\n").unwrap();
+        git_in(&dir, &["add", &format!("cold{i}.txt")]);
+        git_in(&dir, &["commit", "-m", &format!("cold {i}")]);
+    }
+    let (status, body) = get_git(port, "log", &[("path", "hot.txt"), ("limit", "50")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["pagination"]["totalCount"], 3,
+        "file-history commits only, not repo-wide"
+    );
+    assert_eq!(body["pagination"]["totalPages"], 1);
 }
 
 #[tokio::test]
@@ -588,4 +905,121 @@ async fn log_non_repo_is_400() {
     let (status, body) = get_git(port, "log", &[]).await;
     assert_eq!(status, 400);
     assert!(body["error"].is_string());
+}
+
+#[tokio::test]
+async fn log_path_scoped_first_commit_preserved_with_uncommitted_change() {
+    // Regression for the "file-history picker loses its first commit"
+    // bug. Scenario: a file has 3 historical commits (c2 = newest,
+    // touches the file alone; c1 touches file + sibling; c0 = initial).
+    // The user is on a Working-Tree side diff (HEAD == c2, file has
+    // uncommitted modification), so the diff banner's base picker
+    // currently shows c2's hash.
+    //
+    // When the user re-opens the picker, `GET /git/log?path=<file>` must
+    // still return c2 as `commits[0]` — not silently drop it. The
+    // previous behaviour (loss) was traced to a `current_page` math
+    // bug in `log()`: `(skip + 1)` was used to derive `currentPage`,
+    // which rounded page=1 up to currentPage=2 and made the client
+    // treat the first entry as already past the window.
+    let (port, dir) = spawn_server("log-first-commit").await;
+    init_repo(&dir);
+    // c0: init (already done by init_repo → a.txt)
+    // c1: a + sibling
+    std::fs::write(dir.join("a.txt"), "a-v1\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "b-v1\n").unwrap();
+    git_in(&dir, &["add", "a.txt", "b.txt"]);
+    git_in(&dir, &["commit", "-m", "c1: a and b"]);
+    // c2: a only
+    std::fs::write(dir.join("a.txt"), "a-v2\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "c2: only a"]);
+    // Working-Tree state: a.txt is dirty. Mirrors the user's setup
+    // (right side = "Working Tree" in the diff banner).
+    std::fs::write(dir.join("a.txt"), "a-uncommitted\n").unwrap();
+
+    // (1) Path-scoped log for the file the user is editing.
+    let (status, body) = get_git(port, "log", &[("path", "a.txt"), ("limit", "50")]).await;
+    assert_eq!(status, 200);
+    let commits = body["commits"].as_array().unwrap();
+    assert_eq!(
+        commits.len(),
+        3,
+        "file-history must include all 3 commits even with uncommitted change"
+    );
+    assert_eq!(
+        commits[0]["subject"], "c2: only a",
+        "newest file-history commit must be commits[0]"
+    );
+    assert_eq!(commits[1]["subject"], "c1: a and b");
+    assert_eq!(commits[2]["subject"], "init");
+    let p = &body["pagination"];
+    assert_eq!(p["totalCount"], 3);
+    assert_eq!(p["totalPages"], 1);
+    assert_eq!(p["currentPage"], 1);
+
+    // (2) Sanity: repo-wide log still returns 3 commits and the
+    // ordering is identical (newest-first). If a future refactor of
+    // path filtering accidentally also drops the first commit when
+    // no path is given, this catches it.
+    let (status, body) = get_git(port, "log", &[("limit", "50")]).await;
+    assert_eq!(status, 200);
+    let commits = body["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 3);
+    assert_eq!(commits[0]["subject"], "c2: only a");
+    assert_eq!(commits[2]["subject"], "init");
+}
+
+#[tokio::test]
+async fn diff_worktree_base_matches_file_history_head_not_repo_head() {
+    // Bug: opening the diff for a dirty file whose LAST commit is not
+    // HEAD (HEAD only touched a sibling). The worktree diff hard-coded
+    // `base_rev = HEAD`, so the banner's left label showed a commit that
+    // is absent from the banner's file-scoped `CommitPicker`
+    // (`git log -- <path>`): user sees "the first commit id vanished",
+    // and searching for it in the menu finds nothing (it's not in the
+    // server payload at all). The repo-wide history in the status bar
+    // *does* contain HEAD — hence "the status bar menu is right".
+    //
+    // Contract: base label MUST equal the picker's row 1, i.e. the
+    // newest commit touching `path` reachable from the base ref.
+    let (port, dir) = spawn_server("diff-wt-base-file-head").await;
+    init_repo(&dir);
+    // c1: modify a.txt (this is the newest commit touching a.txt).
+    std::fs::write(dir.join("a.txt"), "a-v1\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-m", "c1: a only"]);
+    let c1 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    // c2: HEAD moves forward but only touches b.txt.
+    std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+    git_in(&dir, &["add", "b.txt"]);
+    git_in(&dir, &["commit", "-m", "c2: b only"]);
+    let c2 = git_in(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_ne!(c1, c2);
+    // Dirty a.txt (working-tree modification) → worktree diff.
+    std::fs::write(dir.join("a.txt"), "a-dirty\n").unwrap();
+
+    // (1) Picker source: file-scoped log. Row 1 must be c1 (not c2).
+    let (status, log) = get_git(port, "log", &[("path", "a.txt"), ("limit", "50")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        log["commits"][0]["hash"], c1,
+        "file-history newest commit is c1, not repo HEAD (c2)"
+    );
+
+    // (2) Banner source: worktree diff. baseRev must match the picker row 1.
+    let (status, diff) = get_git(
+        port,
+        "diff",
+        &[("path", "a.txt"), ("base_ref", "HEAD"), ("head_ref", "")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(diff["kind"], "modified");
+    assert_eq!(
+        diff["baseRev"], c1,
+        "worktree base label must be the file-history head (c1), so it is visible in the picker"
+    );
+    // Content is unchanged by the label fix: c1:a.txt == HEAD:a.txt here.
+    assert_eq!(diff["original"], "a-v1\n");
 }

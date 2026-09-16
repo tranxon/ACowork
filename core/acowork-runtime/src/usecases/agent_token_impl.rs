@@ -2,8 +2,8 @@
 //!
 //! ADR-028 / ADR-040: this is the sole source of truth for token accounting.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use acowork_core::providers::traits::UsageInfo;
@@ -44,10 +44,7 @@ impl AgentTokenService for RuntimeAgentTokenService {
         self.core.accumulate_llm_usage(usage);
     }
 
-    fn merge_token_totals(
-        &self,
-        scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
-    ) {
+    fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>)) {
         self.core.merge_token_totals(scanned);
     }
 
@@ -100,10 +97,7 @@ impl InMemoryAgentTokenService {
 #[cfg(test)]
 impl AgentTokenService for InMemoryAgentTokenService {
     fn accumulate_llm_usage(&self, _: &UsageInfo) {}
-    fn merge_token_totals(
-        &self,
-        scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
-    ) {
+    fn merge_token_totals(&self, scanned: (Option<u64>, Option<u64>, Option<u64>, Option<u64>)) {
         let mut t = self.totals.lock().unwrap();
         if let Some(input) = scanned.0 {
             t.0 = t.0.max(input);
@@ -140,9 +134,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use acowork_core::AgentManifest;
     use acowork_core::providers::mock::MockProvider;
     use acowork_core::providers::traits::UsageInfo;
-    use acowork_core::AgentManifest;
 
     use crate::agent::agent_core::AgentCore;
     use crate::config::RuntimeConfig;

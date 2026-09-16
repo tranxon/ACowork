@@ -156,7 +156,10 @@ pub trait AttachmentService: Send + Sync {
     /// - dedup detection (no re-write when any on-disk entry already
     ///   addresses the same `document_id` — the first-uploaded name
     ///   wins).
-    async fn upload_file(&self, params: UploadFileParams) -> Result<UploadedFileResponse, AttachmentError>;
+    async fn upload_file(
+        &self,
+        params: UploadFileParams,
+    ) -> Result<UploadedFileResponse, AttachmentError>;
 
     /// `GET /files/{document_id}` — read a previously-uploaded blob.
     ///
@@ -263,9 +266,7 @@ pub fn sanitize_stem(filename: &str) -> String {
     let mut cleaned: String = without_ext
         .chars()
         .map(|c| {
-            if c.is_control()
-                || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
-            {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
                 '_'
             } else {
                 c
@@ -280,8 +281,8 @@ pub fn sanitize_stem(filename: &str) -> String {
 
     // (5) dodge Windows reserved device names.
     const RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if RESERVED.iter().any(|r| cleaned.eq_ignore_ascii_case(r)) {
         cleaned.push('_');
@@ -349,8 +350,7 @@ pub fn name_matches_document_id(name: &str, document_id: &str) -> bool {
     // don't try to distinguish "stem ends in _" from "single
     // separator" since `document_id` is content-derived (48+16 bits
     // of entropy) and dedup guarantees one match per id.
-    bare.len() > document_id.len() + 1
-        && bare.ends_with(&format!("_{document_id}"))
+    bare.len() > document_id.len() + 1 && bare.ends_with(&format!("_{document_id}"))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -506,7 +506,10 @@ mod tests {
         ] {
             let once = sanitize_stem(raw);
             let twice = sanitize_stem(&once);
-            assert_eq!(once, twice, "not idempotent for {raw:?}: {once:?} vs {twice:?}");
+            assert_eq!(
+                once, twice,
+                "not idempotent for {raw:?}: {once:?} vs {twice:?}"
+            );
         }
     }
 

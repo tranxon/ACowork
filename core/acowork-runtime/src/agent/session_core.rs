@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_approval::ApprovalHandle;
@@ -123,13 +123,11 @@ pub(crate) struct SessionCore {
     /// held the handle for the entire session lifetime, leaving subsequent
     /// requests perpetually Cancelled once any prior request was stopped.
     /// The slot design makes that bug structurally impossible.
-    pub(crate) current_cancel_handle:
-        Arc<parking_lot::Mutex<CancelHandle>>,
+    pub(crate) current_cancel_handle: Arc<parking_lot::Mutex<CancelHandle>>,
 
     /// Watch sender for session status (ADR-014).
     /// None for CLI-only sessions.
-    pub(crate) status_tx:
-        Option<tokio::sync::watch::Sender<SessionStatus>>,
+    pub(crate) status_tx: Option<tokio::sync::watch::Sender<SessionStatus>>,
 
     /// Shared session status for 429 retry UX.
     ///
@@ -138,16 +136,14 @@ pub(crate) struct SessionCore {
     /// [`crate::providers::reliable::ReliableProvider`] (retry pause/resume).
     /// Cloned to the ReliableProvider so it can emit `SessionStateChanged`
     /// events during long retry waits.
-    pub(crate) retry_session_status:
-        Option<Arc<std::sync::RwLock<SessionStatus>>>,
+    pub(crate) retry_session_status: Option<Arc<std::sync::RwLock<SessionStatus>>>,
 
     /// Active retry-wait handle for 429 UX.
     ///
     /// Initialized in `new()`. [`session::SessionTask`] checks this when
     /// handling `ContinueExecution` to trigger `skip_notify` and wake the
     /// retry loop.
-    pub(crate) retry_wait_handle:
-        Option<crate::providers::reliable::RetryWaitHandle>,
+    pub(crate) retry_wait_handle: Option<crate::providers::reliable::RetryWaitHandle>,
 
     /// Per-session workspace ID, held by `SessionHandle`.
     /// Defaults to `"__agent_home__"`. Updated synchronously by SessionManager
@@ -344,9 +340,9 @@ impl SessionCore {
             .unwrap_or(0);
         // compare_exchange prevents overwriting a value the writer thread
         // may have set between our load (cached==0) and this store.
-        let _ = self
-            .committed_lines
-            .compare_exchange(0, count, Ordering::Relaxed, Ordering::Relaxed);
+        let _ =
+            self.committed_lines
+                .compare_exchange(0, count, Ordering::Relaxed, Ordering::Relaxed);
         self.committed_lines.load(Ordering::Relaxed)
     }
 
@@ -558,7 +554,7 @@ impl SessionCore {
     ///    `enable/disable_notify` front/back suppression no longer applies to
     ///    the streaming push).
     ///  - ADR-021: emit the legacy `NewDataAvailable` pure signal, but only
-        // ADR-035: stream_delta is pushed unconditionally.
+    // ADR-035: stream_delta is pushed unconditionally.
     ///    path is retained in parallel during the migration (Phase 1).
     pub(crate) fn notify_new_data_available(&self) {
         // 500ms throttle — shared by both the new StreamDelta push and the
@@ -620,7 +616,8 @@ impl SessionCore {
                 let offset = self.stream_push_offset.load(Ordering::Relaxed);
                 if total > offset {
                     // Collect only the new chars (the delta) — bounded alloc (D8).
-                    let new_chars: Vec<char> = sl.accumulated_content.chars().skip(offset).collect();
+                    let new_chars: Vec<char> =
+                        sl.accumulated_content.chars().skip(offset).collect();
                     let mut consumed: usize = 0; // chars consumed by complete lines
                     let mut line_start: usize = 0;
                     let role = sl.role.clone();
@@ -656,7 +653,8 @@ impl SessionCore {
                     // buffer for re-examination on the next tick; when
                     // `force` is true, the cursor consumes it as well.
                     if consumed > 0 {
-                        self.stream_push_offset.fetch_add(consumed, Ordering::Relaxed);
+                        self.stream_push_offset
+                            .fetch_add(consumed, Ordering::Relaxed);
                     }
                 }
             }
@@ -745,8 +743,7 @@ impl SessionCore {
             wiring,
         );
         let retry_config = crate::providers::reliable::RetryConfig::from(&config.timeouts.retry);
-        let mut reliable =
-            crate::providers::reliable::ReliableProvider::new(raw, retry_config);
+        let mut reliable = crate::providers::reliable::ReliableProvider::new(raw, retry_config);
 
         // Wire up 429 retry UX
         if let Some(status) = &self.retry_session_status
@@ -772,8 +769,8 @@ impl SessionCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
 
     // ── Helpers ────────────────────────────────────────────────────────
@@ -810,9 +807,7 @@ mod tests {
         let streaming_lines: StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let committed_lines = Arc::new(AtomicUsize::new(0));
-        let current_work_dir = Arc::new(RwLock::new(Some(
-            work_dir.to_string_lossy().to_string(),
-        )));
+        let current_work_dir = Arc::new(RwLock::new(Some(work_dir.to_string_lossy().to_string())));
 
         let core = SessionCore::new(
             session_id.to_string(),
@@ -879,7 +874,11 @@ mod tests {
         core.try_send_stream_delta(false);
         let evt = rx.try_recv().unwrap();
         match evt.event {
-            ChunkEvent::StreamDelta { session_id, lines, seq } => {
+            ChunkEvent::StreamDelta {
+                session_id,
+                lines,
+                seq,
+            } => {
                 assert_eq!(session_id, "s1");
                 // Per-session seq must be monotonically increasing across
                 // emits. `next_seq` uses `fetch_add(1)` which returns the
@@ -935,7 +934,10 @@ mod tests {
                     .into_iter()
                     .map(|(role, _mid, content)| (role, content))
                     .collect();
-                assert_eq!(projected, vec![("assistant".to_string(), "partial".to_string())]);
+                assert_eq!(
+                    projected,
+                    vec![("assistant".to_string(), "partial".to_string())]
+                );
             }
             _other => panic!("expected StreamDelta, got non-stream_delta event"),
         }
@@ -959,11 +961,18 @@ mod tests {
         );
         core.try_send_stream_delta(false);
         // Drain the thought line.
-        assert!(matches!(rx.try_recv().unwrap().event, ChunkEvent::StreamDelta { .. }));
+        assert!(matches!(
+            rx.try_recv().unwrap().event,
+            ChunkEvent::StreamDelta { .. }
+        ));
 
         // Simulate a role transition: flush + new assistant line (offset resets).
         core.flush_and_new_streaming_line("assistant", None);
-        core.streaming_lines.write().unwrap().get_mut("s1").unwrap()
+        core.streaming_lines
+            .write()
+            .unwrap()
+            .get_mut("s1")
+            .unwrap()
             .accumulated_content
             .push_str("assistant line\n");
 
@@ -979,7 +988,10 @@ mod tests {
                     .into_iter()
                     .map(|(role, _mid, content)| (role, content))
                     .collect();
-                assert_eq!(projected, vec![("assistant".to_string(), "assistant line".to_string())]);
+                assert_eq!(
+                    projected,
+                    vec![("assistant".to_string(), "assistant line".to_string())]
+                );
             }
             _other => panic!("expected StreamDelta, got non-stream_delta event"),
         }
@@ -1011,7 +1023,9 @@ mod tests {
         core.force_flush_stream_delta();
         let evt = rx.try_recv().unwrap();
         match evt.event {
-            ChunkEvent::StreamDelta { session_id, lines, .. } => {
+            ChunkEvent::StreamDelta {
+                session_id, lines, ..
+            } => {
                 assert_eq!(session_id, "s1");
                 let projected: Vec<(String, String)> = lines
                     .into_iter()
@@ -1140,13 +1154,10 @@ mod tests {
         tokio::task::yield_now().await;
         handle.skip_notify.notify_one();
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            wait_task,
-        )
-        .await
-        .expect("Timeout: skip_notify did not wake the waiter")
-        .expect("Wait task panicked");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), wait_task)
+            .await
+            .expect("Timeout: skip_notify did not wake the waiter")
+            .expect("Wait task panicked");
         assert_eq!(result, "woken", "skip_notify must wake the waiting task");
     }
 

@@ -12,8 +12,8 @@
 
 use std::time::Duration;
 
-use acowork_core::rag::RagProvider;
 use acowork_core::RagToolConfig;
+use acowork_core::rag::RagProvider;
 use async_trait::async_trait;
 
 use super::types::{AnnotatedRagResult, RagQueryRequest, RagQueryResponse, RagResultItem};

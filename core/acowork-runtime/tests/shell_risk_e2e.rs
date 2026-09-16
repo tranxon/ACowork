@@ -29,15 +29,17 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     let agent_config = Arc::new(tokio::sync::Mutex::new(None));
     let attachment = Arc::new(tokio::sync::Mutex::new(None));
     let session_config = Arc::new(tokio::sync::Mutex::new(None));
-    let consolidation_timer: Arc<std::sync::RwLock<Option<Arc<acowork_runtime::memory::ConsolidationTimer>>>> =
-        Arc::new(std::sync::RwLock::new(None));
+    let consolidation_timer: Arc<
+        std::sync::RwLock<Option<Arc<acowork_runtime::memory::ConsolidationTimer>>>,
+    > = Arc::new(std::sync::RwLock::new(None));
     let rag_provider: Arc<std::sync::RwLock<Option<Arc<dyn acowork_core::rag::RagProvider>>>> =
         Arc::new(std::sync::RwLock::new(None));
     let debug_service = Arc::new(tokio::sync::Mutex::new(None));
-    let workspace_resolver: Arc<std::sync::RwLock<acowork_runtime::tools::workspace_resolver::WorkspaceResolver>> =
-        Arc::new(std::sync::RwLock::new(
-            acowork_runtime::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
-        ));
+    let workspace_resolver: Arc<
+        std::sync::RwLock<acowork_runtime::tools::workspace_resolver::WorkspaceResolver>,
+    > = Arc::new(std::sync::RwLock::new(
+        acowork_runtime::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
+    ));
     let session_manager_slot: Arc<
         tokio::sync::RwLock<
             Option<Arc<tokio::sync::Mutex<acowork_runtime::agent::session::SessionManager>>>,
@@ -90,8 +92,13 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         .expect("GET should not error");
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["has_user_override"], true, "first GET must materialize the user template");
-    let content = body["content"].as_str().expect("content should be a string");
+    assert_eq!(
+        body["has_user_override"], true,
+        "first GET must materialize the user template"
+    );
+    let content = body["content"]
+        .as_str()
+        .expect("content should be a string");
     assert!(!content.is_empty(), "default content should not be empty");
     // The materialized template must parse as valid TOML and contain no
     // active user rules (the embedded defaults are comments).
@@ -105,7 +112,8 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     println!("[e2e] default content len = {}", content.len());
 
     // Step 2: PUT a valid override
-    let new_rules = "[[rules]]\ncommand = \"echo\"\nrisk = \"Low\"\nreason = \"safe test override\"\n";
+    let new_rules =
+        "[[rules]]\ncommand = \"echo\"\nrisk = \"Low\"\nreason = \"safe test override\"\n";
     let resp = client
         .put(format!("{}/agents/{}/shell-risk-rules", base, INSTANCE_ID))
         .json(&serde_json::json!({ "content": new_rules }))
@@ -123,8 +131,13 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["has_user_override"], true);
-    let content = body["content"].as_str().expect("content should be a string");
-    assert_eq!(content, new_rules, "GET should return the override verbatim");
+    let content = body["content"]
+        .as_str()
+        .expect("content should be a string");
+    assert_eq!(
+        content, new_rules,
+        "GET should return the override verbatim"
+    );
 
     // Step 4: PUT invalid TOML — should be rejected with 400
     let resp = client

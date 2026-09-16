@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use acowork_memory::admin::{
-    AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
-    AdminStats, MemoryAdminService,
+    AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail, AdminStats, MemoryAdminService,
 };
 use serde::Serialize;
 
@@ -221,10 +220,7 @@ pub(crate) fn get_stats(
 }
 
 /// Look up a single memory node by numeric ID.
-pub(crate) fn get_node(
-    admin: Option<&Arc<dyn MemoryAdminService>>,
-    node_id: u64,
-) -> GetNodeOutput {
+pub(crate) fn get_node(admin: Option<&Arc<dyn MemoryAdminService>>, node_id: u64) -> GetNodeOutput {
     let svc = match admin {
         Some(s) => s,
         None => {
@@ -267,10 +263,7 @@ pub(crate) fn get_node(
 }
 
 /// Delete a memory node by ID. Returns true if the node was found and deleted.
-pub(crate) fn delete_node(
-    admin: Option<&Arc<dyn MemoryAdminService>>,
-    node_id: u64,
-) -> bool {
+pub(crate) fn delete_node(admin: Option<&Arc<dyn MemoryAdminService>>, node_id: u64) -> bool {
     let svc = match admin {
         Some(s) => s,
         None => return false,
@@ -284,9 +277,8 @@ pub(crate) fn create_node(
     label: &str,
     properties: &HashMap<String, serde_json::Value>,
 ) -> crate::error::Result<u64> {
-    let svc = admin.ok_or_else(|| {
-        crate::error::RuntimeError::Memory("memory store unavailable".into())
-    })?;
+    let svc = admin
+        .ok_or_else(|| crate::error::RuntimeError::Memory("memory store unavailable".into()))?;
     svc.create_node(label, properties)
         .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
 }
@@ -297,9 +289,8 @@ pub(crate) fn update_node(
     node_id: u64,
     properties: &HashMap<String, serde_json::Value>,
 ) -> crate::error::Result<()> {
-    let svc = admin.ok_or_else(|| {
-        crate::error::RuntimeError::Memory("memory store unavailable".into())
-    })?;
+    let svc = admin
+        .ok_or_else(|| crate::error::RuntimeError::Memory("memory store unavailable".into()))?;
     svc.update_node(node_id, properties)
         .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
 }

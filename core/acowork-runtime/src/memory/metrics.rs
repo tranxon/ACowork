@@ -481,7 +481,9 @@ mod tests {
 
         let alerts = agg.record_retrieval(&make_metrics(0.8, true, 0));
         // Now 3/5 = 60% abstention
-        let has_alert = alerts.iter().any(|a| a.alert_type == MetricsAlertType::HighAbstentionRate);
+        let has_alert = alerts
+            .iter()
+            .any(|a| a.alert_type == MetricsAlertType::HighAbstentionRate);
         assert!(has_alert, "Should alert on high abstention rate");
     }
 
@@ -509,7 +511,9 @@ mod tests {
             let alerts = agg.record_retrieval(&make_metrics(0.3, false, 0));
             // Alert only fires when consecutive count reaches the limit
             if agg.total_retrievals() >= 3 {
-                let has_alert = alerts.iter().any(|a| a.alert_type == MetricsAlertType::LowNrr);
+                let has_alert = alerts
+                    .iter()
+                    .any(|a| a.alert_type == MetricsAlertType::LowNrr);
                 assert!(has_alert, "Should alert on consecutive low NRR");
             }
         }

@@ -1180,7 +1180,13 @@
     "headLabel": "HEAD",
     "workingTreeLabel": "作業ツリー",
     "commitPickerLabel": "リビジョンを選択",
-    "commitPickerLoading": "コミットを読み込み中…"
+    "commitPickerLoading": "コミットを読み込み中…",
+    "commitPickerSearchPlaceholder": "メッセージ・作者・ハッシュで検索",
+    "commitPickerShowing": "{{start}}-{{end}} / 全 {{total}} 件",
+    "commitPickerNoMatches": "一致する Commit がありません",
+    "commitPickerPageOf": "ページ {{current}} / {{total}}",
+    "commitPickerPrevPage": "前のページ",
+    "commitPickerNextPage": "次のページ"
   },
   "fileTree": {
     "deleteConfirmOk": "削除",

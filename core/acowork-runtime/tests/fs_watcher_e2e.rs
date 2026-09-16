@@ -16,15 +16,17 @@
 //! 4. Workspace added via CRUD-style resolver re-sync → its changes
 //!    are pushed too (the path the HTTP `create_workspace` hook takes)
 
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use acowork_core::mqtt_proto::{DataEnvelope, FsChangeKind, data_envelope};
 use acowork_gateway::mqtt::start_broker;
 use acowork_runtime::http::server::SharedMqttClientSlot;
 use acowork_runtime::mqtt::{MqttConnectConfig, RuntimeMqttClient, new_shared_cache};
-use acowork_runtime::tools::workspace_resolver::{WorkspaceAccess, WorkspaceDir, WorkspaceResolver};
+use acowork_runtime::tools::workspace_resolver::{
+    WorkspaceAccess, WorkspaceDir, WorkspaceResolver,
+};
 use acowork_runtime::workspace::WorkspaceWatcherSet;
 use prost::Message;
 use rumqttc::AsyncClient;
@@ -78,7 +80,8 @@ async fn spawn_fs_subscriber(
                     let Ok(envelope) = DataEnvelope::decode(p.payload.as_ref()) else {
                         continue;
                     };
-                    if let Some(data_envelope::Payload::WorkspaceFsChangeEvent(ev)) = envelope.payload
+                    if let Some(data_envelope::Payload::WorkspaceFsChangeEvent(ev)) =
+                        envelope.payload
                     {
                         let _ = tx.send(ev);
                     }
@@ -92,7 +95,8 @@ async fn spawn_fs_subscriber(
 }
 
 fn temp_workspace(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("acowork-fs-e2e-{}-{}", name, uuid::Uuid::new_v4()));
+    let dir =
+        std::env::temp_dir().join(format!("acowork-fs-e2e-{}-{}", name, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("temp workspace dir");
     dir
 }
@@ -112,7 +116,11 @@ fn resolver_for(dirs: Vec<(&str, std::path::PathBuf)>) -> WorkspaceResolver {
 }
 
 /// True when the collected events contain a change of `kind` on `path`.
-fn saw(events: &[acowork_core::mqtt_proto::WorkspaceFsChangeEvent], path: &str, kind: FsChangeKind) -> bool {
+fn saw(
+    events: &[acowork_core::mqtt_proto::WorkspaceFsChangeEvent],
+    path: &str,
+    kind: FsChangeKind,
+) -> bool {
     events
         .iter()
         .flat_map(|e| e.changes.iter())
@@ -254,7 +262,10 @@ fn fs_watcher_full_chain_e2e() {
         assert!(
             saw(&ws_a_events, "created.txt", FsChangeKind::Created),
             "created.txt must surface as Created, got {:?}",
-            ws_a_events.iter().flat_map(|e| e.changes.iter().map(|c| (c.path.clone(), c.kind))).collect::<Vec<_>>()
+            ws_a_events
+                .iter()
+                .flat_map(|e| e.changes.iter().map(|c| (c.path.clone(), c.kind)))
+                .collect::<Vec<_>>()
         );
         assert!(
             saw(&ws_a_events, "external.txt", FsChangeKind::Modified),
@@ -337,7 +348,8 @@ async fn spawn_fs_subscriber_for(
                     let Ok(envelope) = DataEnvelope::decode(p.payload.as_ref()) else {
                         continue;
                     };
-                    if let Some(data_envelope::Payload::WorkspaceFsChangeEvent(ev)) = envelope.payload
+                    if let Some(data_envelope::Payload::WorkspaceFsChangeEvent(ev)) =
+                        envelope.payload
                     {
                         let _ = tx.send(ev);
                     }
@@ -386,7 +398,8 @@ fn fs_watcher_two_instances_route_to_separate_topics() {
             node_proxy_update_tx: None,
             http_advertise_endpoint: None,
             http_port: None,
-            work_dir: std::env::temp_dir().join(format!("acowork-fs-e2e-A-{}", uuid::Uuid::new_v4())),
+            work_dir: std::env::temp_dir()
+                .join(format!("acowork-fs-e2e-A-{}", uuid::Uuid::new_v4())),
             username: None,
             password: None,
         })
@@ -411,7 +424,8 @@ fn fs_watcher_two_instances_route_to_separate_topics() {
             node_proxy_update_tx: None,
             http_advertise_endpoint: None,
             http_port: None,
-            work_dir: std::env::temp_dir().join(format!("acowork-fs-e2e-B-{}", uuid::Uuid::new_v4())),
+            work_dir: std::env::temp_dir()
+                .join(format!("acowork-fs-e2e-B-{}", uuid::Uuid::new_v4())),
             username: None,
             password: None,
         })

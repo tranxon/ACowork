@@ -25,11 +25,11 @@
 //! `acowork-runtime/tests/fs_watcher_e2e.rs`.
 
 use acowork_runtime::tools::workspace_resolver::WorkspaceResolver;
+use acowork_runtime::usecases::RuntimeWorkspaceMutationService;
 use acowork_runtime::usecases::workspace_mutation::{
     WorkspaceEntryInput, WorkspaceMutationResponse, WorkspaceMutationService,
 };
 use acowork_runtime::usecases::workspace_query::WorkspaceError;
-use acowork_runtime::usecases::RuntimeWorkspaceMutationService;
 
 /// Build the canonical `<work_dir>/config/agent_workspaces.json` path
 /// used by both the mutation service and the resolver. Mirrors
@@ -96,10 +96,7 @@ fn create_workspace_survives_resolver_restart() {
         // Sanity: disk file exists with the new entry inside.
         let disk = read_disk(&work_dir);
         assert_eq!(disk["additional_dirs"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            disk["additional_dirs"][0]["id"].as_str(),
-            Some(id.as_str())
-        );
+        assert_eq!(disk["additional_dirs"][0]["id"].as_str(), Some(id.as_str()));
         assert_eq!(
             disk["additional_dirs"][0]["alias"].as_str(),
             Some("project-a")
@@ -223,7 +220,8 @@ fn delete_workspace_survives_resolver_restart() {
     }));
     let id = created_id(&resp.expect("create"));
 
-    rt.block_on(svc.delete_workspace(&id)).expect("delete succeeds");
+    rt.block_on(svc.delete_workspace(&id))
+        .expect("delete succeeds");
 
     // Disk must reflect the deletion immediately.
     let disk = read_disk(&work_dir);

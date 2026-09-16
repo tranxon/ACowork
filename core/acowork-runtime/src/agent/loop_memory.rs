@@ -20,8 +20,8 @@
 //! semantic-layer promotion runs exclusively in the EpisodicDistiller
 //! background step) — see docs/memory-write-entrypoints.md.
 
-use acowork_memory::judge::{JudgeConfig, should_sample};
 use crate::memory::metrics::MetricsAlertType;
+use acowork_memory::judge::{JudgeConfig, should_sample};
 
 use crate::agent::context::ContextBuilder;
 
@@ -70,9 +70,10 @@ impl super::loop_::AgentLoop {
         // Update MemorySessionHandle so memory_recall tool can see the
         // current session_id for its own exclude_session_id filtering.
         if let Some(ref handle) = self.core.memory_session
-            && let Some(ref sid) = current_session_id {
-                handle.set_session_id(sid.clone());
-            }
+            && let Some(ref sid) = current_session_id
+        {
+            handle.set_session_id(sid.clone());
+        }
 
         // Per-turn auto-injection is OFF by default (per-agent opt-in via
         // manifest `[memory.quality].auto_inject_enabled = true`), and
@@ -205,9 +206,7 @@ impl super::loop_::AgentLoop {
                 // `build()` calls — re-injection is deferred to ADR-060 §11
                 // follow-up work (Block C-style message or explicit path).
                 if let Some(hint) = result.ambiguous_hint {
-                    tracing::info!(
-                        "Injecting ambiguous conflict confirmation hint into context"
-                    );
+                    tracing::info!("Injecting ambiguous conflict confirmation hint into context");
                     context_builder.set_ambiguous_confirmation_hint(hint);
                 }
 
@@ -279,30 +278,45 @@ impl super::loop_::AgentLoop {
 
     /// Persist attached items as standalone system entries in the
     /// conversation JSONL (ADR-046).
-    pub fn write_attached_items(
-        &self,
-        items: &[acowork_core::protocol::AttachedItem],
-    ) {
+    pub fn write_attached_items(&self, items: &[acowork_core::protocol::AttachedItem]) {
         let Some(ref conversation) = self.session.conversation else {
             return;
         };
         for item in items {
             let (content, metadata, client_id) = match item {
-                acowork_core::protocol::AttachedItem::FileUpload { document_id, filename, format, size_bytes, client_id, .. } => {
+                acowork_core::protocol::AttachedItem::FileUpload {
+                    document_id,
+                    filename,
+                    format,
+                    size_bytes,
+                    client_id,
+                    ..
+                } => {
                     let meta = crate::conversation::FileUploadMeta {
                         document_id: document_id.clone(),
                         filename: filename.clone(),
                         format: format.clone(),
                         size_bytes: *size_bytes,
                     };
-                    let content = format!("Uploaded file: {} ({}, {} bytes)", filename, format, size_bytes);
-                    let metadata = serde_json::to_value(
-                        crate::conversation::AttachmentMeta::FileUpload(meta),
-                    )
-                    .expect("FileUploadMeta is always serializable");
+                    let content = format!(
+                        "Uploaded file: {} ({}, {} bytes)",
+                        filename, format, size_bytes
+                    );
+                    let metadata =
+                        serde_json::to_value(crate::conversation::AttachmentMeta::FileUpload(meta))
+                            .expect("FileUploadMeta is always serializable");
                     (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::ImageUpload { document_id, filename, format, size_bytes, width, height, client_id, .. } => {
+                acowork_core::protocol::AttachedItem::ImageUpload {
+                    document_id,
+                    filename,
+                    format,
+                    size_bytes,
+                    width,
+                    height,
+                    client_id,
+                    ..
+                } => {
                     let meta = crate::conversation::ImageUploadMeta {
                         document_id: document_id.clone(),
                         filename: filename.clone(),
@@ -311,14 +325,22 @@ impl super::loop_::AgentLoop {
                         width: *width,
                         height: *height,
                     };
-                    let content = format!("Uploaded image: {} ({}, {} bytes)", filename, format, size_bytes);
+                    let content = format!(
+                        "Uploaded image: {} ({}, {} bytes)",
+                        filename, format, size_bytes
+                    );
                     let metadata = serde_json::to_value(
                         crate::conversation::AttachmentMeta::ImageUpload(meta),
                     )
                     .expect("ImageUploadMeta is always serializable");
                     (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::AttachedFile { abs_path, name, client_id, .. } => {
+                acowork_core::protocol::AttachedItem::AttachedFile {
+                    abs_path,
+                    name,
+                    client_id,
+                    ..
+                } => {
                     let meta = crate::conversation::AttachedFileMeta {
                         abs_path: abs_path.clone(),
                         name: name.clone(),
@@ -330,21 +352,36 @@ impl super::loop_::AgentLoop {
                     .expect("AttachedFileMeta is always serializable");
                     (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::AttachedSelection { abs_path, name, start_line, end_line, client_id, .. } => {
+                acowork_core::protocol::AttachedItem::AttachedSelection {
+                    abs_path,
+                    name,
+                    start_line,
+                    end_line,
+                    client_id,
+                    ..
+                } => {
                     let meta = crate::conversation::AttachedSelectionMeta {
                         abs_path: abs_path.clone(),
                         name: name.clone(),
                         start_line: *start_line,
                         end_line: *end_line,
                     };
-                    let content = format!("Attached selection: {} (L{}-L{})", name, start_line, end_line);
+                    let content = format!(
+                        "Attached selection: {} (L{}-L{})",
+                        name, start_line, end_line
+                    );
                     let metadata = serde_json::to_value(
                         crate::conversation::AttachmentMeta::AttachedSelection(meta),
                     )
                     .expect("AttachedSelectionMeta is always serializable");
                     (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::AttachedFolder { abs_path, name, client_id, .. } => {
+                acowork_core::protocol::AttachedItem::AttachedFolder {
+                    abs_path,
+                    name,
+                    client_id,
+                    ..
+                } => {
                     let meta = crate::conversation::AttachedFolderMeta {
                         abs_path: abs_path.clone(),
                         name: name.clone(),

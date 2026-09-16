@@ -109,10 +109,7 @@ impl OpenAIProvider {
     /// Install the compatibility cache.  Typically called once during startup.
     /// Without this, the provider behaves exactly as before (always runs
     /// the fallback chain).
-    pub fn set_compat_cache(
-        &mut self,
-        cache: Arc<crate::providers::compat::CompatCache>,
-    ) {
+    pub fn set_compat_cache(&mut self, cache: Arc<crate::providers::compat::CompatCache>) {
         self.compat_cache = Some(cache);
     }
 
@@ -597,7 +594,8 @@ fn profile_from_request(
 ) -> crate::providers::compat::StripProfile {
     crate::providers::compat::StripProfile {
         strip_stream_options: req.stream_options.is_none() && original.stream_options.is_some(),
-        strip_reasoning_effort: req.reasoning_effort.is_none() && original.reasoning_effort.is_some(),
+        strip_reasoning_effort: req.reasoning_effort.is_none()
+            && original.reasoning_effort.is_some(),
         strip_thinking: req.thinking.is_none() && original.thinking.is_some(),
         strip_temperature: req.temperature.is_none() && original.temperature.is_some(),
         strip_tools: req.tools.is_none() && original.tools.is_some(),
@@ -698,7 +696,10 @@ impl OpenAIProvider {
                         error_body = %b,
                         "CompatCache profile no longer valid - invalidating and re-probing",
                     );
-                    cache.invalidate(cache_key, "fast-path request failed after applying cached profile");
+                    cache.invalidate(
+                        cache_key,
+                        "fast-path request failed after applying cached profile",
+                    );
                     // Fall through to the cold path below: re-probe the
                     // original request. Content-shaped failures surface there.
                 }
@@ -783,9 +784,7 @@ impl OpenAIProvider {
         }
 
         // Fallback 2: also strip reasoning_effort, thinking, temperature
-        tracing::warn!(
-            "Fallback 2/4: also stripping reasoning_effort, thinking, temperature"
-        );
+        tracing::warn!("Fallback 2/4: also stripping reasoning_effort, thinking, temperature");
         let fb2 = NativeChatRequest {
             temperature: None,
             stream: stream_val,
@@ -886,12 +885,9 @@ impl Provider for OpenAIProvider {
             .as_ref()
             .and_then(|e| openai_reasoning_str(e))
             .map(|s| s.to_string());
-        let thinking = request
-            .thinking_mode
-            .as_ref()
-            .map(|mode| ThinkingMode {
-                mode_type: mode.clone(),
-            });
+        let thinking = request.thinking_mode.as_ref().map(|mode| ThinkingMode {
+            mode_type: mode.clone(),
+        });
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -914,7 +910,9 @@ impl Provider for OpenAIProvider {
         let url = format!("{}/chat/completions", self.base_url);
         let cache_key = self.cache_key(&native_request.model);
 
-        let response = self.send_with_compat(&url, &native_request, &cache_key).await?;
+        let response = self
+            .send_with_compat(&url, &native_request, &cache_key)
+            .await?;
 
         let native_resp: NativeChatResponse = response.json().await.map_err(|e| {
             acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!(
@@ -940,12 +938,9 @@ impl Provider for OpenAIProvider {
             .as_ref()
             .and_then(|e| openai_reasoning_str(e))
             .map(|s| s.to_string());
-        let thinking = request
-            .thinking_mode
-            .as_ref()
-            .map(|mode| ThinkingMode {
-                mode_type: mode.clone(),
-            });
+        let thinking = request.thinking_mode.as_ref().map(|mode| ThinkingMode {
+            mode_type: mode.clone(),
+        });
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -983,7 +978,9 @@ impl Provider for OpenAIProvider {
         let cache_key = self.cache_key(&native_request.model);
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response = self.send_with_compat(&url, &native_request, &cache_key).await?;
+        let response = self
+            .send_with_compat(&url, &native_request, &cache_key)
+            .await?;
 
         Ok(Self::sse_to_stream(response, self.stream_read_timeout))
     }
@@ -1677,9 +1674,7 @@ impl ThinkTagParser {
                 if let Some((start_idx, open_tag, close_tag)) = earliest {
                     // Emit content before the tag as Content.
                     if start_idx > 0 {
-                        events.push(StreamEvent::Content(
-                            self.scratch[..start_idx].to_string(),
-                        ));
+                        events.push(StreamEvent::Content(self.scratch[..start_idx].to_string()));
                     }
                     self.inside_think = true;
                     self.active_close_tag = close_tag;
@@ -1798,7 +1793,9 @@ mod think_tag_parser_tests {
         // feed() emits eagerly — content is already returned
         let events = p.feed("<!think>unfinished thinking");
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::ReasoningContent(t) if t == "unfinished thinking"));
+        assert!(
+            matches!(&events[0], StreamEvent::ReasoningContent(t) if t == "unfinished thinking")
+        );
         // flush() has nothing left (scratch was cleared by eager emission)
         let flushed = p.flush();
         assert_eq!(flushed.len(), 0);
@@ -1866,7 +1863,9 @@ mod think_tag_parser_tests {
         let mut p = ThinkTagParser::new();
         let events = p.feed("<think>unfinished thinking");
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::ReasoningContent(t) if t == "unfinished thinking"));
+        assert!(
+            matches!(&events[0], StreamEvent::ReasoningContent(t) if t == "unfinished thinking")
+        );
         let flushed = p.flush();
         assert_eq!(flushed.len(), 0);
     }

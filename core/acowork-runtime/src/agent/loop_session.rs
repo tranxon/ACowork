@@ -77,12 +77,14 @@ impl super::loop_::AgentLoop {
                 // window)), so window display (96K) and the usable
                 // denominator (96K − output reserve) agree with the
                 // runtime trim/compaction thresholds.
-                Some(crate::agent::session_config::resolve_effective_context_window(
-                    conv.context_window(),
-                    self.core.context_window_override,
-                    self.core.manifest_context_window,
-                    Some(&caps),
-                )),
+                Some(
+                    crate::agent::session_config::resolve_effective_context_window(
+                        conv.context_window(),
+                        self.core.context_window_override,
+                        self.core.manifest_context_window,
+                        Some(&caps),
+                    ),
+                ),
                 Some(&persisted),
                 // Per-session lifetime LLM-call count so the retained
                 // session_state snapshot carries the same "Iterations" as
@@ -115,7 +117,10 @@ impl super::loop_::AgentLoop {
         });
         if context_usage.is_none() {
             let has_conv = self.session.conversation.is_some();
-            let has_tokens = self.session.conversation.as_ref()
+            let has_tokens = self
+                .session
+                .conversation
+                .as_ref()
                 .and_then(|c| c.tokens())
                 .is_some();
             let model_for_caps = self.session.model().unwrap_or("unknown");
@@ -135,8 +140,7 @@ impl super::loop_::AgentLoop {
         // SessionState snapshot to `sessions/{sid}/state`.
         // This replaces the old ChunkEvent::SessionStateChanged path.
         if let Some(ref conv) = self.session.conversation {
-            let status = serde_json::to_string(&status)
-                .unwrap_or_else(|_| r#""idle""#.to_string());
+            let status = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
             let ratio = self.session.model_ratio().unwrap_or(0.0);
             let cu = context_usage.clone().unwrap_or_default();
             conv.update_runtime_state_cache(&status, ratio, &cu);
@@ -154,7 +158,8 @@ impl super::loop_::AgentLoop {
         // The snapshot Arc is shared between SessionState and SessionHandle;
         // writes here are immediately visible to snapshot_session_state().
         {
-            let status_json = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
+            let status_json =
+                serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
             // Serialize the todo list to JSON for the snapshot. Skip the allocation
             // entirely when the list is empty (common case — most iterations have
             // no active todo list). Errors are logged so they can be distinguished
@@ -376,12 +381,17 @@ impl super::loop_::AgentLoop {
         // 2. No streaming flush occurred (non-streaming provider, or all
         //    content arrived in the Finished event). Use the legacy path:
         //    persist_think_to_conversation + strip_think_block.
-        let streamed = self.session_core.streaming_flush_count.load(Ordering::Relaxed) > 0;
+        let streamed = self
+            .session_core
+            .streaming_flush_count
+            .load(Ordering::Relaxed)
+            > 0;
 
         if streamed {
             // Path 1: Content was already flushed on role transitions.
             // Flush the last streaming line (e.g., final assistant segment).
-            self.session_core.flush_streaming_line(self.session.conversation.as_deref());
+            self.session_core
+                .flush_streaming_line(self.session.conversation.as_deref());
             tracing::debug!(
                 iteration,
                 "ADR-022: streaming flush path — skipping legacy persistence"
@@ -478,10 +488,7 @@ pub fn extract_think_block(content: &str) -> Option<String> {
 /// All occurrences of both formats are stripped. If no think blocks are found,
 /// the original content is returned unchanged.
 pub fn strip_think_block(content: &str) -> String {
-    const PAIRS: &[(&str, &str)] = &[
-        ("<think>", "</think>"),
-        ("<!think>", "willReturn"),
-    ];
+    const PAIRS: &[(&str, &str)] = &[("<think>", "</think>"), ("<!think>", "willReturn")];
 
     let mut result = content.to_string();
     for &(start_tag, end_tag) in PAIRS {

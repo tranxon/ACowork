@@ -26,8 +26,8 @@ use regex::Regex;
 
 use crate::usecases::workspace_query::{
     FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, RawFileDto, ReadFileParams,
-    SearchFilesParams, SearchMatchDto, SearchResponse, TreeEntryDto, TreeResponse,
-    WorkspaceError, WorkspaceFileDto, WorkspaceQueryService, WorkspacesListResponse,
+    SearchFilesParams, SearchMatchDto, SearchResponse, TreeEntryDto, TreeResponse, WorkspaceError,
+    WorkspaceFileDto, WorkspaceQueryService, WorkspacesListResponse,
 };
 
 // ── Constants (kept in sync with gateway workspaces.rs) ────────────────────
@@ -43,9 +43,7 @@ const SEARCH_BAILOUT_BYTES: u64 = 1_048_576; // 1 MiB per file
 /// the workspace tree. Everything else (`.cargo`, `.vscode`, `.gitignore`,
 /// ...) is shown, mirroring the Explorer's default behaviour: hidden
 /// entries are visible unless they are VCS metadata or OS junk files.
-const VSCODE_DEFAULT_EXCLUDES: &[&str] = &[
-    ".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db",
-];
+const VSCODE_DEFAULT_EXCLUDES: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
 
 /// True when `name` matches one of VSCode's default `files.exclude`
 /// entries. Applied at every directory level (equivalent to `**/.git`).
@@ -53,11 +51,12 @@ fn is_vscode_default_excluded(name: &str) -> bool {
     VSCODE_DEFAULT_EXCLUDES.contains(&name)
 }
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", "mp3", "mp4", "avi",
-    "mov", "wav", "flac", "ogg", "webm", "mkv", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst",
-    "o", "obj", "a", "so", "dylib", "dll", "exe", "pdb", "lib", "class", "wasm", "bc", "ll", "pyc",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", "mp3", "mp4", "avi", "mov",
+    "wav", "flac", "ogg", "webm", "mkv", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "o",
+    "obj", "a", "so", "dylib", "dll", "exe", "pdb", "lib", "class", "wasm", "bc", "ll", "pyc",
     "pyo", "rlib", "rmeta", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "bin", "dat", "db",
-    "sqlite", "sqlite3", "pack", "idx",
+    "sqlite", "sqlite3", "pack",
+    "idx",
     // NOTE: SVG (`svg`) is intentionally NOT listed here. SVG is XML text and
     // the editor needs the raw markup as `content` so it can be edited in
     // Monaco; base64-wrapping it made the source unreadable. The desktop
@@ -95,8 +94,8 @@ impl RuntimeWorkspaceQueryService {
             WorkspaceError::WorkspaceNotFound(ws_id.to_string())
         })?;
 
-        let val: serde_json::Value = serde_json::from_str(&content)
-            .map_err(WorkspaceError::Json)?;
+        let val: serde_json::Value =
+            serde_json::from_str(&content).map_err(WorkspaceError::Json)?;
 
         if let Some(dirs) = val.get("additional_dirs").and_then(|v| v.as_array()) {
             for dir in dirs {
@@ -264,8 +263,8 @@ fn match_word_boundary(name: &str, seg: &str) -> bool {
     let mut start = 0usize;
     while let Some(pos) = name_lower[start..].find(seg) {
         let abs = start + pos;
-        let at_word_start = abs == 0
-            || matches!(name_bytes[abs - 1], b'.' | b'_' | b' ' | b'-' | b'/');
+        let at_word_start =
+            abs == 0 || matches!(name_bytes[abs - 1], b'.' | b'_' | b' ' | b'-' | b'/');
         let camel_boundary = abs > 0
             && name_bytes[abs - 1].is_ascii_lowercase()
             && name_bytes[abs].is_ascii_uppercase();
@@ -306,10 +305,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })
     }
 
-    async fn list_tree(
-        &self,
-        params: &ListTreeParams,
-    ) -> Result<TreeResponse, WorkspaceError> {
+    async fn list_tree(&self, params: &ListTreeParams) -> Result<TreeResponse, WorkspaceError> {
         let workspace_root = self.resolve_root(params.workspace_id.as_deref())?;
         let requested_path = params.path.as_deref().unwrap_or("");
 
@@ -411,10 +407,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })
     }
 
-    async fn read_file(
-        &self,
-        params: &ReadFileParams,
-    ) -> Result<WorkspaceFileDto, WorkspaceError> {
+    async fn read_file(&self, params: &ReadFileParams) -> Result<WorkspaceFileDto, WorkspaceError> {
         let (_root, abs_path, rel_path) =
             self.resolve_within(params.workspace_id.as_deref(), &params.path)?;
 
@@ -423,7 +416,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })?;
 
         let is_binary = Self::is_binary_path(&abs_path);
-        
+
         let content = if is_binary {
             let bytes = std::fs::read(&abs_path).map_err(|_| {
                 WorkspaceError::NotFound(format!("failed to read file: {}", rel_path))
@@ -446,10 +439,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })
     }
 
-    async fn read_file_raw(
-        &self,
-        params: &ReadFileParams,
-    ) -> Result<RawFileDto, WorkspaceError> {
+    async fn read_file_raw(&self, params: &ReadFileParams) -> Result<RawFileDto, WorkspaceError> {
         // Same `resolve_within` guard as `read_file` — canonicalise +
         // containment check (path-traversal defence) before touching disk.
         let (_root, abs_path, rel_path) =
@@ -465,9 +455,8 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
             )));
         }
 
-        let bytes = std::fs::read(&abs_path).map_err(|_| {
-            WorkspaceError::NotFound(format!("failed to read file: {}", rel_path))
-        })?;
+        let bytes = std::fs::read(&abs_path)
+            .map_err(|_| WorkspaceError::NotFound(format!("failed to read file: {}", rel_path)))?;
 
         Ok(RawFileDto {
             bytes,
@@ -476,10 +465,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })
     }
 
-    async fn find_files(
-        &self,
-        params: &FindFilesParams,
-    ) -> Result<FindResponse, WorkspaceError> {
+    async fn find_files(&self, params: &FindFilesParams) -> Result<FindResponse, WorkspaceError> {
         let pattern = params.q.as_deref().unwrap_or("").trim();
         if pattern.is_empty() {
             return Err(WorkspaceError::BadRequest {
@@ -538,7 +524,12 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         let include_glob = params.include.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            run_search(&workspace_root_str, &re, include_glob.as_deref(), max_results)
+            run_search(
+                &workspace_root_str,
+                &re,
+                include_glob.as_deref(),
+                max_results,
+            )
         })
         .await
         .map_err(|_| WorkspaceError::Persist("Search task panicked".to_string()))?;
@@ -783,7 +774,10 @@ mod tests {
             "result must not retain forward-slash verbatim prefix, got: {s}"
         );
         // Universal contract: forward slashes only.
-        assert!(!s.contains('\\'), "root string must use forward slashes, got: {s}");
+        assert!(
+            !s.contains('\\'),
+            "root string must use forward slashes, got: {s}"
+        );
 
         // Cross-platform: result points at the temp directory.
         let canonical_str = canonical.to_string_lossy();
@@ -824,10 +818,8 @@ mod tests {
 
         // work_dir == tempdir; resolve_root(workspace_id = "__agent_home__")
         // returns work_dir unchanged.
-        let svc = RuntimeWorkspaceQueryService::new(
-            tmp.path().to_path_buf(),
-            "test-agent".to_string(),
-        );
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
 
         let resp = svc
             .list_tree(&ListTreeParams {
@@ -927,7 +919,11 @@ mod tests {
             .iter()
             .find(|e| e.name == ".cargo")
             .expect(".cargo entry");
-        assert_eq!(cargo.children_count, Some(1), "children_count must skip excluded entries");
+        assert_eq!(
+            cargo.children_count,
+            Some(1),
+            "children_count must skip excluded entries"
+        );
     }
 
     /// `read_file_raw` (ADR-055 L2-7) must return verbatim bytes + MIME
@@ -939,7 +935,8 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("index.html"), "<h1>hi</h1>").expect("write");
 
-        let svc = RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
 
         // Agent home: raw bytes + HTML MIME (not a JSON envelope).
         let dto = svc

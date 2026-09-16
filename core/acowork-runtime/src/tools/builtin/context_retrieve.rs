@@ -117,22 +117,18 @@ impl Tool for ContextRetrieveTool {
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
-                    error: Some(
-                        "tool_call_id must be a non-empty string".to_string(),
-                    ),
+                    error: Some("tool_call_id must be a non-empty string".to_string()),
                     token_usage: None,
-                })
+                });
             }
             None => {
                 tracing::warn!("context_retrieve called without tool_call_id parameter");
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
-                    error: Some(
-                        "Missing required parameter 'tool_call_id'".to_string(),
-                    ),
+                    error: Some("Missing required parameter 'tool_call_id'".to_string()),
                     token_usage: None,
-                })
+                });
             }
         };
 
@@ -178,13 +174,10 @@ impl Tool for ContextRetrieveTool {
                 );
                 return Ok(ToolResult {
                     ok: true,
-                    content: format!(
-                        "Could not read conversations directory: {}",
-                        e
-                    ),
+                    content: format!("Could not read conversations directory: {}", e),
                     error: None,
                     token_usage: None,
-                })
+                });
             }
         };
 
@@ -289,10 +282,7 @@ fn find_in_jsonl(path: &Path, target_id: &str) -> Option<String> {
             .and_then(|v| v.as_str());
         match tc_id {
             Some(id) if id == target_id => {
-                let role = entry
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role != "tool_result" {
                     // Entry exists but role is wrong - keep scanning.
                     // The actual tool_result entry might be further down.
@@ -356,7 +346,12 @@ mod tests {
     fn test_find_in_jsonl_matches() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write_entry(&mut tmp, "user", "Hello", "");
-        write_entry(&mut tmp, "tool_result", "This is the hidden content", "toolu_abc");
+        write_entry(
+            &mut tmp,
+            "tool_result",
+            "This is the hidden content",
+            "toolu_abc",
+        );
         write_entry(&mut tmp, "assistant", "Done", "");
 
         let result = find_in_jsonl(tmp.path(), "toolu_abc").unwrap();
@@ -381,7 +376,12 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write_entry(&mut tmp, "tool_call", "", "toolu_shared_id");
         write_entry(&mut tmp, "user", "What was the result?", "");
-        write_entry(&mut tmp, "tool_result", "The actual tool result content", "toolu_shared_id");
+        write_entry(
+            &mut tmp,
+            "tool_result",
+            "The actual tool result content",
+            "toolu_shared_id",
+        );
 
         let result = find_in_jsonl(tmp.path(), "toolu_shared_id").unwrap();
         assert_eq!(
@@ -417,11 +417,17 @@ mod tests {
         let conversations = dir.path().join("conversations");
         std::fs::create_dir(&conversations).unwrap();
         let jsonl = conversations.join("test.jsonl");
-        std::fs::write(&jsonl, serde_json::json!({
-            "role": "tool_result",
-            "content": "The hidden content",
-            "metadata": {"tool_call_id": "toolu_test"}
-        }).to_string() + "\n").unwrap();
+        std::fs::write(
+            &jsonl,
+            serde_json::json!({
+                "role": "tool_result",
+                "content": "The hidden content",
+                "metadata": {"tool_call_id": "toolu_test"}
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
 
         let queue = test_queue();
         let tool = ContextRetrieveTool::new(&dir.path().to_string_lossy(), queue.clone());

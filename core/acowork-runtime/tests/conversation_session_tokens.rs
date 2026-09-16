@@ -13,15 +13,15 @@
 //! No mocks. All paths are real `std::fs` calls on a `tempfile::TempDir`.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::UsageInfo;
 use acowork_runtime::agent::context::build_context_usage_from_persisted;
 use acowork_runtime::conversation::{
-    read_session_meta, write_session_meta, ConversationSession, SessionConfig, SessionMeta,
-    SessionTokens,
+    ConversationSession, SessionConfig, SessionMeta, SessionTokens, read_session_meta,
+    write_session_meta,
 };
 use tempfile::TempDir;
 
@@ -90,14 +90,16 @@ async fn accumulate_then_resume_round_trip_preserves_session_tokens() {
     session.accumulate_llm_usage(&usage(0, 200)); // Provider fallback — must skip total_input
     session.accumulate_llm_usage(&usage(15_000, 1_500));
 
-    let in_memory = session.tokens().expect("tokens should be set after 3 calls");
+    let in_memory = session
+        .tokens()
+        .expect("tokens should be set after 3 calls");
     assert_eq!(
         in_memory,
         SessionTokens {
-            last_input: 15_000,    // most recent raw value
+            last_input: 15_000, // most recent raw value
             last_output: 1_500,
-            total_input: 25_000,   // skipped the prompt=0 call (10k + 15k)
-            total_output: 2_500,   // all 3 calls counted (800 + 200 + 1500)
+            total_input: 25_000, // skipped the prompt=0 call (10k + 15k)
+            total_output: 2_500, // all 3 calls counted (800 + 200 + 1500)
             // ADR-066: cache fields are 0 in this test because the
             // `usage()` helper does not populate them (zero-cache path).
             ..Default::default()
@@ -107,12 +109,9 @@ async fn accumulate_then_resume_round_trip_preserves_session_tokens() {
     session.close().await.expect("close");
 
     // Resume and confirm disk round-trip is lossless.
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("resume must succeed");
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume must succeed");
 
     let from_disk = resumed
         .0
@@ -146,12 +145,9 @@ async fn resume_tokens_feed_context_usage_emission() {
     session.accumulate_llm_usage(&usage(45_000, 1_200));
     session.close().await.expect("close");
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("resume");
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume");
 
     let persisted = resumed.0.tokens().expect("tokens after resume");
     let caps128k = caps(128_000, 16_384);
@@ -160,10 +156,10 @@ async fn resume_tokens_feed_context_usage_emission() {
         &caps128k,
         persisted.last_input,
         persisted.last_output,
-        32_768, // max_output_limit
-        None,   // no context_window_override
+        32_768,           // max_output_limit
+        None,             // no context_window_override
         Some(&persisted), // ADR-027: cumulative totals must flow through
-        None,   // no persisted iteration count
+        None,             // no persisted iteration count
     );
 
     assert_eq!(ctx.input_tokens, 45_000);
@@ -201,12 +197,9 @@ async fn resume_tokens_cumulative_totals_diverge_from_per_turn() {
     session.accumulate_llm_usage(&usage(18_000, 1_400));
     session.close().await.expect("close");
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("resume");
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume");
 
     let persisted = resumed.0.tokens().expect("tokens after resume");
 
@@ -278,12 +271,8 @@ async fn provider_fallback_records_raw_zero_in_last_input() {
 
     session.close().await.unwrap();
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .unwrap();
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let from_disk = resumed.0.tokens().unwrap();
     assert_eq!(from_disk.last_input, 0);
     assert_eq!(from_disk.last_output, 0);
@@ -310,12 +299,8 @@ async fn accumulate_saturates_at_u64_max_without_panic() {
 
     session.close().await.unwrap();
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .unwrap();
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let t2 = resumed.0.tokens().unwrap();
     assert_eq!(t2.total_input, u64::MAX);
     assert_eq!(t2.total_output, u64::MAX);
@@ -390,12 +375,8 @@ async fn consecutive_accumulations_each_reach_disk() {
     );
 
     // Resume and cross-check the snapshot.
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .unwrap();
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0))).unwrap();
     let from_resume = resumed.0.tokens().unwrap();
     assert_eq!(from_resume.total_input, 15_000);
     assert_eq!(from_resume.last_input, 5_000);
@@ -441,12 +422,9 @@ async fn legacy_meta_file_loads_with_tokens_none() {
     let jsonl_path = conv_dir.join(format!("{}.jsonl", session_id));
     std::fs::write(&jsonl_path, "").unwrap();
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("legacy resume must succeed");
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("legacy resume must succeed");
     assert_eq!(
         resumed.0.tokens(),
         None,
@@ -537,8 +515,7 @@ async fn compaction_offset_persists_to_meta_after_append() {
     // Need a way to call the private write_meta — instead, read the
     // JSONL directly and verify the meta gets persisted through
     // accumulate_llm_usage, which always calls write_meta().
-    session
-        .accumulate_llm_usage(&usage(100, 20));
+    session.accumulate_llm_usage(&usage(100, 20));
 
     let conv_dir = dir.path().join("conversations");
     let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta after compaction");
@@ -554,8 +531,8 @@ async fn compaction_offset_persists_to_meta_after_append() {
     // confirms both halves of the persistence path:
     //   - raw `ConversationEntry { kind: "compaction" ... }` in JSONL
     //   - `last_compaction_offset: Some(<abs>)` in meta.json
-    let jsonl = std::fs::read_to_string(conv_dir.join(format!("{session_id}.jsonl")))
-        .expect("read jsonl");
+    let jsonl =
+        std::fs::read_to_string(conv_dir.join(format!("{session_id}.jsonl"))).expect("read jsonl");
     assert!(
         jsonl.contains("\"kind\":\"compaction\""),
         "compaction entry must be present in JSONL"
@@ -602,12 +579,9 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
 
     // Phase 2: resume and force a write_meta so we can observe the
     // hydrated offset.
-    let (session, _config_rx, _state_rx) = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("resume");
+    let (session, _config_rx, _state_rx) =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume");
 
     session.accumulate_llm_usage(&usage(50, 10));
 
@@ -681,12 +655,9 @@ async fn model_ratio_round_trips_through_meta_and_resume() {
 
     session.close().await.expect("close");
 
-    let resumed = ConversationSession::resume(
-        dir.path(),
-        session_id,
-        Arc::new(AtomicUsize::new(0)),
-    )
-    .expect("resume must succeed");
+    let resumed =
+        ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
+            .expect("resume must succeed");
 
     // Both fields SessionManager::restore_anchor consumes at resume time.
     assert_eq!(resumed.0.model_ratio(), Some(2.5));

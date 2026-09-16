@@ -206,6 +206,19 @@ pub struct GitDiffResponse {
     pub original: String,
     /// `head_ref` version; `""` for deleted.
     pub modified: String,
+    /// Canonical SHA for `base_ref` after `git rev-parse <base_ref>^{commit}`.
+    /// `None` only when `base_ref` could not be resolved (the caller used a
+    /// non-rev like the empty string or a malformed shorthand) — in
+    /// practice this is unreachable because the `diff` handler already
+    /// rejects empty / invalid refs with `GitError::BadRequest` before
+    /// reaching this struct.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub base_rev: Option<String>,
+    /// Canonical SHA for `head_ref` after `git rev-parse <head_ref>^{commit}`.
+    /// `None` when `head_ref` was the empty string (working tree) — the
+    /// client renders this as "Working Tree" instead of a commit id.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub head_rev: Option<String>,
 }
 
 /// Querystring for `GET /git/diff`.
@@ -245,11 +258,30 @@ pub struct GitCommitDto {
     pub subject: String,
 }
 
-/// Response for `GET /git/log`.
+/// Response for `GET /git/log` — one page of the file / repo history,
+/// plus pagination metadata so the client can render "Page X of Y" and
+/// `Prev` / `Next` controls (the diff banner's `CommitPicker`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitLogResponse {
     pub commits: Vec<GitCommitDto>,
+    pub pagination: GitLogPagination,
+}
+
+/// Pagination metadata for [`GitLogResponse`]. `totalCount` is the
+/// total commits in the (filtered) history, not just the page — the
+/// client uses it to render "Showing X-Y of Z" and to decide whether
+/// to surface the search + pagination chrome (when `totalCount <=
+/// pageSize` the controls collapse, matching the session list pattern).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLogPagination {
+    /// 1-indexed page number.
+    pub current_page: u32,
+    /// Total pages given `pageSize` and `totalCount`.
+    pub total_pages: u32,
+    pub page_size: u32,
+    pub total_count: u32,
 }
 
 /// Querystring for `GET /git/log`.
@@ -263,6 +295,10 @@ pub struct GitLogParams {
     /// Max commits. Default 50, hard cap 200 (ADR-078 decision 4).
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Commits to skip from the start of the history (newest-first).
+    /// `skip = (currentPage - 1) * pageSize`. Default 0.
+    #[serde(default)]
+    pub skip: Option<u32>,
 }
 
 // ── Service trait ──────────────────────────────────────────────────────────

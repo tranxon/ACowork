@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 
 use acowork_core::mqtt_proto::{AvailableProviders, BootstrapPhase, BootstrapState};
 
@@ -96,7 +96,9 @@ fn compute(
     // (the Gateway's `MqttGlobalResourcesPublisher` always emits a
     // non-None envelope once its ready barrier lifts), which still
     // maps to Missing via the empty-list branch below.
-    let Some(p) = providers else { return LlmAvailability::Loading };
+    let Some(p) = providers else {
+        return LlmAvailability::Loading;
+    };
     if p.providers.is_empty() {
         return LlmAvailability::Missing;
     }
@@ -169,8 +171,8 @@ impl LlmAvailabilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_core::mqtt_proto::{BootstrapState, ProviderRef};
     use crate::mqtt::available_cache::AvailableResourceCache;
+    use acowork_core::mqtt_proto::{BootstrapState, ProviderRef};
 
     fn bs(phase: BootstrapPhase) -> BootstrapState {
         BootstrapState {

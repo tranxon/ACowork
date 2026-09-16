@@ -291,20 +291,15 @@ pub async fn handle_get_section(
     // (the full conversation as of the context build). getSection is the
     // single RPC for both paths — no separate handler needed.
     if params.section == "messages" {
-        let messages = ctrl
-            .get_messages(params.iteration)
-            .ok_or_else(|| {
-                DebugError::NotFound(format!(
-                    "No stored messages for iteration {}",
-                    params.iteration
-                ))
-            })?;
+        let messages = ctrl.get_messages(params.iteration).ok_or_else(|| {
+            DebugError::NotFound(format!(
+                "No stored messages for iteration {}",
+                params.iteration
+            ))
+        })?;
         let json = serde_json::to_string(messages.as_ref())
             .map_err(|e| DebugError::Internal(format!("messages serialize failed: {e}")))?;
-        let meta = snap
-            .sections
-            .find("messages")
-            .map(|s| s.to_meta());
+        let meta = snap.sections.find("messages").map(|s| s.to_meta());
         tracing::info!(
             iteration = params.iteration,
             message_count = messages.len(),
@@ -314,10 +309,7 @@ pub async fn handle_get_section(
         return Ok(GetSectionResult {
             content: json,
             hash: meta.as_ref().map(|m| m.hash.clone()).unwrap_or_default(),
-            token_count: meta
-                .as_ref()
-                .map(|m| m.token_estimate)
-                .unwrap_or_default(),
+            token_count: meta.as_ref().map(|m| m.token_estimate).unwrap_or_default(),
         });
     }
 
@@ -328,9 +320,7 @@ pub async fn handle_get_section(
         .sections
         .find(&params.section)
         .map(|s| &s.content)
-        .ok_or_else(|| {
-            DebugError::InvalidParams(format!("Unknown section: {}", params.section))
-        })?;
+        .ok_or_else(|| DebugError::InvalidParams(format!("Unknown section: {}", params.section)))?;
     tracing::info!(
         iteration = params.iteration,
         section = %params.section,
@@ -571,7 +561,11 @@ mod tests {
     }
 
     /// Build a named section with a fixed token count (deterministic tests).
-    fn named_section(key: &str, content: &str, token: usize) -> super::super::controller::NamedSection {
+    fn named_section(
+        key: &str,
+        content: &str,
+        token: usize,
+    ) -> super::super::controller::NamedSection {
         super::super::controller::NamedSection {
             key: key.to_string(),
             content: SectionContent::with_token_count(content.to_string(), token),
@@ -598,7 +592,10 @@ mod tests {
     /// events were emitted by draining the receiver.
     fn fresh_event_sender_pair(
         session_id: &str,
-    ) -> (DebugEventSender, tokio::sync::broadcast::Receiver<TaggedEvent>) {
+    ) -> (
+        DebugEventSender,
+        tokio::sync::broadcast::Receiver<TaggedEvent>,
+    ) {
         let bus = DebugEventBus::new();
         let rx = bus.subscribe();
         let tx = bus.sender_template().for_session(session_id.to_string());
@@ -622,7 +619,9 @@ mod tests {
         let mut ctrl = fresh_controller();
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        handle_resume(&mut ctrl, &tx).await.expect("resume should succeed");
+        handle_resume(&mut ctrl, &tx)
+            .await
+            .expect("resume should succeed");
 
         assert_eq!(ctrl.state, DebugState::Running);
         let events = drain_events(&mut rx);
@@ -646,7 +645,9 @@ mod tests {
         let mut ctrl = fresh_controller();
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        handle_pause(&mut ctrl, &tx).await.expect("pause should succeed");
+        handle_pause(&mut ctrl, &tx)
+            .await
+            .expect("pause should succeed");
 
         assert_eq!(ctrl.state, DebugState::Paused);
         let events = drain_events(&mut rx);
@@ -671,10 +672,7 @@ mod tests {
             }
         })
         .await;
-        assert!(
-            resolved,
-            "control_notify must be pulsed by handle_pause"
-        );
+        assert!(resolved, "control_notify must be pulsed by handle_pause");
     }
 
     // ── handle_step ───────────────────────────────────────────────────
@@ -685,8 +683,9 @@ mod tests {
         ctrl.state = DebugState::Paused;
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        let outcome =
-            handle_step(&mut ctrl, &tx, StepGranularity::Iteration).await.expect("step ok");
+        let outcome = handle_step(&mut ctrl, &tx, StepGranularity::Iteration)
+            .await
+            .expect("step ok");
 
         assert_eq!(outcome, StepOutcome::Accepted);
         assert_eq!(ctrl.state, DebugState::Stepping);
@@ -706,8 +705,9 @@ mod tests {
         ctrl.state = DebugState::Running; // not Paused
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        let outcome =
-            handle_step(&mut ctrl, &tx, StepGranularity::Phase).await.expect("step ignored ok");
+        let outcome = handle_step(&mut ctrl, &tx, StepGranularity::Phase)
+            .await
+            .expect("step ignored ok");
 
         match outcome {
             StepOutcome::Ignored { state, iteration } => {
@@ -730,7 +730,9 @@ mod tests {
         let mut ctrl = fresh_controller();
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        handle_stop(&mut ctrl, &tx).await.expect("stop should succeed");
+        handle_stop(&mut ctrl, &tx)
+            .await
+            .expect("stop should succeed");
 
         assert_eq!(ctrl.state, DebugState::Stopped);
         let events = drain_events(&mut rx);
@@ -772,12 +774,10 @@ mod tests {
     #[tokio::test]
     async fn get_context_snapshot_returns_not_found_for_missing_iteration() {
         let mut ctrl = fresh_controller();
-        let err = handle_get_context_snapshot(
-            &mut ctrl,
-            GetContextSnapshotParams { iteration: 99 },
-        )
-        .await
-        .expect_err("missing iter must error");
+        let err =
+            handle_get_context_snapshot(&mut ctrl, GetContextSnapshotParams { iteration: 99 })
+                .await
+                .expect_err("missing iter must error");
         assert!(matches!(err, DebugError::NotFound(_)));
         assert_eq!(err.rpc_code(), -32002);
     }
@@ -896,10 +896,12 @@ mod tests {
         // Snapshot carries the messages section metadata only (ADR-054 step 4).
         let mut sections = seven_sections(("sys", 1));
         let meta_json = serde_json::to_string(msgs.as_ref()).unwrap();
-        sections.sections.push(super::super::controller::NamedSection {
-            key: "messages".to_string(),
-            content: SectionContent::metadata_only(meta_json.len(), 3, "msg-hash".to_string()),
-        });
+        sections
+            .sections
+            .push(super::super::controller::NamedSection {
+                key: "messages".to_string(),
+                content: SectionContent::metadata_only(meta_json.len(), 3, "msg-hash".to_string()),
+            });
         ctrl.context_snapshots.insert(
             7,
             ContextSnapshot {
@@ -927,17 +929,22 @@ mod tests {
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&r.content).unwrap();
         let stored: Vec<serde_json::Value> = serde_json::from_str(&meta_json).unwrap();
         assert_eq!(parsed.len(), 3, "all messages must round-trip");
-        assert_eq!(parsed, stored, "lazy-loaded messages must deep-equal history");
+        assert_eq!(
+            parsed, stored,
+            "lazy-loaded messages must deep-equal history"
+        );
     }
 
     #[tokio::test]
     async fn get_section_messages_returns_not_found_when_messages_not_stored() {
         let mut ctrl = fresh_controller();
         let mut sections = seven_sections(("sys", 0));
-        sections.sections.push(super::super::controller::NamedSection {
-            key: "messages".to_string(),
-            content: SectionContent::metadata_only(0, 0, String::new()),
-        });
+        sections
+            .sections
+            .push(super::super::controller::NamedSection {
+                key: "messages".to_string(),
+                content: SectionContent::metadata_only(0, 0, String::new()),
+            });
         ctrl.context_snapshots.insert(
             1,
             ContextSnapshot {
@@ -991,13 +998,9 @@ mod tests {
         });
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        let r = handle_rewind(
-            &mut ctrl,
-            &tx,
-            RewindParams { to_iteration: 3 },
-        )
-        .await
-        .expect("rewind ok");
+        let r = handle_rewind(&mut ctrl, &tx, RewindParams { to_iteration: 3 })
+            .await
+            .expect("rewind ok");
 
         assert_eq!(r.rewound_to_iteration, 3);
         assert_eq!(r.messages_trimmed_to, 0, "no snapshot at iter 3 → 0");
@@ -1027,13 +1030,9 @@ mod tests {
         ctrl.iteration = 10;
         let (tx, mut rx) = fresh_event_sender_pair("s1");
 
-        handle_rewind(
-            &mut ctrl,
-            &tx,
-            RewindParams { to_iteration: 2 },
-        )
-        .await
-        .expect("rewind ok");
+        handle_rewind(&mut ctrl, &tx, RewindParams { to_iteration: 2 })
+            .await
+            .expect("rewind ok");
 
         assert_eq!(ctrl.state, DebugState::Paused);
         assert_eq!(ctrl.iteration, 2);
@@ -1214,10 +1213,12 @@ mod tests {
         let mut ctrl = fresh_controller();
         ctrl.iteration = 4;
         let mut sections = seven_sections(("sys", 1));
-        sections.sections.push(super::super::controller::NamedSection {
-            key: "ambiguous_confirmation_hint".to_string(),
-            content: SectionContent::with_token_count("old hint".to_string(), 2),
-        });
+        sections
+            .sections
+            .push(super::super::controller::NamedSection {
+                key: "ambiguous_confirmation_hint".to_string(),
+                content: SectionContent::with_token_count("old hint".to_string(), 2),
+            });
         ctrl.context_snapshots.insert(
             4,
             ContextSnapshot {
