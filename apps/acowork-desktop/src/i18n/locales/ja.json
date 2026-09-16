@@ -1456,6 +1456,18 @@
     "tbColLabel": "列 {{n}}",
     "tbMermaid": "Mermaid フローチャート",
     "tbRule": "区切り線",
-    "editorLoadFailed": "エディターの読み込みに失敗しました。再度お試しください"
+    "editorLoadFailed": "エディターの読み込みに失敗しました。再度お試しください",
+    "engineLabel": "編集方式",
+    "richText": "リッチテキスト",
+    "source": "Markdown",
+    "richToolbar": "リッチテキストツールバー",
+    "richPlaceholder": "入力を開始…",
+    "charCount": "{{count}}/{{limit}}",
+    "richLoadFailed": "リッチテキストエディタの読み込みに失敗しました。Markdown ソースモードに切り替えました",
+    "editorLoadingRich": "リッチテキストエディタを読み込み中…",
+    "linkPrompt": "リンク URL",
+    "imagePrompt": "画像 URL または相対パス",
+    "tbUndo": "元に戻す",
+    "tbRedo": "やり直す"
   }
 }

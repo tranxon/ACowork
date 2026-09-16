@@ -18,6 +18,8 @@ import { log } from "../../lib/logger";
 import type { DocRead } from "../../lib/doc-types";
 
 type EditorMode = "edit" | "split" | "preview";
+/** 编辑引擎（ADR-079 D1 双模式）：rich = Tiptap 富文本；source = Monaco markdown 源码。 */
+type EditorEngine = "rich" | "source";
 
 interface DocEditorState {
   /** 当前打开的文档（null = 空状态） */
@@ -28,6 +30,8 @@ interface DocEditorState {
   saving: boolean;
   loading: boolean;
   mode: EditorMode;
+  /** 编辑引擎：rich（Tiptap 富文本，P0 默认）｜source（Monaco 源码，保留） */
+  engine: EditorEngine;
   /** 409 版本冲突：他人已更新，需刷新 */
   conflict: boolean;
   saveError: string | null;
@@ -44,6 +48,7 @@ interface DocEditorState {
   /** 关闭当前文档 */
   closeDoc: () => void;
   setMode: (mode: EditorMode) => void;
+  setEngine: (engine: EditorEngine) => void;
   setContent: (content: string) => void;
   /** 保存：PUT base_version=当前版本；成功 version+1；409 → conflict */
   save: () => Promise<boolean>;
@@ -62,6 +67,7 @@ export const useDocEditorStore = create<DocEditorState>((set, get) => ({
   saving: false,
   loading: false,
   mode: "edit",
+  engine: "rich",
   conflict: false,
   saveError: null,
   lastSavedAt: null,
@@ -115,6 +121,7 @@ export const useDocEditorStore = create<DocEditorState>((set, get) => ({
     set({ doc: null, content: "", dirty: false, loading: false, mode: "edit", conflict: false, saveError: null, pendingOpenDocId: null }),
 
   setMode: (mode) => set({ mode }),
+  setEngine: (engine) => set({ engine }),
   setContent: (content) => set({ content, dirty: true, conflict: false }),
 
   save: async () => {

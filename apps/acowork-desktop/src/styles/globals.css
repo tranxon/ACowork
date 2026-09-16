@@ -1790,3 +1790,86 @@ input[type="radio"]:checked {
    * contrast. Keep the same hue so the two states stay related. */
   background-color: color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
+/* ═══════════════════════════════════════════════════════════════════════
+ * DocRichEditor — Tiptap 富文本编辑引擎样式（ADR-079 P0）
+ *
+ * 覆盖三类 Tiptap/ProseMirror 特有形态：
+ *   1. TableKit 表格：列 border + 选中节点 outline（colgroup 布局）；
+ *   2. TaskList/TaskItem：原生 checkbox（隐藏 PM 的 ::before 文本标记）；
+ *   3. Placeholder：空文档占位（p.is-editor-empty:first-child::before）。
+ * 其余排版（标题/列表/代码块）沿用 prose + 下方已有 .prose 覆盖。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+.doc-rich-editor-scroll {
+  overscroll-behavior: contain;
+}
+
+/* 内容区：与预览一致的内边距，编辑时保留可点区域 */
+.doc-rich-content {
+  padding: 1.25rem 1.25rem 6rem;
+  min-height: 100%;
+}
+
+/* ── TableKit 表格（column borders + 选中 outline） ─────────────────── */
+.doc-rich-content table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  margin: 0.5em 0;
+  overflow: hidden;
+}
+
+.doc-rich-content td,
+.doc-rich-content th {
+  border: 1px solid var(--color-border, #d4d4d8);
+  padding: 6px 12px;
+  vertical-align: top;
+  min-width: 3em;
+  position: relative;
+}
+
+.dark .doc-rich-content td,
+.dark .doc-rich-content th {
+  border-color: #3f3f46;
+}
+
+/* 选中单元格 / 表格（Tiptap 内建 selectedCell / ProseMirror-selectednode） */
+.doc-rich-content .selectedCell::after,
+.doc-rich-content .ProseMirror-selectednode {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.doc-rich-content .column-resize-handle {
+  background-color: var(--color-accent);
+  width: 2px;
+}
+
+/* ── TaskList / TaskItem（原生 checkbox） ───────────────────────────── */
+.doc-rich-content ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.doc-rich-content ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.doc-rich-content ul[data-type="taskList"] li > label {
+  margin-top: 0.35em;
+  flex-shrink: 0;
+}
+
+.doc-rich-content ul[data-type="taskList"] li > div {
+  flex: 1;
+}
+
+/* ── Placeholder（空文档） ──────────────────────────────────────────── */
+.doc-rich-content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--color-zinc-400, #a1a1aa);
+}

@@ -311,6 +311,25 @@ sequenceDiagram
 
 ---
 
+## 10. 实施记录
+
+### P0（2026-10-16，已交付）：Tiptap 3 编辑器替换（单用户）
+
+| 决策点 | 落地实现 |
+|---|---|
+| 转换方案 | **手写 micromark + mdast 双向转换**（放弃 `@tiptap/markdown`：基于 marked、需 DOM、round-trip 契约不可控；.md 是权威存储，保真度是硬约束） |
+| 转换契约 | `md → json → md` 对常见 GFM 输入**字节稳定**（未改动文档保存零 diff 噪音）；全部用例语义（mdast AST）稳定；真实文档（ADR-074/076/079，共 74KB）AST 回归通过 |
+| 已知-lossy | highlight → `<mark>` 行内 HTML；underline → 纯文本；HTML 块 → 段落文本（内容不丢，格式降级，测试锁定） |
+| 编辑器 | `DocRichEditor`（`src/components/doc/editor/`）：Tiptap `useEditor` + 裁剪版 ExtensionKit（StarterKit + TableKit + TaskList + Highlight + Image + Placeholder + CharacterCount 50000 上限） |
+| 双模式 | `editorStore.engine: "rich" \| "source"`；DocEditor 顶栏引擎切换；rich 默认、懒加载（独立 chunk ~470KB/149KB gzip，不进首屏）；加载失败 → 显式降级 Monaco + amber 提示 |
+| 同步链路 | 编辑即序列化回写 store（`.md` 仍是事实源）；保存走现有 PUT + `base_version`；409 冲突 banner、reload、`applyMergedUpdate`（审阅合并）均通过 `canonicalMd` 对比实现外部同步（无死循环、挂载不污染 dirty） |
+| 审阅流 | ReviewQueue approve → `applyMergedUpdate` → 编辑器自动重载（已单测覆盖） |
+| 测试 | round-trip 语料 40+ 用例（字节稳定 36 + 语义 12 + known-lossy 2 + 幂等）；`DocRichEditor` 组件测试 5 项（载入/回写/外部同步/只读热切换） |
+
+P1 前置条件（未动）：`yrs` + WS 端点、Gateway WS 升级、`y-websocket`/`y-indexeddb`、Collaboration/Caret —— 均待 ADR-076 落地后启动。
+
+---
+
 ## 附：DocFlow 可借鉴文件索引（外部参考，位于 `D:\projects\tranxon\DocFlow`）
 
 | 借鉴点 | 文件 |

@@ -1514,6 +1514,18 @@
     "tbColLabel": "Column {{n}}",
     "tbMermaid": "Mermaid diagram",
     "tbRule": "Divider",
-    "editorLoadFailed": "Editor failed to load. Close and reopen the doc to retry."
+    "editorLoadFailed": "Editor failed to load. Close and reopen the doc to retry.",
+    "engineLabel": "Engine",
+    "richText": "Rich text",
+    "source": "Markdown",
+    "richToolbar": "Rich text toolbar",
+    "richPlaceholder": "Start typing…",
+    "charCount": "{{count}}/{{limit}}",
+    "richLoadFailed": "Rich text editor failed to load — fell back to Markdown source mode",
+    "editorLoadingRich": "Loading rich text editor…",
+    "linkPrompt": "Link URL",
+    "imagePrompt": "Image URL or relative path",
+    "tbUndo": "Undo",
+    "tbRedo": "Redo"
   }
 }

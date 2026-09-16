@@ -1457,6 +1457,18 @@
     "tbColLabel": "열 {{n}}",
     "tbMermaid": "Mermaid 플로우차트",
     "tbRule": "구분선",
-    "editorLoadFailed": "편집기 로드에 실패했습니다. 다시 시도하세요"
+    "editorLoadFailed": "편집기 로드에 실패했습니다. 다시 시도하세요",
+    "engineLabel": "편집 방식",
+    "richText": "리치 텍스트",
+    "source": "Markdown",
+    "richToolbar": "리치 텍스트 도구 모음",
+    "richPlaceholder": "입력 시작…",
+    "charCount": "{{count}}/{{limit}}",
+    "richLoadFailed": "리치 텍스트 편집기 로드 실패 — Markdown 소스 모드로 전환됨",
+    "editorLoadingRich": "리치 텍스트 편집기 로드 중…",
+    "linkPrompt": "링크 URL",
+    "imagePrompt": "이미지 URL 또는 상대 경로",
+    "tbUndo": "실행 취소",
+    "tbRedo": "다시 실행"
   }
 }

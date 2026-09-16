@@ -1,23 +1,23 @@
 /**
  * DocEditor — doc 视图右侧编辑器（设计 §7 / plan D2-3）。
  *
- * - 编辑/分栏/预览三模式：编辑 = Monaco（markdown）；预览 =
- *   DocMarkdownView（同渲染栈）；分栏 = 左 Monaco 右预览。
- * - 工具栏：MarkdownToolbar 通过 executeEdits 插入片段（表格/流程图/
- *   代码块等），走 Monaco undo/redo 栈。
- * - 表格导航：光标在 GFM 表格内时 Tab / Shift+Tab 跨单元格移动，
- *   行尾自动补格（tableAid.nextCell 纯函数）。
+ * - 双编辑引擎（ADR-079 D1 / P0）：rich = Tiptap 富文本（默认，懒加载）；
+ *   source = Monaco markdown 源码（保留，含 MarkdownToolbar + 表格导航）。
+ * - 编辑/分栏/预览三模式：预览 = DocMarkdownView（同渲染栈）；分栏 =
+ *   左引擎右预览（可拖拽，宽度持久化）。
  * - 保存：PUT 携带 `base_version`（乐观并发）；409 `version_conflict` →
  *   amber banner「文档已被他人更新」+ 刷新按钮（不静默覆盖）。
  * - 来源标记：Agent add-to-doc 导入的文档展示 instance_id 的 display_name
  *   + workspace_path badge（ADR-073：通过 agentStore 把 instance_id
  *   解析为人类可读名，而不是直接显示原始 UUID）。
- * - 快捷键 Ctrl/Cmd+S 保存（Monaco 聚焦时）。
+ * - 快捷键 Ctrl/Cmd+S 保存（Tiptap / Monaco 聚焦时均可）。
  * - 切换文档且本地有未保存修改 → ConfirmDialog 确认丢弃。
+ * - rich 引擎动态 import()（Tiptap + micromark 不进首屏 chunk）；
+ *   加载失败 → 自动降级 Monaco + amber 提示（显式失败，不静默）。
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Columns2, Eye, FileText, Loader2, Pencil, RefreshCw, Save, Sparkles } from "lucide-react";
+import { Check, Columns2, Eye, FileText, Loader2, Pencil, RefreshCw, Save, Sparkles, Type, Braces } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -33,6 +33,8 @@ import { MarkdownToolbar } from "../../components/markdown/MarkdownToolbar";
 import { registerMarkdownTableNavigation } from "../../components/markdown/editorAid";
 import { cn } from "../../lib/utils";
 import { DocMarkdownView } from "./DocMarkdownView";
+// 仅类型引用（懒加载边界：DocRichEditor 运行时经动态 import() 进入）。
+import type { DocRichEditor } from "../../components/doc/editor/DocRichEditor";
 
 /** 解析 agent instance_id → 显示名（meta.display_name ?? meta.name ?? id）。
  *  agentStore 是按 instance_id 索引的（ADR-073），与 `import.instance_id`
@@ -47,6 +49,71 @@ function resolveAgentName(
   return a.meta.display_name || a.meta.name || id;
 }
 
+/** Monaco markdown 源码面板（source 引擎 + rich 加载失败的降级共用）。 */
+function MonacoPane({
+  doc,
+  content,
+  monacoReady,
+  monacoFailed,
+  monacoTheme,
+  editorFontSize,
+  healthy,
+  editorAria,
+  loadFailedLabel,
+  onMount,
+  onChange,
+}: {
+  doc: { meta: { doc_id: string } };
+  content: string;
+  monacoReady: boolean;
+  monacoFailed: boolean;
+  monacoTheme: string;
+  editorFontSize: number;
+  /** boolean | null（healthStore 未加载时为 null；null 视为不可用 → 只读） */
+  healthy: boolean | null;
+  editorAria: string;
+  loadFailedLabel: string;
+  onMount: OnMount;
+  onChange: (value: string) => void;
+}) {
+  if (!monacoReady) {
+    return monacoFailed ? (
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+        <RefreshCw className="h-4 w-4" aria-hidden />
+        {loadFailedLabel}
+      </div>
+    ) : (
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+      </div>
+    );
+  }
+  return (
+    <Editor
+      path={`doc:${doc.meta.doc_id}`}
+      value={content}
+      language="markdown"
+      theme={monacoTheme}
+      onChange={(value) => onChange(value ?? "")}
+      onMount={onMount}
+      keepCurrentModel={false}
+      options={{
+        minimap: { enabled: false },
+        fontSize: editorFontSize,
+        lineNumbers: "on",
+        scrollBeyondLastLine: false,
+        wordWrap: "on",
+        tabSize: 2,
+        renderWhitespace: "selection",
+        padding: { top: 8 },
+        automaticLayout: true,
+        readOnly: !healthy,
+        ariaLabel: editorAria,
+      }}
+    />
+  );
+}
+
 export function DocEditor() {
   const { t } = useTranslation();
   const healthy = useDocHealthStore((s) => s.healthy);
@@ -56,10 +123,12 @@ export function DocEditor() {
   const saving = useDocEditorStore((s) => s.saving);
   const loading = useDocEditorStore((s) => s.loading);
   const mode = useDocEditorStore((s) => s.mode);
+  const engine = useDocEditorStore((s) => s.engine);
   const conflict = useDocEditorStore((s) => s.conflict);
   const saveError = useDocEditorStore((s) => s.saveError);
   const pendingOpenDocId = useDocEditorStore((s) => s.pendingOpenDocId);
   const setMode = useDocEditorStore((s) => s.setMode);
+  const setEngine = useDocEditorStore((s) => s.setEngine);
   const setContent = useDocEditorStore((s) => s.setContent);
   const save = useDocEditorStore((s) => s.save);
   const reload = useDocEditorStore((s) => s.reload);
@@ -83,6 +152,25 @@ export function DocEditor() {
       },
       () => {
         if (!cancelled) setMonacoFailed(true);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ── Tiptap 富文本引擎（ADR-079 P0）：动态 import() 懒加载 ──────
+  // micromark + Tiptap 不进首屏 chunk；加载失败 → 显式降级 source。
+  const [RichEditorComp, setRichEditorComp] = useState<typeof DocRichEditor | null>(null);
+  const [richFailed, setRichFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    import("../../components/doc/editor/DocRichEditor").then(
+      (mod) => {
+        if (!cancelled) setRichEditorComp(() => mod.DocRichEditor);
+      },
+      () => {
+        if (!cancelled) setRichFailed(true);
       },
     );
     return () => {
@@ -221,6 +309,48 @@ export function DocEditor() {
           </div>
         </div>
 
+        {/* 编辑引擎切换（rich=Tiptap 富文本 / source=Monaco 源码；预览模式隐藏） */}
+        {mode !== "preview" && (
+          <div
+            className="flex shrink-0 items-center rounded-md border border-zinc-200 p-0.5 text-[11px] dark:border-zinc-700"
+            role="group"
+            aria-label={t("doc.engineLabel")}
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={engine === "rich"}
+              disabled={!healthy}
+              onClick={() => setEngine("rich")}
+              className={cn(
+                "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
+                engine === "rich"
+                  ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+              )}
+            >
+              <Type className="h-3 w-3" aria-hidden />
+              {t("doc.richText")}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={engine === "source"}
+              disabled={!healthy}
+              onClick={() => setEngine("source")}
+              className={cn(
+                "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
+                engine === "source"
+                  ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+              )}
+            >
+              <Braces className="h-3 w-3" aria-hidden />
+              {t("doc.source")}
+            </button>
+          </div>
+        )}
+
         {/* 模式切换（编辑/分栏/预览） */}
         <div
           className="flex shrink-0 items-center rounded-md border border-zinc-200 p-0.5 text-[11px] dark:border-zinc-700"
@@ -269,47 +399,70 @@ export function DocEditor() {
       )}
 
       {/* ── 工具栏（编辑/分栏模式下显示） ─────────────────── */}
-      {mode !== "preview" && <MarkdownToolbar editor={editorRef.current} disabled={!healthy} />}
+      {/* source 引擎：MarkdownToolbar（Monaco executeEdits）；rich 引擎自带 RichToolbar */}
+      {mode !== "preview" && engine === "source" && (
+        <MarkdownToolbar editor={editorRef.current} disabled={!healthy} />
+      )}
+
+      {/* rich 引擎加载失败 → 显式降级提示（ADR-079 §7：不静默回退） */}
+      {mode !== "preview" && engine === "rich" && richFailed && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
+          <span className="flex-1">{t("doc.richLoadFailed")}</span>
+        </div>
+      )}
 
       {/* ── 编辑 / 分栏 / 预览 ─────────────────────────────── */}
       {mode === "preview" ? (
         <DocMarkdownView content={content} />
       ) : (
         <div className="flex h-full min-h-0 flex-1">
-          {/* 左：Monaco 源码编辑 */}
-          <div className={cn("min-h-0 min-w-0", mode === "split" ? "flex-1" : "flex-1")}>
-            {monacoReady ? (
-              <Editor
-                path={`doc:${doc.meta.doc_id}`}
-                value={content}
-                language="markdown"
-                theme={monacoTheme}
-                onChange={(value) => setContent(value ?? "")}
-                onMount={handleEditorMount}
-                keepCurrentModel={false}
-                options={{
-                  minimap: { enabled: false },
-                  fontSize: editorFontSize,
-                  lineNumbers: "on",
-                  scrollBeyondLastLine: false,
-                  wordWrap: "on",
-                  tabSize: 2,
-                  renderWhitespace: "selection",
-                  padding: { top: 8 },
-                  automaticLayout: true,
-                  readOnly: !healthy,
-                  ariaLabel: t("doc.editorAria"),
-                }}
-              />
-            ) : monacoFailed ? (
-              <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
-                <RefreshCw className="h-4 w-4" aria-hidden />
-                {t("doc.editorLoadFailed")}
-              </div>
+          {/* 左：编辑引擎（rich=Tiptap 懒加载 / source=Monaco） */}
+          <div className="min-h-0 min-w-0 flex-1">
+            {engine === "rich" ? (
+              richFailed ? (
+                // 富文本加载失败 → 降级 Monaco 源码编辑
+                <MonacoPane
+                  doc={doc}
+                  content={content}
+                  monacoReady={monacoReady}
+                  monacoFailed={monacoFailed}
+                  monacoTheme={monacoTheme}
+                  editorFontSize={editorFontSize}
+                  healthy={healthy}
+                  editorAria={t("doc.editorAria")}
+                  loadFailedLabel={t("doc.editorLoadFailed")}
+                  onMount={handleEditorMount}
+                  onChange={setContent}
+                />
+              ) : RichEditorComp ? (
+                <RichEditorComp
+                  key={doc.meta.doc_id}
+                  contentMd={content}
+                  readOnly={!healthy}
+                  placeholder={t("doc.richPlaceholder")}
+                  onContentChange={setContent}
+                  onSave={() => void handleSave()}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                  {t("doc.editorLoadingRich")}
+                </div>
+              )
             ) : (
-              <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
-                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-              </div>
+              <MonacoPane
+                doc={doc}
+                content={content}
+                monacoReady={monacoReady}
+                monacoFailed={monacoFailed}
+                monacoTheme={monacoTheme}
+                editorFontSize={editorFontSize}
+                healthy={healthy}
+                editorAria={t("doc.editorAria")}
+                loadFailedLabel={t("doc.editorLoadFailed")}
+                onMount={handleEditorMount}
+                onChange={setContent}
+              />
             )}
           </div>
 

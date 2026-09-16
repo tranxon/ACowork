@@ -1455,6 +1455,18 @@
     "tbColLabel": "欄 {{n}}",
     "tbMermaid": "Mermaid 流程圖",
     "tbRule": "分隔線",
-    "editorLoadFailed": "編輯器載入失敗，請關閉後重試"
+    "editorLoadFailed": "編輯器載入失敗，請關閉後重試",
+    "engineLabel": "編輯方式",
+    "richText": "富文本",
+    "source": "Markdown",
+    "richToolbar": "富文本工具列",
+    "richPlaceholder": "開始輸入…",
+    "charCount": "{{count}}/{{limit}}",
+    "richLoadFailed": "富文本編輯器載入失敗，已切換為 Markdown 原始碼模式",
+    "editorLoadingRich": "正在載入富文本編輯器…",
+    "linkPrompt": "連結位址",
+    "imagePrompt": "圖片位址（URL 或相對路徑）",
+    "tbUndo": "復原",
+    "tbRedo": "重做"
   }
 }

@@ -1531,6 +1531,18 @@
     "tbColLabel": "列 {{n}}",
     "tbMermaid": "Mermaid 流程图",
     "tbRule": "分割线",
-    "editorLoadFailed": "编辑器加载失败，请关闭后重试"
+    "editorLoadFailed": "编辑器加载失败，请关闭后重试",
+    "engineLabel": "编辑方式",
+    "richText": "富文本",
+    "source": "Markdown",
+    "richToolbar": "富文本工具栏",
+    "richPlaceholder": "开始输入…",
+    "charCount": "{{count}}/{{limit}}",
+    "richLoadFailed": "富文本编辑器加载失败，已切换为 Markdown 源码模式",
+    "editorLoadingRich": "正在加载富文本编辑器…",
+    "linkPrompt": "链接地址",
+    "imagePrompt": "图片地址（URL 或相对路径）",
+    "tbUndo": "撤销",
+    "tbRedo": "重做"
   }
 }

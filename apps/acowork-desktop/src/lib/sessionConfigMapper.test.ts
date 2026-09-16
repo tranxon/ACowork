@@ -30,6 +30,7 @@ describe("sessionConfigToPatch", () => {
         provider: "anthropic",
         reasoningEffort: "high",
         temperature: 0.5,
+        sessionContextWindow: null, // ADR-074: 未提供 → 全量快照补 null（clearOnNull）
       });
     });
 
@@ -48,6 +49,7 @@ describe("sessionConfigToPatch", () => {
         provider: null,
         reasoningEffort: null,
         temperature: null,
+        sessionContextWindow: null,
       });
     });
 
@@ -107,6 +109,7 @@ describe("sessionConfigToPatch", () => {
         provider: null,
         reasoningEffort: null,
         temperature: null,
+        sessionContextWindow: null,
       });
     });
   });
