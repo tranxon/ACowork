@@ -294,7 +294,10 @@ const handleCompressSummary = () => {
           aria-label={t("contextUsage.title")}
           onMouseEnter={handlePopoverEnter}
           onMouseLeave={handleMouseLeave}
-          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[min(calc(100vh-120px),460px)] select-none overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-modal-surface text-zinc-700 shadow-lg dark:border-zinc-700 dark:text-zinc-200"
+          // ponytail: cap is viewport-bound so the editor expands naturally
+          // without a scrollbar; the previous 460px ceiling was too low once
+          // the inline window editor + presets + breakdown all rendered.
+          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-modal-surface text-zinc-700 shadow-lg dark:border-zinc-700 dark:text-zinc-200"
         >
           <div className="flex items-center justify-between px-3 pt-2.5">
             <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
@@ -312,7 +315,7 @@ const handleCompressSummary = () => {
           </div>
 
           <div className="px-3 pt-2">
-            <div className="flex items-baseline gap-2 whitespace-nowrap">
+            <div className="flex items-center gap-2 whitespace-nowrap">
               <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] text-zinc-700 tabular-nums dark:text-zinc-200">
                 {formatDetailedPercent(usagePercent)}%
               </span>
@@ -326,7 +329,7 @@ const handleCompressSummary = () => {
                   {formatTokens(contextUsage?.context_window ?? 0)}
                 </span>
               </span>
-              {/* ADR-074: per-session window editor entry + override badge. */}
+              {/* ADR-074: per-session window editor entry. */}
               <button
                 type="button"
                 onClick={openWindowEditor}
@@ -336,11 +339,6 @@ const handleCompressSummary = () => {
               >
                 <Pencil size={11} strokeWidth={2.25} />
               </button>
-              {sessionContextWindow != null && (
-                <span className="ml-0.5 shrink-0 rounded bg-indigo-100 px-1 py-px text-[10px] leading-none text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-300">
-                  {t("contextUsage.windowOverrideBadge")}
-                </span>
-              )}
             </div>
 
             {/* ADR-074: per-session window editor (inline, same popover). */}
