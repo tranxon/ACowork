@@ -298,6 +298,17 @@ pub fn restore_history_from_jsonl(
             continue;
         }
 
+        // Internal runtime entries (e.g. the output-budget nudge) are part of
+        // the live LLM context but must NOT be replayed as genuine turns: an
+        // interrupted turn is never resumed after a restart, so replaying the
+        // nudge would leak a stale internal instruction into subsequent turns.
+        // Mirrors the Desktop transcript, which filters the same marker.
+        if entry.is_internal() {
+            pending_reasoning = None;
+            skipped += 1;
+            continue;
+        }
+
         match entry.role.as_str() {
             "thought" => {
                 // Reasoning content for the upcoming tool-call assistant
@@ -641,6 +652,53 @@ mod tests {
                 .messages
                 .iter()
                 .all(|m| !matches!(m.role, MessageRole::System))
+        );
+        assert!(outcome.skipped_entry_count >= 1);
+    }
+
+    #[test]
+    fn restore_skips_internal_entries() {
+        // The output-budget nudge is persisted to JSONL marked
+        // `metadata.internal`. It must NOT be replayed as a genuine user turn:
+        // an interrupted turn is never resumed, so a replayed nudge would leak
+        // a stale internal instruction into subsequent turns.
+        let work = temp_workdir("internal");
+        let session_id = "sess-internal";
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            &work,
+            session_id,
+            SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)), // unlimited in tests
+        )
+        .unwrap();
+        session.append_message("user", "real question", None);
+        session.append_internal_message("user", "output budget exhausted — wrap up");
+        session.append_message("assistant", "real answer", None);
+        flush();
+
+        let path = work
+            .join("conversations")
+            .join(format!("{}.jsonl", session_id));
+        let outcome = restore_history_from_jsonl(&path, None).unwrap();
+        assert_eq!(
+            outcome.messages.len(),
+            2,
+            "internal entry must not enter the replay context"
+        );
+        assert_eq!(outcome.messages[0].content, "real question");
+        assert_eq!(outcome.messages[1].content, "real answer");
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .all(|m| !m.content.contains("output budget exhausted")),
+            "no message should carry the nudge text"
         );
         assert!(outcome.skipped_entry_count >= 1);
     }

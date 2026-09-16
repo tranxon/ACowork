@@ -69,6 +69,13 @@ pub struct SessionTokens {
 /// Entry kind discriminator for `ConversationEntry.kind`.
 pub const ENTRY_KIND_COMPACTION: &str = "compaction";
 
+/// Metadata key marking an entry as an *internal runtime artifact* (e.g. the
+/// output-budget nudge injected by `AgentLoop::handle_output_budget_exhausted`).
+///
+/// Value is boolean `true`. See [`ConversationEntry::is_internal`] for the
+/// reader contract.
+pub const META_KEY_INTERNAL: &str = "internal";
+
 /// A single line in the conversation JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationEntry {
@@ -90,6 +97,28 @@ pub struct ConversationEntry {
     /// Added in JSONL v2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+}
+
+impl ConversationEntry {
+    /// Whether this entry is an internal runtime artifact rather than a genuine
+    /// conversation turn.
+    ///
+    /// Marked by [`ConversationSession::append_internal_message`] with
+    /// `metadata.internal = true`. The contract for readers is:
+    ///
+    /// - **Do not surface it to the user.** The Desktop filters these entries
+    ///   out of the chat transcript when loading history.
+    /// - **Do not replay it as a conversation turn.** The session restorer
+    ///   skips them, because an interrupted turn is never resumed after a
+    ///   restart — replaying a nudge would leak a stale internal instruction
+    ///   into subsequent turns.
+    pub fn is_internal(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get(META_KEY_INTERNAL))
+            .and_then(|v| v.as_bool())
+            == Some(true)
+    }
 }
 
 /// Structured metadata payload for `kind="compaction"` entries.
@@ -1082,6 +1111,18 @@ impl ConversationSession {
     /// background writer thread.
     pub fn append_message(&self, role: &str, content: &str, metadata: Option<serde_json::Value>) {
         self.append_message_with_id(role, content, metadata, None);
+    }
+
+    /// Append an *internal* runtime message (e.g. the output-budget nudge).
+    ///
+    /// Stored in JSONL with `metadata.internal = true` so readers recognize it
+    /// via [`ConversationEntry::is_internal`]. It is deliberately **not**
+    /// broadcast over MQTT (only [`SessionCore::flush_streaming_line`] emits
+    /// `ChunkEvent::RecordComplete`), so the live UI never sees it.
+    pub fn append_internal_message(&self, role: &str, content: &str) {
+        let mut meta = serde_json::Map::new();
+        meta.insert(META_KEY_INTERNAL.to_string(), serde_json::Value::Bool(true));
+        self.append_message(role, content, Some(serde_json::Value::Object(meta)));
     }
 
     /// Append a message with an explicit ID.
@@ -4224,6 +4265,28 @@ mod tests {
             metadata: None,
             kind: None,
         }
+    }
+
+    #[test]
+    fn is_internal_only_for_internal_marker() {
+        let mut e = make_entry("1", "user", "hello");
+        assert!(!e.is_internal(), "no metadata → not internal");
+
+        e.metadata = Some(serde_json::json!({ "tool_name": "echo" }));
+        assert!(!e.is_internal(), "unrelated metadata → not internal");
+
+        e.metadata = Some(serde_json::json!({ "internal": false }));
+        assert!(!e.is_internal(), "explicit false → not internal");
+
+        e.metadata = Some(serde_json::json!({ "internal": true }));
+        assert!(e.is_internal(), "internal:true → internal");
+
+        // The marker is the exact shape `append_internal_message` writes.
+        assert_eq!(META_KEY_INTERNAL, "internal");
+        let mut meta = serde_json::Map::new();
+        meta.insert(META_KEY_INTERNAL.to_string(), serde_json::Value::Bool(true));
+        e.metadata = Some(serde_json::Value::Object(meta));
+        assert!(e.is_internal());
     }
 
     #[test]

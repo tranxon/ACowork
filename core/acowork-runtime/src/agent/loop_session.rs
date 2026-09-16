@@ -15,6 +15,59 @@ use crate::agent::context::build_context_usage_from_persisted;
 use crate::agent::session_state::SessionStatus;
 use crate::error::Result;
 
+// ── Output-budget exhaustion (think-budget runaway) ─────────────────────
+//
+// A thinking model can spend its entire completion budget on reasoning and
+// return `finish_reason="length"` with no content and no tool calls. Observed
+// with MiniMax-M3 on 2026-09-16 (session 20260916_145211_eeb117): all 32768
+// completion tokens were reasoning tokens, `content` was empty, and the turn
+// silently ended in Idle with no reply at all. These helpers detect that
+// signature and bound the recovery so it cannot loop forever.
+
+/// `name` marker on the internal nudge appended to history. It identifies
+/// nudge messages when counting retries, and keeps the nudge distinguishable
+/// from a real user turn.
+pub(crate) const INTERNAL_NUDGE_NAME: &str = "internal_nudge";
+
+/// Maximum nudges injected per user turn before the failure is surfaced.
+pub(crate) const MAX_OUTPUT_BUDGET_NUDGES: usize = 2;
+
+/// Instruction injected into history after an output-budget exhaustion.
+const OUTPUT_BUDGET_NUDGE: &str = "Your previous reply was cut off by the output token limit \
+and produced no content and no tool calls. Respond now with a direct answer or a tool call — \
+do not keep reasoning at length. Reply in the same language as the user.";
+
+/// Signature of an output-budget exhaustion: the model was cut off by the
+/// token limit and produced nothing usable.
+pub(crate) fn is_output_budget_exhausted(response: &ChatResponse) -> bool {
+    response.finish_reason.as_deref() == Some("length")
+        && response.content.trim().is_empty()
+        && response.tool_calls.is_none()
+}
+
+/// Count internal nudges injected since the last genuine user turn.
+///
+/// Stateless on purpose: counting from history avoids a per-turn counter that
+/// would need resetting at every turn boundary.
+///
+/// A **genuine user turn** is a `User` message with no `name`. Every internal
+/// user-role injection carries a `name` (see `inject_inbound_into_history`:
+/// system notifications use `"system"`, compaction summaries
+/// `"compaction_summary"`, the nudge `"internal_nudge"`), so those do NOT
+/// reset the budget. This is load-bearing: the token-budget warning is injected
+/// as `User { name: "system" }` between iterations, and a thinking model that
+/// burns its whole output budget also blows the token budget — so treating the
+/// warning as a turn boundary would reset the nudge budget on every iteration
+/// and defeat the bound.
+fn count_output_budget_nudges(history: &[ChatMessage]) -> usize {
+    history
+        .iter()
+        .rev()
+        .take_while(|m| !(m.role == MessageRole::User && m.name.is_none()))
+        .filter(|m| m.role == MessageRole::User && m.name.as_deref() == Some(INTERNAL_NUDGE_NAME))
+        .count()
+}
+
 impl super::loop_::AgentLoop {
     // ── Session lifecycle methods ──────────────────────────────────────────
 
@@ -381,32 +434,21 @@ impl super::loop_::AgentLoop {
         // 2. No streaming flush occurred (non-streaming provider, or all
         //    content arrived in the Finished event). Use the legacy path:
         //    persist_think_to_conversation + strip_think_block.
-        let streamed = self
-            .session_core
-            .streaming_flush_count
-            .load(Ordering::Relaxed)
-            > 0;
+        let streamed = self.finalize_streaming_line(response);
 
         if streamed {
-            // Path 1: Content was already flushed on role transitions.
-            // Flush the last streaming line (e.g., final assistant segment).
-            self.session_core
-                .flush_streaming_line(self.session.conversation.as_deref());
             tracing::debug!(
                 iteration,
                 "ADR-022: streaming flush path — skipping legacy persistence"
             );
         } else if let Some(ref conversation) = self.session.conversation {
             // Path 2: Legacy persistence for non-streaming responses.
-            super::loop_session::persist_think_to_conversation(conversation, response);
+            // The think block was already persisted by `finalize_streaming_line`;
+            // only the assistant text remains.
             let assistant_text = strip_think_block(&content);
             if !assistant_text.is_empty() {
                 conversation.append_message("assistant", &assistant_text, None);
             }
-
-            // ADR-021: Remove streaming line after legacy persistence
-            // (handle_text_response already wrote thought + assistant to JSONL)
-            self.session_core.remove_streaming_line();
         }
 
         // Persist the final assistant turn to in-memory history.
@@ -460,6 +502,140 @@ impl super::loop_::AgentLoop {
         self.core.debug_observer.on_phase_step_done().await;
 
         super::loop_::IterationResult::TextResponse(content)
+    }
+
+    /// ADR-022: close out the current streaming line at turn end.
+    ///
+    /// Two cases:
+    /// 1. The provider already flushed on role transitions
+    ///    (`streaming_flush_count > 0`): flush the final line (e.g. the last
+    ///    assistant segment) to JSONL + emit `RecordComplete`.
+    /// 2. Nothing was flushed: persist the response's think block via the
+    ///    legacy path and drop the line.
+    ///
+    /// Returns `true` when case 1 applied, i.e. the caller must **skip** its
+    /// own legacy think/assistant persistence to avoid a duplicate entry.
+    ///
+    /// This MUST be called on every terminal (return-to-Idle) path. Leaving the
+    /// line open means a later role transition flushes it as a *late*
+    /// `record_complete`, surfacing stale content as a bubble on the next turn.
+    fn finalize_streaming_line(&self, response: &ChatResponse) -> bool {
+        let streamed = self
+            .session_core
+            .streaming_flush_count
+            .load(Ordering::Relaxed)
+            > 0;
+
+        if streamed {
+            self.session_core
+                .flush_streaming_line(self.session.conversation.as_deref());
+        } else if let Some(ref conversation) = self.session.conversation {
+            persist_think_to_conversation(conversation, response);
+            self.session_core.remove_streaming_line();
+        }
+
+        streamed
+    }
+
+    /// Handle a response whose output budget was exhausted (see
+    /// [`is_output_budget_exhausted`]).
+    ///
+    /// Injects an internal nudge and asks the loop for another iteration while
+    /// the per-turn nudge budget lasts. The nudge is appended to the LLM
+    /// history AND persisted to JSONL (marked `metadata.internal`), but it is
+    /// deliberately NOT broadcast over MQTT (it never goes through
+    /// `ChunkEvent::RecordComplete`). Readers treat it as an internal artifact:
+    /// the Desktop keeps it out of the transcript, and the session restorer
+    /// skips it (an interrupted turn is never resumed, so replaying the nudge
+    /// would leak a stale instruction into later turns).
+    ///
+    /// Once the budget is spent the turn ends and a user-visible error is
+    /// emitted, so the user is never left with a silent empty reply.
+    pub(crate) async fn handle_output_budget_exhausted(
+        &mut self,
+        response: &ChatResponse,
+        iteration: u32,
+    ) -> super::loop_::IterationResult {
+        let reasoning_tokens = response
+            .usage
+            .as_ref()
+            .map(|u| u.reasoning_tokens)
+            .unwrap_or(0);
+        let completion_tokens = response
+            .usage
+            .as_ref()
+            .map(|u| u.completion_tokens)
+            .unwrap_or(0);
+        let nudges_used = count_output_budget_nudges(self.session.history.messages());
+
+        if nudges_used < MAX_OUTPUT_BUDGET_NUDGES {
+            tracing::warn!(
+                iteration,
+                attempt = nudges_used + 1,
+                max_attempts = MAX_OUTPUT_BUDGET_NUDGES,
+                finish_reason = ?response.finish_reason,
+                reasoning_tokens,
+                completion_tokens,
+                "Output budget exhausted on reasoning with no content — nudging model to wrap up"
+            );
+
+            // LLM context: a `User` turn is what makes the model respond again.
+            self.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: OUTPUT_BUDGET_NUDGE.to_string(),
+                name: Some(INTERNAL_NUDGE_NAME.to_string()),
+                ..Default::default()
+            });
+
+            // Persistence: JSONL only. `append_internal_message` goes straight
+            // to the conversation writer; it does NOT emit
+            // `ChunkEvent::RecordComplete` (that happens only in
+            // `SessionCore::flush_streaming_line`), so the live UI never sees
+            // this entry. The `metadata.internal` marker lets readers (Desktop
+            // transcript, session restorer) recognize it.
+            if let Some(conversation) = self.session.conversation.as_deref() {
+                conversation.append_internal_message("user", OUTPUT_BUDGET_NUDGE);
+            }
+
+            return super::loop_::IterationResult::Nudged;
+        }
+
+        tracing::error!(
+            iteration,
+            finish_reason = ?response.finish_reason,
+            reasoning_tokens,
+            completion_tokens,
+            "Output budget exhausted and nudge budget spent — surfacing failure to user"
+        );
+
+        // ADR-022: close the streaming line before returning to Idle. The
+        // truncated response's reasoning was streamed as a live `thought` line;
+        // without this it would dangle and surface as a late `record_complete`
+        // on the next turn's first role transition.
+        self.finalize_streaming_line(response);
+
+        // User-visible fallback: a normal error chunk (not a JSONL note), so it
+        // reaches the live UI and renders like every other runtime error.
+        let _ = self
+            .session_core
+            .try_send_chunk(super::loop_::ChunkEvent::Error {
+                user_message: "Model output hit the token limit without producing usable content \
+(reasoning consumed the entire output budget). Retry, split the task, or lower the reasoning effort."
+                    .to_string(),
+                detail: format!(
+                    "finish_reason=length reasoning_tokens={} completion_tokens={}",
+                    reasoning_tokens, completion_tokens
+                ),
+                error_type: "OutputBudgetExhausted".to_string(),
+                message_id: format!("output-budget-exhausted-{}", iteration),
+            });
+
+        // Close the turn in history the same way `handle_text_response` does
+        // for an empty response, so the next user turn is not preceded by a
+        // dangling internal `user` message (two consecutive user turns).
+        self.session.history.append(ChatMessage::assistant(String::new()));
+
+        super::loop_::IterationResult::TextResponse(String::new())
     }
 }
 
@@ -624,5 +800,135 @@ mod tests {
     #[test]
     fn strip_think_only_think_block() {
         assert_eq!(strip_think_block("<think>just thinking</think>"), "");
+    }
+
+    // ── Output-budget exhaustion ────────────────────────────────────────
+
+    /// The exact 2026-09-16 MiniMax-M3 signature: `finish_reason="length"`,
+    /// all completion tokens are reasoning, and content is a single space.
+    fn exhausted_response() -> ChatResponse {
+        ChatResponse {
+            content: " ".to_string(),
+            reasoning_content: Some("long internal monologue".to_string()),
+            finish_reason: Some("length".to_string()),
+            usage: Some(acowork_core::providers::traits::UsageInfo {
+                prompt_tokens: 67_712,
+                completion_tokens: 32_768,
+                total_tokens: 100_480,
+                reasoning_tokens: 32_768,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn budget_exhausted_detects_truncated_whitespace_only() {
+        assert!(is_output_budget_exhausted(&exhausted_response()));
+    }
+
+    #[test]
+    fn budget_exhausted_false_when_truncated_with_content() {
+        // Truncated but there IS an answer to continue from — different path.
+        let mut r = exhausted_response();
+        r.content = "partial answer".to_string();
+        assert!(!is_output_budget_exhausted(&r));
+    }
+
+    #[test]
+    fn budget_exhausted_false_for_normal_stop() {
+        let mut r = exhausted_response();
+        r.finish_reason = Some("stop".to_string());
+        assert!(!is_output_budget_exhausted(&r));
+    }
+
+    #[test]
+    fn budget_exhausted_false_when_tool_calls_present() {
+        let mut r = exhausted_response();
+        r.tool_calls = Some(vec![acowork_core::providers::traits::ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: acowork_core::providers::traits::FunctionCall {
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        assert!(!is_output_budget_exhausted(&r));
+    }
+
+    fn nudge() -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::User,
+            content: OUTPUT_BUDGET_NUDGE.to_string(),
+            name: Some(INTERNAL_NUDGE_NAME.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nudge_count_zero_without_nudges() {
+        let history = vec![
+            ChatMessage::user("do the thing"),
+            ChatMessage::assistant("working"),
+        ];
+        assert_eq!(count_output_budget_nudges(&history), 0);
+    }
+
+    #[test]
+    fn nudge_count_tallies_since_last_user_turn() {
+        let history = vec![
+            ChatMessage::user("first turn"),
+            nudge(),
+            ChatMessage::assistant("still working"),
+            nudge(),
+        ];
+        assert_eq!(count_output_budget_nudges(&history), 2);
+    }
+
+    #[test]
+    fn nudge_count_resets_at_new_user_turn() {
+        // Two nudges in the previous turn must not consume the new turn's budget.
+        let history = vec![
+            ChatMessage::user("first turn"),
+            nudge(),
+            nudge(),
+            // next turn starts here
+            ChatMessage::user("second turn"),
+            nudge(),
+        ];
+        assert_eq!(count_output_budget_nudges(&history), 1);
+    }
+
+    #[test]
+    fn nudge_count_ignores_internal_user_injections() {
+        // A thinking model that burns its whole output budget also blows the
+        // token budget, so the Runtime injects `User { name: "system" }` budget
+        // warnings between iterations. Those are NOT genuine turns — if they
+        // reset the budget, the nudge bound is silently defeated.
+        let internal = |name: &str| ChatMessage {
+            role: MessageRole::User,
+            content: "[System Warning] Daily token limit".to_string(),
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let history = vec![
+            ChatMessage::user("real turn"),
+            nudge(),
+            internal("system"),
+            nudge(),
+            internal("system"),
+        ];
+        assert_eq!(count_output_budget_nudges(&history), 2);
+    }
+
+    #[test]
+    fn nudge_budget_allows_two_then_stops() {
+        let mut history = vec![ChatMessage::user("turn")];
+        assert!(count_output_budget_nudges(&history) < MAX_OUTPUT_BUDGET_NUDGES);
+        history.push(nudge());
+        assert!(count_output_budget_nudges(&history) < MAX_OUTPUT_BUDGET_NUDGES);
+        history.push(nudge());
+        // Budget spent — the handler now surfaces the failure instead of nudging.
+        assert!(count_output_budget_nudges(&history) >= MAX_OUTPUT_BUDGET_NUDGES);
     }
 }

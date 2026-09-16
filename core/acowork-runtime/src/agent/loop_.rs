@@ -298,6 +298,9 @@ pub(crate) enum IterationResult {
     Stopped(String),
     /// Agent was paused by debug panel — iteration aborted, await resume
     Paused,
+    /// Output budget exhausted with no content — an internal nudge was
+    /// injected into history, continue to the next iteration.
+    Nudged,
 }
 
 use crate::agent::session_core::SessionCore;
@@ -1366,6 +1369,12 @@ impl AgentLoop {
                     tracing::debug!(iteration, "Loop iteration complete, continuing");
                     continue;
                 }
+                IterationResult::Nudged => {
+                    // Output budget exhausted with no content; an internal
+                    // nudge was appended to history. Run another iteration.
+                    tracing::debug!(iteration, "Output budget exhausted — nudged, continuing");
+                    continue;
+                }
                 IterationResult::Paused => {
                     // ADR-014: Streaming → Paused (iteration aborted, await resume)
                     self.transition_status(SessionStatus::Paused {
@@ -1635,10 +1644,21 @@ impl AgentLoop {
 
         // ── ④ Text response → early return ──
         if !has_tool_calls {
-            // Guard: log empty response before exiting the loop.
-            // This can happen when a thinking model exhausts its token budget
-            // on reasoning and produces neither content nor tool_calls.
-            if response.content.is_empty() && response.reasoning_content.is_some() {
+            // A thinking model can spend its entire completion budget on
+            // reasoning and return `finish_reason="length"` with no content and
+            // no tool calls (MiniMax-M3, 2026-09-16: all 32768 completion
+            // tokens were reasoning tokens). Ending the turn here would
+            // silently return an empty reply, so nudge the model to wrap up
+            // first — bounded per user turn.
+            if crate::agent::loop_session::is_output_budget_exhausted(&response) {
+                return Ok(self
+                    .handle_output_budget_exhausted(&response, iteration)
+                    .await);
+            }
+            // Any other empty-content response is not actionable; keep the
+            // diagnostic. `trim()` so whitespace-only content — which used to
+            // slip past this guard and end the turn silently — is reported too.
+            if response.content.trim().is_empty() && response.reasoning_content.is_some() {
                 let reasoning_tokens = response
                     .usage
                     .as_ref()
@@ -1868,8 +1888,10 @@ mod tests {
     use super::*;
     use crate::agent::agent_core::BuiltinToolEntry;
     use crate::agent::loop_tools::execute_single_tool;
-    use acowork_core::providers::mock::MockProvider;
-    use acowork_core::providers::traits::{FunctionCall, MessageRole, ToolCall};
+    use acowork_core::providers::mock::{MockProvider, MockResponse};
+    use acowork_core::providers::traits::{
+        ChatResponse, FunctionCall, MessageRole, ToolCall, UsageInfo,
+    };
 
     /// Simple echo tool for testing
     struct EchoTool;
@@ -3786,5 +3808,189 @@ mod tests {
             user_entry.contains("Attached workspace files"),
             "When raw_user_message=None, JSONL should contain enriched hint, got: {user_entry}",
         );
+    }
+
+    // ── Output-budget exhaustion (think-budget runaway) ─────────────────
+
+    /// The exact 2026-09-16 MiniMax-M3 signature: `finish_reason="length"`, all
+    /// completion tokens spent on reasoning, whitespace-only content.
+    fn exhausted_response() -> ChatResponse {
+        ChatResponse {
+            content: " ".to_string(),
+            reasoning_content: Some("long internal monologue".to_string()),
+            finish_reason: Some("length".to_string()),
+            usage: Some(UsageInfo {
+                prompt_tokens: 67_712,
+                completion_tokens: 32_768,
+                total_tokens: 100_480,
+                reasoning_tokens: 32_768,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn output_budget_exhaustion_nudges_then_surfaces_error() {
+        use crate::conversation::{SessionConfig, read_messages_paginated};
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let session_id = "ob-exhaust-e2e";
+        let (conversation, _cfg_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            session_id,
+            SessionConfig {
+                agent_id: "com.test.loop".to_string(),
+                workspace_id: None,
+                model: Some("mock-model".to_string()),
+                provider: Some("mock".to_string()),
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+        // Pre-set the title so the async title-generation task is skipped —
+        // otherwise it would consume one of the mock's canned responses and
+        // shift the whole sequence (title gen only runs when unset).
+        conversation.set_title("pre-set");
+
+        // nudge #1 → nudge #2 → budget spent (error + empty turn).
+        let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Raw(Box::new(exhausted_response())),
+            MockResponse::Raw(Box::new(exhausted_response())),
+            MockResponse::Raw(Box::new(exhausted_response())),
+        ]));
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider.clone(),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        let mut ctx = ContextBuilder::new("System".to_string());
+        let reply = agent_loop
+            .run("please summarise the doc", &mut ctx, None, None, None, None)
+            .await
+            .expect("loop must not error");
+        assert_eq!(reply, "", "exhausted turn returns an empty reply");
+
+        // The model was re-invoked for both nudges and the final attempt.
+        assert_eq!(
+            provider.call_count(),
+            3,
+            "expected exactly 3 LLM calls (nudge, nudge, give-up)"
+        );
+
+        conversation.flush_pending().await.expect("flush");
+        let path = dir
+            .path()
+            .join("conversations")
+            .join(format!("{session_id}.jsonl"));
+        let page = read_messages_paginated(&path, 0, 500, false).unwrap();
+        let nudges: Vec<_> = page.messages.iter().filter(|e| e.is_internal()).collect();
+        assert_eq!(
+            nudges.len(),
+            2,
+            "exactly two nudges before surfacing the failure"
+        );
+        assert!(nudges.iter().all(|e| e.role == "user"));
+
+        assert!(
+            agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "no dangling streaming line at turn end"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_budget_exhaustion_closes_open_streaming_line() {
+        use crate::agent::loop_session::{INTERNAL_NUDGE_NAME, MAX_OUTPUT_BUDGET_NUDGES};
+        use crate::conversation::SessionConfig;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let session_id = "ob-exhaust-stream";
+        let (conversation, _cfg_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            session_id,
+            SessionConfig {
+                agent_id: "com.test.loop".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+
+        let provider = Arc::new(MockProvider::single_text("unused"));
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider,
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        // Budget already spent this turn: one real user message + two nudges.
+        agent_loop
+            .session
+            .history
+            .append(ChatMessage::user("real turn"));
+        for _ in 0..MAX_OUTPUT_BUDGET_NUDGES {
+            agent_loop.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: "nudge".to_string(),
+                name: Some(INTERNAL_NUDGE_NAME.to_string()),
+                ..Default::default()
+            });
+        }
+        // A truncated thinking response leaves a live `thought` line open.
+        agent_loop
+            .session_core
+            .append_streaming_delta("thought", "long internal monologue");
+        assert!(
+            !agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "precondition: a streaming line is open"
+        );
+
+        let _ = agent_loop
+            .handle_output_budget_exhausted(&exhausted_response(), 3)
+            .await;
+
+        assert!(
+            agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "terminal exhausted path must close the streaming line"
+        );
+        // The turn is closed in history with an empty assistant message.
+        assert!(matches!(
+            agent_loop.session.history.messages().last().map(|m| &m.role),
+            Some(MessageRole::Assistant)
+        ));
     }
 }

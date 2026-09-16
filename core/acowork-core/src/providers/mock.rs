@@ -28,6 +28,12 @@ pub enum MockResponse {
     },
     /// Return an error
     Error { message: String },
+    /// Return a fully-formed [`ChatResponse`] verbatim.
+    ///
+    /// Lets tests exercise response shapes the typed variants can't express —
+    /// e.g. an output-budget exhaustion (`finish_reason="length"`, empty
+    /// `content`, populated `reasoning_content`).
+    Raw(Box<ChatResponse>),
 }
 
 /// Mock Provider for testing
@@ -178,6 +184,7 @@ impl Provider for MockProvider {
             MockResponse::Error { message } => Err(crate::error::AcoworkError::Provider(
                 crate::providers::ProviderError::unknown(message),
             )),
+            MockResponse::Raw(response) => Ok(*response),
         }
     }
 
