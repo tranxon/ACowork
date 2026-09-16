@@ -1175,6 +1175,8 @@
     "nextChange": "次の変更",
     "prevCommits": "新しいコミット",
     "nextCommits": "古いコミット",
+    "prevPage": "前のページ",
+    "nextPage": "次のページ",
     "headLabel": "HEAD",
     "workingTreeLabel": "作業ツリー",
     "commitPickerLabel": "リビジョンを選択",

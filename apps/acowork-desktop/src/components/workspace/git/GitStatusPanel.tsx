@@ -5,10 +5,12 @@
  * editor. Deleted rows redirect to Show Diff (decision 6).
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ArrowRightLeft,
+  ChevronLeft,
+  ChevronRight,
   FileMinus,
   FilePlus,
   GitMerge,
@@ -26,6 +28,25 @@ import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
 import { cn } from "../../../lib/utils";
+
+// Pagination: a workspace with a stray `node_modules/` or `target/`
+// under version control can balloon the changed-file list to 5000+
+// rows, which freezes the panel before the user even sees it. 100
+// rows/page matches the git-domain LOG_STEP=50 in GitVirtualNav (file
+// rows are denser, single-line, so we double it).  Sized to leave the
+// scrolled viewport filled without becoming a wall of text.
+const PAGE_SIZE = 100;
+
+// Stable empty array so `changes` reference doesn't churn when the
+// store is still loading (avoiding an extra render loop on first mount).
+const EMPTY_CHANGES: GitChangeDto[] = [];
+
+/** Inline-friendly sibling of `BUTTON_CLASS` from GitVirtualNav.tsx —
+ *  same icon size + zinc-100/border treatment, minus the overlay
+ *  decorations (absolute, shadow, animate-in) which would look out
+ *  of place inside the flat file-list footer. */
+const PAGINATION_BUTTON_CLASS =
+  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-zinc-500 transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-600";
 
 interface GitStatusPanelProps {
   agentId: string;
@@ -121,7 +142,28 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
   const data = entry?.data;
   const loading = entry?.loading ?? false;
   const error = entry?.error ?? null;
-  const changes = data?.changes ?? [];
+  const changes = data?.changes ?? EMPTY_CHANGES;
+
+  // ── Pagination (ADR-078 decision 6 follow-up) ───────────────────
+  // Clamp the page index whenever the underlying changes array
+  // changes (new fetch, switching rev via the history dropdown).
+  // `changes` reference is stable across re-renders of the same
+  // snapshot because `EMPTY_CHANGES` is a module-level const, so the
+  // effect fires on real data swaps only.
+  const totalPages = Math.max(1, Math.ceil(changes.length / PAGE_SIZE));
+  const [pageIndex, setPageIndex] = useState(0);
+  useEffect(() => {
+    // `changes.length` shift (ref change with same length is a no-op)
+    if (pageIndex > totalPages - 1) {
+      setPageIndex(Math.max(0, totalPages - 1));
+    } else if (pageIndex < 0) {
+      setPageIndex(0);
+    }
+  }, [changes, totalPages, pageIndex]);
+  const pagedChanges = useMemo(
+    () => changes.slice(pageIndex * PAGE_SIZE, (pageIndex + 1) * PAGE_SIZE),
+    [changes, pageIndex],
+  );
 
   const openDiff = useMemo(
     () => async (c: GitChangeDto) => {
@@ -146,8 +188,15 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           original: diff.original,
           gitDiffKind: diff.kind,
           language: languageForPath(c.path),
-          diffBaseRef: baseRef,
-          diffHeadRef: headRef,
+          // Store the server-canonicalised commit SHAs as the OpenFile's
+          // refs. The diff-side banner slice(0, 7) relies on these being
+          // already-canonical SHAs — passing `<sha>^` here used to slice
+          // to the same 7 chars as `<sha>` and the banner showed the
+            // same commit id on both sides (bug-fix invariant).
+          // Working-tree variant returns `headRev = null` so the existing
+          // `!diffHeadRef → "Working Tree"` rendering still works.
+          diffBaseRef: diff.baseRev,
+          diffHeadRef: diff.headRev ?? "",
         });
       } catch (e) {
         console.error("[GitStatusPanel] fetchDiff failed:", e);
@@ -262,8 +311,9 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       );
     }
     return (
+      <>
       <ul className="flex-1 overflow-y-auto py-0.5">
-        {changes.map((c) => {
+        {pagedChanges.map((c) => {
           const meta = statusMeta(c);
           return (
             <li
@@ -273,12 +323,11 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
                 "file-tree-row flex cursor-pointer items-center gap-1.5 py-[0.2em] pr-3 pl-4 text-xs select-none",
                 "hover:bg-zinc-100 dark:hover:bg-zinc-800",
               )}
-              onClick={() => {
-                // When viewing a commit's file list, the file may not
-                // exist on disk (e.g. it was deleted in that commit, or
-                // the worktree hasn't caught up). Default the click to
-                // "open the diff for that commit" so the user gets a
-                // useful preview regardless.
+              onDoubleClick={() => {
+                // Double-click opens the file (or its diff if unavailable on
+                // disk). Unifies the gesture with the workspace working-tree
+                // list, which uses single-click to select and double-click
+                // to open (FileTreeNode.tsx).
                 if (viewingRev || c.worktree === "deleted") void openDiff(c);
                 else
                   void useFileEditorStore
@@ -310,6 +359,39 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           );
         })}
       </ul>
+      {totalPages > 1 && (
+        <div
+          data-testid="git-status-pagination"
+          className="flex shrink-0 items-center justify-between gap-2 border-t border-zinc-200 px-2 py-1 dark:border-zinc-700"
+        >
+          <span className="text-[10px] tabular-nums text-zinc-500 dark:text-zinc-400">
+            {pageIndex * PAGE_SIZE + 1}–{Math.min((pageIndex + 1) * PAGE_SIZE, changes.length)} / {changes.length}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
+              disabled={pageIndex === 0}
+              aria-label={t("gitStatus.prevPage")}
+              title={t("gitStatus.prevPage")}
+              className={PAGINATION_BUTTON_CLASS}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setPageIndex((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={pageIndex >= totalPages - 1}
+              aria-label={t("gitStatus.nextPage")}
+              title={t("gitStatus.nextPage")}
+              className={PAGINATION_BUTTON_CLASS}
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
     );
   })();
 

@@ -1174,6 +1174,8 @@
     "nextChange": "下一處修改",
     "prevCommits": "較新的提交",
     "nextCommits": "較舊的提交",
+    "prevPage": "上一頁",
+    "nextPage": "下一頁",
     "headLabel": "HEAD",
     "workingTreeLabel": "本機工作區",
     "commitPickerLabel": "選擇版本",

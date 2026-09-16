@@ -423,6 +423,8 @@
     "nextChange": "Next change",
     "prevCommits": "Previous commits",
     "nextCommits": "Next commits",
+    "prevPage": "Previous page",
+    "nextPage": "Next page",
     "headLabel": "HEAD",
     "workingTreeLabel": "Working Tree",
     "commitPickerLabel": "Select a revision",

@@ -1176,6 +1176,8 @@
     "nextChange": "다음 변경",
     "prevCommits": "더 최근 커밋",
     "nextCommits": "더 오래된 커밋",
+    "prevPage": "이전 페이지",
+    "nextPage": "다음 페이지",
     "headLabel": "HEAD",
     "workingTreeLabel": "작업 트리",
     "commitPickerLabel": "리비전 선택",
