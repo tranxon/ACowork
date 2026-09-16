@@ -2823,6 +2823,58 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_core_clone_shares_arc_for_compact_models() {
+        // Regression (compact-model switch didn't take effect): the SSE
+        // session kept distilling with the stale provider after the global
+        // pick was switched to minimax. Root cause — `default_compact_model`
+        // and `provider_compact_models` were plain fields, so the deep clone
+        // taken by `SessionTask::new` snapshotted them and a write from
+        // `SessionManager::update_global_provider_list` (which holds the
+        // canonical AgentCore) never reached an in-flight session.
+        //
+        // These fields MUST be shared `Arc<RwLock<...>>` (ADR-063 §3.7.5),
+        // exactly like `compaction_prompt`, so the global pick reaches every
+        // existing session on its next `resolve_distill_model()` call.
+        let core = make_core(Some(8192), None, None, 0);
+        let session_clone = core.clone(); // simulates an in-flight session
+
+        // Simulate `update_global_provider_list` writing through the
+        // canonical handle held by SessionManager.
+        *core.default_compact_model.write().unwrap() =
+            Some(("minimax".to_string(), "MiniMax-M2.5".to_string()));
+        core.provider_compact_models
+            .write()
+            .unwrap()
+            .insert("minimax".to_string(), Some("MiniMax-M2.5".to_string()));
+        *core.provider_list_version.write().unwrap() = 42;
+
+        // The in-flight session's clone must observe all three writes.
+        assert_eq!(
+            session_clone
+                .default_compact_model
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|(p, m)| (p.as_str(), m.as_str())),
+            Some(("minimax", "MiniMax-M2.5")),
+            "default_compact_model must be shared, not snapshotted per session"
+        );
+        assert_eq!(
+            session_clone
+                .provider_compact_models
+                .read()
+                .unwrap()
+                .get("minimax")
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("MiniMax-M2.5"),
+            "provider_compact_models must be shared, not snapshotted per session"
+        );
+        assert_eq!(*session_clone.provider_list_version.read().unwrap(), 42);
+    }
+
+    #[test]
     fn test_prompt_accessor_reflects_write_through_lock() {
         // ADR-063 §3.4 — the public accessor (e.g. `search_prompt`)
         // MUST read the RwLock on every call (no caching to a local
