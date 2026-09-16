@@ -17,7 +17,7 @@ import * as docApi from "../../lib/doc-api";
 import { log } from "../../lib/logger";
 import type { DocRead } from "../../lib/doc-types";
 
-type EditorMode = "edit" | "preview";
+type EditorMode = "edit" | "split" | "preview";
 
 interface DocEditorState {
   /** 当前打开的文档（null = 空状态） */

@@ -1,23 +1,36 @@
 /**
  * DocEditor — doc 视图右侧编辑器（设计 §7 / plan D2-3）。
  *
- * - 编辑/预览双模式：编辑 = 等宽 textarea；预览 = DocMarkdownView（同渲染栈）。
+ * - 编辑/分栏/预览三模式：编辑 = Monaco（markdown）；预览 =
+ *   DocMarkdownView（同渲染栈）；分栏 = 左 Monaco 右预览。
+ * - 工具栏：MarkdownToolbar 通过 executeEdits 插入片段（表格/流程图/
+ *   代码块等），走 Monaco undo/redo 栈。
+ * - 表格导航：光标在 GFM 表格内时 Tab / Shift+Tab 跨单元格移动，
+ *   行尾自动补格（tableAid.nextCell 纯函数）。
  * - 保存：PUT 携带 `base_version`（乐观并发）；409 `version_conflict` →
  *   amber banner「文档已被他人更新」+ 刷新按钮（不静默覆盖）。
  * - 来源标记：Agent add-to-doc 导入的文档展示 instance_id 的 display_name
  *   + workspace_path badge（ADR-073：通过 agentStore 把 instance_id
  *   解析为人类可读名，而不是直接显示原始 UUID）。
- * - 快捷键 Ctrl/Cmd+S 保存（textarea 聚焦时）。
+ * - 快捷键 Ctrl/Cmd+S 保存（Monaco 聚焦时）。
  * - 切换文档且本地有未保存修改 → ConfirmDialog 确认丢弃。
  */
 
-import { useState } from "react";
-import { Check, Eye, FileText, Loader2, Pencil, RefreshCw, Save, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, Columns2, Eye, FileText, Loader2, Pencil, RefreshCw, Save, Sparkles } from "lucide-react";
+import Editor, { type OnMount } from "@monaco-editor/react";
+import type { editor } from "monaco-editor";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useDocEditorStore } from "../../stores/doc/editorStore";
 import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { initMonaco } from "../../lib/monacoBootstrap";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { SplitHandle } from "../../components/common/SplitHandle";
+import { useDragResize } from "../../hooks/useDragResize";
+import { MarkdownToolbar } from "../../components/markdown/MarkdownToolbar";
+import { registerMarkdownTableNavigation } from "../../components/markdown/editorAid";
 import { cn } from "../../lib/utils";
 import { DocMarkdownView } from "./DocMarkdownView";
 
@@ -58,6 +71,44 @@ export function DocEditor() {
   // fallback 到 instance_id 本身（badge 不至于显示空字符串）。
   const agents = useAgentStore((s) => s.agents);
 
+  // ── Monaco 生命周期（与 FileEditorPanel 一致：后台加载 + gate）────
+  const [monacoReady, setMonacoReady] = useState(false);
+  const [monacoFailed, setMonacoFailed] = useState(false);
+  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    initMonaco().then(
+      () => {
+        if (!cancelled) setMonacoReady(true);
+      },
+      () => {
+        if (!cancelled) setMonacoFailed(true);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 主题 + 字号（与 FileEditorPanel 同一来源：settingsStore）
+  const theme = useSettingsStore((s) => s.theme);
+  const osTheme = useSettingsStore((s) => s.osTheme);
+  const fontSize = useSettingsStore((s) => s.fontSize);
+  const monacoTheme = useMemo(() => {
+    if (theme === "dark") return "vs-dark";
+    if (theme === "light") return "vs";
+    return osTheme === "dark" ? "vs-dark" : "vs";
+  }, [theme, osTheme]);
+  const editorFontSize = useMemo(() => Math.round(fontSize * 16), [fontSize]);
+
+  // split 模式预览列宽度（可拖拽 + localStorage 持久化）
+  const preview = useDragResize({
+    storageKey: "acowork-doc-split-width",
+    defaultWidth: 380,
+    minWidth: 200,
+    maxWidth: 800,
+  });
+
   const [savedTick, setSavedTick] = useState(0);
 
   // 空状态
@@ -87,6 +138,47 @@ export function DocEditor() {
       setTimeout(() => setSavedTick((n) => n + 1), 2500);
     }
   };
+
+  /** Tab / Shift+Tab inside a GFM table moves across cells — shared with the
+   *  workspace file editor (editorAid + tableAid). DocEditor always edits
+   *  markdown, so no languageId filter is needed. */
+  const handleEditorMount: OnMount = (ed, monaco) => {
+    editorRef.current = ed;
+    // Ctrl/Cmd+S → save
+    ed.addCommand(
+      // eslint-disable-next-line no-bitwise
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+      () => void handleSave(),
+    );
+    registerMarkdownTableNavigation(ed, monaco);
+  };
+
+  const modeTab = (
+    key: "edit" | "split" | "preview",
+    label: string,
+    icon: typeof Pencil,
+  ) => (
+    <button
+      key={key}
+      type="button"
+      role="tab"
+      aria-selected={mode === key}
+      disabled={!healthy}
+      onClick={() => setMode(key)}
+      className={cn(
+        "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
+        mode === key
+          ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+          : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+      )}
+    >
+      {(() => {
+        const Icon = icon;
+        return <Icon className="h-3 w-3" aria-hidden />;
+      })()}
+      {label}
+    </button>
+  );
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-editor-canvas">
@@ -129,43 +221,15 @@ export function DocEditor() {
           </div>
         </div>
 
-        {/* 模式切换（编辑/预览） */}
+        {/* 模式切换（编辑/分栏/预览） */}
         <div
           className="flex shrink-0 items-center rounded-md border border-zinc-200 p-0.5 text-[11px] dark:border-zinc-700"
           role="tablist"
           aria-label={t("doc.modeLabel")}
         >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "edit"}
-            disabled={!healthy}
-            onClick={() => setMode("edit")}
-            className={cn(
-              "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
-              mode === "edit"
-                ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
-            )}
-          >
-            <Pencil className="h-3 w-3" aria-hidden />
-            {t("doc.edit")}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "preview"}
-            onClick={() => setMode("preview")}
-            className={cn(
-              "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
-              mode === "preview"
-                ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
-            )}
-          >
-            <Eye className="h-3 w-3" aria-hidden />
-            {t("doc.preview")}
-          </button>
+          {modeTab("edit", t("doc.edit"), Pencil)}
+          {modeTab("split", t("doc.split"), Columns2)}
+          {modeTab("preview", t("doc.preview"), Eye)}
         </div>
 
         <button
@@ -204,24 +268,61 @@ export function DocEditor() {
         </div>
       )}
 
-      {/* ── 编辑 / 预览 ────────────────────────────────────── */}
+      {/* ── 工具栏（编辑/分栏模式下显示） ─────────────────── */}
+      {mode !== "preview" && <MarkdownToolbar editor={editorRef.current} disabled={!healthy} />}
+
+      {/* ── 编辑 / 分栏 / 预览 ─────────────────────────────── */}
       {mode === "preview" ? (
         <DocMarkdownView content={content} />
       ) : (
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-              e.preventDefault();
-              void handleSave();
-            }
-          }}
-          disabled={!healthy}
-          spellCheck={false}
-          aria-label={t("doc.editorAria")}
-          className="h-full min-h-0 w-full flex-1 resize-none bg-editor-canvas px-5 py-4 font-mono text-xs leading-relaxed text-zinc-800 outline-none placeholder:text-zinc-400 disabled:opacity-50 dark:text-zinc-200"
-        />
+        <div className="flex h-full min-h-0 flex-1">
+          {/* 左：Monaco 源码编辑 */}
+          <div className={cn("min-h-0 min-w-0", mode === "split" ? "flex-1" : "flex-1")}>
+            {monacoReady ? (
+              <Editor
+                path={`doc:${doc.meta.doc_id}`}
+                value={content}
+                language="markdown"
+                theme={monacoTheme}
+                onChange={(value) => setContent(value ?? "")}
+                onMount={handleEditorMount}
+                keepCurrentModel={false}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: editorFontSize,
+                  lineNumbers: "on",
+                  scrollBeyondLastLine: false,
+                  wordWrap: "on",
+                  tabSize: 2,
+                  renderWhitespace: "selection",
+                  padding: { top: 8 },
+                  automaticLayout: true,
+                  readOnly: !healthy,
+                  ariaLabel: t("doc.editorAria"),
+                }}
+              />
+            ) : monacoFailed ? (
+              <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                <RefreshCw className="h-4 w-4" aria-hidden />
+                {t("doc.editorLoadFailed")}
+              </div>
+            ) : (
+              <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              </div>
+            )}
+          </div>
+
+          {/* 右：预览（split 模式） */}
+          {mode === "split" && (
+            <>
+              <SplitHandle onMouseDown={preview.onHandleMouseDown} ariaLabel={t("doc.split")} />
+              <div className="min-h-0 min-w-0 shrink-0" style={{ width: preview.width }}>
+                <DocMarkdownView content={content} />
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {/* ── 切文档确认（丢弃未保存修改；由 editorStore.pendingOpenDocId 驱动） */}

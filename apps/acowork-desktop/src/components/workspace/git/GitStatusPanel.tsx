@@ -290,7 +290,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
               <span className={cn("shrink-0", meta.color)} title={t(meta.labelKey)}>
                 {meta.icon}
               </span>
-              <span className="flex-1 truncate text-zinc-700 dark:text-zinc-300">
+              <span className="flex-1 truncate text-zinc-700 dark:text-zinc-400">
                 {c.path}
               </span>
               {c.oldPath && (

@@ -95,6 +95,12 @@ vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({ t: mocks.t }),
 }));
 
+// Monaco is never exercised in these tests (mode is "preview"); stub the
+// bootstrap so the test never dynamic-imports the full monaco-editor bundle.
+vi.mock("../../lib/monacoBootstrap", () => ({
+  initMonaco: () => Promise.resolve(),
+}));
+
 // Mock the children/modal that we don't exercise here.
 vi.mock("./DocMarkdownView", () => ({
   DocMarkdownView: () => <div data-testid="markdown-view" />,
