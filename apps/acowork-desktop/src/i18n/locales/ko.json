@@ -329,6 +329,7 @@
     "local": "로컬",
     "remote": "원격",
     "localGateway": "로컬 게이트웨이",
+    "localModeKeepsUrl": "로컬 모드에서 Desktop은 먼저 이 주소로 프로브하며, 응답이 없을 때만 하위 Gateway를 시작합니다.",
     "status": "상태",
     "running": "실행 중",
     "starting": "시작 중...",

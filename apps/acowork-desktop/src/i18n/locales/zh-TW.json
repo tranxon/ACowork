@@ -329,6 +329,7 @@
     "local": "本機",
     "remote": "遠端",
     "localGateway": "本機閘道",
+    "localModeKeepsUrl": "切換至本機模式後，Desktop 會先用此位址探測（如不通才 spawn 本機子進程）",
     "status": "狀態",
     "running": "執行中",
     "starting": "啟動中...",

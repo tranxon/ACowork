@@ -88,6 +88,28 @@ pub struct McpState {
 #[async_trait]
 pub trait AgentDirectory: Send + Sync {
     async fn agent_exists(&self, agent_id: &str) -> bool;
+
+    /// 查 `instance_id` 对应的 Agent 元信息（包 ID + 显示名）。
+    /// 找不到返回 `None`。`pm_get_project` 用它把 `ProjectMember` 投影成
+    /// 包含 `agent_id` / `name` 的对象，让调用方（LLM）能从 agent name
+    /// 反查到派任务需要的 `instance_id`。
+    ///
+    /// 默认实现返回 `None`（`Noop` 不持元信息；宽松模式仍允许派任务，
+    /// 只是 `pm_get_project` 返回的成员不附 name/agent_id）。
+    async fn agent_info(&self, _instance_id: &str) -> Option<AgentInfo> {
+        None
+    }
+}
+
+/// Agent 元信息（`AgentDirectory::agent_info` 返回）。
+///
+/// 字段刻意保持最少：`pm_get_project` 投影成员时只需要 `agent_id`（包 ID，
+/// 用于展示/日志）+ `name`（显示名，用于 LLM 识别）。`instance_id` 是查询
+/// key，不重复放在 value 里。
+#[derive(Debug, Clone)]
+pub struct AgentInfo {
+    pub agent_id: String,
+    pub name: String,
 }
 
 /// 默认（宽松）Agent 目录：不校验存在性。`PmService::new` 未注入目录时使用。
@@ -308,7 +330,7 @@ mod tests {
     use super::*;
     use crate::config::PmConfig;
     use crate::store::tree::PmStore;
-    use crate::types::{ProjectStatus, TaskId, UpdateProject};
+    use crate::types::{ProjectId, ProjectStatus, TaskId, UpdateProject};
     use tower::ServiceExt;
 
     /// 将响应体 `Bytes` 解析为 `Value`。
@@ -457,12 +479,10 @@ mod tests {
 
     /// 便捷：解析 `tools/call` 成功响应中的 `result.content[0].text`（JSON 文本）。
     fn tool_text(v: &Value) -> Value {
-        serde_json::from_str(
-            v["result"]["content"][0]["text"]
-                .as_str()
-                .expect("content[0].text should be a JSON string"),
-        )
-        .expect("tool result text should be valid JSON")
+        let text = v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("content[0].text should be a JSON string, got: {v}"));
+        serde_json::from_str(text).expect("tool result text should be valid JSON")
     }
 
     /// 建 router + 空状态（Noop AgentDirectory：assignee 存在性恒真）。
@@ -479,6 +499,18 @@ mod tests {
         Router::new()
             .route("/mcp", post(jsonrpc_endpoint))
             .with_state(state)
+    }
+
+    /// 建 router + 暴露 store（注入自定义 Agent 目录），用于需要走
+    /// `store.add_project_member(...)` 等 store 接口的前置准备。
+    async fn test_router_store_with_dir(
+        agent_dir: Arc<dyn AgentDirectory>,
+    ) -> (Router, Arc<TreePmStore>) {
+        let (state, _tmp) = test_mcp_state_with_dir(agent_dir).await;
+        let router = Router::new()
+            .route("/mcp", post(jsonrpc_endpoint))
+            .with_state(state.clone());
+        (router, state.store)
     }
 
     /// 建 router + 暴露 store（供 human review / archive 等 MCP 之外的
@@ -511,6 +543,43 @@ mod tests {
     impl AgentDirectory for WhitelistAgentDirectory {
         async fn agent_exists(&self, agent_id: &str) -> bool {
             self.allowed.lock().unwrap().contains(agent_id)
+        }
+    }
+
+    /// 元信息 Agent 目录（测试桩）：同时支持存在性 + 元信息查询。
+    /// 用于验证 `pm_get_project` 把 `instance_id` 投影成 `agent_id` + `name`。
+    struct MapAgentDirectory {
+        infos: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, AgentInfo>>>,
+    }
+
+    impl MapAgentDirectory {
+        fn new(entries: &[(&str, &str, &str)]) -> Self {
+            // entries: (instance_id, agent_id, name)
+            let map = entries
+                .iter()
+                .map(|(iid, aid, n)| {
+                    (
+                        (*iid).to_string(),
+                        AgentInfo {
+                            agent_id: (*aid).to_string(),
+                            name: (*n).to_string(),
+                        },
+                    )
+                })
+                .collect();
+            Self {
+                infos: std::sync::Arc::new(std::sync::Mutex::new(map)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDirectory for MapAgentDirectory {
+        async fn agent_exists(&self, instance_id: &str) -> bool {
+            self.infos.lock().unwrap().contains_key(instance_id)
+        }
+        async fn agent_info(&self, instance_id: &str) -> Option<AgentInfo> {
+            self.infos.lock().unwrap().get(instance_id).cloned()
         }
     }
 
@@ -1039,6 +1108,377 @@ mod tests {
         .await;
         assert!(v["error"].is_null(), "known assignee failed: {v}");
         assert_eq!(tool_text(&v)["assignee"], agent);
+    }
+
+    /// e2e：`pm_get_project` 返回的成员列表附 `agent_id` + `name`，让 LLM
+    /// 拿到项目成员后能用 agent name 反查到 `instance_id` 用于派任务。
+    /// （用户场景：人类说"把这个任务派给 Senior Engineer"，LLM 通过 `members`
+    /// 找到 `name=Senior Engineer` 的 `instance_id`，再调 `pm_create_task`。）
+    ///
+    /// 覆盖两条路径：
+    /// 1. 缓存命中：MapAgentDirectory 目录里有元信息 → 返回完整 agent_id/name
+    /// 2. 缓存 miss / NoopAgentDirectory → `agent_id` / `name` 为 null（仍能拿到 instance_id）
+    #[tokio::test]
+    async fn e2e_get_project_returns_members_with_agent_id_and_name() {
+        let creator = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+
+        // ── 路径 1：MapAgentDirectory（缓存命中） ─────────────────────────
+        let router = test_router_with_dir(Arc::new(MapAgentDirectory::new(&[(
+            creator,
+            "com.acowork.senior-engineer",
+            "Senior Engineer",
+        )])))
+        .await;
+        let v = call_tool(
+            &router,
+            Some(creator),
+            90,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "create_project failed: {v}");
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        let v = call_tool(
+            &router,
+            Some(creator),
+            91,
+            "pm_get_project",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "get_project failed: {v}");
+        let resp = tool_text(&v);
+        let members = resp["members"].as_array().expect("members is array");
+        assert_eq!(members.len(), 1, "creator auto-joined");
+        let m = &members[0];
+        assert_eq!(m["instance_id"], creator);
+        assert_eq!(m["agent_id"], "com.acowork.senior-engineer");
+        assert_eq!(m["name"], "Senior Engineer");
+        assert!(m["added_at"].is_string());
+
+        // ── 路径 2：NoopAgentDirectory（元信息全 null） ───────────────────
+        let router_noop = test_router_with_dir(Arc::new(NoopAgentDirectory)).await;
+        let v = call_tool(
+            &router_noop,
+            Some(creator),
+            92,
+            "pm_create_project",
+            json!({ "title": "P2" }),
+        )
+        .await;
+        let pid2 = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router_noop,
+            Some(creator),
+            93,
+            "pm_get_project",
+            json!({ "project_id": pid2 }),
+        )
+        .await;
+        let resp = tool_text(&v);
+        let members = resp["members"].as_array().unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0]["instance_id"], creator);
+        assert!(members[0]["agent_id"].is_null());
+        assert!(members[0]["name"].is_null());
+    }
+
+    /// e2e：所有任务/项目返回都附 `assignee_meta` / `created_by_meta`，
+    /// 让 LLM 在 `pm_list_tasks` / `pm_list_projects` 等列表接口中能用
+    /// `*_meta.name` 识别谁是谁（不需要反查 members）。
+    ///
+    /// 覆盖的接口：`pm_list_projects` / `pm_list_tasks` / `pm_list_my_tasks`
+    /// / `pm_get_task` / `pm_check_task` / `pm_create_project`。
+    #[tokio::test]
+    async fn e2e_meta_fields_attach_to_tasks_and_projects() {
+        let creator = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let worker = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
+        let (router, store) = test_router_store_with_dir(Arc::new(MapAgentDirectory::new(&[
+            (creator, "com.acowork.senior-engineer", "Senior Engineer"),
+            (worker, "com.acowork.architect", "Architect"),
+        ])))
+        .await;
+
+        // 建项目 + 把 worker 加为成员（项目成员校验要求 assignee ∈ members）
+        let v = call_tool(
+            &router,
+            Some(creator),
+            100,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let proj = tool_text(&v);
+        let pid_str = proj["id"].as_str().unwrap().to_string();
+        let pid: ProjectId = pid_str.parse().unwrap();
+        store.add_project_member(&pid, worker).await.unwrap();
+
+        // pm_create_project 返回值带 created_by_meta
+        assert_eq!(proj["created_by"], creator);
+        assert_eq!(proj["created_by_meta"]["instance_id"], creator);
+        assert_eq!(proj["created_by_meta"]["agent_id"], "com.acowork.senior-engineer");
+        assert_eq!(proj["created_by_meta"]["name"], "Senior Engineer");
+
+        let v = call_tool(
+            &router,
+            Some(creator),
+            101,
+            "pm_create_task",
+            json!({ "project_id": pid_str, "title": "T1", "assignee": worker }),
+        )
+        .await;
+        let task = tool_text(&v);
+        let tid = task["id"].as_str().unwrap().to_string();
+
+        // pm_create_task 返回值带 assignee_meta + created_by_meta
+        assert_eq!(task["assignee"], worker);
+        assert_eq!(task["assignee_meta"]["instance_id"], worker);
+        assert_eq!(task["assignee_meta"]["agent_id"], "com.acowork.architect");
+        assert_eq!(task["assignee_meta"]["name"], "Architect");
+        assert_eq!(task["created_by"], creator);
+        assert_eq!(task["created_by_meta"]["name"], "Senior Engineer");
+
+        // pm_get_task 同样带 _meta
+        let v = call_tool(
+            &router,
+            Some(creator),
+            102,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["assignee_meta"]["name"], "Architect");
+        assert_eq!(t["created_by_meta"]["name"], "Senior Engineer");
+
+        // pm_list_tasks：每条都带 _meta
+        let v = call_tool(
+            &router,
+            Some(creator),
+            103,
+            "pm_list_tasks",
+            json!({ "project_id": pid_str }),
+        )
+        .await;
+        let list_tasks_text = tool_text(&v);
+        let tasks = list_tasks_text.as_array().expect("list_tasks returns array");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["assignee_meta"]["name"], "Architect");
+        assert_eq!(tasks[0]["created_by_meta"]["name"], "Senior Engineer");
+        // 同时原 String 字段保留不变（前端 join agentStore 用）
+        assert_eq!(tasks[0]["assignee"], worker);
+        assert_eq!(tasks[0]["created_by"], creator);
+
+        // pm_list_projects：每个 project 带 created_by_meta
+        let v = call_tool(
+            &router,
+            Some(creator),
+            104,
+            "pm_list_projects",
+            json!({}),
+        )
+        .await;
+        let list_projects_text = tool_text(&v);
+        let projs = list_projects_text.as_array().unwrap();
+        assert!(projs.iter().any(|p| p["created_by_meta"]["name"] == "Senior Engineer"));
+
+        // pm_list_my_tasks（worker 自查）：assignee_meta 是自己，created_by_meta 是 creator
+        let v = call_tool(
+            &router,
+            Some(worker),
+            105,
+            "pm_list_my_tasks",
+            json!({}),
+        )
+        .await;
+        let my_text = tool_text(&v);
+        let my = my_text.as_array().unwrap();
+        assert_eq!(my.len(), 1);
+        assert_eq!(my[0]["assignee"], worker);
+        assert_eq!(my[0]["assignee_meta"]["name"], "Architect");
+        assert_eq!(my[0]["created_by_meta"]["name"], "Senior Engineer");
+
+        // pm_check_task（creator 自查）：带 created_by_meta
+        let v = call_tool(
+            &router,
+            Some(creator),
+            106,
+            "pm_check_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let ct = tool_text(&v);
+        assert_eq!(ct["created_by"], creator);
+        assert_eq!(ct["created_by_meta"]["name"], "Senior Engineer");
+    }
+
+    /// e2e：未在 agent_dir 里的 instance_id / `"human"` 创建者 → `_meta` 为 null，
+    /// 不阻塞返回。LLM 拿到 null 时知道元信息暂不可用但仍能拿到 raw ID。
+    ///
+    /// 用 `MapAgentDirectory` 注入"存在但无元信息"的代理（`agent_exists`
+    /// 返回 true，`agent_info` 返回 None），模拟 Agent 已注册但元信息缺失
+    /// （宽松目录默认行为）。
+    #[tokio::test]
+    async fn e2e_meta_null_when_agent_unknown() {
+        let ghost = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        // ExistsButNoMetaDirectory: 存在校验通过，元信息返回 None
+        struct ExistsButNoMetaDirectory;
+        #[async_trait::async_trait]
+        impl AgentDirectory for ExistsButNoMetaDirectory {
+            async fn agent_exists(&self, _instance_id: &str) -> bool {
+                true
+            }
+            async fn agent_info(&self, _instance_id: &str) -> Option<AgentInfo> {
+                None
+            }
+        }
+        let (router, store) =
+            test_router_store_with_dir(Arc::new(ExistsButNoMetaDirectory)).await;
+
+        // 人类创建（actor = "human"）：created_by_meta 应该为 null
+        let v = call_tool(
+            &router,
+            Some("human"),
+            110,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let proj = tool_text(&v);
+        let pid_str = proj["id"].as_str().unwrap().to_string();
+        let pid: ProjectId = pid_str.parse().unwrap();
+        assert!(proj["created_by_meta"].is_null(), "human creator → null");
+        // 加 ghost 为成员（assignee 必须是成员）
+        store.add_project_member(&pid, ghost).await.unwrap();
+
+        // 已知存在但元信息为 null 的 instance → assignee_meta 也为 null
+        let v = call_tool(
+            &router,
+            Some("human"),
+            111,
+            "pm_create_task",
+            json!({ "project_id": pid_str, "title": "T", "assignee": ghost }),
+        )
+        .await;
+        let task = tool_text(&v);
+        assert_eq!(task["assignee"], ghost);
+        assert!(task["assignee_meta"].is_null(), "no meta → null");
+        // created_by_meta 仍是 null（"human" 不在 agent_dir）
+        assert!(task["created_by_meta"].is_null());
+    }
+
+    /// e2e：`"human"` 保留创建者哨兵短路——`lookup_agent_meta` / 批量查询
+    /// 对 `"human"` **不发起**任何 `agent_info` 查询（否则每次项目列表/详情
+    /// 都会对 Gateway 白打一次 `/api/agents/human`）。
+    ///
+    /// 用 `RecordingAgentDirectory`（记录所有被查询的 instance_id）验证
+    /// human 创建的项目/任务在各接口下都没有触发查询。
+    #[tokio::test]
+    async fn e2e_human_creator_shortcircuits_agent_lookup() {
+        struct RecordingAgentDirectory {
+            queried: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        impl RecordingAgentDirectory {
+            fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+                let queried = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                (Self {
+                    queried: queried.clone(),
+                }, queried)
+            }
+        }
+        #[async_trait::async_trait]
+        impl AgentDirectory for RecordingAgentDirectory {
+            async fn agent_exists(&self, _instance_id: &str) -> bool {
+                true
+            }
+            async fn agent_info(&self, instance_id: &str) -> Option<AgentInfo> {
+                self.queried.lock().unwrap().push(instance_id.to_string());
+                None
+            }
+        }
+
+        let (dir, queried) = RecordingAgentDirectory::new();
+        let (router, store) = test_router_store_with_dir(Arc::new(dir)).await;
+
+        // 人类创建项目 → created_by = "human" → 不应查询 agent_dir
+        let v = call_tool(
+            &router,
+            Some("human"),
+            120,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let proj = tool_text(&v);
+        let pid_str = proj["id"].as_str().unwrap().to_string();
+        assert!(proj["created_by_meta"].is_null());
+        assert!(
+            queried.lock().unwrap().is_empty(),
+            "human create_project → no agent lookup"
+        );
+
+        // 人类创建任务（assignee 为真实 instance）→ created_by 为 "human"
+        // 不查询，assignee 正常查询
+        let ghost = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        store
+            .add_project_member(&pid_str.parse().unwrap(), ghost)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some("human"),
+            121,
+            "pm_create_task",
+            json!({ "project_id": pid_str, "title": "T", "assignee": ghost }),
+        )
+        .await;
+        let task = tool_text(&v);
+        assert!(task["created_by_meta"].is_null());
+        {
+            let q = queried.lock().unwrap();
+            assert_eq!(
+                &*q,
+                &vec![ghost.to_string()],
+                "only assignee (real instance) looked up, never 'human'"
+            );
+        }
+
+        // 项目详情 / 列表 → 成员为 "human"（creator）+ ghost（真实 instance）：
+        // "human" 不查询，ghost 正常查询（get_project 查一次成员元信息）
+        let v = call_tool(
+            &router,
+            Some("human"),
+            122,
+            "pm_get_project",
+            json!({ "project_id": pid_str }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "get_project failed: {v}");
+        // 列表：created_by = "human" → 批量查询被过滤 → 无新增查询
+        let v = call_tool(
+            &router,
+            Some("human"),
+            123,
+            "pm_list_projects",
+            json!({}),
+        )
+        .await;
+        assert!(v["error"].is_null(), "list_projects failed: {v}");
+        {
+            let q = queried.lock().unwrap();
+            // create_task 查 1 次（assignee=ghost）+ get_project 查 1 次（成员 ghost）
+            assert_eq!(
+                &*q,
+                &vec![ghost.to_string(), ghost.to_string()],
+                "'human' creator/member must never reach agent_dir"
+            );
+            assert!(
+                !q.iter().any(|s| s == "human"),
+                "sentinel 'human' must be short-circuited everywhere"
+            );
+        }
     }
 
     /// e2e：依赖阻塞 —— depends_on(Blocks) 未完成时 claim 409，依赖完成

@@ -15,14 +15,14 @@
 //! 依赖方向：acowork-pm 只实现 [`super::AgentDirectory`] 契约，不反向依赖
 //! Gateway 代码。Gateway URL 由 supervisor 经 `--gateway-url` 传入（`main.rs`）。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use super::AgentDirectory;
+use super::{AgentDirectory, AgentInfo};
 
 /// HTTP Agent 目录（查询 Gateway `/api/agents`）。
 ///
@@ -37,8 +37,17 @@ pub struct HttpAgentDirectory {
     /// 可选 Bearer token（Gateway `auth_enabled=true` 时经
     /// `ACOWORK_PM_GATEWAY_TOKEN` env 传入）。
     auth_token: Option<String>,
-    /// 全量 Agent ID 缓存。
-    cache: RwLock<HashSet<String>>,
+    /// 全量 Agent 元信息缓存（key = `instance_id`，ADR-073）。
+    ///
+    /// 值语义：
+    /// - `Some(info)`：该 instance 存在且元信息可用（`agent_id` + `name`）
+    /// - `None`：该 instance **存在**（存在性校验用 `contains_key`），但元
+    ///   信息缺失（Gateway 列表响应缺 `agent_id`）——`agent_info` 直接返回
+    ///   `None`，不再打详情兜底（全量列表都没有，单查大概率也没有）
+    ///
+    /// 这样 `agent_exists` 的存在性语义与旧实现（`HashSet<String>`）完全
+    /// 一致：只依赖 `instance_id` 是否在列表里，元信息尽力而为。
+    cache: RwLock<HashMap<String, Option<AgentInfo>>>,
     /// HTTP 客户端（短超时，避免阻塞 MCP 调用）。
     client: reqwest::Client,
     /// 周期刷新间隔。
@@ -58,7 +67,7 @@ impl HttpAgentDirectory {
         Self {
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
             auth_token,
-            cache: RwLock::new(HashSet::new()),
+            cache: RwLock::new(HashMap::new()),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .connect_timeout(Duration::from_secs(3))
@@ -100,8 +109,9 @@ impl HttpAgentDirectory {
         }
     }
 
-    /// `GET {gateway_url}/api/agents` → `instance_id` 集合（ADR-073）。
-    async fn fetch_agents(&self) -> Result<HashSet<String>, String> {
+    /// `GET {gateway_url}/api/agents` → `instance_id` → 元信息映射（ADR-073）。
+    /// 值为 `Some(info)`（元信息可用）或 `None`（存在但元信息缺失）。
+    async fn fetch_agents(&self) -> Result<HashMap<String, Option<AgentInfo>>, String> {
         let url = format!("{}/api/agents", self.gateway_url);
         let mut req = self.client.get(&url);
         if let Some(token) = &self.auth_token {
@@ -111,31 +121,82 @@ impl HttpAgentDirectory {
         if !resp.status().is_success() {
             return Err(format!("GET /api/agents -> {}", resp.status()));
         }
-        // ADR-073: AgentListResponse 同时含 `instance_id` + `agent_id`。
+        // ADR-073: AgentListResponse 同时含 `instance_id` + `agent_id` + `name`。
         // PM 的存在性校验按 instance 走（与 task.assignee / X-MCP-Actor 一致），
-        // agent_id 仅用于显示，不进身份 key。
+        // agent_id / name 仅用于显示（pm_get_project 投影成员元信息）。
         let agents: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
-        Ok(agents
-            .into_iter()
-            .filter_map(|a| {
-                a.get("instance_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .collect())
+        let mut out = HashMap::with_capacity(agents.len());
+        for a in agents {
+            let Some(instance_id) = a.get("instance_id").and_then(|v| v.as_str()) else {
+                continue; // 无 instance_id 的条目跳过（ADR-073 回归保护）
+            };
+            let agent_id = a
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = a
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 存在性只依赖 instance_id（与旧 HashSet 语义一致）：即使
+            // agent_id 缺失也保留条目（值为 `None` = 存在但元信息不可用），
+            // 避免把该 instance 从存在性缓存中剔除（否则 agent_exists
+            // 每次都会走即时兜底，且语义与旧实现漂移）。
+            let entry = (!agent_id.is_empty()).then_some(AgentInfo { agent_id, name });
+            out.insert(instance_id.to_string(), entry);
+        }
+        Ok(out)
     }
 
-    /// 即时校验兜底：`GET {gateway_url}/api/agents/{instance_id}`（200 = 存在）。
-    async fn query_gateway(&self, instance_id: &str) -> bool {
-        let url = format!("{}/api/agents/{}", self.gateway_url, instance_id);
+    /// GET `{gateway_url}{path}`（自动拼 URL + bearer auth）。
+    ///
+    /// 返回 `(status 是否 2xx, JSON body)`；传输错误 / body 解析失败 → `None`。
+    /// [`Self::query_gateway`]（只看状态）与 [`Self::query_gateway_info`]
+    /// （解析 body）共用，避免重复 URL 拼接与鉴权逻辑。
+    async fn gateway_get(&self, path: &str) -> Option<(bool, serde_json::Value)> {
+        let url = format!("{}/{}", self.gateway_url, path);
         let mut req = self.client.get(&url);
         if let Some(token) = &self.auth_token {
             req = req.bearer_auth(token);
         }
-        match req.send().await {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
+        let resp = req.send().await.ok()?;
+        let ok = resp.status().is_success();
+        let body = resp.json().await.ok()?;
+        Some((ok, body))
+    }
+
+    /// 即时校验兜底：`GET {gateway_url}/api/agents/{instance_id}`（200 = 存在）。
+    async fn query_gateway(&self, instance_id: &str) -> bool {
+        self.gateway_get(&format!("api/agents/{instance_id}"))
+            .await
+            .map(|(ok, _)| ok)
+            .unwrap_or(false)
+    }
+
+    /// 即时元信息兜底：`GET {gateway_url}/api/agents/{instance_id}` → `AgentInfo`。
+    ///
+    /// `agent_info` 在缓存 miss 时调用，把成员的真实 `agent_id` / `name`
+    /// 投影给 LLM（否则 60 秒周期刷新窗口内 LLM 拿到 null 仍派不了任务）。
+    /// Gateway 不可达 / Agent 不存在 / 详情缺 `agent_id` → `None`。
+    async fn query_gateway_info(&self, instance_id: &str) -> Option<AgentInfo> {
+        let (ok, body) = self
+            .gateway_get(&format!("api/agents/{instance_id}"))
+            .await?;
+        if !ok {
+            return None;
         }
+        let agent_id = body
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)?;
+        let name = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Some(AgentInfo { agent_id, name })
     }
 }
 
@@ -143,11 +204,22 @@ impl HttpAgentDirectory {
 impl AgentDirectory for HttpAgentDirectory {
     async fn agent_exists(&self, instance_id: &str) -> bool {
         // 缓存命中 → 存在（周期刷新保证收敛）。
-        if self.cache.read().await.contains(instance_id) {
+        if self.cache.read().await.contains_key(instance_id) {
             return true;
         }
         // 缓存 miss → 即时校验兜底（Agent 刚安装 / 缓存过期窗口）。
         self.query_gateway(instance_id).await
+    }
+
+    async fn agent_info(&self, instance_id: &str) -> Option<AgentInfo> {
+        // 缓存命中（含元信息缺失的 `None` 占位）→ 直接返回，不再打详情兜底。
+        if let Some(info) = self.cache.read().await.get(instance_id) {
+            return info.clone();
+        }
+        // 缓存 miss → 即时从 Gateway 单详情接口兜底拉元信息（Agent 刚安装
+        // 未进缓存 / 缓存过期窗口）。并发与去重由调用方
+        // `batch_lookup_agent_meta`（限流）负责。
+        self.query_gateway_info(instance_id).await
     }
 }
 
@@ -159,9 +231,23 @@ mod tests {
 
     /// 起一个 mock Gateway（`/api/agents` + `/api/agents/{id}`），返回 base URL。
     /// 参数 `instance_ids` 模拟 Gateway 返回的 instance_id 列表（ADR-073）。
+    ///
+    /// 列表与详情路由都返回完整的 `{instance_id, agent_id, name}`（与真实
+    /// `AgentListResponse` / `AgentDetailResponse` 同形），供 `agent_exists`
+    /// 与 `agent_info` 测试共用。
     async fn start_mock_gateway(instance_ids: &[&str]) -> String {
         let ids: Vec<String> = instance_ids.iter().map(|s| s.to_string()).collect();
         let ids_for_list = ids.clone();
+
+        // 与真实 Gateway 一致的派生字段（agents.rs：`name` 来自包元数据，
+        // 此处用 instance 前缀模拟，保证测试内可断言）。
+        let to_entry = |id: &str| {
+            serde_json::json!({
+                "instance_id": id,
+                "agent_id": format!("com.acowork.{}", &id[..4]),
+                "name": format!("Agent {}", &id[..8]),
+            })
+        };
 
         let app = Router::new()
             .route(
@@ -171,16 +257,7 @@ mod tests {
                     async move {
                         // ADR-073: Gateway 响应同时含 instance_id + agent_id；
                         // PM 按 instance_id 走存在性校验。
-                        axum::Json(
-                            ids.iter()
-                                .map(|id| {
-                                    serde_json::json!({
-                                        "instance_id": id,
-                                        "agent_id": format!("com.acowork.{}", &id[..4]),
-                                    })
-                                })
-                                .collect::<Vec<_>>(),
-                        )
+                        axum::Json(ids.iter().map(|id| to_entry(id)).collect::<Vec<_>>())
                     }
                 }),
             )
@@ -192,7 +269,7 @@ mod tests {
                         if ids.contains(&id) {
                             (
                                 axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({ "instance_id": id })),
+                                axum::Json(to_entry(&id)),
                             )
                         } else {
                             (
@@ -358,5 +435,115 @@ mod tests {
             !dir.agent_exists(shared_agent_id).await,
             "package id must NOT be a cache key; only instance_id is"
         );
+    }
+
+    /// `agent_info` 缓存命中：refresh 后返回完整元信息（agent_id + name）。
+    #[tokio::test]
+    async fn agent_info_cache_hit_returns_meta() {
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let gw = start_mock_gateway(&[instance]).await;
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        dir.refresh().await;
+
+        let info = dir.agent_info(instance).await.expect("cached meta");
+        assert_eq!(info.agent_id, "com.acowork.3f8c");
+        assert_eq!(info.name, "Agent 3f8c2a91");
+    }
+
+    /// `agent_info` 缓存 miss → 即时兜底：详情路由返回完整元信息。
+    #[tokio::test]
+    async fn agent_info_cache_miss_fallback_queries_gateway() {
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let gw = start_mock_gateway(&[instance]).await;
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        // 不 refresh（模拟启动拉全量未完成 / 缓存过期窗口）
+
+        let info = dir.agent_info(instance).await.expect("fallback meta");
+        assert_eq!(info.agent_id, "com.acowork.3f8c");
+        assert_eq!(info.name, "Agent 3f8c2a91");
+    }
+
+    /// `agent_info` 404（Agent 不存在）→ `None`，不 panic。
+    #[tokio::test]
+    async fn agent_info_not_found_returns_none() {
+        let gw = start_mock_gateway(&["3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"]).await;
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        // 缓存 miss + 详情 404 → None
+        assert!(dir.agent_info("5d2e1100-0000-0000-0000-000000000000").await.is_none());
+    }
+
+    /// `agent_info` Gateway 不可达 → `None`（不 panic，与 `agent_exists` 一致）。
+    #[tokio::test]
+    async fn agent_info_gateway_unreachable_returns_none() {
+        let dir = Arc::new(HttpAgentDirectory::new(
+            "http://127.0.0.1:1".to_string(), // 不可达端口
+            None,
+            Duration::from_secs(3600),
+        ));
+        assert!(dir.agent_info("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.is_none());
+    }
+
+    /// 详情缺 `agent_id`（异常响应）→ `None`（不投影空串给 LLM）。
+    #[tokio::test]
+    async fn agent_info_missing_agent_id_returns_none() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/api/agents/{id}",
+            get(|| async {
+                // 只含 instance_id，缺 agent_id — 模拟异常详情响应
+                axum::Json(serde_json::json!({ "instance_id": "x" }))
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let gw = format!("http://127.0.0.1:{port}");
+
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        assert!(dir.agent_info("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.is_none());
+    }
+
+    /// 列表缺 `agent_id`（异常响应）：instance 仍在存在性缓存
+    /// （`agent_exists` 为 true，与旧 `HashSet` 语义一致），但 `agent_info`
+    /// 返回 `None` 且**不**触发详情兜底（全量列表都没有，单查大概率也没有）。
+    #[tokio::test]
+    async fn agent_exists_keeps_entry_when_agent_id_missing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(|| async {
+                    // 只有 instance_id，缺 agent_id — 模拟异常列表响应
+                    axum::Json(vec![serde_json::json!({
+                        "instance_id": "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"
+                    })])
+                }),
+            )
+            .route(
+                "/api/agents/{id}",
+                get(|| async {
+                    // 详情正常返回——若 `agent_info` 误走 HTTP 兜底会拿到 Some；
+                    // 断言 None 即证明走了缓存占位，未打详情。
+                    axum::Json(serde_json::json!({
+                        "instance_id": "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d",
+                        "agent_id": "com.acowork.3f8c",
+                        "name": "Agent 3f8c2a91",
+                    }))
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let gw = format!("http://127.0.0.1:{port}");
+
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        dir.refresh().await;
+
+        // 存在性保留
+        assert!(dir.agent_exists("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await);
+        // 元信息缺失 → None，且未打详情（详情会返回 Some）
+        assert!(dir.agent_info("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.is_none());
     }
 }

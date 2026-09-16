@@ -500,6 +500,7 @@
     "local": "Local",
     "remote": "Remote",
     "localGateway": "Local Gateway",
+    "localModeKeepsUrl": "In Local mode, Desktop probes this address first and only spawns a child Gateway if it can't be reached.",
     "status": "Status",
     "running": "Running",
     "starting": "Starting...",

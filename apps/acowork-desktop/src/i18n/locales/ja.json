@@ -330,6 +330,7 @@
     "local": "ローカル",
     "remote": "リモート",
     "localGateway": "ローカルゲートウェイ",
+    "localModeKeepsUrl": "ローカルモードでは、Desktop はまずこのアドレスをプローブし、応答がない場合のみ子 Gateway を起動します。",
     "status": "ステータス",
     "running": "実行中",
     "starting": "起動中...",
