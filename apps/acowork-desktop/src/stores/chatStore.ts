@@ -2755,7 +2755,13 @@ function stripSummaryTags(text: string): string {
   return (match ? match[1] : trimmed).trim();
 }
 
-function convertConversationEntry(entry: ConversationEntry, agentId: string): ChatMessage {
+function convertConversationEntry(entry: ConversationEntry, agentId: string): ChatMessage | null {
+  // Internal runtime entries (e.g. the output-budget nudge the Runtime
+  // appends to history and persists for replay fidelity) are kept out of the
+  // chat transcript. They are never broadcast over MQTT, so this only affects
+  // the JSONL history-load path.
+  if (entry.metadata?.internal === true) return null;
+
   // Compaction events: rendered as a folded summary card. Mirrors the
   // backend `kind="compaction"` JSONL marker. Detected BEFORE role-based
   // mapping because the underlying role is "system" but we render it
@@ -2848,7 +2854,9 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
  * now a thin map. Kept as a named helper so the callsite stays self-explanatory.
  */
 function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): ChatMessage[] {
-  return entries.map((e) => convertConversationEntry(e, agentId));
+  return entries
+    .map((e) => convertConversationEntry(e, agentId))
+    .filter((m): m is ChatMessage => m !== null);
 }
 
 // ── WebSocket event handler — routes by event.session_id ──────────────

@@ -983,6 +983,45 @@ describe("messagesStale: cache-integrity flag", () => {
     vi.unstubAllGlobals();
   });
 
+  it("drops internal runtime entries (metadata.internal) from loaded history", async () => {
+    // The Runtime persists an output-budget nudge to the session JSONL (for
+    // replay fidelity) marked `metadata.internal`, and deliberately never
+    // broadcasts it over MQTT. The history-load path must therefore filter it
+    // out so it never renders as a fake user bubble.
+    seedSessionState([], { total: 0 });
+    useChatStore.getState().clearSessionMessages(AGENT, SESSION);
+
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          messages: [
+            { id: "u1", role: "user", content: "hi", ts: "2026-01-01T00:00:00.000Z" },
+            {
+              id: "nudge-1",
+              role: "user",
+              content: "output budget exhausted — wrap up",
+              ts: "2026-01-01T00:00:01.000Z",
+              metadata: { internal: true },
+            },
+            { id: "assistant-1", role: "assistant", content: "hello back", ts: "2026-01-01T00:00:02.000Z" },
+          ],
+          offset: 0,
+          limit: 3,
+          total: 3,
+        }),
+      }),
+    ));
+
+    await useChatStore.getState().loadSessionMessages(AGENT, SESSION, 0, 50);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.messages.map((m) => m.id)).toEqual(["u1", "assistant-1"]);
+
+    vi.unstubAllGlobals();
+  });
+
   it("ensureLatestInCache does NOT short-circuit on a stale partially-repopulated cache (polluted cursor)", async () => {
     // Scenario: user switched away mid-stream → clearSessionMessages wiped the
     // cache; then background record_complete appended ONLY the tail records,
