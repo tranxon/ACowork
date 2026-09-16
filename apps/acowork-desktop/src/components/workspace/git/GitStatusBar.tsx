@@ -88,6 +88,18 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
   // "you're viewing X's file list, not your worktree".
   const viewingCommit = viewingRev !== "";
 
+  // Direction of the history dropdown. Anchor ABOVE the bar whenever
+  // the popover (~288px) wouldn't fit between the bar and the
+  // panel's bottom edge — i.e. the panel is collapsed (banner sits
+  // flush at the panel bottom; `changes` still reads the store and
+  // can be any N, so we MUST NOT key off `changes` alone), OR the
+  // expanded file list is short (<6 rows, banner still near the
+  // panel bottom). With a long expanded list (≥ 6 rows) the file
+  // list pushes the banner up into the middle of the workspace,
+// downward has room, and opening upward would cover the FileTree.
+  const historyPlacement: "top" | "bottom" =
+    !isExpanded || changes < 6 ? "top" : "bottom";
+
   const title = !data
     ? t("gitStatusBar.title")
     : !isRepo
@@ -224,6 +236,10 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // Empty path → repo-wide history (the fetchLog endpoint
           // skips the path param when it's empty).
           relPath=""
+          // Flip the popover above the bar when the expanded file list
+          // is short (see `historyPlacement` derivation above) so the
+          // dropdown doesn't clip off the workspace panel's bottom.
+          placement={historyPlacement}
           onSelect={(rev) => {
             setViewingRev(agentId, workspaceId, rev);
             setHistoryAnchor(null);
