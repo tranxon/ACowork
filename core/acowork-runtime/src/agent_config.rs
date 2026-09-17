@@ -11,8 +11,9 @@
 //! Model selection is per-session (ADR-012), persisted in JSONL SessionMetadata.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use indexmap::IndexMap;
 
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 
@@ -1030,11 +1031,18 @@ pub fn default_enabled_tools_for(server_name: &str) -> Option<&'static [&'static
 /// (`{"pm": {"enabled_tools": [...]}}`) fails to parse rather than
 /// silently mapping to an empty config — there is no automatic
 /// migration by design (project is in active development).
+///
+/// ADR-069 follow-up: `servers` is `IndexMap`, not `HashMap`. Serde
+/// serialises the file in iteration order; `HashMap` reshuffles on
+/// every reconcile pass, making the Tools-panel tool order reshuffle
+/// whenever the user toggles a single tool. `IndexMap` preserves the
+/// order `merge_mcp_tools_config` produced (= MCP server's
+/// `tools/list` order).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMcpToolsConfig {
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub servers: HashMap<String, Vec<AgentMcpToolItem>>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub servers: IndexMap<String, Vec<AgentMcpToolItem>>,
 }
 
 /// Single MCP tool row inside a server's flat list.
@@ -1093,7 +1101,7 @@ pub struct McpToolDescriptor {
 /// refreshed from the live `tools/list`.
 pub fn merge_mcp_tools_config(
     persisted: &AgentMcpToolsConfig,
-    server_tools: &HashMap<String, Vec<McpToolDescriptor>>,
+    server_tools: &IndexMap<String, Vec<McpToolDescriptor>>,
 ) -> AgentMcpToolsConfig {
     let mut merged: AgentMcpToolsConfig = AgentMcpToolsConfig::default();
 
@@ -2330,7 +2338,7 @@ mod tests {
             "pm_list_my_tasks",
             "pm_reparent_task",
         ];
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         let defs: Vec<McpToolDescriptor> = names
             .iter()
             .map(|n| McpToolDescriptor {
@@ -2385,7 +2393,7 @@ mod tests {
                 description: None,
             },
         ];
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert("user-installed".to_string(), defs);
 
         let merged = merge_mcp_tools_config(&persisted, &server_tools);
@@ -2405,7 +2413,7 @@ mod tests {
                 AgentMcpToolItem::new("pm_create_project", true), // user enabled
             ],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![
@@ -2444,7 +2452,7 @@ mod tests {
                 Some("stale description from yesterday".into()),
             )],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![McpToolDescriptor {
@@ -2470,7 +2478,7 @@ mod tests {
                 AgentMcpToolItem::new("pm_old_removed_tool", true),
             ],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![McpToolDescriptor {
@@ -2497,7 +2505,7 @@ mod tests {
             "docling".to_string(),
             vec![AgentMcpToolItem::new("parse_pdf", true)],
         );
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![McpToolDescriptor {
@@ -2516,7 +2524,7 @@ mod tests {
     fn merge_mcp_tools_config_persists_and_loads_back() {
         let dir = tempfile::tempdir().unwrap();
         let persisted = AgentMcpToolsConfig::default();
-        let mut server_tools: HashMap<String, Vec<McpToolDescriptor>> = HashMap::new();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert(
             "pm".to_string(),
             vec![
@@ -2536,6 +2544,101 @@ mod tests {
             .unwrap()
             .expect("file was just created, must load");
         assert_eq!(loaded, merged);
+    }
+
+    /// ADR-069 follow-up: server ordering must be the iteration order
+    /// of the `IndexMap` input, NOT alphabetical, NOT hash-random. The
+    /// downstream `agent_mcp_tools.json` file is read back by the
+    /// desktop Tools panel verbatim — if this order reshuffles on
+    /// every reconcile (which `PUT /mcp-tools` triggers), toggling a
+    /// single tool reshuffles the entire per-MCP-server tool list in
+    /// the UI.
+    ///
+    /// This test pins the order end-to-end:
+    ///   1. `merge_mcp_tools_config` output follows the IndexMap order
+    ///   2. JSON round-trip preserves the order
+    ///   3. `IndexMap::new()` + `.insert()` (the order the runtime
+    ///      produces via `collect_server_tools_from_registry`) is the
+    ///      source of truth — alphabetical name is NOT.
+    #[test]
+    fn merge_mcp_tools_config_preserves_indexmap_iteration_order() {
+        let persisted = AgentMcpToolsConfig::default();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
+        // Insert in an order that is NOT alphabetical — proves we
+        // don't silently sort.
+        server_tools.insert(
+            "zeta".to_string(),
+            vec![
+                McpToolDescriptor {
+                    name: "zeta_z".into(),
+                    description: None,
+                },
+                McpToolDescriptor {
+                    name: "zeta_a".into(),
+                    description: None,
+                },
+            ],
+        );
+        server_tools.insert(
+            "alpha".to_string(),
+            vec![McpToolDescriptor {
+                name: "alpha_b".into(),
+                description: None,
+            }],
+        );
+        server_tools.insert(
+            "mu".to_string(),
+            vec![McpToolDescriptor {
+                name: "mu_x".into(),
+                description: None,
+            }],
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+
+        // 1. Server order = insertion order (zeta, alpha, mu) — not
+        //    alphabetical (alpha, mu, zeta).
+        let server_order: Vec<&String> = merged.servers.keys().collect();
+        assert_eq!(
+            server_order,
+            vec![&"zeta".to_string(), &"alpha".to_string(), &"mu".to_string()],
+            "merged.servers must follow IndexMap insertion order, not hash/alphabetical"
+        );
+
+        // 2. Per-server tool order = defs insertion order.
+        assert_eq!(
+            merged.servers["zeta"].iter().map(|t| &t.name).collect::<Vec<_>>(),
+            vec!["zeta_z", "zeta_a"],
+            "per-server tool order must follow defs insertion order"
+        );
+        assert_eq!(
+            merged.servers["alpha"]
+                .iter()
+                .map(|t| &t.name)
+                .collect::<Vec<_>>(),
+            vec!["alpha_b"]
+        );
+
+        // 3. JSON round-trip preserves the order — guards against a
+        //    future regression to HashMap (which would randomise).
+        let json = serde_json::to_string(&merged).expect("serialize");
+        let json_value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let servers_obj = json_value["servers"].as_object().expect("servers object");
+        let json_server_order: Vec<&String> = servers_obj.keys().collect();
+        assert_eq!(
+            json_server_order,
+            vec![&"zeta".to_string(), &"alpha".to_string(), &"mu".to_string()],
+            "JSON serialisation must preserve IndexMap order — HashMap would shuffle this"
+        );
+
+        let restored: AgentMcpToolsConfig =
+            serde_json::from_str(&json).expect("round-trip deserialise");
+        let restored_order: Vec<&String> = restored.servers.keys().collect();
+        assert_eq!(
+            restored_order,
+            vec![&"zeta".to_string(), &"alpha".to_string(), &"mu".to_string()],
+            "round-trip deserialise must preserve order"
+        );
     }
 
     /// Missing file -> `Ok(None)`.

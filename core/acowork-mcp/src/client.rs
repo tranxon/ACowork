@@ -2,7 +2,7 @@
 // ACowork deviation: uses acowork-mcp's own transport/protocol modules
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -340,7 +340,15 @@ pub struct McpRegistry {
     /// prefixed_name -> (server_index, McpToolDef)
     /// The tool def is stored directly in the index to avoid a secondary
     /// linear search in `McpServerMeta.tools`.
-    tool_index: HashMap<String, (usize, McpToolDef)>,
+    ///
+    /// ADR-069 follow-up: `IndexMap` (not `HashMap`) — `tool_names()` and
+    /// `get_tool_def()` must preserve the order in which tools were
+    /// inserted during `connect_all`, because the runtime's reconcile
+    /// pass writes that order into `agent_mcp_tools.json`. A `HashMap`
+    /// reshuffles the list on every reconnect (which `PUT /mcp-tools`
+    /// triggers), making the Tools-panel tool order reshuffle whenever
+    /// the user toggles a single tool.
+    tool_index: IndexMap<String, (usize, McpToolDef)>,
 }
 
 impl McpRegistry {
@@ -358,7 +366,7 @@ impl McpRegistry {
             return Ok((
                 Self {
                     servers: Vec::new(),
-                    tool_index: HashMap::new(),
+                    tool_index: IndexMap::new(),
                 },
                 Vec::new(),
             ));
@@ -378,7 +386,7 @@ impl McpRegistry {
 
         // Build server list and tool index from successful connections
         let mut servers = Vec::new();
-        let mut tool_index = HashMap::new();
+        let mut tool_index = IndexMap::new();
         let mut failures = Vec::new();
 
         for (name, result) in results {
