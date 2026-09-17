@@ -23,6 +23,7 @@ import { markdownToTiptapJSON, tiptapToMarkdown } from "../../../lib/markdown";
 import { cn } from "../../../lib/utils";
 import { RICH_EDITOR_CHAR_LIMIT, buildExtensionKit } from "./extension-kit";
 import { RichToolbar } from "./RichToolbar";
+import { TableBubbleMenu } from "./TableBubbleMenu";
 
 export interface DocRichEditorProps {
   /** markdown 事实源（editorStore.content）。 */
@@ -124,6 +125,7 @@ export function DocRichEditor({
       <RichToolbar editor={editor} disabled={readOnly} />
       <div className="doc-rich-editor-scroll min-h-0 flex-1 overflow-y-auto">
         <EditorContent editor={editor} className="h-full" />
+        <TableBubbleMenu editor={editor} readOnly={readOnly} />
       </div>
       {/* 字符计数（DocFlow 同款上限，ADR-079 §7 大文档性能） */}
       <div

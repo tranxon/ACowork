@@ -27,6 +27,7 @@ import {
   Strikethrough,
   Table,
   Undo2,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "../../../i18n/useTranslation";
@@ -116,6 +117,16 @@ export function RichToolbar({ editor, disabled }: RichToolbarProps) {
     chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
   };
 
+  const insertMermaid = () => {
+    chain()
+      .insertContent({
+        type: "codeBlock",
+        attrs: { language: "mermaid" },
+        content: [{ type: "text", text: "graph TD\n  A[Start] --> B[End]" }],
+      })
+      .run();
+  };
+
   return (
     <div
       role="toolbar"
@@ -137,6 +148,7 @@ export function RichToolbar({ editor, disabled }: RichToolbarProps) {
       <ToolButton icon={ListOrdered} label={t("doc.tbOrderedList")} active={is("orderedList")} disabled={inactive} onClick={() => chain().toggleOrderedList().run()} />
       <ToolButton icon={ListTodo} label={t("doc.tbTaskList")} active={is("taskList")} disabled={inactive} onClick={() => chain().toggleTaskList().run()} />
       <ToolButton icon={Table} label={t("doc.tbTable")} disabled={inactive} onClick={insertTable} />
+      <ToolButton icon={Workflow} label={t("doc.tbMermaid")} disabled={inactive} onClick={insertMermaid} />
       <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
       <ToolButton icon={Link} label={t("doc.tbLink")} active={is("link")} disabled={inactive} onClick={promptLink} />
       <ToolButton icon={Image} label={t("doc.tbImage")} disabled={inactive} onClick={promptImage} />

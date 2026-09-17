@@ -1825,26 +1825,66 @@ input[type="radio"]:checked {
   min-height: 100%;
 }
 
-/* ── TableKit 表格（column borders + 选中 outline） ─────────────────── */
+/* ── TableKit 表格（边框+圆角+表头底色+斑马纹，colgroup 列宽拖拽） ──
+   视觉语言对齐 .prose table（见上）：
+     - border-collapse: separate + border-spacing: 0 是 border-radius
+       在 <table> 上真正渲染的前提（collapse 模式所有引擎忽略圆角）；
+     - 每格只画 right + bottom 边框、末列/末行去掉，复刻 1px 内网格
+       且不翻倍；
+     - 外框（1px border + radius + overflow:hidden 裁 cell 底色）挂在
+       <table> 上，横向滚动时与单元格网格保持对齐。
+   保留编辑器专属项：
+     - table-layout: fixed + colgroup（TableKit resizable 列宽拖拽依赖，
+       fixed 布局在 separate 模式下同样生效）；
+     - td/th 的 position: relative 供 .selectedCell::after outline 定位；
+     - min-width 保证窄格可点。 */
 .doc-rich-content table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: fixed;
+  min-width: 100%;
   margin: 0.5em 0;
   overflow: hidden;
+  border: 1px solid var(--color-border, #d4d4d8);
+  border-radius: var(--radius-md);
 }
 
 .doc-rich-content td,
 .doc-rich-content th {
-  border: 1px solid var(--color-border, #d4d4d8);
+  border-right: 1px solid var(--color-border, #d4d4d8);
+  border-bottom: 1px solid var(--color-border, #d4d4d8);
   padding: 6px 12px;
   vertical-align: top;
   min-width: 3em;
   position: relative;
 }
 
+.doc-rich-content th:last-child,
+.doc-rich-content td:last-child {
+  border-right: none;
+}
+
+.doc-rich-content tr:last-child th,
+.doc-rich-content tr:last-child td {
+  border-bottom: none;
+}
+
 .dark .doc-rich-content td,
 .dark .doc-rich-content th {
   border-color: #3f3f46;
+}
+
+/* 表头：底色 + 加粗 + 单行（色板同 chat prose th，.dark 自动翻转；
+   文字色继承正文，light 深字 / dark 浅字在两种底上都可读） */
+.doc-rich-content th {
+  background-color: var(--color-chat-title);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 斑马纹（偶数数据行；表头行若是 tbody 内首行则不染色，计数天然跳过） */
+.doc-rich-content tbody tr:nth-child(even) {
+  background-color: var(--color-chat-body);
 }
 
 /* 选中单元格 / 表格（Tiptap 内建 selectedCell / ProseMirror-selectednode） */

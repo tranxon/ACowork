@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Editor } from "@tiptap/react";
 import { DocRichEditor } from "./DocRichEditor";
 
@@ -36,6 +36,18 @@ const mocks = vi.hoisted(() => ({
       "doc.tbOrderedList": "有序列表",
       "doc.tbTaskList": "任务列表",
       "doc.tbTable": "插入表格",
+      "doc.tbAddRowBefore": "在上方插入行",
+      "doc.tbAddRowAfter": "在下方插入行",
+      "doc.tbAddColumnBefore": "在左侧插入列",
+      "doc.tbAddColumnAfter": "在右侧插入列",
+      "doc.tbDeleteRow": "删除当前行",
+      "doc.tbDeleteColumn": "删除当前列",
+      "doc.tbToggleHeaderRow": "切换表头行",
+      "doc.tbToggleHeaderColumn": "切换表头列",
+      "doc.tbDeleteTable": "删除表格",
+      "doc.mermaidEdit": "编辑代码",
+      "doc.mermaidPreview": "预览",
+      "doc.mermaidRendering": "渲染中…",
       "doc.tbLink": "链接",
       "doc.tbImage": "图片",
       "doc.tbRule": "分割线",
@@ -180,5 +192,146 @@ describe("DocRichEditor", () => {
       expect(editor.isEditable).toBe(false);
     });
     expect(document.querySelector(".doc-rich-content")?.getAttribute("contenteditable")).toBe("false");
+  });
+
+  it("表格：光标入表浮出工具条；行列增删按钮输出合法 GFM", async () => {
+    const { editorRef } = renderEditor();
+    const editor = await waitEditor(editorRef);
+    mocks.onContentChange.mockClear();
+
+    // 插入 2×2 表格（withHeaderRow），insertTable 后光标落在首单元格。
+    act(() => {
+      editor.chain().focus().insertTable({ rows: 2, cols: 2, withHeaderRow: true }).run();
+    });
+    expect(editor.isActive("table")).toBe(true);
+
+    // 浮动工具条可见（shouldShow：光标在表格内且可编辑）。
+    await waitFor(() => {
+      const menu = document.querySelector('[data-testid="table-bubble-menu"]') as HTMLElement | null;
+      expect(menu?.style.visibility).toBe("visible");
+    });
+
+    // 下行加行 + 右列加列（真实按钮点击，走 editor.chain() 进 undo 栈）。
+    act(() => {
+      fireEvent.click(screen.getByLabelText("在下方插入行"));
+    });
+    act(() => {
+      fireEvent.click(screen.getByLabelText("在右侧插入列"));
+    });
+    await waitFor(() => {
+      expect(mocks.onContentChange).toHaveBeenCalled();
+    });
+
+    const pipeLines = (md: string) => md.split("\n").filter((l) => l.trim().startsWith("|"));
+    const cellCount = (line: string) => line.split("|").length - 2;
+    let md = mocks.onContentChange.mock.calls.at(-1)?.[0] as string;
+    // 2 行 + 1 行 = 3 行（表头 + 分隔符 + 2 body），每行 3 列。
+    expect(pipeLines(md)).toHaveLength(4);
+    expect(cellCount(pipeLines(md)[0])).toBe(3);
+
+    // 删列（按钮）→ 每行回到 2 列；删行（命令）→ 回到 3 行。
+    act(() => {
+      fireEvent.click(screen.getByLabelText("删除当前列"));
+    });
+    md = mocks.onContentChange.mock.calls.at(-1)?.[0] as string;
+    expect(cellCount(pipeLines(md)[0])).toBe(2);
+    act(() => {
+      editor.chain().focus().deleteRow().run();
+    });
+    md = mocks.onContentChange.mock.calls.at(-1)?.[0] as string;
+    expect(pipeLines(md)).toHaveLength(3);
+
+    // 撤销恢复上一状态（命令进了 undo 栈）。
+    act(() => {
+      editor.chain().focus().undo().run();
+    });
+    md = mocks.onContentChange.mock.calls.at(-1)?.[0] as string;
+    expect(pipeLines(md)).toHaveLength(4);
+
+    // 删除表格 → 输出不再含表格。
+    act(() => {
+      editor.chain().focus().deleteTable().run();
+    });
+    md = mocks.onContentChange.mock.calls.at(-1)?.[0] as string;
+    expect(pipeLines(md)).toHaveLength(0);
+  });
+
+  it("表格：readOnly 时工具条隐藏（不可编辑不浮出）", async () => {
+    const { rerender, editorRef } = renderEditor();
+    const editor = await waitEditor(editorRef);
+    act(() => {
+      editor.chain().focus().insertTable({ rows: 2, cols: 2, withHeaderRow: true }).run();
+    });
+    await waitFor(() => {
+      const menu = document.querySelector('[data-testid="table-bubble-menu"]') as HTMLElement | null;
+      expect(menu?.style.visibility).toBe("visible");
+    });
+
+    // 用编辑器当前内容 rerender（避免外部同步 setContent 移除表格），只切 readOnly。
+    const currentMd = mocks.onContentChange.mock.calls.at(-1)?.[0] as string;
+    rerender(
+      <DocRichEditor
+        contentMd={currentMd}
+        readOnly={true}
+        onContentChange={mocks.onContentChange}
+        onSave={mocks.onSave}
+      />,
+    );
+    await waitFor(() => {
+      expect(editor.isEditable).toBe(false);
+    });
+    // hide() 会 element.remove() → 菜单从 DOM 消失。
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="table-bubble-menu"]')).toBeNull();
+    });
+  });
+
+  it("mermaid 代码块：NodeView 可视化 + 点击切换编辑态", async () => {
+    const { editorRef } = renderEditor({
+      contentMd: "```mermaid\ngraph TD\n  A --> B\n```",
+    });
+    await waitEditor(editorRef);
+
+    // mermaid language → 挂 MermaidNodeView（渲染态：编辑按钮在，代码内容隐藏）。
+    await waitFor(() => {
+      expect(document.querySelector('[data-mermaid-nodeview]')).not.toBeNull();
+    });
+    expect(screen.getByLabelText("编辑代码")).toBeTruthy();
+    const contentEl = () =>
+      document.querySelector('[data-mermaid-nodeview] [data-node-view-content]') as HTMLElement | null;
+    // NodeViewContent 恒挂载，渲染态 wrapper 带 hidden（contentDOM 稳定）。
+    expect(contentEl()?.closest(".hidden")).not.toBeNull();
+
+    // 点击「编辑代码」→ 编辑态：预览按钮出现，编辑按钮消失，代码可见。
+    act(() => {
+      fireEvent.click(screen.getByLabelText("编辑代码"));
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("预览")).toBeTruthy();
+      expect(screen.queryByLabelText("编辑代码")).toBeNull();
+    });
+    expect(contentEl()?.textContent).toContain("graph TD");
+    expect(contentEl()?.closest(".hidden")).toBeNull();
+
+    // 点击「预览」→ 回渲染态。
+    act(() => {
+      fireEvent.click(screen.getByLabelText("预览"));
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("编辑代码")).toBeTruthy();
+      expect(screen.queryByLabelText("预览")).toBeNull();
+    });
+  });
+
+  it("非 mermaid 代码块：不走 NodeView，默认代码块渲染", async () => {
+    const { editorRef } = renderEditor({
+      contentMd: "```rust\nfn main() {}\n```",
+    });
+    await waitEditor(editorRef);
+    await waitFor(() => {
+      expect(document.querySelector(".doc-rich-content pre")).not.toBeNull();
+    });
+    expect(document.querySelector('[data-mermaid-nodeview]')).toBeNull();
+    expect(document.querySelector(".doc-rich-content pre")?.textContent).toContain("fn main()");
   });
 });
