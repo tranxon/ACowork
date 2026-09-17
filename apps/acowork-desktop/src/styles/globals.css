@@ -2,8 +2,12 @@
 
 @theme {
   --color-accent: #3B82F6;
-  --color-text-secondary: hsl(240 3.7% 46.9%);
-  /* ~zinc-500: secondary labels & icons */
+  --color-text-secondary: hsl(0 0% 24%);
+  /* default UI labels & icons (light) */
+  --color-text-tertiary: hsl(0 0% 44%);
+  /* hints / metadata / placeholder (light) */
+  --color-text-disabled: hsl(0 0% 60%);
+  /* disabled state (light) */
 
   /* Semantic status colors — foreground values for Badge tones
      (success / warning). Consumers write `text-ok` / `bg-ok/12` /
@@ -368,9 +372,14 @@
   --color-muted-foreground: hsl(215.4 16.3% 65%);
 
   --color-bg: hsl(240 10% 3.9%);
-  --color-text: hsl(0 0% 98%);
-  --color-text-secondary: hsl(240 5% 64.9%);
-  /* ~zinc-400 for dark mode */
+  --color-text: hsl(0 0% 90%);
+  /* high-contrast text (dark) — softened from pure white */
+  --color-text-secondary: hsl(0 0% 70%);
+  /* default UI labels & icons (dark) */
+  --color-text-tertiary: hsl(0 0% 52%);
+  /* hints / metadata / placeholder (dark) */
+  --color-text-disabled: hsl(0 0% 38%);
+  /* disabled state (dark) */
 
   /* Semantic status colors (dark) — auto-flips the @theme light values */
   --color-ok: #34d399;
