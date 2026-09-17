@@ -41,10 +41,13 @@ interface TooltipProps {
 }
 
 const variantClasses: Record<TooltipVariant, string> = {
+  // Background intentionally inverts with theme (dark bg in light mode, light
+  // bg in dark mode), so text must flip too — do NOT "simplify" away the
+  // dark:text override (regression: bf9432b8 made dark tooltips white-on-white).
   inverted:
-    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 ",
+    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 dark:text-zinc-800",
   plain:
-    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 ",
+    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 dark:text-zinc-800",
 };
 
 const GAP = 6; // px gap between trigger and tooltip
