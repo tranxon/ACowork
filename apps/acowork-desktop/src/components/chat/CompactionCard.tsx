@@ -4,11 +4,36 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CompactionEventMeta } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
+import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 
 /** ReactMarkdown component overrides for the compaction summary.
- *  Only needs the table wrapper — same as MessageBubble / MarkdownPreviewView
- *  so behavior is consistent across chat, file preview and compaction card. */
+ *  Table wrapper — same as MessageBubble / MarkdownPreviewView so behavior
+ *  is consistent across chat, file preview and compaction card — plus the
+ *  same link interceptor as MessageBubble: compaction summaries quote agent
+ *  output verbatim, so they can carry the same drive-path links (`D:/…`)
+ *  whose empty-href fallback would default-navigate the webview. */
 const markdownComponents = {
+  a: ({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
+    // Degrade to plain text when no usable href survived sanitisation —
+    // an empty-href <a> click reloads the webview on default navigation.
+    if (!href) return <span>{children}</span>;
+    return (
+      <a
+        href={href}
+        {...rest}
+        onClick={(e) => {
+          e.preventDefault();
+          handleChatMarkdownLinkClick(href);
+        }}
+        onAuxClick={(e) => {
+          if (e.button !== 0) e.preventDefault();
+        }}
+        draggable={false}
+      >
+        {children}
+      </a>
+    );
+  },
   table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
     <div className="prose-table-scroll">
       <table {...rest}>{children}</table>
@@ -106,7 +131,7 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
             style={{ fontSize: CARD_FONT_SIZE }}
           >
             {summary ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{summary}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={markdownComponents}>{summary}</ReactMarkdown>
             ) : (
               <span className="italic text-zinc-400">{t("compactionCard.empty")}</span>
             )}

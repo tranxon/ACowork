@@ -26,6 +26,9 @@
 // pure helper for image rendering without re-running the HEAD probe on
 // every render.
 
+import { defaultUrlTransform } from "react-markdown";
+import { useAgentStore } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { getCachedWorkspaceRoot } from "../../stores/fileTree";
@@ -337,5 +340,135 @@ export function notifyLinkNotFound(href: string): void {
     showToast({
         type: "warning",
         message: i18n.t("fileEditor.markdownLinkNotFound", { href }),
+    });
+}
+
+// ── Chat-surface markdown link handling ────────────────────────────────
+//
+// `[text](D:/repo/file.md)` — a Windows drive-path link, the shape agents
+// produce for file references. react-markdown's stock `defaultUrlTransform`
+// treats `D:` as an unknown protocol and rewrites the href to `""`; the
+// resulting `<a href="">` then default-navigates the webview to the current
+// URL on click — a full page reload, and on WebView2 the historical
+// renderer crash that killed the whole app. The exports below are the
+// chat-side fix: `markdownUrlTransform` keeps local paths alive through
+// sanitisation, `parseChatLinkHref` normalises the clickable shapes, and
+// `handleChatMarkdownLinkClick` resolves them against the agent's
+// workspaces exactly like the attachment chips do.
+
+/**
+ * react-markdown `urlTransform` for every chat-side markdown surface.
+ *
+ * Differences from the stock `defaultUrlTransform` (react-markdown 10.x):
+ *   - Windows drive paths (`D:/…`, `D:\…`) pass through unchanged. The
+ *     stock transform classifies `D:` as an unknown protocol and returns
+ *     `""`, destroying the link. The click handler resolves the drive
+ *     path against the agent's workspace roots.
+ *   - `file:///…` URLs are converted to plain local absolute paths
+ *     (`file:///D:/repo/a.md` → `D:/repo/a.md`, `file:///home/u/a.md` →
+ *     `/home/u/a.md`) for the same reason — the stock transform strips
+ *     them because `file:` is not an allow-listed protocol.
+ *
+ * Everything else keeps the stock sanitisation (`javascript:` etc. are
+ * still rewritten to `""`), so the XSS posture is unchanged.
+ */
+export function markdownUrlTransform(url: string): string {
+    // `D:/…` / `D:\…` — Windows drive path.
+    if (/^[A-Za-z]:[/\\]/.test(url)) return url;
+    // `file:///…` — convert to a local path; fall back to the stock
+    // sanitisation when the URL is malformed or is a UNC path
+    // (`file://server/share`), which the workspace resolver cannot map.
+    if (/^file:\/\//i.test(url)) {
+        const local = fileUrlToLocalPath(url);
+        if (local) return local;
+    }
+    return defaultUrlTransform(url);
+}
+
+/** `file:///D:/x` → `D:/x`; `file:///home/u/x` → `/home/u/x`; UNC → null. */
+function fileUrlToLocalPath(url: string): string | null {
+    try {
+        const u = new URL(url);
+        if (u.host) return null; // UNC (`file://server/…`) — not resolvable.
+        let p = decodeURIComponent(u.pathname);
+        if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1); // `/D:/…` → `D:/…`
+        return p;
+    } catch {
+        return null;
+    }
+}
+
+/** Parsed form of a chat markdown link that points at a local file. */
+export interface ChatLinkTarget {
+    /** The path part. URL-ified drive paths (`/D:/…`) lose the leading
+     *  slash so the workspace resolver can absorb the absolute path. */
+    path: string;
+    /** 1-based cursor line from a `#L42` / `#L42-L67` fragment, if any. */
+    line?: number;
+}
+
+/**
+ * Split a chat markdown href into its path and optional `#L…` line
+ * fragment, normalising the two shapes the resolver must accept:
+ *   - `/D:/repo/a.md` — `file://` conversion leftovers and editors that
+ *     URL-ify drive paths with a leading slash.
+ *   - `D:/repo/a.md` — plain drive path, kept intact; the workspace
+ *     resolver maps it back to a workspace-relative path via the
+ *     workspace root prefix.
+ * Relative paths (`docs/a.md`) pass through unchanged.
+ */
+export function parseChatLinkHref(href: string): ChatLinkTarget {
+    const [rawPath, fragment = ""] = href.split("#", 2);
+    let path = rawPath;
+    if (/^\/[A-Za-z]:[/\\]/.test(path)) path = path.slice(1);
+    const m = fragment.match(/^L(\d+)(?:-L(\d+))?$/);
+    return { path, line: m ? parseInt(m[1], 10) : undefined };
+}
+
+/**
+ * Click dispatch for markdown links inside chat surfaces (MessageBubble,
+ * CompactionCard). Chat links have no file-of-origin context, so local
+ * paths are resolved against the agent's workspaces — the same
+ * candidate-walk the attachment chips use (`resolveAssetAcrossWorkspaces`
+ * + `openFirstResolved`), which transparently upgrades drive-absolute
+ * paths (`D:/repo/docs/a.md`) to a workspace-relative open.
+ *
+ * http(s) links open in the URL preview tab. Local paths open in Monaco
+ * (images in preview mode); a link that matches no workspace file raises
+ * the standard "not found" toast. In-page anchors are silently ignored.
+ * Callers MUST have already called `preventDefault()` — this function
+ * never lets the webview navigate.
+ */
+export function handleChatMarkdownLinkClick(href: string): void {
+    // In-page anchors (`#foo`) and empty hrefs have no workspace meaning.
+    if (!href || href.startsWith("#")) return;
+
+    const agentId = useAgentStore.getState().selectedAgentId;
+    if (!agentId) return;
+
+    if (/^https?:\/\//i.test(href)) {
+        useFileEditorStore.getState().openUrl(agentId, href);
+        return;
+    }
+
+    const sessionId = useChatStore.getState().getActiveSessionId(agentId);
+    if (!sessionId) return;
+    const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
+
+    const { path, line } = parseChatLinkHref(href);
+    const action = pickOpenActionForPath(path);
+
+    let candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path);
+    if (candidates.length === 0 && path.startsWith("/")) {
+        // Legacy chat convention: a bare leading slash means
+        // "workspace-relative", not "POSIX absolute".
+        candidates = resolveAssetAcrossWorkspaces(agentId, workspaceId, "", path.slice(1));
+    }
+    if (candidates.length === 0) {
+        notifyLinkNotFound(path);
+        return;
+    }
+    void openFirstResolved(agentId, candidates, action, line).then((result) => {
+        if (!result.opened) notifyLinkNotFound(path);
     });
 }

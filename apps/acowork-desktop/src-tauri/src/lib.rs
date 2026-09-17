@@ -25,6 +25,7 @@
 mod commands;
 mod gateway_client;
 mod mqtt_client;
+mod navigation_guard;
 mod state;
 mod tray;
 #[cfg(target_os = "windows")]
@@ -618,6 +619,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
+        // Last-resort navigation firewall: blocks any webview navigation
+        // that is not the app's own root URL or an allow-listed scheme.
+        // See `navigation_guard.rs` for the allow-list rationale.
+        .plugin(navigation_guard::init())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::agent::list_agents,
@@ -692,6 +697,9 @@ pub fn run() {
             // Post-wake renderer recovery: page reports its first
             // painted frame (rAF-driven). See `wake_recovery` docs.
             desktop_recovery_visible,
+            // TEMP DEBUG: <a> click probe — see src/main.tsx. Delete once
+            // the link-click webview-crash root cause is confirmed.
+            debug_log_link_click,
         ])
         .setup(|app| {
             tray::setup(app)?;
@@ -1076,4 +1084,11 @@ pub fn run() {
             let _ = (app_handle, event);
         }
     });
+}
+
+// TEMP DEBUG: webview <a> click probe — see apps/acowork-desktop/src/main.tsx.
+// Delete once the link-click webview-crash root cause is confirmed.
+#[tauri::command]
+fn debug_log_link_click(payload: String) {
+    tracing::warn!(target: "webview_link_click", "{}", payload);
 }
