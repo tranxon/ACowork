@@ -51,6 +51,21 @@ export interface PmProjectMember {
   /** Agent 实例 ID（UUID，ADR-073） */
   instance_id: string;
   added_at: string;
+  /**
+   * Agent 角色（manifest 顶层 `role`，例："Senior Software Engineer"）。
+   *
+   * **可选字段**：仅在调用方走 MCP `pm_get_project` 路径时填充（PM 服务端
+   * 经 `HttpAgentDirectory` join Gateway `AgentListResponse.role` 透出）。
+   * REST `GET /projects/:pid` 仍只返回 `instance_id` + `added_at`（前端
+   * 当前消费的是 REST 路径，member 元信息由 `agentStore` join 提供）。
+   *
+   * - 缺失 / 未声明 manifest role → `null`
+   * - `NoopAgentDirectory` 宽松模式 → `null`
+   *
+   * PM task t-2ee347c3：补 role 字段，让前端可在 UI 上展示成员角色而无需
+   * 再 join agentStore（MCP 路径）。
+   */
+  role?: string | null;
 }
 
 /** 项目元数据 */

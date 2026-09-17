@@ -104,12 +104,20 @@ pub trait AgentDirectory: Send + Sync {
 /// Agent 元信息（`AgentDirectory::agent_info` 返回）。
 ///
 /// 字段刻意保持最少：`pm_get_project` 投影成员时只需要 `agent_id`（包 ID，
-/// 用于展示/日志）+ `name`（显示名，用于 LLM 识别）。`instance_id` 是查询
-/// key，不重复放在 value 里。
+/// 用于展示/日志）+ `name`（显示名，用于 LLM 识别）+ `role`（来自
+/// manifest 顶层 `role = "..."`，人类用户 / PM agent 派活时判断"这个
+/// 实例适合干什么"）。`instance_id` 是查询 key，不重复放在 value 里。
+///
+/// **`role` 来源**：Gateway `AgentListResponse.role`（已从 `manifest.role`
+/// 透出，ADR-073 唯一真相源 = Gateway `installed_agents`）。`HttpAgentDirectory`
+/// 周期刷新时一并拉取并缓存；缺字段 / 未声明 → `None`，不报错。
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
+    /// Agent 角色（manifest 顶层 `role`，例：`"Senior Software Engineer"`）。
+    /// Gateway 列表响应缺字段或 `.agent` 包未声明 → `None`。
+    pub role: Option<String>,
 }
 
 /// 默认（宽松）Agent 目录：不校验存在性。`PmService::new` 未注入目录时使用。
@@ -331,6 +339,8 @@ mod tests {
     use crate::config::PmConfig;
     use crate::store::tree::PmStore;
     use crate::types::{ProjectId, ProjectStatus, TaskId, UpdateProject};
+    use axum::routing::get;
+    use std::time::Duration;
     use tower::ServiceExt;
 
     /// 将响应体 `Bytes` 解析为 `Value`。
@@ -555,6 +565,7 @@ mod tests {
     impl MapAgentDirectory {
         fn new(entries: &[(&str, &str, &str)]) -> Self {
             // entries: (instance_id, agent_id, name)
+            // role 默认为 None — 仅当测试关心 role 时用 `with_role` / `set` 注入。
             let map = entries
                 .iter()
                 .map(|(iid, aid, n)| {
@@ -563,6 +574,7 @@ mod tests {
                         AgentInfo {
                             agent_id: (*aid).to_string(),
                             name: (*n).to_string(),
+                            role: None,
                         },
                     )
                 })
@@ -570,6 +582,14 @@ mod tests {
             Self {
                 infos: std::sync::Arc::new(std::sync::Mutex::new(map)),
             }
+        }
+
+        /// 测试用：注入带 role 的元信息条目，覆盖已存在的 instance_id。
+        fn set(&self, instance_id: &str, info: AgentInfo) {
+            self.infos
+                .lock()
+                .unwrap()
+                .insert(instance_id.to_string(), info);
         }
     }
 
@@ -1183,6 +1203,226 @@ mod tests {
         assert_eq!(members[0]["instance_id"], creator);
         assert!(members[0]["agent_id"].is_null());
         assert!(members[0]["name"].is_null());
+    }
+
+    /// PM task t-2ee347c3 — `pm_get_project` members 必须把 `role` 字段带出来。
+    ///
+    /// 人类用户在 PM UI 排任务 / PM agent 自身派活时，需要从 members 列表一眼
+    /// 看出"这个实例适合干什么"（manifest 顶层 `role`，例：`"Senior Software
+    /// Engineer"` / `"Project Manager"` / `"Product Manager"`），而不是只看
+    /// display_name 猜。
+    ///
+    /// 三条路径必须各自正确：
+    /// 1. **role 存在** → JSON `"role": "Senior Software Engineer"`（不为 null）
+    /// 2. **role 缺失**（legacy manifest / 未声明） → JSON `"role": null`，
+    ///    **不**省略字段（旧调用方 schema 不漂移；null = "未声明 / 不可用"
+    ///    是契约稳定的最小面）
+    /// 3. **`NoopAgentDirectory`**（宽松模式） → `"role": null`（与
+    ///    `agent_id` / `name` 同语义）
+    #[tokio::test]
+    async fn e2e_get_project_members_include_role_field() {
+        let creator = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let member_with_role = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
+        let member_without_role = "b07e4c2d-34f8-4b91-b07e-4c2d34f8b91";
+
+        // ── 路径 1 + 2：MapAgentDirectory 同时含 role 存在 / 缺失 ─────────
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            (creator, "com.acowork.senior-engineer", "SSE"),
+            (member_with_role, "com.acowork.project-manager", "PM"),
+            (member_without_role, "com.acowork.legacy", "Legacy"),
+        ]));
+        // 仅 member_with_role 注入 role;member_without_role 保持 None
+        dir.set(
+            member_with_role,
+            crate::mcp::AgentInfo {
+                agent_id: "com.acowork.project-manager".to_string(),
+                name: "PM".to_string(),
+                role: Some("Project Manager".to_string()),
+            },
+        );
+        // `pm_add_member` MCP tool 不存在 — 直接走 store API 加 member
+        // （与 `e2e_meta_fields_attach_to_tasks_and_projects` 同模式）。
+        let (router, store) = test_router_store_with_dir(dir.clone()).await;
+
+        let v = call_tool(
+            &router,
+            Some(creator),
+            100,
+            "pm_create_project",
+            json!({ "title": "P-role" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "create_project failed: {v}");
+        let pid_str = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let pid: ProjectId = pid_str.parse().expect("valid project id");
+
+        store
+            .add_project_member(&pid, member_with_role)
+            .await
+            .expect("add member_with_role");
+        store
+            .add_project_member(&pid, member_without_role)
+            .await
+            .expect("add member_without_role");
+
+        let v = call_tool(
+            &router,
+            Some(creator),
+            103,
+            "pm_get_project",
+            json!({ "project_id": pid_str }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "get_project failed: {v}");
+        let resp = tool_text(&v);
+        let members = resp["members"].as_array().expect("members array");
+
+        // 三个 member（creator auto-join + 2 个 add_member）
+        assert_eq!(members.len(), 3, "members = {members:?}");
+
+        let by_id = |id: &str| -> &serde_json::Value {
+            members
+                .iter()
+                .find(|m| m["instance_id"] == id)
+                .unwrap_or_else(|| panic!("missing instance {id}"))
+        };
+
+        // role 存在 → 透传
+        let m = by_id(member_with_role);
+        assert_eq!(m["agent_id"], "com.acowork.project-manager");
+        assert_eq!(m["name"], "PM");
+        assert_eq!(
+            m["role"], "Project Manager",
+            "role must be the manifest value, not null"
+        );
+
+        // role 缺失 → null,不省略字段
+        let m = by_id(member_without_role);
+        assert_eq!(m["agent_id"], "com.acowork.legacy");
+        assert_eq!(m["name"], "Legacy");
+        assert!(
+            m["role"].is_null(),
+            "missing role must serialize as JSON null (key still present), got {}",
+            m["role"]
+        );
+        assert!(
+            m.as_object().unwrap().contains_key("role"),
+            "role key must be present even when value is null — schema stability for old callers"
+        );
+
+        // creator（SSE）role 默认 None → null
+        let m = by_id(creator);
+        assert!(
+            m["role"].is_null(),
+            "creator injected without role must serialize as null"
+        );
+
+        // ── 路径 3：NoopAgentDirectory（元信息全 null） ─────────────────
+        let router_noop = test_router_with_dir(Arc::new(NoopAgentDirectory)).await;
+        let v = call_tool(
+            &router_noop,
+            Some(creator),
+            110,
+            "pm_create_project",
+            json!({ "title": "P-noop" }),
+        )
+        .await;
+        let pid2 = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router_noop,
+            Some(creator),
+            111,
+            "pm_get_project",
+            json!({ "project_id": pid2 }),
+        )
+        .await;
+        let resp = tool_text(&v);
+        let members = resp["members"].as_array().unwrap();
+        assert!(!members.is_empty(), "creator auto-joined");
+        for m in members {
+            assert!(m["agent_id"].is_null());
+            assert!(m["name"].is_null());
+            assert!(
+                m["role"].is_null(),
+                "NoopAgentDirectory must serialize role as null, got {}",
+                m["role"]
+            );
+        }
+    }
+
+    /// PM task t-2ee347c3 — Agent 的 `role` 在 manifest 改了之后,下一次
+    /// `HttpAgentDirectory::refresh` 必须把新 role 透出来。
+    ///
+    /// 这条守的是缓存失效路径 —— 之前 role 根本没进 `AgentInfo`,
+    /// 现在新增字段后必须保证 Gateway 改了 manifest.role(重装 / 升级),
+    /// PM 周期刷新窗口(默认 60s)收敛后 `pm_get_project` 立即看到新值。
+    #[tokio::test]
+    async fn e2e_role_updated_after_periodic_refresh() {
+        use crate::mcp::agent_dir::HttpAgentDirectory;
+
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        // 第一次 refresh:Gateway 返回 role = "Project Manager"
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // 用 Arc<Mutex<...>> 让同一 listener 在两次 refresh 之间切换响应
+        let current_role: std::sync::Arc<std::sync::Mutex<String>> =
+            std::sync::Arc::new(std::sync::Mutex::new("Project Manager".to_string()));
+        let cr1 = current_role.clone();
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(move || {
+                    let cr = cr1.clone();
+                    async move {
+                        let role = cr.lock().unwrap().clone();
+                        axum::Json(vec![serde_json::json!({
+                            "instance_id": instance,
+                            "agent_id": "com.acowork.dispatcher",
+                            "name": "Dispatcher",
+                            "role": role,
+                        })])
+                    }
+                }),
+            )
+            .route(
+                "/api/agents/{id}",
+                get(move || async move {
+                    axum::Json(serde_json::json!({
+                        "instance_id": instance,
+                        "agent_id": "com.acowork.dispatcher",
+                        "name": "Dispatcher",
+                        "role": "Project Manager",
+                    }))
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let gw = format!("http://127.0.0.1:{port}");
+
+        let dir = Arc::new(HttpAgentDirectory::new(
+            gw,
+            None,
+            Duration::from_secs(3600),
+        ));
+        dir.refresh().await;
+
+        // 第一次断言:role = "Project Manager"
+        let info = dir.agent_info(instance).await.expect("cached meta");
+        assert_eq!(info.role.as_deref(), Some("Project Manager"));
+
+        // 模拟 manifest 升级:role 改成 "Senior Software Engineer"
+        *current_role.lock().unwrap() = "Senior Software Engineer".to_string();
+        dir.refresh().await;
+
+        // 第二次断言:role 已收敛(否则 PM 永远拿不到 manifest 升级后的 role)
+        let info = dir.agent_info(instance).await.expect("cached meta after refresh");
+        assert_eq!(
+            info.role.as_deref(),
+            Some("Senior Software Engineer"),
+            "refresh must converge role changes"
+        );
     }
 
     /// e2e：所有任务/项目返回都附 `assignee_meta` / `created_by_meta`，

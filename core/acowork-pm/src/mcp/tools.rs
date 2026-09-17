@@ -388,10 +388,17 @@ async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
     let mut members = Vec::with_capacity(p.members.len());
     for m in &p.members {
         let info = meta.get(&m.instance_id);
+        // 投影规则：
+        // - `agent_id` / `name` / `role` 来自 AgentDirectory（缓存命中 / 即时兜底）
+        // - 任一字段 AgentDirectory 拿不到 → `null`（与 `NoopAgentDirectory`
+        //   宽松模式语义一致），**不**省略（省略会让老调用方 schema 漂移
+        //   解析失败；保持显式 null = "未声明 / 不可用" 是契约稳定的最小面）
+        // - `added_at` 来自 ProjectMember 自身
         members.push(json!({
             "instance_id": m.instance_id,
             "agent_id": info.map(|i| &i.agent_id),
             "name": info.map(|i| &i.name),
+            "role": info.and_then(|i| i.role.as_ref()),
             "added_at": m.added_at,
         }));
     }

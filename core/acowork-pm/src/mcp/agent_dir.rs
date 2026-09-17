@@ -93,7 +93,11 @@ impl HttpAgentDirectory {
     }
 
     /// 拉全量 Agent 列表到缓存。
-    async fn refresh(&self) {
+    ///
+    /// `pub(crate)` 是为了 `mod.rs` 的 `e2e_role_updated_after_periodic_refresh`
+    /// 跨文件测试可调 —— 同 crate 内部可访问,对外仍是私有。生产路径
+    /// (`start()` 后台 spawn)不需要这个可见性。
+    pub(crate) async fn refresh(&self) {
         match self.fetch_agents().await {
             Ok(ids) => {
                 let mut cache = self.cache.write().await;
@@ -123,7 +127,7 @@ impl HttpAgentDirectory {
         }
         // ADR-073: AgentListResponse 同时含 `instance_id` + `agent_id` + `name`。
         // PM 的存在性校验按 instance 走（与 task.assignee / X-MCP-Actor 一致），
-        // agent_id / name 仅用于显示（pm_get_project 投影成员元信息）。
+        // agent_id / name / role 仅用于显示（pm_get_project 投影成员元信息）。
         let agents: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
         let mut out = HashMap::with_capacity(agents.len());
         for a in agents {
@@ -140,11 +144,23 @@ impl HttpAgentDirectory {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            // `role` 来自 manifest 顶层（`AgentListResponse.role`，Gateway 已
+            // 透出）。缺失 / 未声明 → `None`，不阻塞存在性校验（与
+            // agent_id 缺失的对称处理）。role 改了 → 下一次 refresh 自动
+            // 收敛（PM 测试 `pm_get_project_members_role_updated_after_refresh` 守门）。
+            let role = a
+                .get("role")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             // 存在性只依赖 instance_id（与旧 HashSet 语义一致）：即使
             // agent_id 缺失也保留条目（值为 `None` = 存在但元信息不可用），
             // 避免把该 instance 从存在性缓存中剔除（否则 agent_exists
             // 每次都会走即时兜底，且语义与旧实现漂移）。
-            let entry = (!agent_id.is_empty()).then_some(AgentInfo { agent_id, name });
+            let entry = (!agent_id.is_empty()).then_some(AgentInfo {
+                agent_id,
+                name,
+                role,
+            });
             out.insert(instance_id.to_string(), entry);
         }
         Ok(out)
@@ -177,7 +193,7 @@ impl HttpAgentDirectory {
 
     /// 即时元信息兜底：`GET {gateway_url}/api/agents/{instance_id}` → `AgentInfo`。
     ///
-    /// `agent_info` 在缓存 miss 时调用，把成员的真实 `agent_id` / `name`
+    /// `agent_info` 在缓存 miss 时调用，把成员的真实 `agent_id` / `name` / `role`
     /// 投影给 LLM（否则 60 秒周期刷新窗口内 LLM 拿到 null 仍派不了任务）。
     /// Gateway 不可达 / Agent 不存在 / 详情缺 `agent_id` → `None`。
     async fn query_gateway_info(&self, instance_id: &str) -> Option<AgentInfo> {
@@ -196,7 +212,17 @@ impl HttpAgentDirectory {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        Some(AgentInfo { agent_id, name })
+        // 详情响应里 role 来自 manifest 顶层（`AgentDetailResponse` 透出），
+        // 缺失 / 未声明 → None，不影响存在性兜底。
+        let role = body
+            .get("role")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Some(AgentInfo {
+            agent_id,
+            name,
+            role,
+        })
     }
 }
 
@@ -545,5 +571,112 @@ mod tests {
         assert!(dir.agent_exists("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await);
         // 元信息缺失 → None，且未打详情（详情会返回 Some）
         assert!(dir.agent_info("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.is_none());
+    }
+
+    /// PM task t-2ee347c3 — `role` 字段在 refresh 路径透传。
+    ///
+    /// Gateway `/api/agents` 响应含 `role` 字段（`AgentListResponse.role`，
+    /// 来自 manifest 顶层）。`HttpAgentDirectory::fetch_agents` 必须把
+    /// 这个字段带进 `AgentInfo.role` 而不是丢弃。
+    ///
+    /// 守门:防止未来重构再把 `role` 漏掉(这是 t-2ee347c3 引入的字段,
+    /// 之前所有 `AgentInfo` 只装 `agent_id` + `name`)。
+    #[tokio::test]
+    async fn fetch_agents_passes_role_through() {
+        let instance_with_role = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let instance_without_role = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/api/agents",
+            get(move || async move {
+                axum::Json(vec![
+                    // 标准响应:role 来自 manifest 顶层
+                    serde_json::json!({
+                        "instance_id": instance_with_role,
+                        "agent_id": "com.acowork.senior-engineer",
+                        "name": "SSE",
+                        "role": "Senior Software Engineer",
+                    }),
+                    // 旧 manifest 没声明 role / 旧版 Gateway 缺字段 — 不崩
+                    serde_json::json!({
+                        "instance_id": instance_without_role,
+                        "agent_id": "com.acowork.legacy",
+                        "name": "Legacy",
+                        // role 字段缺失
+                    }),
+                ])
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let gw = format!("http://127.0.0.1:{port}");
+
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        dir.refresh().await;
+
+        // 主断言:role 透传
+        let info = dir
+            .agent_info(instance_with_role)
+            .await
+            .expect("cached meta for role-bearing instance");
+        assert_eq!(info.agent_id, "com.acowork.senior-engineer");
+        assert_eq!(info.name, "SSE");
+        assert_eq!(
+            info.role.as_deref(),
+            Some("Senior Software Engineer"),
+            "fetch_agents must extract role from /api/agents response"
+        );
+
+        // 兜底断言:role 缺失 → None,不阻塞 agent_id/name
+        let info = dir
+            .agent_info(instance_without_role)
+            .await
+            .expect("cached meta even when role is absent");
+        assert_eq!(info.agent_id, "com.acowork.legacy");
+        assert_eq!(info.name, "Legacy");
+        assert!(info.role.is_none(), "missing role must map to None, not empty string");
+    }
+
+    /// PM task t-2ee347c3 — 详情兜底路径(缓存 miss → `query_gateway_info`)
+    /// 也必须把 `role` 透传过来,不能因为走兜底而丢字段。
+    #[tokio::test]
+    async fn query_gateway_info_passes_role_through() {
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route(
+            "/api/agents/{id}",
+            get(move || async move {
+                axum::Json(serde_json::json!({
+                    "instance_id": instance,
+                    "agent_id": "com.acowork.project-manager",
+                    "name": "PM",
+                    "role": "Project Manager",
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let gw = format!("http://127.0.0.1:{port}");
+
+        // 故意不 refresh() — 缓存全空,agent_info 必须走兜底打详情
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+
+        let info = dir
+            .agent_info(instance)
+            .await
+            .expect("fallback should populate meta from /api/agents/{id}");
+        assert_eq!(info.agent_id, "com.acowork.project-manager");
+        assert_eq!(info.name, "PM");
+        assert_eq!(
+            info.role.as_deref(),
+            Some("Project Manager"),
+            "query_gateway_info must pass role through"
+        );
     }
 }
