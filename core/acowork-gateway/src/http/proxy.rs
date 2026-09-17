@@ -156,6 +156,10 @@ pub fn proxy_routes() -> Router<AppState> {
             get(proxy_git_log),
         )
         .route(
+            "/api/agents/{id}/git/revert",
+            post(proxy_git_revert),
+        )
+        .route(
             "/api/agents/{id}/sessions",
             get(proxy_list_sessions),
         )
@@ -559,6 +563,29 @@ async fn proxy_git_log(
 ) -> Response {
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, "/git/log", &query, &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/git/revert` to Runtime's
+/// `POST /git/revert` (discard uncommitted changes). The JSON body
+/// (`workspace_id` / `path` / `old_path`) is forwarded verbatim — the
+/// Gateway never touches `.git` (ADR-009 red line).
+async fn proxy_git_revert(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/git/revert",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.

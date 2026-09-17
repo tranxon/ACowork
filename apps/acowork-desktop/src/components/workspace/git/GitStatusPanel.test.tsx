@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
 
@@ -18,6 +18,8 @@ const translations: Record<string, string> = {
   "gitStatus.showDiff": "Show Diff",
   "gitStatus.showLog": "Show Log",
   "gitStatus.openInEditor": "Open in Editor",
+  "gitStatus.revert": "Revert",
+  "gitStatus.revertConfirmTitle": "Revert changes?",
   "gitStatus.loading": "Loading…",
   "gitStatus.notRepo": "Not a Git repository",
   "gitStatus.gitUnavailable": "Git unavailable",
@@ -44,6 +46,8 @@ const gitStoreMocks = {
   viewingRev: {} as Record<string, string>,
   fetchDiff: vi.fn(),
   fetchLog: vi.fn(),
+  revertFile: vi.fn(),
+  refresh: vi.fn(),
 };
 
 vi.mock("../../../stores/gitStore", () => ({
@@ -92,6 +96,8 @@ beforeEach(() => {
   setEntry(undefined);
   gitStoreMocks.fetchDiff.mockReset();
   gitStoreMocks.fetchLog.mockReset();
+  gitStoreMocks.revertFile.mockReset();
+  gitStoreMocks.refresh.mockReset();
   fileEditorMocks.openFile.mockReset();
   fileEditorMocks.openVirtualFile.mockReset();
 });
@@ -274,6 +280,53 @@ describe("GitStatusPanel", () => {
           gitDiffKind: "modified",
         }),
       );
+    });
+  });
+
+  it("right-click Revert discards changes after confirmation and refreshes", async () => {
+    setEntry({
+      data: {
+        isRepo: true,
+        branch: "main",
+        error: null,
+        truncated: false,
+        changes: [
+          {
+            path: "src/a.ts",
+            oldPath: null,
+            index: "modified",
+            worktree: "modified",
+            staged: false,
+          },
+        ],
+      },
+      loading: false,
+    });
+    gitStoreMocks.revertFile.mockReturnValue(
+      okResponse({ path: "src/a.ts", oldPath: null }),
+    );
+    gitStoreMocks.refresh.mockReturnValue(Promise.resolve());
+
+    render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
+    fireEvent.contextMenu(screen.getByTestId("git-status-row"), {
+      clientX: 10,
+      clientY: 20,
+    });
+    expect(screen.getByText("Revert")).toBeTruthy();
+
+    // Menu item → destructive confirm dialog (not yet reverted).
+    fireEvent.click(screen.getByText("Revert"));
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("Revert changes?");
+    expect(gitStoreMocks.revertFile).not.toHaveBeenCalled();
+
+    // Confirm → revertFile + working-tree refresh.
+    fireEvent.click(within(dialog).getByText("Revert"));
+    await vi.waitFor(() => {
+      expect(gitStoreMocks.revertFile).toHaveBeenCalledWith("a1", "ws1", "src/a.ts", null);
+    });
+    await vi.waitFor(() => {
+      expect(gitStoreMocks.refresh).toHaveBeenCalledWith("a1", "ws1");
     });
   });
 

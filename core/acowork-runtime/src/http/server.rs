@@ -655,15 +655,17 @@ impl RuntimeHttpServer {
             .route("/workspaces/tree", get(list_tree))
             .route("/workspaces/find", get(find_files))
             .route("/workspaces/search", get(search_files))
-            // ADR-078: read-only git endpoints for the Desktop Git Status
-            // Bar. Git executes in the Runtime (workspace owner, ADR-009
-            // v2) via the system git CLI with `GIT_OPTIONAL_LOCKS=0` —
-            // the Gateway reverse-proxies `/api/agents/{id}/git/*` here
-            // and never touches the filesystem. All three handlers are
-            // thin protocol converters over the GitQueryService trait.
+            // ADR-078: git endpoints for the Desktop Git Status Bar. Git
+            // executes in the Runtime (workspace owner, ADR-009 v2) via
+            // the system git CLI — the Gateway reverse-proxies
+            // `/api/agents/{id}/git/*` here and never touches the
+            // filesystem. All handlers are thin protocol converters over
+            // the GitQueryService trait. `/git/revert` is the single
+            // deliberate WRITE (discard uncommitted changes).
             .route("/git/status", get(git_status))
             .route("/git/diff", get(git_diff))
             .route("/git/log", get(git_log))
+            .route("/git/revert", post(git_revert))
             // 2 NEW workspace file/dir resources, REST-style (ADR-034 §11.2 #6-9).
             // One path per resource; HTTP method dispatches the operation:
             //   GET    /workspaces/file — read  → JSON {content,size,mimeType}
@@ -1590,12 +1592,13 @@ async fn search_files(
 
 // ── Git Query Handlers (ADR-078) ───────────────────────────────────────────
 //
-// Read-only git operations for the Desktop Git Status Bar. All three
-// handlers route through the `GitQueryService` UseCase trait (ADR-040)
-// — the Runtime executes git with `GIT_OPTIONAL_LOCKS=0` so the
-// endpoints are strictly read-only (ADR-078 §1.3 invariant 1). The
-// Gateway reverse-proxies `/api/agents/{id}/git/*` to these routes and
-// never touches the filesystem (ADR-009 / ADR-055 red line).
+// Git operations for the Desktop Git Status Bar. All handlers route
+// through the `GitQueryService` UseCase trait (ADR-040) — the Runtime
+// executes read commands with `GIT_OPTIONAL_LOCKS=0` (strictly
+// read-only, ADR-078 §1.3 invariant 1); `/git/revert` is the single
+// user-requested write (discard uncommitted changes). The Gateway
+// reverse-proxies `/api/agents/{id}/git/*` to these routes and never
+// touches the filesystem (ADR-009 / ADR-055 red line).
 //
 // Pre-Phase-B HTTP probes receive 503 from the slot-first pattern,
 // matching every other `*Service` handler in this crate.
@@ -1659,6 +1662,26 @@ async fn git_log(
         Json(serde_json::json!({"error": "git service not ready"})),
     ))?;
     svc.log(&params)
+        .await
+        .map(Json)
+        .map_err(git_error_to_response)
+}
+
+/// `POST /git/revert` — discard uncommitted changes of one path
+/// (restore to HEAD; untracked files are deleted). The only write
+/// endpoint in the git API family — the Desktop surfaces it behind a
+/// destructive confirm dialog.
+async fn git_revert(
+    State(state): State<HttpState>,
+    Json(body): Json<crate::usecases::git_query::GitRevertParams>,
+) -> Result<Json<crate::usecases::git_query::GitRevertResponse>, (StatusCode, Json<serde_json::Value>)>
+{
+    let svc = state.git_query.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "git service not ready"})),
+    ))?;
+    svc.revert(&body)
         .await
         .map(Json)
         .map_err(git_error_to_response)

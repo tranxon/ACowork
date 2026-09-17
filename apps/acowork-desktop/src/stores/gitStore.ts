@@ -102,6 +102,12 @@ export interface GitLogResponse {
   pagination: GitLogPagination;
 }
 
+/** Response for `POST /git/revert` — echoes the reverted path(s). */
+export interface GitRevertResponse {
+  path: string;
+  oldPath?: string | null;
+}
+
 /** Group key: `${agentId}\u0000${workspaceId}` (matches workspaceFsWatch). */
 export type GitGroupKey = string;
 
@@ -173,6 +179,14 @@ interface GitStore {
     limit?: number,
     skip?: number,
   ) => Promise<GitLogResponse>;
+  /** Discard the uncommitted changes of one path (restore to HEAD;
+   *  untracked files deleted). Backend: `POST /api/agents/{id}/git/revert`. */
+  revertFile: (
+    agentId: string,
+    workspaceId: string,
+    path: string,
+    oldPath?: string | null,
+  ) => Promise<GitRevertResponse>;
 
   /** Clear the cached status for a group (switch agent / workspace). */
   invalidate: (agentId: string, workspaceId: string) => void;
@@ -351,6 +365,41 @@ export const useGitStore = create<GitStore>((set, get) => {
       };
       if (path) params.path = path;
       return httpGet<GitLogResponse>(`/api/agents/${agentId}/git/log`, params);
+    },
+
+    revertFile: (agentId, workspaceId, path, oldPath) => {
+      const base = getGatewayUrl();
+      const body: Record<string, string | undefined> = {
+        path,
+        // `statusParams` already emits the snake_case `workspace_id` the
+        // Runtime `GitRevertParams` deserializes (same convention as the
+        // GET querystrings).
+        ...statusParams(workspaceId),
+      };
+      if (oldPath) body.old_path = oldPath;
+      return with503Retry(
+        (sig) =>
+          fetch(`${base}/api/agents/${agentId}/git/revert`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+            signal: sig,
+          }),
+        { tag: "gitStore.revertFile", logger: log },
+      ).then(async (resp) => {
+        if (!resp.ok) {
+          let detail = "";
+          try {
+            detail = JSON.stringify(await resp.json());
+          } catch {
+            /* non-JSON error body */
+          }
+          throw new Error(
+            `git revert ${resp.status} ${resp.statusText} ${detail}`.trim(),
+          );
+        }
+        return (await resp.json()) as GitRevertResponse;
+      });
     },
 
     invalidate: (agentId, workspaceId) => {

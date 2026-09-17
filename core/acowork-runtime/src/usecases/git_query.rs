@@ -1,15 +1,18 @@
 //! Git query use case (ADR-078).
 //!
-//! Read-only git operations for the Desktop Git Status Bar: `status`,
-//! `diff`, `log`. All git execution happens in the **Runtime** (the
-//! authoritative workspace owner, ADR-009 v2) via the system git CLI —
-//! the Gateway only reverse-proxies these endpoints (ADR-033 Phase 2)
-//! and never touches the filesystem.
+//! Git operations for the Desktop Git Status Bar: `status`, `diff`,
+//! `log` (read-only) and `revert` (the single user-requested WRITE that
+//! discards uncommitted changes). All git execution happens in the
+//! **Runtime** (the authoritative workspace owner, ADR-009 v2) via the
+//! system git CLI — the Gateway only reverse-proxies these endpoints
+//! (ADR-033 Phase 2) and never touches the filesystem.
 //!
 //! Security invariants (ADR-078 §1.3):
-//! - **read-only**: every command runs with `GIT_OPTIONAL_LOCKS=0` so
-//!   git cannot take optional locks (e.g. the index stat-cache refresh
-//!   `git status` would otherwise perform);
+//! - **read-only except revert**: every read command runs with
+//!   `GIT_OPTIONAL_LOCKS=0` so git cannot take optional locks (e.g. the
+//!   index stat-cache refresh `git status` would otherwise perform);
+//!   `revert` (a write) skips that flag but is confirm-dialog guarded on
+//!   the client and validates its target like every other path;
 //! - **paths never escape the workspace**: diff/log paths are
 //!   canonicalized and must stay under the workspace root; status
 //!   output is filtered by the workspace-root prefix before it leaves
@@ -301,14 +304,52 @@ pub struct GitLogParams {
     pub skip: Option<u32>,
 }
 
+// ── Revert DTOs ────────────────────────────────────────────────────────────
+
+/// Body for `POST /git/revert` — discard the uncommitted changes of a
+/// single path, restoring it to HEAD (untracked files are deleted,
+/// matching IDE "Discard Changes" semantics). This is the one
+/// deliberate WRITE operation in the git API family (the read-only
+/// `GIT_OPTIONAL_LOCKS=0` convention does not apply to it); it is
+/// guarded by the same path-traversal validation as diff/log.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GitRevertParams {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Workspace-root-relative path of the change to revert.
+    pub path: String,
+    /// Old path of a staged rename (`GitChangeDto.oldPath`), when the
+    /// row being reverted is a rename. Restored from HEAD before the
+    /// new path is discarded so both halves of the rename unwind.
+    #[serde(default)]
+    pub old_path: Option<String>,
+}
+
+/// Response for `POST /git/revert` — echoes the reverted path(s).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRevertResponse {
+    /// Workspace-root-relative path that was reverted.
+    pub path: String,
+    /// Old path restored for renames, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+}
+
 // ── Service trait ──────────────────────────────────────────────────────────
 
 /// Read-only git query operations, implemented by
 /// [`crate::usecases::RuntimeGitQueryService`]. ADR-040 layering: the
 /// HTTP handlers depend on this trait, never on the concrete service.
+///
+/// [`revert`](Self::revert) is the single write operation — it discards
+/// uncommitted changes and is explicitly requested by the user via the
+/// Desktop context menu (destructive, confirm-dialog guarded on the
+/// client).
 #[async_trait]
 pub trait GitQueryService: Send + Sync {
     async fn status(&self, params: &GitStatusParams) -> Result<GitStatusResponse, GitError>;
     async fn diff(&self, params: &GitDiffParams) -> Result<GitDiffResponse, GitError>;
     async fn log(&self, params: &GitLogParams) -> Result<GitLogResponse, GitError>;
+    async fn revert(&self, params: &GitRevertParams) -> Result<GitRevertResponse, GitError>;
 }

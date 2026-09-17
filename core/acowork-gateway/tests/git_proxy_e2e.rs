@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::response::IntoResponse;
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -40,6 +40,8 @@ const INSTANCE_ID: &str = "0a0b0c0d-1e2f-4a3b-8c7d-9e8f7a6b5c4d";
 #[derive(Clone, Default)]
 struct Recorder {
     requests: Arc<StdRwLock<Vec<(String, String)>>>,
+    /// Write endpoints (`/git/revert`): `(method, path, raw_body)`.
+    writes: Arc<StdRwLock<Vec<(String, String, String)>>>,
 }
 
 fn record(recorder: &Recorder, req: &Request) {
@@ -52,6 +54,18 @@ fn record(recorder: &Recorder, req: &Request) {
         .push((uri.path().to_string(), query));
 }
 
+/// Record a write request (method + path + body) for `/git/revert`.
+async fn record_write(recorder: &Recorder, req: Request) {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let bytes = to_bytes(req.into_body(), usize::MAX).await.unwrap();
+    recorder
+        .writes
+        .write()
+        .unwrap()
+        .push((method, path, String::from_utf8_lossy(&bytes).to_string()));
+}
+
 /// Start a fake Runtime HTTP server on a random loopback port.
 /// Returns `(port, recorder)`.
 async fn spawn_fake_runtime(fail_status: bool) -> (u16, Recorder) {
@@ -60,6 +74,7 @@ async fn spawn_fake_runtime(fail_status: bool) -> (u16, Recorder) {
     let rec_status = rec.clone();
     let rec_diff = rec.clone();
     let rec_log = rec.clone();
+    let rec_revert = rec.clone();
     let app = Router::new()
         .route(
             "/git/status",
@@ -113,6 +128,16 @@ async fn spawn_fake_runtime(fail_status: bool) -> (u16, Recorder) {
                         ],
                     }))
                     .into_response()
+                }
+            }),
+        )
+        .route(
+            "/git/revert",
+            post(move |req: Request| {
+                let rec = rec_revert.clone();
+                async move {
+                    record_write(&rec, req).await;
+                    Json(json!({ "path": "a.txt", "oldPath": null })).into_response()
                 }
             }),
         );
@@ -230,6 +255,41 @@ async fn log_forwards_path_and_limit() {
     let reqs = recorder.requests.read().unwrap().clone();
     assert_eq!(reqs[0].0, "/git/log");
     assert_eq!(reqs[0].1, "limit=50&path=a.txt");
+}
+
+#[tokio::test]
+async fn revert_forwards_post_method_body_and_passthrough_json() {
+    let (port, recorder) = spawn_fake_runtime(false).await;
+    let registry = new_shared_registry();
+    registry.write().await.register(INSTANCE_ID, &format!("http://127.0.0.1:{port}"));
+    let (state, _dir) = gateway_state(registry);
+    let router = build_router(state);
+
+    // POST JSON body through the Gateway → Runtime's /git/revert.
+    let body = r#"{"path":"a.txt","oldPath":null}"#;
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agents/{INSTANCE_ID}/git/revert"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    // Upstream JSON untouched.
+    assert_eq!(body["path"], "a.txt");
+
+    let writes = recorder.writes.read().unwrap().clone();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].0, "POST", "method forwarded");
+    assert_eq!(writes[0].1, "/git/revert", "path forwarded");
+    assert_eq!(writes[0].2, r#"{"path":"a.txt","oldPath":null}"#, "body forwarded verbatim");
 }
 
 #[tokio::test]

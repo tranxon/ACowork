@@ -18,7 +18,7 @@
 
 ### 1.1 一句话
 
-**在 WorkspaceExplorer（右侧 workspace 面板）底部加一条"版本控制条"**：显示当前选中 workspace 的 git 分支与变更计数，点击折叠展开（视觉沿用 AgentList 的 NodeGroupHeader 风格）；展开后以**平铺列表**（不分目录、行样式与工作树文件列表一致）展示 `git status` 的本地未 commit 文件；行右键菜单提供 **Show Diff / Show Log / 在编辑器中打开**。Show Diff 用 **Monaco DiffEditor 双栏**（HEAD ↔ 工作树），Show Log 用只读文本，两者均以**只读虚拟文件**形式进 filetab。git 执行在 **Runtime**（新 `/git/*` HTTP API，Gateway 反代）；状态刷新**复用 ADR-058 fs-watch 的 demand-driven 订阅**（面板展开时订阅、折叠时取消）。v1 **只读**，不做 stage / commit / push。
+**在 WorkspaceExplorer（右侧 workspace 面板）底部加一条"版本控制条"**：显示当前选中 workspace 的 git 分支与变更计数，点击折叠展开（视觉沿用 AgentList 的 NodeGroupHeader 风格）；展开后以**平铺列表**（不分目录、行样式与工作树文件列表一致）展示 `git status` 的本地未 commit 文件；行右键菜单提供 **Show Diff / Show Log / 在编辑器中打开 / Revert**。Show Diff 用 **Monaco DiffEditor 双栏**（HEAD ↔ 工作树），Show Log 用只读文本，两者均以**只读虚拟文件**形式进 filetab。Revert（还原未提交修改）为 git API 家族**唯一的写操作**，行内确认对话框 + `POST /git/revert`（`git restore --source=HEAD`，untracked 直接删除文件）。git 执行在 **Runtime**（新 `/git/*` HTTP API，Gateway 反代）；状态刷新**复用 ADR-058 fs-watch 的 demand-driven 订阅**（面板展开时订阅、折叠时取消）。除 revert 外 v1 保持**只读**，不做 stage / commit / push。
 
 > **2026-XX 修订**：原决策把 `GitStatusBar` 挂在 `FileEditorPanel` 底部，与"打开文件"耦合——粒度错配（git 是 workspace 级属性、editor 是 file 级属性），"想看 git 必须先打开文件"违反最小惊讶。修订为挂在 `WorkspaceExplorer` 底部，与当前选中 workspace 共生、editor 完全脱钩；workspace 面板折叠时连同隐藏。展开态 fs-watch 规则的正交性约束依然成立（见决策 8），但触发条件从"editor 开着"放宽为"git 面板可见"。
 
@@ -26,8 +26,8 @@
 
 | # | 决策 | 结论 |
 |---|---|---|
-| 1 | git 执行位置 | **Runtime**（新增 `/git/status` `/git/diff` `/git/log` 三个只读 API），Gateway 反代 `/api/agents/{id}/git/*`；**不**放 Gateway 侧 fs（ADR-009 / ADR-055 红线） |
-| 2 | git 引擎 | **系统 git CLI**（`git status --porcelain=v1 -z` / `git show HEAD:<path>` / `git log`），不引入 git2 / gix 编译依赖；`std::process::Command` + `spawn_blocking` + 超时 + 输出上限 + **`GIT_OPTIONAL_LOCKS=0`**（真·只读）；git 缺失时显式报错 |
+| 1 | git 执行位置 | **Runtime**（新增 `/git/status` `/git/diff` `/git/log` 三个只读 API + `POST /git/revert` 唯一写 API），Gateway 反代 `/api/agents/{id}/git/*`；**不**放 Gateway 侧 fs（ADR-009 / ADR-055 红线） |
+| 2 | git 引擎 | **系统 git CLI**（`git status --porcelain=v1 -z` / `git show HEAD:<path>` / `git log` / `git restore --staged --worktree --source=HEAD`），不引入 git2 / gix 编译依赖；`std::process::Command` + `spawn_blocking` + 超时 + 输出上限 + **`GIT_OPTIONAL_LOCKS=0`**（真·只读，**revert 除外**——写操作经 `run_git_mut` 跳过该 guard）；git 缺失时显式报错 |
 | 3 | repo root 定位与安全边界 | 从 workspace root 向上**最多 6 层**发现最近 `.git`；**展示范围 = workspace root ∩ repo 变更集**（status 只列 workspace 内变化，绝不暴露 workspace 外文件）；diff/log 的 path 复用现有 canonicalize + `starts_with` 防穿越 |
 | 4 | Desktop 数据层 | 新 `gitStore.ts`（仿 [stores/fileTree/treeClient.ts](apps/acowork-desktop/src/stores/fileTree/treeClient.ts)：SWR 缓存 + agent/workspace 切换失效 + `with503Retry`），并订阅 fs-changed 事件做自动刷新 |
 | 5 | Desktop UI 布局 | `GitStatusBar`（`WorkspaceExplorer` 底部，h-6，视觉沿用 NodeGroupHeader）+ 展开后 `GitStatusPanel`（平铺列表，行样式沿用 FileTreeNode） |
@@ -117,12 +117,14 @@ Desktop ──HTTP──▶ Gateway :19876
    GET /api/agents/{id}/git/status?workspace_id=…
    GET /api/agents/{id}/git/diff?workspace_id=…&path=…&cached=0|1
    GET /api/agents/{id}/git/log?workspace_id=…&path=…&limit=50
+   POST /api/agents/{id}/git/revert   {workspace_id?, path, old_path?}
         │  反代（proxy_routes，forward 到 Runtime localhost）
         ▼
 Runtime :random
    GET /git/status?workspace_id=…
    GET /git/diff?workspace_id=…&path=…&cached=0|1
    GET /git/log?workspace_id=…&path=…&limit=50
+   POST /git/revert                  {workspace_id?, path, old_path?}
 ```
 
 **理由**：
@@ -295,8 +297,9 @@ graph LR
 
 ### 决策 9：范围裁剪 — v1 只读，但为未来留接口形状
 
-- 明确不做：stage / unstage / commit / push / pull / branch 切换 / stash / blame / clean / revert。
+- 明确不做：stage / unstage / commit / push / pull / branch 切换 / stash / blame / clean。
 - 预留：porcelain XY 两列状态模型已完整携带 index（staged）信息；`/git/diff?cached=1` 已定义 Staged Diff 语义，未来加 `POST /git/stage`、`POST /git/commit` 时无需改 status/diff 数据结构，只需新增写端点并接受评审（写操作涉及工作树与 .git 变更，须单独过安全评审）。
+- **2026-XX 修订（Revert）**：用户明确要求"还原未提交修改"，据此落地唯一写端点 `POST /git/revert`。语义与安全约束：仅接受单文件 path（空 path 直接 400，防 `git restore -- .` 清空整个工作树）；路径复用 diff/log 的 canonicalize + `starts_with` 防穿越；客户端（GitStatusPanel 右键菜单）以破坏性确认对话框把关；`git restore --source=HEAD` 会顺带把 index-only 路径（staged 新增 / rename 新路径）从 index+worktree 移除，rename 行先还原 `oldPath` 再处理新路径，untracked 走直接删文件。
 
 ---
 
@@ -338,15 +341,15 @@ graph LR
 
 | 层 | 文件 | 改动 |
 |---|---|---|
-| core/acowork-runtime | `src/http/server.rs` | 注册 `GET /git/status|diff|log` 三路由 |
-| core/acowork-runtime | `src/usecases/git_query.rs` / `git_query_impl.rs` | 新增：repo discovery、porcelain `-z` 解析、范围过滤、diff original/modified 组装、log（仿 workspace_query 分层） |
+| core/acowork-runtime | `src/http/server.rs` | 注册 `GET /git/status|diff|log` 三路由 + `POST /git/revert` |
+| core/acowork-runtime | `src/usecases/git_query.rs` / `git_query_impl.rs` | 新增：repo discovery、porcelain `-z` 解析、范围过滤、diff original/modified 组装、log（仿 workspace_query 分层）、revert（唯一写操作） |
 | core/acowork-runtime | `src/usecases/mod.rs` | 导出 git_query |
-| core/acowork-gateway | `src/http/proxy.rs` | 新增 3 条 `/api/agents/{id}/git/*` 反代 |
-| apps/acowork-desktop | `src/stores/gitStore.ts` | 新增 SWR store（status/diff/log + invalidate/refresh）+ fs-changed 订阅处理器 |
+| core/acowork-gateway | `src/http/proxy.rs` | 新增 4 条 `/api/agents/{id}/git/*` 反代（status/diff/log/revert，revert 为 POST 透传 body） |
+| apps/acowork-desktop | `src/stores/gitStore.ts` | 新增 SWR store（status/diff/log/revert + invalidate/refresh）+ fs-changed 订阅处理器 |
 | apps/acowork-desktop | `src/lib/workspaceFsWatch.ts` | `deriveWatchGroups` 增加"git 面板展开 → 组内加根路径 ''"派生规则（**放在 workspace 面板可见性守卫之外**，决策 8） |
 | apps/acowork-desktop | `src/lib/workspaceFsEvents.ts` | 暴露可注册的 fs-changed 处理器（gitStore 订阅，去抖 refresh） |
 | apps/acowork-desktop | `src/components/workspace/git/GitStatusBar.tsx` | workspace 面板底部折叠条（视觉沿用 NodeGroupHeader） |
-| apps/acowork-desktop | `src/components/workspace/git/GitStatusPanel.tsx` | 平铺列表（行样式沿用 FileTreeNode）+ 右键菜单 + 展开/折叠订阅开关 |
+| apps/acowork-desktop | `src/components/workspace/git/GitStatusPanel.tsx` | 平铺列表（行样式沿用 FileTreeNode）+ 右键菜单（含 Revert + 破坏性确认对话框）+ 展开/折叠订阅开关 |
 | apps/acowork-desktop | `src/components/workspace/WorkspaceExplorer.tsx` | 挂载 GitStatusBar/GitStatusPanel；派生源 = 当前选中 workspace（与 FileTree 同源）；`virtual.kind === "diff"` 渲染 DiffEditor 仍由 `FileEditorPanel` 承担（虚拟文件生命周期归属 editor） |
 | apps/acowork-desktop | `src/stores/fileEditorStore.ts` | `OpenFile` 增加 `readonly?` / `virtual?`；save/dirty 逻辑对虚拟文件短路 |
 | apps/acowork-desktop | `src/i18n/locales/{zh,en}.json` | `git.*` 词条 |

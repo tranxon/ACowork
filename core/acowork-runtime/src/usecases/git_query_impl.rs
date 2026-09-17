@@ -14,7 +14,8 @@
 //! - `cwd = repo_root`; uniform timeout (10s);
 //! - `GIT_OPTIONAL_LOCKS=0` (read-only guarantee, ADR-078 §1.3
 //!   invariant 1) + `LC_ALL=C` (stable English stderr for error
-//!   matching) on every command;
+//!   matching) on every READ command — the single write command
+//!   (`revert`) goes through `run_git_mut` and skips the lock guard;
 //! - stdout capped (status 1 MiB / 5000 entries; diff pre-checks blob
 //!   sizes before reading, > 2 MiB degrades to `kind=binary`).
 
@@ -28,7 +29,7 @@ use crate::usecases::WorkspaceError;
 use crate::usecases::git_query::{
     GitChangeDto, GitCommitDto, GitDiffKind, GitDiffParams, GitDiffResponse, GitError,
     GitIndexStatus, GitLogPagination, GitLogParams, GitLogResponse, GitQueryService,
-    GitStatusParams, GitStatusResponse, GitWorktreeStatus,
+    GitRevertParams, GitRevertResponse, GitStatusParams, GitStatusResponse, GitWorktreeStatus,
 };
 use crate::usecases::workspace_mutation_impl::{resolve_within_static, resolve_workspace_root};
 
@@ -116,8 +117,23 @@ fn git_cmd(git_bin: &str, repo_root: &Path) -> Command {
 /// rare stray `git` process — these commands are sub-second in
 /// practice, and `Command::output()` drains both pipes so there is no
 /// deadlock risk).
-async fn run_git(mut cmd: Command) -> Result<GitOutput, GitError> {
-    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+async fn run_git(cmd: Command) -> Result<GitOutput, GitError> {
+    run_git_op(cmd, true).await
+}
+
+/// Run a git command that must be able to WRITE (the `revert` path):
+/// same timeout / `LC_ALL=C` conventions as [`run_git`], but without
+/// the `GIT_OPTIONAL_LOCKS=0` read-only guard — restoring the index +
+/// worktree needs the index lock.
+async fn run_git_mut(cmd: Command) -> Result<GitOutput, GitError> {
+    run_git_op(cmd, false).await
+}
+
+/// Shared plumbing for [`run_git`] / [`run_git_mut`].
+async fn run_git_op(mut cmd: Command, optional_locks: bool) -> Result<GitOutput, GitError> {
+    if optional_locks {
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    }
     cmd.env("LC_ALL", "C");
     let handle = tokio::task::spawn_blocking(move || cmd.output());
     match tokio::time::timeout(GIT_TIMEOUT, handle).await {
@@ -898,6 +914,90 @@ impl GitQueryService for RuntimeGitQueryService {
                 page_size: limit,
                 total_count,
             },
+        })
+    }
+
+    /// `POST /git/revert` — discard the uncommitted changes of one path,
+    /// restoring it to HEAD. The one deliberate WRITE in the git API
+    /// family; the Desktop guards it with a confirm dialog.
+    ///
+    /// Semantics (verified against real git, Windows CRLF included):
+    /// - modified / deleted / conflicted → `git restore --source=HEAD`
+    ///   rewrites index + worktree from HEAD;
+    /// - staged-added / staged rename-new-path (in the index but not in
+    ///   HEAD) → the same `git restore --source=HEAD` REMOVES them from
+    ///   index and worktree, no `git rm` needed;
+    /// - rename rows → restore `old_path` first (splits the rename back
+    ///   into a staged-add, see ADR-078 DTO `oldPath`), then the row path;
+    /// - untracked (pathspec matches nothing) → delete the file directly
+    ///   (IDE "Discard Changes" semantics).
+    async fn revert(&self, params: &GitRevertParams) -> Result<GitRevertResponse, GitError> {
+        // Trust boundary: a bare `path` would resolve to the workspace
+        // root and `git restore --source=HEAD -- .` would nuke the whole
+        // working tree. Reject it like every other invalid path.
+        if params.path.trim().is_empty() {
+            return Err(GitError::BadRequest(
+                "path must not be empty (revert targets a single file)".into(),
+            ));
+        }
+
+        let (canonical_ws, _, _) =
+            resolve_within_static(&self.work_dir, params.workspace_id.as_deref(), &params.path)
+                .map_err(workspace_to_git_error)?;
+        let repo_root = discover_repo_root(&canonical_ws)
+            .ok_or_else(|| GitError::NotARepo(canonical_ws.display().to_string()))?;
+
+        // Restore `old_path` (the rename source, which IS in HEAD) before
+        // the row path so the index stops recording the rename and the new
+        // path is left as a plain staged-add — which the same command then
+        // unwinds (removed from index + worktree).
+        let mut targets: Vec<(String, PathBuf)> = Vec::with_capacity(2);
+        if let Some(old) = params.old_path.as_deref().filter(|o| !o.is_empty()) {
+            let (_, _, _) = resolve_within_static(&self.work_dir, params.workspace_id.as_deref(), old)
+                .map_err(workspace_to_git_error)?;
+            targets.push((old.to_string(), canonical_ws.join(old)));
+        }
+        targets.push((params.path.clone(), canonical_ws.join(&params.path)));
+
+        for (ws_rel, abs) in &targets {
+            let repo_rel = abs
+                .strip_prefix(&repo_root)
+                .map_err(|_| {
+                    GitError::InvalidPath("path is outside the repository root".into())
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let mut cmd = git_cmd(&self.git_bin, &repo_root);
+            cmd.args(["restore", "--staged", "--worktree", "--source=HEAD", "--"]);
+            cmd.arg(&repo_rel);
+            let out = run_git_mut(cmd).await?;
+            if out.status.success() {
+                continue;
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("did not match any file(s) known to git") {
+                // Untracked: no source to restore from — discard the file
+                // itself (IDE "Discard" semantics). Already-gone is fine.
+                match std::fs::remove_file(abs) {
+                    Ok(()) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(GitError::Io(e)),
+                }
+            }
+            if looks_like_not_a_repo(&stderr) {
+                return Err(GitError::NotARepo(stderr.trim().to_string()));
+            }
+            return Err(GitError::GitFailed(format!(
+                "git restore {}: {}",
+                ws_rel,
+                stderr.trim()
+            )));
+        }
+
+        Ok(GitRevertResponse {
+            path: params.path.clone(),
+            old_path: params.old_path.clone(),
         })
     }
 }
@@ -2029,5 +2129,143 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(lg.commits.len(), 6);
+    }
+
+    // ── revert (the one write op) ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn integration_revert_restores_modified_and_deleted() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        init_repo(&ws);
+        let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
+
+        // unstaged worktree modification → back to HEAD content
+        // (git's worktree copy may carry CRLF under core.autocrlf —
+        // normalize before comparing, the revert itself is correct).
+        std::fs::write(ws.join("a.txt"), "dirty\n").unwrap();
+        let resp = svc
+            .revert(&GitRevertParams {
+                workspace_id: None,
+                path: "a.txt".into(),
+                old_path: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.path, "a.txt");
+        let content = std::fs::read_to_string(ws.join("a.txt")).unwrap().replace("\r\n", "\n");
+        assert_eq!(content, "hello\n");
+        assert!(svc.status(&GitStatusParams::default()).await.unwrap().changes.is_empty());
+
+        // worktree deletion → file restored
+        std::fs::remove_file(ws.join("a.txt")).unwrap();
+        svc.revert(&GitRevertParams {
+            workspace_id: None,
+            path: "a.txt".into(),
+            old_path: None,
+        })
+        .await
+        .unwrap();
+        let content = std::fs::read_to_string(ws.join("a.txt")).unwrap().replace("\r\n", "\n");
+        assert_eq!(content, "hello\n");
+        assert!(svc.status(&GitStatusParams::default()).await.unwrap().changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integration_revert_removes_staged_added_and_untracked() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        init_repo(&ws);
+        let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
+
+        // staged-added (in index, not in HEAD) → removed from index + disk
+        std::fs::write(ws.join("b.txt"), "new\n").unwrap();
+        assert!(git_in(&ws, ["add", "b.txt"]).status.success());
+        svc.revert(&GitRevertParams {
+            workspace_id: None,
+            path: "b.txt".into(),
+            old_path: None,
+        })
+        .await
+        .unwrap();
+        assert!(!ws.join("b.txt").exists());
+        assert!(svc.status(&GitStatusParams::default()).await.unwrap().changes.is_empty());
+
+        // untracked → file deleted (IDE "Discard" semantics)
+        std::fs::write(ws.join("c.txt"), "untracked\n").unwrap();
+        svc.revert(&GitRevertParams {
+            workspace_id: None,
+            path: "c.txt".into(),
+            old_path: None,
+        })
+        .await
+        .unwrap();
+        assert!(!ws.join("c.txt").exists());
+        assert!(svc.status(&GitStatusParams::default()).await.unwrap().changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integration_revert_unwinds_rename() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        init_repo(&ws);
+        let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
+
+        assert!(git_in(&ws, ["mv", "a.txt", "renamed.txt"]).status.success());
+        let st = svc.status(&GitStatusParams::default()).await.unwrap();
+        assert_eq!(st.changes.len(), 1);
+        assert_eq!(st.changes[0].old_path.as_deref(), Some("a.txt"));
+
+        svc.revert(&GitRevertParams {
+            workspace_id: None,
+            path: "renamed.txt".into(),
+            old_path: Some("a.txt".into()),
+        })
+        .await
+        .unwrap();
+
+        assert!(ws.join("a.txt").exists());
+        assert!(!ws.join("renamed.txt").exists());
+        assert!(svc.status(&GitStatusParams::default()).await.unwrap().changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integration_revert_rejects_empty_path() {
+        if !git_available() {
+            eprintln!("skipping: git binary not available");
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        init_repo(&ws);
+        let svc = RuntimeGitQueryService::new(ws.clone(), "agent-1".to_string());
+
+        // Trust boundary: empty path would resolve to the workspace root
+        // and revert the whole tree — must be rejected before any git runs.
+        let err = svc
+            .revert(&GitRevertParams {
+                workspace_id: None,
+                path: "".into(),
+                old_path: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::BadRequest(_)), "got {err:?}");
     }
 }

@@ -2,7 +2,9 @@
  * GitStatusPanel — ADR-078 decision 6. Flat (non-tree) list of uncommitted
  * changes below GitStatusBar. Row styling mirrors the file-tree rows
  * (FileTreeNode.tsx). Right-click menu: Show Diff / Show Log / Open in
- * editor. Deleted rows redirect to Show Diff (decision 6).
+ * editor / Revert (destructive, confirm-guarded — discards uncommitted
+ * changes back to HEAD; untracked files are deleted). Deleted rows
+ * redirect to Show Diff (decision 6).
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -27,6 +29,8 @@ import {
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
+import { ConfirmDialog } from "../../common/ConfirmDialog";
+import { showToast } from "../../common/ToastProvider";
 import { cn } from "../../../lib/utils";
 
 // Pagination: a workspace with a stray `node_modules/` or `target/`
@@ -284,8 +288,50 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           }
         },
       },
+      // Reverting "files in commit X" makes no sense — the rows are
+      // historical, not uncommitted changes. Only offer it on the
+      // working-tree view (`viewingRev === ""`).
+      ...(viewingRev
+        ? []
+        : [
+            {
+              key: "revert",
+              label: t("gitStatus.revert"),
+              onClick: ({ payload }: { payload: GitChangeDto | undefined }) => {
+                if (payload) setRevertTarget(payload);
+              },
+            },
+          ]),
     ],
-    [t, openDiff, openLog, agentId, workspaceId],
+    [t, openDiff, openLog, agentId, workspaceId, viewingRev],
+  );
+
+  /** Pending revert target (null = dialog closed). */
+  const [revertTarget, setRevertTarget] = useState<GitChangeDto | null>(null);
+  const handleRevert = useMemo(
+    () => async () => {
+      const c = revertTarget;
+      if (!c) return;
+      setRevertTarget(null);
+      try {
+        await useGitStore
+          .getState()
+          .revertFile(agentId, workspaceId, c.path, c.oldPath);
+        // Discarding changes rewrites the working tree — refresh the
+        // panel's current view so the row disappears.
+        await useGitStore.getState().refresh(agentId, workspaceId);
+        showToast({ type: "success", message: t("gitStatus.revertSuccess", { path: c.path }) });
+      } catch (e) {
+        console.error("[GitStatusPanel] revert failed:", e);
+        showToast({
+          type: "error",
+          message: t("gitStatus.revertError", {
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        });
+      }
+    },
+    [agentId, workspaceId, revertTarget, t],
   );
 
   const body = (() => {
@@ -422,6 +468,19 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
         selectionAtOpen={menu.selectionAtOpen}
         onClose={menu.close}
         compact
+      />
+      {/* Destructive discard of uncommitted changes — explicit consent
+          before the backend runs `git restore` (untracked → delete). */}
+      <ConfirmDialog
+        open={revertTarget !== null}
+        title={t("gitStatus.revertConfirmTitle")}
+        message={t("gitStatus.revertConfirmMessage", {
+          path: revertTarget?.path ?? "",
+        })}
+        confirmLabel={t("gitStatus.revert")}
+        destructive
+        onConfirm={handleRevert}
+        onCancel={() => setRevertTarget(null)}
       />
       {/* manual refresh affordance is on the bar; keep the panel focused */}
       <span className="sr-only">{loading ? t("gitStatus.loading") : ""}</span>
