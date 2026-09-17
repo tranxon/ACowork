@@ -1077,6 +1077,40 @@ impl RuntimeMqttClient {
             bootstrap_data,
         };
 
+        // Presence self-heal (2026-09-17 sleep/wake + Wi-Fi switch
+        // incident): on reconnect the retained "online" publish can be
+        // clobbered by the *previous* connection's Last Will ("offline",
+        // retained), which the broker may deliver *after* our online
+        // publish. The retained status then sticks at "offline" while the
+        // session is alive, so the Gateway/UI shows the agent as stopped
+        // and rejects start with 400 "already running" (the process is
+        // genuinely up). Re-publish retained "online" every 5 s while
+        // `Connected` so any stale LWT is overwritten within one tick.
+        // A real drop still reads as offline: the LWT fires and we skip
+        // publishing while the session is not Connected.
+        //
+        // `ponytail:` the task lives for the process lifetime (one Runtime
+        // hosts one agent), so the detached clone is intentional; it dies
+        // with the tokio runtime on shutdown.
+        let hb = mqtt_client.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if hb.session_state() != SessionState::Connected {
+                    continue;
+                }
+                if let Err(e) = hb.publish_status(true).await {
+                    tracing::debug!(
+                        agent_id = %hb.agent_id,
+                        error = %e,
+                        "status heartbeat publish failed"
+                    );
+                }
+            }
+        });
+
         Ok(mqtt_client)
     }
 
@@ -2517,6 +2551,102 @@ mod tests {
             "should receive config: {:?}",
             received_topics
         );
+
+        drop(sub_client);
+        drop(client);
+        drop(broker);
+    }
+
+    /// Presence self-heal (2026-09-17 sleep/wake incident): the broker
+    /// can deliver the previous connection's Last Will ("offline",
+    /// retained) AFTER the reconnect's retained "online", clobbering
+    /// the status. The 5 s heartbeat must re-publish retained "online"
+    /// so a stale offline is overwritten within one tick.
+    #[tokio::test]
+    async fn test_status_heartbeat_reclaims_retained_online() {
+        let port = 18982;
+        let broker =
+            acowork_gateway::mqtt::start_broker("127.0.0.1", port).expect("broker should start");
+
+        let cache = crate::mqtt::available_cache::new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let work_dir = std::env::temp_dir().join("acowork-test-mqtt-heartbeat-18982");
+        let instance_id = "bb22cc33-4dd4-4e5e-8f6f-7a8b9c0d1e2f";
+
+        let client = RuntimeMqttClient::connect(MqttConnectConfig {
+            host: "127.0.0.1",
+            port,
+            agent_id: "com.test.agent",
+            instance_id,
+            agent_name: "Test Agent",
+            agent_version: "1.0.0",
+            config_json: "{}",
+            available_cache: cache,
+            control_tx,
+            identity_update_tx: None,
+            provider_update_tx: None,
+            search_update_tx: None,
+            embedding_update_tx: None,
+            node_id: None,
+            lsps_update_tx: None,
+            node_proxy_update_tx: None,
+            work_dir,
+            username: None,
+            password: None,
+            http_advertise_endpoint: None,
+            http_port: None,
+        })
+        .await
+        .expect("Runtime MQTT client should connect");
+
+        use rumqttc::{AsyncClient as SubClient, MqttOptions as SubOpts};
+        let mut sub_opts = SubOpts::new("test:heartbeat:sub", "127.0.0.1", port);
+        sub_opts.set_keep_alive(acowork_mqtt_session::KEEPALIVE_INTERVAL);
+        let (sub_client, mut sub_eventloop) = SubClient::new(sub_opts, 10);
+        let status_topic = format!("acowork/agents/{}/status", instance_id);
+        sub_client
+            .subscribe(&status_topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
+
+        // 1) Wait for the initial retained online from bootstrap.
+        //    (rumqttd forwards retained publishes to live subscribers
+        //    with retain=false, so match on payload, not the flag.)
+        let mut got_online = false;
+        for _ in 0..50 {
+            match tokio::time::timeout(Duration::from_millis(500), sub_eventloop.poll()).await {
+                Ok(Ok(Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
+                    if p.topic == status_topic && p.payload.as_ref() == b"online" {
+                        got_online = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(got_online, "should receive the initial retained online");
+
+        // 2) Simulate the stale Last Will clobbering the retained status.
+        sub_client
+            .publish(&status_topic, QoS::AtLeastOnce, true, b"offline")
+            .await
+            .unwrap();
+
+        // 3) The 5 s heartbeat must re-publish retained online within
+        //    one tick (allow 20 s of slack for tick alignment).
+        let mut reclaimed = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(500), sub_eventloop.poll()).await {
+                Ok(Ok(Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
+                    if p.topic == status_topic && p.payload.as_ref() == b"online" {
+                        reclaimed = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(reclaimed, "heartbeat should re-publish retained online within one tick");
 
         drop(sub_client);
         drop(client);
