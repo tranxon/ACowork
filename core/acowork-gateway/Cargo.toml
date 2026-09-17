@@ -60,6 +60,11 @@ sha2.workspace = true
 tokio-stream.workspace = true
 ignore.workspace = true
 regex.workspace = true
+# Cross-platform async IP/interface change watcher (NotifyAddrChange on
+# Windows, netlink on Linux, SCDynamicStore on macOS). Drives the
+# advertise-host auto-refresh watchdog (ADR-080). `tokio` feature is
+# required so `IfWatcher` is re-exported from the platform module.
+if-watch = { version = "3", features = ["tokio"] }
 
 # Interactive CLI (feature-gated)
 dialoguer = { workspace = true, optional = true }

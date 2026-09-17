@@ -868,6 +868,17 @@ impl GatewayConfig {
         acowork_core::timeout_config::validate(&self.timeouts).map_err(GatewayError::Config)
     }
 
+    /// True iff the operator pinned `advertise_host` via config or CLI.
+    /// When `true`, the advertise-host IP-change watchdog (ADR-080)
+    /// must NOT spawn — the operator's explicit value wins over any
+    /// auto-detected IP.
+    pub fn advertise_host_is_pinned(&self) -> bool {
+        self.advertise_host
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
     /// Persist the current configuration to its source TOML file.
     /// Falls back to `default_config_path()` if `config_source_path` is not set.
     pub fn save(&self) -> Result<(), GatewayError> {
@@ -996,7 +1007,10 @@ pub(crate) fn resolve_advertise_host(config: &GatewayConfig) -> String {
 /// route and assign the local source address, which we then read via
 /// `local_addr`. Targets the well-known anycast `1.1.1.1`; no traffic
 /// is emitted.
-fn detect_non_loopback_ip() -> Option<String> {
+/// Best-effort detection of the first non-loopback IPv4 address on this
+/// host (ADR-080). Exposed `pub(crate)` so the advertise-watchdog can
+/// re-run the same detection after an interface change event.
+pub(crate) fn detect_non_loopback_ip() -> Option<String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     // connect on UDP does not emit packets; it only resolves the route
     // and pins the local source address for subsequent sends.

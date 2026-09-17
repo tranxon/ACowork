@@ -1095,6 +1095,35 @@ impl Gateway {
             // the bootstrap snapshot can transition to READY before any
             // provider payload has been released.
             publisher_handle.mark_ready(Some("publisher started".to_string()));
+
+            // ADR-080: spawn the advertise-host IP-change watchdog.
+            // Subscribes to OS interface-change events (NotifyAddrChange
+            // / netlink / SCDynamicStore via `if-watch`); on any change
+            // it re-runs the UDP-trick IP detector and, if the LAN IP
+            // drifted, refreshes `pm_mcp_url` / `doc_mcp_url` and
+            // triggers a fresh retained `acowork/global/mcps` so every
+            // Runtime rewrites its `agent_mcp.json`.
+            let watchdog_cfg =
+                crate::lifecycle::advertise_watchdog::AdvertiseWatchdogConfig {
+                    http_port: http_config.port,
+                    pm_mcp_path: if self.config.pm.auto_inject_mcp {
+                        Some(self.config.pm.mcp_http_path.clone())
+                    } else {
+                        None
+                    },
+                    doc_mcp_path: if self.config.doc.auto_inject_mcp {
+                        Some(self.config.doc.mcp_http_path.clone())
+                    } else {
+                        None
+                    },
+                };
+            crate::lifecycle::advertise_watchdog::spawn_advertise_watchdog(
+                shared_state.clone(),
+                trigger.clone(),
+                watchdog_cfg,
+                self.config.advertise_host_is_pinned(),
+            );
+
             Some(trigger)
         } else { None };
 
