@@ -386,13 +386,18 @@ describe("fetchGatewayDiagnose (P2 snapshot path)", () => {
     expect(result!.services.mqtt.detail).toMatch(/client disconnected/);
   });
 
-  it("keeps the broker verdict when the local client read fails", async () => {
+  it("marks mqtt offline when the local client read fails", async () => {
     stubFetchRoutes([[SNAPSHOT_URL, () => jsonResponse(snapshotPayload())]]);
     mockedInvoke.mockRejectedValueOnce(new Error("ipc broken"));
 
     const result = await fetchGatewayDiagnose("http://gw");
-    expect(result!.services.mqtt.online).toBe(true);
-    expect(result!.services.mqtt.detail).toMatch(/client unknown/);
+    // An unreadable Desktop-side status is the silent-failure mode this
+    // row exists to catch (broker reports healthy while the chat input
+    // is dead) — it must fail red instead of falling back to the broker
+    // half alone, matching `probeMqtt`'s direct-path verdict.
+    expect(result!.services.mqtt.online).toBe(false);
+    expect(result!.services.mqtt.detail).toMatch(/client unreadable/);
+    expect(result!.services.mqtt.last_error).toMatch(/unreadable/);
   });
 
   it("marks lsp-relay offline when no online node advertises it", async () => {

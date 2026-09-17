@@ -466,7 +466,9 @@ function subsystemRow(
 /** Map a validated Gateway snapshot into the 7 `ServiceHealth` rows.
  *  `latency` is the round-trip of the snapshot fetch itself; `client`
  *  is the local MQTT client state used for the combined broker+client
- *  MQTT row (`null` when the in-process read failed). */
+ *  MQTT row (`null` when the in-process read failed — the MQTT row is
+ *  then OFFLINE, matching `probeMqtt`'s direct-path verdict: an
+ *  unreadable Desktop MQTT status must never render green). */
 function mapGatewaySnapshot(
   payload: GatewayDiagnosePayload,
   latency: number,
@@ -489,13 +491,18 @@ function mapGatewaySnapshot(
 
   // mqtt — broker half from the Gateway, client half from the local
   // Tauri snapshot. `online` requires both (a broker nobody can reach,
-  // or a client with no broker, both mean chat is broken); when the
-  // in-process read failed we can only enforce the broker half.
+  // or a client with no broker, both mean chat is broken). A failed
+  // in-process read (`client === null`) counts as OFFLINE, not as
+  // "unverifiable → benefit of the doubt": an unreadable Desktop MQTT
+  // status is exactly the silent-failure mode this row exists to catch
+  // (broker reports healthy while the chat input is dead). This mirrors
+  // `probeMqtt`'s direct path, which already fails red on the same
+  // condition.
   const brokerRunning = payload.mqtt.broker_running;
-  const clientOk = client === null ? true : client.known && client.connected;
+  const clientOk = client !== null && client.known && client.connected;
   const clientLabel =
     client === null
-      ? "unknown"
+      ? "unreadable"
       : !client.known
         ? "not initialized"
         : client.connected
@@ -512,7 +519,9 @@ function mapGatewaySnapshot(
       ? "mqtt broker not running"
       : clientOk
         ? null
-        : (client?.reason ?? "mqtt client disconnected"),
+        : client === null
+          ? "desktop mqtt status unreadable (get_mqtt_status failed)"
+          : (client.reason ?? "mqtt client disconnected"),
     probed_at: now,
   };
 
