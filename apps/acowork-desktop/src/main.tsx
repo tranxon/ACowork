@@ -198,3 +198,25 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 // is logged in monacoBootstrap and retried when the editor panel next mounts,
 // so swallow it here rather than raising an unhandled rejection at boot.
 initMonaco().catch(() => {});
+
+// TEMP DEBUG: capture every <a> click in capture phase (before React handlers
+// run). Reports to Rust log via debug_log_link_click command. Delete once root
+// cause of the <a> webview-crash is confirmed.
+document.addEventListener(
+  "click",
+  (e) => {
+    const a = (e.target as Element | null)?.closest?.("a") as HTMLAnchorElement | null;
+    if (!a) return;
+    const payload = JSON.stringify({
+      href: a.getAttribute("href") ?? "",
+      target: a.getAttribute("target") ?? "",
+      defaultPrevented: e.defaultPrevented,
+      eventPhase: e.eventPhase,
+      outerStart: a.outerHTML.slice(0, 120),
+    });
+    void (window as unknown as { __TAURI__?: { core?: { invoke?: (n: string, args: unknown) => Promise<unknown> } } })
+      ?.__TAURI__?.core?.invoke?.("debug_log_link_click", { payload })
+      .catch(() => {});
+  },
+  true,
+);
