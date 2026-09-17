@@ -530,7 +530,7 @@ export function AgentList({ width }: AgentListProps) {
             {/* Top row: name */}
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex items-center gap-1.5">
-                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.alive ? "text-text " : "text-text-tertiary ")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
+                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
               </div>
             </div>
             {/* Bottom row: current session title.

@@ -528,7 +528,7 @@ export const FileTreeNode = memo(function FileTreeNode({
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           />
         ) : (
-          <span className="whitespace-nowrap text-text-secondary ">{entry.name}</span>
+          <span className="whitespace-nowrap text-text-tertiary ">{entry.name}</span>
         )}
 
         {/* Loading indicator for directories being fetched */}
