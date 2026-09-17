@@ -1,8 +1,16 @@
 import React from "react";
+import { cn } from "../../lib/utils";
 
 /**
  * Unified input field component with consistent focus style:
  * thin accent-colored border on focus (no ring / outline).
+ *
+ * Note: width comes from the caller's `className` (defaults to `w-full`).
+ * We deliberately run the merge via `cn()` / `tailwind-merge` so a caller
+ * passing `w-16` / `w-24` / `w-32` etc. correctly overrides the default
+ * `w-full` — plain string concat would let `w-full` win via CSS cascade
+ * order, leaving narrow inputs stretched across the whole row (see
+ * Settings > Logs: "Log File Size (MB)" / "Max Log Files").
  */
 interface StyledInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   /** Use monospace font (for API keys, code, etc.) */
@@ -14,9 +22,11 @@ export const StyledInput = React.forwardRef<HTMLInputElement, StyledInputProps>(
     return (
       <input
         ref={ref}
-        className={`w-full rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900  ${
-          fontMono ? "font-mono" : ""
-        } ${className}`}
+        className={cn(
+          "w-full rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900",
+          fontMono && "font-mono",
+          className,
+        )}
         {...props}
       />
     );
@@ -26,6 +36,9 @@ StyledInput.displayName = "StyledInput";
 
 /**
  * Unified textarea with consistent focus style.
+ *
+ * Same width-merging rationale as `StyledInput`: `w-full` is the default
+ * but must be overridable by the caller's `className`.
  */
 interface StyledTextareaProps
   extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
@@ -40,9 +53,11 @@ export const StyledTextarea = React.forwardRef<
   return (
     <textarea
       ref={ref}
-      className={`w-full resize-y rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900  ${
-        fontMono ? "font-mono" : ""
-      } ${className}`}
+      className={cn(
+        "w-full resize-y rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900",
+        fontMono && "font-mono",
+        className,
+      )}
       {...props}
     />
   );

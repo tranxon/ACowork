@@ -111,13 +111,24 @@ export function ServicesPanel() {
 
   return (
     <div data-testid="services-panel" className="space-y-3">
-      {/* Summary + diagnose button */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs text-text-tertiary ">
-          <Server className="h-3.5 w-3.5" aria-hidden="true" />
-          <span>{totalLabel}</span>
+      {/* Summary + diagnose button.
+
+          Layout contract: every text fragment (healthy count, "probed Ns
+          ago", source badge, button label) keeps its own single line via
+          `whitespace-nowrap`. The two siblings are allowed to wrap to
+          a second row when the panel is narrow — but each fragment is
+          never broken mid-phrase. Without this, English labels like
+          "7/7 services healthy" / "via Gateway snapshot" / "Run diagnose"
+          were splitting at arbitrary word boundaries, producing ugly
+          double-line fragments ("healthy" on its own row, "diagnose" on
+          its own row, etc.). `shrink-0` on the icon/badge/button prevents
+          flex from squeezing them. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-tertiary ">
+          <Server className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span className="whitespace-nowrap">{totalLabel}</span>
           {lastProbeAt !== null && (
-            <span className="text-text-tertiary ">
+            <span className="whitespace-nowrap text-text-tertiary ">
               · {t("settings.services.lastProbeAt", {
                 seconds: Math.max(0, Math.floor((Date.now() - lastProbeAt) / 1000)),
               })}
@@ -128,7 +139,7 @@ export function ServicesPanel() {
               (legacy per-endpoint walk on a pre-P2 Gateway). */}
           {report && (
             <span
-              className="rounded-full border border-zinc-300 px-1.5 py-px text-[10px] leading-4 text-text-tertiary dark:border-zinc-600 "
+              className="shrink-0 whitespace-nowrap rounded-full border border-zinc-300 px-1.5 py-px text-[10px] leading-4 text-text-tertiary dark:border-zinc-600 "
               data-testid="services-source"
             >
               {t(
@@ -143,7 +154,7 @@ export function ServicesPanel() {
           type="button"
           onClick={() => void diagnose()}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
           aria-label={t("settings.services.diagnose")}
         >
           {loading ? (
