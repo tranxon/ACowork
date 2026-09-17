@@ -30,12 +30,15 @@
 //! updates from `acowork/global/mcps` (see
 //! `core/acowork-runtime/src/mqtt/client.rs::handle_global_mcps`).
 //!
-//! # Skip conditions
+//! # Runs unconditionally
 //!
-//! If the operator pinned `advertise_host` via `[network] advertise_host`
-//! in `gateway.toml` (or `--advertise-host` on the CLI), we respect
-//! that intent and never start the watchdog — the watchdog is only
-//! useful for the auto-detected-IP path.
+//! The watchdog starts even when `advertise_host` was pinned via
+//! `[network] advertise_host` in `gateway.toml` (or `--advertise-host`
+//! on the CLI). A pin only fixes the **initial** value; the underlying
+//! NIC IP can still drift (Wi-Fi / VPN / router change), so a pinned
+//! host needs the same self-heal. [`reconcile`] only rewrites
+//! `advertise_host` when the detected IP differs from the cached one,
+//! so a pinned-but-still-valid value is never touched.
 
 use if_watch::tokio::IfWatcher;
 use tokio_stream::StreamExt;
@@ -60,10 +63,15 @@ pub struct AdvertiseWatchdogConfig {
 
 /// Spawn the advertise-host watchdog and return immediately.
 ///
-/// `advertise_host_is_pinned` must reflect whether the operator set
-/// `--advertise-host` (or `gateway.toml`'s `[network] advertise_host`).
-/// When `true`, this function is a no-op and the watchdog is not
-/// spawned — the operator's explicit choice wins.
+/// The watchdog runs unconditionally: whether the operator pinned
+/// `advertise_host` via `--advertise-host` (or `gateway.toml`'s
+/// `[network] advertise_host`) only affects the **initial** value, not
+/// whether the IP can drift afterwards. Passing a pin does not make the
+/// host static — Wi-Fi / VPN / NIC changes can still invalidate it, so
+/// the watchdog must run regardless and self-heal on a real change.
+/// [`reconcile`] only rewrites `advertise_host` when the detected IP
+/// actually differs from the cached one, so a pinned-but-still-valid
+/// value is left untouched.
 ///
 /// The returned `JoinHandle` is the watchdog task. Cancellation is
 /// intentionally not exposed: the watchdog runs for the lifetime of
@@ -72,16 +80,7 @@ pub fn spawn_advertise_watchdog(
     shared_state: SharedHttpState,
     publisher_handle: MqttPublisherTrigger,
     cfg: AdvertiseWatchdogConfig,
-    advertise_host_is_pinned: bool,
 ) -> tokio::task::JoinHandle<()> {
-    if advertise_host_is_pinned {
-        tracing::info!(
-            "advertise_host is pinned by operator config; \
-             skipping IP-change watchdog (ADR-080)"
-        );
-        return tokio::spawn(async {});
-    }
-
     tracing::info!("Spawning advertise-host IP-change watchdog (ADR-080)");
 
     tokio::spawn(async move {
@@ -106,6 +105,13 @@ async fn run_loop(
         }
     };
     tracing::info!("if-watch: subscribed to OS interface-change events");
+
+    // First reconcile fires immediately after startup, not only on the
+    // next network event. Covers the case where the initial
+    // `advertise_host` (auto-detected or pinned) is already stale —
+    // e.g. a pinned value from a previous Wi-Fi that is no longer
+    // reachable — so self-heal happens at boot, not at the next event.
+    reconcile(&shared_state, &publisher_handle, &cfg).await;
 
     while let Some(event) = watcher.next().await {
         match event {

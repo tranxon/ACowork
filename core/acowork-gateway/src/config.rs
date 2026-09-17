@@ -868,17 +868,6 @@ impl GatewayConfig {
         acowork_core::timeout_config::validate(&self.timeouts).map_err(GatewayError::Config)
     }
 
-    /// True iff the operator pinned `advertise_host` via config or CLI.
-    /// When `true`, the advertise-host IP-change watchdog (ADR-080)
-    /// must NOT spawn — the operator's explicit value wins over any
-    /// auto-detected IP.
-    pub fn advertise_host_is_pinned(&self) -> bool {
-        self.advertise_host
-            .as_ref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
-    }
-
     /// Persist the current configuration to its source TOML file.
     /// Falls back to `default_config_path()` if `config_source_path` is not set.
     pub fn save(&self) -> Result<(), GatewayError> {

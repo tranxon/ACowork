@@ -39,7 +39,7 @@ Gateway 进程内新增一个后台 watchdog 任务，订阅 OS 层的接口地�
 - **一致**：no-op（避免无意义 republish）。
 - **不一致**：原子更新 `gw.advertise_host` + 重新构造 `pm_mcp_url` / `doc_mcp_url` → 调 `MqttPublisherTrigger::trigger()` 触发 `acowork/global/mcps` 重发 → 每个订阅的 Runtime 自动收到新 retained 消息，落盘到 `agent_mcp.json`。
 
-**跳过条件**：如果操作者通过 `--advertise-host` 或 `gateway.toml` 显式 pin 了 `advertise_host`（`config.advertise_host_is_pinned() == true`），watchdog **不启动**——尊重显式意图，不让自动探测覆盖运维配置。
+**无条件启动**：watchdog **始终启动**——即使操作者通过 `--advertise-host` 或 `gateway.toml` 显式 pin 了 `advertise_host`。pin 只决定**初始值**，不能阻止后续 IP 漂移（Wi-Fi / VPN / 路由器变更都会让 pin 的 IP 失效）；`reconcile()` 只在检测到的新 IP 与当前值**不同**时才改写 `gw.advertise_host`，因此"pin 且仍然有效"的地址不会被触碰，只有真正失效时才自愈。
 
 ## 3. 设计要点
 
@@ -51,9 +51,9 @@ Gateway 进程内新增一个后台 watchdog 任务，订阅 OS 层的接口地�
 
 `reconcile()` 内对 `GatewayState` 的写锁**只在状态变更路径上持有**，调 `trigger()` 前显式 `drop(gw)`，避免跨 `notify_one()` 持锁（`Notify::notify_one` 本身不阻塞，但 tokio 调度器切换可能导致锁持有时间膨胀）。
 
-### 3.3 显式配置的尊重
+### 3.3 显式配置的尊重（初始值，非开关）
 
-`GatewayConfig::advertise_host_is_pinned()` 返回 `self.advertise_host.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)`。`spawn_advertise_watchdog` 在 `is_pinned == true` 时直接返回空 `JoinHandle`，不进 `if_watch::new()`。
+显式 pin（`--advertise-host` / `[network] advertise_host`）只决定 `resolve_advertise_host` 的**初始值**。watchdog 无条件启动；`reconcile()` 在检测到新 IP ≠ 当前值时改写 `gw.advertise_host` 并 republish。pin 且仍然有效的地址不会被触碰。
 
 ### 3.4 零 Runtime 改动
 
@@ -86,7 +86,6 @@ Runtime 端 `mqtt/client.rs::handle_global_mcps` 已经在监听 `acowork/global
 
 - `core/acowork-gateway/src/config.rs`：
   - `detect_non_loopback_ip` 由 `fn` 改 `pub(crate) fn`（供 watchdog 调用）
-  - 新增 `GatewayConfig::advertise_host_is_pinned()` 方法
 - `core/acowork-gateway/src/lifecycle/mod.rs`：注册新模块
 - `core/acowork-gateway/src/gateway/mod.rs`：在 `MqttPublisherTrigger` 创建之后、`Some(trigger)` 返回之前 spawn watchdog
 

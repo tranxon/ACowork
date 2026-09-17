@@ -1103,7 +1103,9 @@ impl Gateway {
             // it re-runs the UDP-trick IP detector and, if the LAN IP
             // drifted, refreshes `pm_mcp_url` / `doc_mcp_url` and
             // triggers a fresh retained `acowork/global/mcps` so every
-            // Runtime rewrites its `agent_mcp.json`.
+            // Runtime rewrites its `agent_mcp.json`. Runs regardless of
+            // whether `advertise_host` was pinned — a pin fixes only the
+            // initial value, not future IP drift.
             let watchdog_cfg =
                 crate::lifecycle::advertise_watchdog::AdvertiseWatchdogConfig {
                     http_port: http_config.port,
@@ -1122,7 +1124,6 @@ impl Gateway {
                 shared_state.clone(),
                 trigger.clone(),
                 watchdog_cfg,
-                self.config.advertise_host_is_pinned(),
             );
 
             Some(trigger)
