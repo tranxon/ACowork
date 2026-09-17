@@ -25,13 +25,23 @@
   <!-- "A": two strokes that span ~58% of the icon height, vertically centered.
        stroke-width=61 is the exact scale-up of brand-mark.svg's 10 onto a
        512 canvas (10 × 512/84 = 60.95 ≈ 61), so the stroke-to-edge ratio
-       matches the brand-mark (≈ 11.9 % of the chip side). -->
-  <path d="M110 402 L256 110 L402 402"
+       matches the brand-mark (≈ 11.9 % of the chip side).
+       The strokes are separated at the apex: the left stroke runs all the
+       way to the apex (256,110) with its round cap; the right stroke ends
+       short with its own round cap. Its centerline end (300.7,199.4) is
+       100 px from the apex along the stroke axis, leaving a minimum
+       clearance of ~19 px (≈ 1/3 stroke width) between the right cap and
+       the left stroke's edge, plus a ~39 px gap between the two caps. -->
+  <path d="M110 402 L256 110"
         fill="none"
         stroke="#383838"
         stroke-width="61"
-        stroke-linecap="round"
-        stroke-linejoin="round"/>
+        stroke-linecap="round"/>
+  <path d="M300.7 199.4 L402 402"
+        fill="none"
+        stroke="#383838"
+        stroke-width="61"
+        stroke-linecap="round"/>
   <!-- Dot with C-notch from the bite mask, sitting below the A's apex. -->
-  <circle cx="256" cy="317" r="62" fill="#383838" mask="url(#bite)"/>
+  <circle cx="256" cy="317" r="62" fill="#303030" mask="url(#bite)"/>
 </svg>
