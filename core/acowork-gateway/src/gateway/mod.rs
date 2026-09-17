@@ -710,6 +710,7 @@ impl Gateway {
                 gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
                 data_dir: self.config.doc.data_dir.clone(),
                 request_ttl_hours: self.config.doc.request_ttl_hours,
+                mqtt_port: self.config.mqtt.port,
             };
             crate::lifecycle::doc_supervisor::start_doc_supervisor(
                 supervisor_cfg,

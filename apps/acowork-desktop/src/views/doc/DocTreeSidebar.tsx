@@ -20,6 +20,7 @@ import {
   FolderOpen,
   Loader2,
   Pencil,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -53,6 +54,8 @@ export function DocTreeSidebar({ width }: { width?: number }) {
   const nodes = useDocTreeStore((s) => s.nodes);
   const expanded = useDocTreeStore((s) => s.expanded);
   const loadingDirs = useDocTreeStore((s) => s.loadingDirs);
+  const refreshingVisible = useDocTreeStore((s) => s.refreshingVisible);
+  const refreshVisible = useDocTreeStore((s) => s.refreshVisible);
   const selectedDocId = useDocEditorStore((s) => s.doc?.meta.doc_id ?? null);
   const treeError = useDocTreeStore((s) => s.error);
   const clearTreeError = useDocTreeStore((s) => s.clearError);
@@ -116,6 +119,18 @@ export function DocTreeSidebar({ width }: { width?: number }) {
           title={t("doc.newDoc")}
         >
           <FilePlus2 className="h-3.5 w-3.5" />
+        </IconBtn>
+        <IconBtn
+          label={t("common.refresh")}
+          disabled={healthy === false || refreshingVisible}
+          onClick={() => void refreshVisible()}
+          title={t("common.refresh")}
+        >
+          {refreshingVisible ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+          )}
         </IconBtn>
       </div>
 

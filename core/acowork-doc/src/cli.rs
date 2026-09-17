@@ -39,6 +39,14 @@ pub struct Cli {
     #[arg(long, default_value = "300000")]
     pub gateway_health_timeout_ms: u64,
 
+    /// MQTT broker host (the embedded Gateway broker; default 127.0.0.1).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub mqtt_host: String,
+
+    /// MQTT broker port (default 19875).
+    #[arg(long, default_value_t = 19875)]
+    pub mqtt_port: u16,
+
     /// Override for update-request TTL (hours) forwarded by the Gateway.
     #[arg(long)]
     pub request_ttl_hours: Option<u32>,

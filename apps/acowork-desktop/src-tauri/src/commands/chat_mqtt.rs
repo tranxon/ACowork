@@ -559,6 +559,23 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("acowork:workspace-fs-changed", event);
             }
 
+            // ── Doc library tree changes ──
+            //
+            // acowork-doc publishes on `acowork/doc/tree/changed`
+            // (QoS 1, non-retained) after every structural mutation.
+            // Re-emitted on the dedicated `acowork:doc-tree-changed`
+            // Tauri channel — the docTreeStore owns this state, the
+            // chatStore must not know about it (same channel-separation
+            // rationale as workspace-fs-changed / debug-event).
+            data_envelope::Payload::DocTreeChanged(ev) => {
+                let _ = app_handle.emit(
+                    "acowork:doc-tree-changed",
+                    serde_json::json!({
+                        "changed_dirs": ev.changed_dirs,
+                    }),
+                );
+            }
+
             // ── Global resources & control commands: ignore (Gateway handles these) ──
             // DebugBreakpointEvent / DebugRecordStepEvent are likewise
             // reserved-but-unemitted (see Runtime mqtt/debug_events.rs);

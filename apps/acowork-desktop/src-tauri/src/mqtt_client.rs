@@ -130,6 +130,12 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // mandatory (same reason as messages/#: a lost event desyncs the
     // Desktop FileTree until the reconnect full-sync fallback fires).
     ("acowork/agents/+/workspaces/+/fs-changed", MqttQoS::AtLeastOnce),
+    // ── Doc library tree changes ──
+    // acowork-doc publishes after every structural mutation on
+    // `acowork/doc/tree/changed` (QoS 1, non-retained); the DocTreeStore
+    // force-refreshes its expanded layers on receipt. A lost event is
+    // covered by the 30s poll + reconnect full-sync fallback.
+    ("acowork/doc/tree/changed", MqttQoS::AtLeastOnce),
 ];
 
 /// Desktop entity handler for the shared [`MqttClient`] (ADR-065 Step 4).

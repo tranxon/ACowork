@@ -108,6 +108,7 @@ fn start_supervisor(port: u16) -> (Arc<RwLock<GatewayState>>, tempfile::TempDir)
         gateway_health_url: "http://127.0.0.1:9/health".to_string(), // unreachable → watchdog idle
         data_dir: Some(tmp.path().join("data")),
         request_ttl_hours: None,
+        mqtt_port: 19875,
     };
     acowork_gateway::lifecycle::doc_supervisor::start_doc_supervisor(cfg, state.clone());
     (state, tmp)

@@ -19,6 +19,7 @@ use clap::Parser;
 
 use acowork_doc::cli::Cli;
 use acowork_doc::config::DocConfig;
+use acowork_doc::mqtt_publisher;
 use acowork_doc::server::DocService;
 
 #[tokio::main]
@@ -63,6 +64,12 @@ async fn main() {
             "Gateway health watchdog started (ADR-018)"
         );
     }
+
+    // MQTT tree-change publisher (acowork/doc/tree/changed). Broker is
+    // the embedded Gateway broker on this host; a not-yet-ready broker
+    // is fine (auto-reconnect). Failure never blocks startup — events
+    // are best-effort, the Desktop's 30s poll is the fallback.
+    mqtt_publisher::init(&cli.mqtt_host, cli.mqtt_port).await;
 
     let service = match DocService::new(config.clone()).await {
         Ok(svc) => Arc::new(svc),

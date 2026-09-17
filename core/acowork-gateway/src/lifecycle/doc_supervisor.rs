@@ -58,6 +58,11 @@ pub struct DocSupervisorConfig {
     /// Optional update-request TTL override forwarded via
     /// `--request-ttl-hours`.
     pub request_ttl_hours: Option<u32>,
+    /// Broker port forwarded via `--mqtt-port` so the doc process can
+    /// publish `acowork/doc/tree/changed` to the embedded broker
+    /// (always loopback: doc is spawned on this host, next to the
+    /// broker — host is fixed to 127.0.0.1).
+    pub mqtt_port: u16,
 }
 
 /// Spawn the doc supervisor task. Non-fatal: if doc cannot start, the
@@ -209,6 +214,13 @@ async fn spawn_doc(cfg: &DocSupervisorConfig) -> Result<(tokio::process::Child, 
         .arg(&cfg.gateway_health_url)
         .arg("--log-level")
         .arg("info")
+        // Embedded broker is on this host; loopback is always the right
+        // connect target (a wildcard bind host like 0.0.0.0 is not a
+        // valid TCP dial address on Windows).
+        .arg("--mqtt-host")
+        .arg("127.0.0.1")
+        .arg("--mqtt-port")
+        .arg(cfg.mqtt_port.to_string())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log_file));
 

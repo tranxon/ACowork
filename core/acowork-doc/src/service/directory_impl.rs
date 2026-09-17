@@ -71,6 +71,7 @@ impl DirectoryService for LibraryDirectoryService {
             deleted: false,
         });
         self.store.save(&parent_idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![input.parent_dir_id]);
         Ok(DirMeta {
             dir_id,
             name: input.name,
@@ -173,6 +174,7 @@ impl DirectoryService for LibraryDirectoryService {
         entry.updated_at = self.now();
         let updated = entry.clone();
         self.store.save(&parent_idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![parent_id]);
         Ok(updated)
     }
 
@@ -188,6 +190,13 @@ impl DirectoryService for LibraryDirectoryService {
         // sidecar (content is copied in), then remove the original file
         // and mark library entries deleted.
         let now = self.now();
+        // Parent id for the change event (the tree refresh target).
+        let parent_id = self
+            .store
+            .load(dir_id)
+            .await?
+            .parent
+            .unwrap_or_else(|| ROOT_DIR_ID.to_string());
         let mut stack = vec![dir_id.to_string()];
         let mut to_delete: Vec<(String, String, String, std::path::PathBuf)> = vec![];
         while let Some(d) = stack.pop() {
@@ -249,6 +258,7 @@ impl DirectoryService for LibraryDirectoryService {
                 self.store.save(&idx).await?;
             }
         }
+        crate::mqtt_publisher::notify_tree_changed(vec![parent_id]);
         Ok(())
     }
 }

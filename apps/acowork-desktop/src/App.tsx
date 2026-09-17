@@ -8,6 +8,7 @@ import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { initMqttListener } from "./stores/chatStore";
 import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
+import { initDocTreeChangeListener } from "./lib/docFsEvents";
 import { log } from "./lib/logger";
 
 function App() {
@@ -38,6 +39,10 @@ function App() {
       // reload — re-register alongside the MQTT listener.
       initWorkspaceFsListener().catch((e) =>
         log.warn("[App] initWorkspaceFsListener failed on recovery reload:", e)
+      );
+      // Doc tree-change listener (same webview-reload death).
+      initDocTreeChangeListener().catch((e) =>
+        log.warn("[App] initDocTreeChangeListener failed on recovery reload:", e)
       );
       // Post-wake renderer recovery: report the first painted frame to
       // the Rust backend. requestAnimationFrame is driven by the GPU

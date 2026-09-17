@@ -27,12 +27,25 @@ interface DocTreeState {
   error: string | null;
   /** 根是否加载过 */
   rootReady: boolean;
+  /** `refreshVisible` 进行中（防 30s 轮询与手动点击打架） */
+  refreshingVisible: boolean;
 
   loadDir: (dirId: string, opts?: { force?: boolean }) => Promise<boolean>;
   toggleDir: (dirId: string) => Promise<void>;
   expandDir: (dirId: string) => Promise<void>;
   collapseDir: (dirId: string) => void;
   refreshDir: (dirId: string) => Promise<boolean>;
+  /**
+   * 强制重拉所有已展开目录的子项 — 专给 30s 轮询和手动刷新按钮用。
+   *
+   * 为何不用 `refreshDir(root)`：TreeNode 是非递归的，mcp 工具如果往已
+   * 展开的子目录（"研发"之类）加文件，刷根目录只更新根的 dirs/files 列表，
+   * 子目录内部 cache 仍是旧的，用户在树里看到的还是旧内容。
+   *
+   * 折叠目录不刷：折叠的目录用户看不见内容，刷它浪费请求；用户展开时
+   * `toggleDir` 仍按需拉取（cache 命中直接复用，符合既有约定）。
+   */
+  refreshVisible: () => Promise<void>;
 
   createDir: (parentDirId: string, name: string) => Promise<DirMeta | null>;
   renameDir: (dirId: string, parentDirId: string, newName: string) => Promise<boolean>;
@@ -52,6 +65,7 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
   loadingDirs: {},
   error: null,
   rootReady: false,
+  refreshingVisible: false,
 
   loadDir: async (dirId, { force = false } = {}): Promise<boolean> => {
     const cached = get().nodes[dirId];
@@ -74,6 +88,19 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
   },
 
   refreshDir: (dirId) => get().loadDir(dirId, { force: true }),
+
+  refreshVisible: async () => {
+    // 单次刷新防重入：30s 轮询和手动按钮可能并发；`loadDir` 内部还有
+    // `loadingDirs[dirId]` 二次防御，避免同一目录并发请求。
+    if (get().refreshingVisible) return;
+    set({ refreshingVisible: true });
+    try {
+      const ids = Object.keys(get().expanded).filter((id) => get().expanded[id]);
+      await Promise.all(ids.map((id) => get().loadDir(id, { force: true })));
+    } finally {
+      set({ refreshingVisible: false });
+    }
+  },
 
   toggleDir: async (dirId) => {
     const isOpen = get().expanded[dirId];
@@ -200,5 +227,6 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       loadingDirs: {},
       error: null,
       rootReady: false,
+      refreshingVisible: false,
     }),
 }));

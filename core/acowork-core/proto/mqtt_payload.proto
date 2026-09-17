@@ -110,6 +110,14 @@ message DataEnvelope {
     // ready in the SubsystemReadinessRegistry on receipt. Field 87
     // is occupied and will never be reused.
     NodeReady                node_ready                = 87;
+
+    // ── Doc library tree changes (acowork-doc → Desktop, QoS 1) ──
+    // Topic: acowork/doc/tree/changed. The standalone doc service
+    // publishes after every structural mutation (dir/doc create /
+    // rename / move / delete, trash restore) so the Desktop's
+    // DocTreeStore can force-refresh its visible tree layers instead
+    // of waiting for the 30s poll. Field 88 occupied, never reused.
+    DocTreeChangedEvent      doc_tree_changed          = 88;
   }
 }
 
@@ -824,6 +832,27 @@ message FsChange {
   // Observation time (aggregator flush moment, epoch ms). The Desktop
   // uses it for stale-event filtering and echo suppression.
   uint64 timestamp_ms = 3;
+}
+
+// ── Doc library tree changes (acowork-doc → Desktop, QoS 1, non-retained) ──
+
+/// Doc library tree changed (dir/doc create / rename / move / delete,
+/// trash restore). Published by the standalone doc service on
+/// `acowork/doc/tree/changed` right after the structural mutation
+/// commits — every write path goes through the doc process, so the
+/// publisher does not need a filesystem watcher (unlike the Runtime's
+/// WorkspaceFsWatcher, which must catch external edits).
+///
+/// The Desktop listens and force-refreshes whatever tree layers it has
+/// expanded (`refreshVisible`); lost events (QoS 1, non-retained) are
+/// covered by the 30s poll + reconnect full-sync fallback.
+message DocTreeChangedEvent {
+  // dir_ids whose direct children may have changed (the parent of the
+  // touched file/folder; move contributes source + target). Empty =
+  // unknown scope — refresh everything visible. Currently informational:
+  // the Desktop refreshes all expanded layers regardless, but carrying
+  // the scope keeps the wire future-proof for selective refresh.
+  repeated string changed_dirs = 1;
 }
 
 // ── Control commands (§9) — Desktop → Runtime ─────────────────────────

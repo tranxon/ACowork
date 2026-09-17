@@ -27,6 +27,7 @@ export function DocsView() {
   const checking = useDocHealthStore((s) => s.checking);
   const check = useDocHealthStore((s) => s.check);
   const loadDir = useDocTreeStore((s) => s.loadDir);
+  const refreshVisible = useDocTreeStore((s) => s.refreshVisible);
   const loadPending = useDocRequestStore((s) => s.loadPending);
 
   // 进入视图：健康检查；检查成功（或已成功）时确保根树加载
@@ -40,18 +41,20 @@ export function DocsView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 30s 健康轮询；离线 → 恢复在线时重载根树 + pending
+  // 30s 健康轮询；离线 → 恢复在线时重载已展开目录树 + pending。
+  // 用 `refreshVisible` 而非 `refreshDir(root)`：mcp 工具可能在已展开的子
+  // 目录里加文档，仅刷根目录看不到。`refreshVisible` 强制刷所有已展开层。
   useEffect(() => {
     const timer = setInterval(() => {
       void check().then((ok) => {
         if (ok) {
-          void loadDir(DOC_ROOT_DIR_ID);
+          void refreshVisible();
           void loadPending();
         }
       });
     }, 30_000);
     return () => clearInterval(timer);
-  }, [check, loadDir, loadPending]);
+  }, [check, refreshVisible, loadPending]);
 
   // 与聊天 AgentList 一致的左侧分栏宽度（可拖动 + localStorage 持久化）
   const sidebar = useDragResize({

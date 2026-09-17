@@ -107,11 +107,13 @@ impl DocumentService for LibraryDocumentService {
         let meta = DocMeta::new(doc_id.clone(), input.title.clone(), input.import, now);
         idx.files.push(meta.clone());
         self.store.save(&idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![input.parent_dir_id]);
         Ok(meta)
     }
 
     async fn update(&self, doc_id: &str, input: UpdateDocumentInput) -> Result<DocMeta> {
         let (parent_dir_id, file_path, mut entry, mut idx) = self.locate(doc_id).await?;
+        let prev_name = entry.name.clone();
         if entry.version != input.base_version {
             return Err(DocError::VersionConflict {
                 base_version: input.base_version,
@@ -146,6 +148,12 @@ impl DocumentService for LibraryDocumentService {
             *slot = entry.clone();
         }
         self.store.save(&idx).await?;
+        // A title rename inside `update` changes what the tree displays —
+        // publish so the Desktop refreshes (same as the dedicated `rename`
+        // path). Content-only updates leave the tree untouched.
+        if entry.name != prev_name {
+            crate::mqtt_publisher::notify_tree_changed(vec![parent_dir_id]);
+        }
         Ok(entry)
     }
 
@@ -189,6 +197,7 @@ impl DocumentService for LibraryDocumentService {
             *slot = entry.clone();
         }
         self.store.save(&idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![parent_dir_id]);
         Ok(entry)
     }
 
@@ -245,6 +254,7 @@ impl DocumentService for LibraryDocumentService {
             return Err(e);
         }
         entry.updated_at = self.now();
+        crate::mqtt_publisher::notify_tree_changed(vec![source_dir_id, target_dir_id.to_string()]);
         Ok(entry)
     }
 
@@ -272,6 +282,7 @@ impl DocumentService for LibraryDocumentService {
             *slot = entry;
         }
         self.store.save(&idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![parent_dir_id]);
         Ok(())
     }
 
@@ -396,6 +407,36 @@ mod tests {
         assert_eq!(updated.version, 2);
         let read = docs.read(&meta.doc_id).await.unwrap();
         assert_eq!(read.content, "v2");
+    }
+
+    #[tokio::test]
+    async fn update_with_title_renames_file_and_meta() {
+        let (tmp, docs, _dirs) = setup().await;
+        let meta = docs
+            .create(CreateDocumentInput {
+                parent_dir_id: crate::types::ROOT_DIR_ID.into(),
+                title: "old".into(),
+                content: "v1".into(),
+                import: None,
+            })
+            .await
+            .unwrap();
+        let updated = docs
+            .update(
+                &meta.doc_id,
+                UpdateDocumentInput {
+                    base_version: 1,
+                    title: Some("new".into()),
+                    content: "v2".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "new");
+        // The file on disk is renamed too (this path feeds the tree's
+        // displayed name — a missed notify would desync the sidebar).
+        assert!(tmp.path().join("new.md").exists());
+        assert!(!tmp.path().join("old.md").exists());
     }
 
     #[tokio::test]

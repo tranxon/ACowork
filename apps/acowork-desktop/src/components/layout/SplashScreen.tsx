@@ -4,6 +4,7 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { initMqttListener } from "../../stores/chatStore";
 import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
+import { initDocTreeChangeListener } from "../../lib/docFsEvents";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -83,6 +84,10 @@ async function bootGateway(): Promise<void> {
         // editor conflict UX + reconnect full-sync fallback).
         await initWorkspaceFsListener();
         log.debug("[bootGateway] workspace fs listener initialized");
+        // Doc library tree-change listener (event-driven refresh of the
+        // doc sidebar; reconnect full-sync fallback built in).
+        await initDocTreeChangeListener();
+        log.debug("[bootGateway] doc tree-change listener initialized");
     } catch (err) {
         log.warn("connect_mqtt failed:", err);
     }

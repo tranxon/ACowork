@@ -39,6 +39,7 @@ pub mod config;
 pub mod error;
 pub mod health;
 pub mod mcp;
+pub mod mqtt_publisher;
 pub mod path;
 pub mod server;
 pub mod service;
