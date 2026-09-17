@@ -530,7 +530,7 @@ export function AgentList({ width }: AgentListProps) {
             {/* Top row: name */}
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex items-center gap-1.5">
-                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.alive ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400 dark:text-zinc-500")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
+                <span className={cn("truncate font-medium", selectedAgentId === id ? "text-white" : agent.alive ? "text-text " : "text-text-tertiary ")} style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{agent.display_name ?? agent.name}</span>
               </div>
             </div>
             {/* Bottom row: current session title.
@@ -560,7 +560,7 @@ export function AgentList({ width }: AgentListProps) {
                       "block truncate",
                       selectedAgentId === id
                         ? "text-white/70"
-                        : "text-zinc-500 dark:text-zinc-400",
+                        : "text-text-tertiary ",
                     )}
                   >
                     {sessionTitle === null ? (
@@ -588,7 +588,7 @@ export function AgentList({ width }: AgentListProps) {
                     "block truncate",
                     selectedAgentId === id
                       ? "text-white/70"
-                      : "text-zinc-500 dark:text-zinc-400",
+                      : "text-text-tertiary ",
                   )}
                 >
                   <span className="inline-flex items-baseline">
@@ -615,7 +615,7 @@ export function AgentList({ width }: AgentListProps) {
       <div className={cn(isCollapsed ? "px-1.5 py-2" : "px-3 py-2")}>
         <div className="relative min-w-0 flex-1">
           <Search
-            className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
+            className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary "
           />
           <StyledInput
             type="text"
@@ -663,7 +663,7 @@ export function AgentList({ width }: AgentListProps) {
           : filteredAgents.map((agent, index) => renderAgentItem(agent, index, filteredAgents.length))}
 
         {filteredAgents.length === 0 && !loading && (
-          <div className="px-3 py-8 text-center text-xs text-zinc-400 dark:text-zinc-500">
+          <div className="px-3 py-8 text-center text-xs text-text-tertiary ">
             {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
           </div>
         )}
@@ -675,7 +675,7 @@ export function AgentList({ width }: AgentListProps) {
             setAddMenuOpen(!addMenuOpen);
             setInstallNodes(null);
           }}
-          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-nav-control focus-visible:bg-nav-control dark:text-zinc-300"
+          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-nav-control focus-visible:bg-nav-control "
           aria-label={t("agentList.ariaLabelAddAgent")}
         >
           <Plus className="h-3.5 w-3.5" />
@@ -684,7 +684,7 @@ export function AgentList({ width }: AgentListProps) {
           <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-zinc-200 bg-modal-surface py-1 shadow-lg dark:border-zinc-700">
             {installNodes !== null ? (
               <>
-                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">
                   {t("agentList.selectNode")}
                 </div>
                 {installNodes.map((node) => (
@@ -695,21 +695,21 @@ export function AgentList({ width }: AgentListProps) {
                       setInstallNodes(null);
                       void doInstall(node.node_id);
                     }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
                   >
                     {/* Node install picker only lists online nodes, so the
                         dot renders solid emerald — same online/offline
                         badge as the group header (gray when offline). */}
                     <span className="h-2 w-2 rounded-full bg-emerald-500" />
                     {node.node_id}
-                    <span className="ml-auto text-zinc-400">
+                    <span className="ml-auto text-text-tertiary">
                       {node.os ?? ""} {node.arch ?? ""}
                     </span>
                   </button>
                 ))}
                 <button
                   onClick={() => setInstallNodes(null)}
-                  className="flex w-full items-center gap-2 border-t border-zinc-100 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-zinc-50 dark:border-zinc-700/50 dark:text-zinc-500 dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 border-t border-zinc-100 px-3 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-zinc-50 dark:border-zinc-700/50  dark:hover:bg-zinc-700/50"
                 >
                   {t("agentList.back")}
                 </button>
@@ -721,7 +721,7 @@ export function AgentList({ width }: AgentListProps) {
                     setAddMenuOpen(false);
                     setShowCreateWizard(true);
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
                 >
                   <Sparkles className="h-3.5 w-3.5" />
                   {t("agentList.createAgent")}
@@ -731,7 +731,7 @@ export function AgentList({ width }: AgentListProps) {
                     void handleInstall();
                   }}
                   disabled={installing}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-zinc-50  dark:hover:bg-zinc-700/50"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   {t("agentList.installAgent")}
@@ -857,7 +857,7 @@ function NodeGroupHeader({
         // ~56px, so the node label has comfortable breathing room.
         "flex h-6 w-full items-center gap-1.5 px-3 text-left",
         "text-[10px] font-medium uppercase tracking-wide",
-        "text-zinc-400 dark:text-zinc-500",
+        "text-text-tertiary ",
         "hover:text-zinc-600 dark:hover:text-zinc-300",
         "transition-colors duration-150",
         // Dedicated divider on BOTH edges so the header reads as its own

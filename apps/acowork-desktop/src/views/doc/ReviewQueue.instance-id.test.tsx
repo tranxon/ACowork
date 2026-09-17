@@ -116,7 +116,7 @@ describe("ReviewQueue — ADR-073 submitted_by → display name", () => {
     // We grab it via class because the timestamp lives in the same text
     // node as the name, so `getByText("资深工程师")` won't match.
     const submitterRow = container.querySelector(
-      ".text-\\[10px\\].text-zinc-400",
+      ".text-\\[10px\\].text-text-tertiary\.truncate",
     ) as HTMLElement | null;
     expect(submitterRow).toBeTruthy();
     const rowText = submitterRow?.textContent ?? "";
@@ -130,7 +130,7 @@ describe("ReviewQueue — ADR-073 submitted_by → display name", () => {
     const { container } = render(<ReviewQueue />);
     fireEvent.click(screen.getByRole("button", { expanded: false }));
     const submitterRow = container.querySelector(
-      ".text-\\[10px\\].text-zinc-400",
+      ".text-\\[10px\\].text-text-tertiary\.truncate",
     ) as HTMLElement | null;
     expect(submitterRow).toBeTruthy();
     const rowText = submitterRow?.textContent ?? "";

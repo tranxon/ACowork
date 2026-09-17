@@ -151,7 +151,7 @@ export function SearchTab() {
       {/* Configured Search Providers — Tools-tab level-1 collapsible
           card, default open, unified rows in the inset body. */}
       {keysLoading ? (
-        <div className="py-3 text-center text-xs text-zinc-400">{t("harnessSearch.loading")}</div>
+        <div className="py-3 text-center text-xs text-text-tertiary">{t("harnessSearch.loading")}</div>
       ) : keys.length > 0 && (
         <ListBox dividers={false}>
           <ExpandableRow
@@ -191,8 +191,8 @@ export function SearchTab() {
                     }
                   >
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{providerName}</span>
-                      <span className="shrink-0 text-[11px] text-zinc-400">{t("harnessSearch.key")}: {keyEntry.key_preview}</span>
+                      <span className="truncate text-xs font-medium text-text-secondary ">{providerName}</span>
+                      <span className="shrink-0 text-[11px] text-text-tertiary">{t("harnessSearch.key")}: {keyEntry.key_preview}</span>
                     </div>
                   </ListRow>
                 );
@@ -213,7 +213,7 @@ export function SearchTab() {
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
         >
           {availableProviders.length === 0 ? (
-            <div className="px-3 py-3 text-center text-xs text-zinc-400">{t("harnessSearch.allConfigured")}</div>
+            <div className="px-3 py-3 text-center text-xs text-text-tertiary">{t("harnessSearch.allConfigured")}</div>
           ) : (
             <ListBox variant="plain">
               {availableProviders.map((item) => (
@@ -227,18 +227,18 @@ export function SearchTab() {
                         setNewBaseUrl(item.base_url);
                         setShowAddDialog(true);
                       }}
-                      className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                      className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                     >
                       {t("harnessSearch.addKey")}
                     </button>
                   }
                 >
                   <div className="flex min-w-0 items-baseline gap-2">
-                    <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{item.name}</span>
-                    <span className="truncate text-[11px] text-zinc-400">{item.description}</span>
+                    <span className="truncate text-xs font-medium text-text-secondary ">{item.name}</span>
+                    <span className="truncate text-[11px] text-text-tertiary">{item.description}</span>
                   </div>
                   {item.free_quota && (
-                    <div className="mt-0.5 text-[10px] text-zinc-400">{item.free_quota}</div>
+                    <div className="mt-0.5 text-[10px] text-text-tertiary">{item.free_quota}</div>
                   )}
                 </ListRow>
               ))}
@@ -258,8 +258,8 @@ export function SearchTab() {
             <div className="space-y-3">
               {/* Provider display (read-only) */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harnessSearch.provider")}</label>
-                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.provider")}</label>
+                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 ">
                   {lookupSearchProvider(newProvider)?.name || newProvider}
                 </div>
               </div>
@@ -267,7 +267,7 @@ export function SearchTab() {
               {/* API Key */}
               {lookupSearchProvider(newProvider)?.requires_api_key !== false && (
                 <div>
-                  <label className="mb-1 block text-xs text-zinc-500">{t("harnessSearch.apiKey")}</label>
+                  <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.apiKey")}</label>
                   <StyledInput
                     type="password"
                     value={newKey}
@@ -279,7 +279,7 @@ export function SearchTab() {
 
               {/* Base URL */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harnessSearch.baseUrl")} <span className="text-zinc-400">({newProvider === "searxng" ? t("harnessSearch.required") : t("harnessSearch.optional")})</span></label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.baseUrl")} <span className="text-text-tertiary">({newProvider === "searxng" ? t("harnessSearch.required") : t("harnessSearch.optional")})</span></label>
                 <StyledInput
                   type="text"
                   value={newBaseUrl}
@@ -299,14 +299,14 @@ export function SearchTab() {
                 <ErrorBox message={testResult.message} />
               )}
               {testing && (
-                <div className="text-xs text-zinc-400">{t("harnessSearch.testing")}</div>
+                <div className="text-xs text-text-tertiary">{t("harnessSearch.testing")}</div>
               )}
             </div>
 
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => { setShowAddDialog(false); setNewKey(""); setTestResult(null); }}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
               >
                 {t("common.cancel")}
               </button>
@@ -334,8 +334,8 @@ export function SearchTab() {
             <div className="space-y-3">
               {/* Provider display (read-only) */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harnessSearch.provider")}</label>
-                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.provider")}</label>
+                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 ">
                   {editProviderDef?.name || showEditDialog}
                 </div>
               </div>
@@ -343,20 +343,20 @@ export function SearchTab() {
               {/* API Key */}
               {editProviderDef?.requires_api_key !== false && (
                 <div>
-                  <label className="mb-1 block text-xs text-zinc-500">{t("harnessSearch.apiKey")} <span className="text-zinc-400">({t("harnessSearch.leaveEmptyToKeep")})</span></label>
+                  <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.apiKey")} <span className="text-text-tertiary">({t("harnessSearch.leaveEmptyToKeep")})</span></label>
                   <StyledInput
                     type="password"
                     value={editKey}
                     onChange={(e) => setEditKey(e.target.value)}
                     placeholder={searchKeyPlaceholder(showEditDialog)}
                   />
-                  <p className="mt-0.5 text-xs text-zinc-400">{t("harnessSearch.current")}: {keys.find(k => k.provider === showEditDialog)?.key_preview}</p>
+                  <p className="mt-0.5 text-xs text-text-tertiary">{t("harnessSearch.current")}: {keys.find(k => k.provider === showEditDialog)?.key_preview}</p>
                 </div>
               )}
 
               {/* Base URL */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harnessSearch.baseUrl")}</label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.baseUrl")}</label>
                 <StyledInput
                   type="text"
                   value={editBaseUrl}
@@ -370,7 +370,7 @@ export function SearchTab() {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={() => setShowEditDialog(null)}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
               >
                 {t("common.cancel")}
               </button>

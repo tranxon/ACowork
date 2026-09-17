@@ -490,7 +490,7 @@ export const VirtualMessageList = React.forwardRef<
       {adapter.isLoading && (
         <div className="flex items-center justify-center py-2">
           <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-          <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>
+          <span className="ml-1.5 text-[10px] text-text-tertiary ">Loading more...</span>
         </div>
       )}
 
@@ -499,7 +499,7 @@ export const VirtualMessageList = React.forwardRef<
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center">
             <span className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-            <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading conversation...</p>
+            <p className="mt-3 text-xs text-text-tertiary ">Loading conversation...</p>
           </div>
         </div>
       )}
@@ -512,7 +512,7 @@ export const VirtualMessageList = React.forwardRef<
           </div>
           <button
             onClick={() => onRetryLoadSession?.()}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
           >
             {t("chatPanel.retry")}
           </button>
@@ -568,11 +568,11 @@ export const VirtualMessageList = React.forwardRef<
                       className="shrink-0"
                     />
                     <div className="flex flex-col">
-                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                      <span className="text-xs font-medium text-text-tertiary ">
                         {agentDisplayName}
                       </span>
                       {selectedAgent?.role && (
-                        <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
+                        <span className="text-[10px] leading-tight text-text-tertiary ">
                           {selectedAgent.role}
                         </span>
                       )}
@@ -683,11 +683,11 @@ export const VirtualMessageList = React.forwardRef<
                       className="shrink-0"
                     />
                     <div className="flex flex-col">
-                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                      <span className="text-xs font-medium text-text-tertiary ">
                         {agentDisplayName}
                       </span>
                       {selectedAgent?.role && (
-                        <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
+                        <span className="text-[10px] leading-tight text-text-tertiary ">
                           {selectedAgent.role}
                         </span>
                       )}

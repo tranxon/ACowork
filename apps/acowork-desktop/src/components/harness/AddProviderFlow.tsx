@@ -289,7 +289,7 @@ export function AddProviderFlow({
           {step !== "picker" && (
             <button
               onClick={() => setStep("picker")}
-              className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200"
+              className="text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-200"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
@@ -319,8 +319,8 @@ export function AddProviderFlow({
             <div className="space-y-2">
               {/* Provider display (read-only) */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harness.provider")}</label>
-                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.provider")}</label>
+                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 ">
                   {selectedProviderName}
                 </div>
               </div>
@@ -328,7 +328,7 @@ export function AddProviderFlow({
               {/* API Key */}
               {needsApiKey(selectedProvider) && (
                 <div>
-                  <label className="mb-1 block text-xs text-zinc-500">{t("harness.apiKey")}</label>
+                  <label className="mb-1 block text-xs text-text-tertiary">{t("harness.apiKey")}</label>
                   <StyledInput
                     type="password"
                     value={newKey}
@@ -340,7 +340,7 @@ export function AddProviderFlow({
 
               {/* Base URL */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harness.baseUrl")}</label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.baseUrl")}</label>
                 <StyledInput
                   type="text"
                   value={newBaseUrl}
@@ -390,7 +390,7 @@ export function AddProviderFlow({
             <div className="space-y-2">
               {/* Provider Name */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harness.customProviderName")}</label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.customProviderName")}</label>
                 <StyledInput
                   type="text"
                   value={customProviderName}
@@ -404,7 +404,7 @@ export function AddProviderFlow({
 
               {/* Provider ID */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harness.customProviderId")}</label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.customProviderId")}</label>
                 <StyledInput
                   type="text"
                   value={customProviderId}
@@ -416,7 +416,7 @@ export function AddProviderFlow({
 
               {/* Base URL */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harness.customBaseUrl")}</label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.customBaseUrl")}</label>
                 <StyledInput
                   type="text"
                   value={customBaseUrl}
@@ -430,7 +430,7 @@ export function AddProviderFlow({
 
               {/* API Key (optional) */}
               <div>
-                <label className="mb-1 block text-xs text-zinc-500">{t("harness.apiKey")} <span className="text-zinc-400">({t("harness.optional")})</span></label>
+                <label className="mb-1 block text-xs text-text-tertiary">{t("harness.apiKey")} <span className="text-text-tertiary">({t("harness.optional")})</span></label>
                 <StyledInput
                   type="password"
                   value={customApiKey}
@@ -441,7 +441,7 @@ export function AddProviderFlow({
 
               {/* Model discovery status */}
               {customModelsLoading && (
-                <div className="rounded-md bg-zinc-50 px-3 py-2 text-xs text-zinc-500 dark:bg-zinc-900">
+                <div className="rounded-md bg-zinc-50 px-3 py-2 text-xs text-text-tertiary dark:bg-zinc-900">
                   {t("harness.discoveringModels")}
                 </div>
               )}
@@ -490,7 +490,7 @@ export function AddProviderFlow({
               </div>
             )}
             {step === "add" && testing && (
-              <div className="text-xs text-zinc-400">{t("harness.testing")}</div>
+              <div className="text-xs text-text-tertiary">{t("harness.testing")}</div>
             )}
           </div>
 
@@ -498,7 +498,7 @@ export function AddProviderFlow({
           <div className="flex gap-2 shrink-0">
             <button
               onClick={onClose}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
             >
               {t("common.cancel")}
             </button>
@@ -511,7 +511,7 @@ export function AddProviderFlow({
                 // the key and surfaces `pleaseEnterApiKey` inline — keep
                 // the button enabled so that hint can fire.
                 disabled={testing}
-                className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 {testing ? t("harness.saving") : t("harness.save")}
               </button>
@@ -520,7 +520,7 @@ export function AddProviderFlow({
               <button
                 onClick={handleAddCustom}
                 disabled={!customProviderName.trim() || !customProviderId.trim() || !customBaseUrl.trim() || customTesting}
-                className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 {customTesting ? t("harness.saving") : t("harness.save")}
               </button>

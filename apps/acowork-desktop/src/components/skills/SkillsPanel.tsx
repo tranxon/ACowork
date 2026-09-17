@@ -133,7 +133,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
           <div className="absolute bottom-full left-0 mb-1 w-60 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700" style={{ zIndex: 100 }}>
             {/* Menu title */}
             <div className="px-3 pt-2.5 pb-1">
-              <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+              <h2 className="text-sm font-normal text-text-secondary ">
                 {t("skillsPanel.title")}
               </h2>
             </div>
@@ -141,9 +141,9 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             {/* Skills list */}
             <div className="max-h-56 overflow-y-auto py-1">
               {loading && skills.length === 0 ? (
-                <div className="py-4 text-center text-xs text-zinc-400">{t("skillsPanel.loading")}</div>
+                <div className="py-4 text-center text-xs text-text-tertiary">{t("skillsPanel.loading")}</div>
               ) : skills.length === 0 ? (
-                <div className="py-4 text-center text-xs text-zinc-400">No skills loaded</div>
+                <div className="py-4 text-center text-xs text-text-tertiary">No skills loaded</div>
               ) : (
                 <div className="space-y-0.5">
                   {skills.map((skill) => {
@@ -167,11 +167,11 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
                       >
                         <Sparkles className={cn("h-3.5 w-3.5 shrink-0")} style={isActive ? { color: "var(--color-accent)" } : { color: "" }} />
                         <div className="min-w-0 flex-1">
-                          <div className={cn("truncate text-xs font-medium", isActive ? "text-[var(--color-accent)]" : "text-zinc-700 dark:text-zinc-200")}>
+                          <div className={cn("truncate text-xs font-medium", isActive ? "text-[var(--color-accent)]" : "text-text-secondary ")}>
                             {skill.name}
                           </div>
                           {skill.description && (
-                            <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                            <div className="truncate text-[10px] text-text-tertiary ">
                               {skill.description}
                             </div>
                           )}
@@ -180,7 +180,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
                           <Check className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--color-accent)" }} />
                         )}
                         {!isActive && skill.triggers.length > 0 && (
-                          <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
+                          <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-tertiary dark:bg-zinc-700 ">
                             {skill.triggers.length}
                           </span>
                         )}
@@ -197,7 +197,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             {/* Import Skills button */}
             <button
               onClick={handleImportClick}
-              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
+              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("skillsPanel.buttonImportSkills")}
@@ -212,21 +212,21 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
           <div className="w-96 rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700">
             {/* Header */}
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              <h3 className="text-sm font-semibold text-text ">
                 Import Skill
               </h3>
               <button
                 onClick={handleCloseDialog}
-                className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                className="rounded p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
             {/* Description */}
-            <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
+            <p className="mb-4 text-xs text-text-tertiary ">
               Select a skill ZIP package to import. The ZIP must contain a{" "}
-              <code className="rounded bg-zinc-100 px-1 py-0.5 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">
+              <code className="rounded bg-zinc-100 px-1 py-0.5 text-text-secondary dark:bg-zinc-700 ">
                 SKILL.md
               </code>{" "}
               file with YAML frontmatter.
@@ -257,12 +257,12 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
                   <div className="mb-1 font-medium" style={{ color: "var(--color-accent)" }}>
                     {selectedFile.name}
                   </div>
-                  <div className="text-zinc-500 dark:text-zinc-400">
+                  <div className="text-text-tertiary ">
                     {(selectedFile.size / 1024).toFixed(1)} KB
                   </div>
                 </div>
               ) : (
-                <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                <div className="text-xs text-text-tertiary ">
                   <FolderPlus className="mx-auto mb-2 h-6 w-6" />
                   <div>Click to select or drop a .zip file</div>
                 </div>
@@ -284,7 +284,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
             <div className="flex justify-end gap-2">
               <button
                 onClick={handleCloseDialog}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700"
               >
                 Cancel
               </button>
@@ -294,7 +294,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
                 className={cn(
                   "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
                   !selectedFile || importing
-                    ? "cursor-not-allowed bg-zinc-200 text-zinc-400 dark:bg-zinc-700 dark:text-zinc-500"
+                    ? "cursor-not-allowed bg-zinc-200 text-text-tertiary dark:bg-zinc-700 "
                     : "text-white",
                 )}
                 style={selectedFile && !importing ? { backgroundColor: "var(--color-accent)" } : undefined}

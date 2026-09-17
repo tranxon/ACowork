@@ -87,7 +87,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
     >
       {/* 列头 */}
       <header className="flex shrink-0 items-center gap-1.5 px-2.5 py-2">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-600 dark:text-zinc-300">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-text-secondary ">
           {t(i18nKey)}
         </h3>
         <span
@@ -95,7 +95,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
             "rounded-full px-1.5 py-px text-[10px] font-medium tabular-nums",
             status === "submitted"
               ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
-              : "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300",
+              : "bg-zinc-200 text-text-secondary dark:bg-zinc-700 ",
           )}
         >
           {tasks.length}
@@ -107,7 +107,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           <div
             className={cn(
-              "flex h-16 items-center justify-center rounded-md border border-dashed text-[10px] text-zinc-400 dark:text-zinc-600",
+              "flex h-16 items-center justify-center rounded-md border border-dashed text-[10px] text-text-tertiary ",
               active && "border-[var(--color-accent)] text-[var(--color-accent)]",
             )}
           >

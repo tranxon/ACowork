@@ -40,7 +40,7 @@ export function ProjectBoard({
       <main className="flex min-w-0 flex-1 items-center justify-center bg-page-bg">
         <div className="text-center">
           <div className="text-3xl">📋</div>
-          <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
+          <p className="mt-2 text-xs text-text-tertiary ">
             {t("pm.selectProjectHint")}
           </p>
         </div>

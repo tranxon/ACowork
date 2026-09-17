@@ -29,38 +29,38 @@ export function ModelCapEditor({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-1 px-2 py-1.5 text-xs text-zinc-600 dark:text-zinc-300"
+        className="flex w-full items-center gap-1 px-2 py-1.5 text-xs text-text-secondary "
       >
-        <span className="text-zinc-400">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className="text-text-tertiary">{expanded ? "\u25BC" : "\u25B6"}</span>
         <span className="flex-1 truncate text-left">{modelId}</span>
-        <span className="text-zinc-400">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
+        <span className="text-text-tertiary">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
       </button>
       {expanded && (
         <div className="border-t border-zinc-200 px-2 py-2 dark:border-zinc-700">
           <div className="flex gap-2">
             <div className="flex-1">
-              <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.contextWindow")}</label>
+              <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.contextWindow")}</label>
               <StyledInput
                 type="number"
                 value={caps.context_window?.toString() ?? ""}
                 onChange={(e) => onUpdate("context_window", parseInt(e.target.value) || 0)}
                 placeholder="e.g. 128000"
-                className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                className="dark:border-zinc-700 dark:bg-zinc-900 "
               />
             </div>
             <div className="flex-1">
-              <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.maxOutputTokens")}</label>
+              <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.maxOutputTokens")}</label>
               <StyledInput
                 type="number"
                 value={caps.max_output_tokens?.toString() ?? ""}
                 onChange={(e) => onUpdate("max_output_tokens", parseInt(e.target.value) || 0)}
                 placeholder="e.g. 16384"
-                className="dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                className="dark:border-zinc-700 dark:bg-zinc-900 "
               />
             </div>
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+            <label className="flex items-center gap-1.5 text-xs text-text-tertiary">
               <input
                 type="checkbox"
                 checked={caps.supports_tool_calling ?? false}
@@ -69,7 +69,7 @@ export function ModelCapEditor({
               />
               {t("harness.supportsToolCalling")}
             </label>
-            <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+            <label className="flex items-center gap-1.5 text-xs text-text-tertiary">
               <input
                 type="checkbox"
                 checked={caps.supports_reasoning ?? false}
@@ -81,10 +81,10 @@ export function ModelCapEditor({
           </div>
           <div className="mt-1.5 flex gap-4">
             <div>
-              <label className="mb-0.5 block text-xs text-zinc-400">Input</label>
+              <label className="mb-0.5 block text-xs text-text-tertiary">Input</label>
               <div className="flex gap-2">
                 {INPUT_MODALITIES.map(mod => (
-                  <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                  <label key={mod} className="flex items-center gap-1 text-xs text-text-tertiary">
                     <input
                       type="checkbox"
                       checked={caps.modalities?.input?.includes(mod) ?? false}
@@ -103,10 +103,10 @@ export function ModelCapEditor({
               </div>
             </div>
             <div>
-              <label className="mb-0.5 block text-xs text-zinc-400">Output</label>
+              <label className="mb-0.5 block text-xs text-text-tertiary">Output</label>
               <div className="flex gap-2">
                 {OUTPUT_MODALITIES.map(mod => (
-                  <label key={mod} className="flex items-center gap-1 text-xs text-zinc-500">
+                  <label key={mod} className="flex items-center gap-1 text-xs text-text-tertiary">
                     <input
                       type="checkbox"
                       checked={caps.modalities?.output?.includes(mod) ?? false}
@@ -127,7 +127,7 @@ export function ModelCapEditor({
           </div>
           {caps.supports_reasoning && (
             <div className="mt-1.5">
-              <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.defaultReasoningEffort")}</label>
+              <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.defaultReasoningEffort")}</label>
               <Dropdown
                 value={caps.default_reasoning_effort ?? "auto"}
                 onChange={(v) => onUpdate("default_reasoning_effort", v)}

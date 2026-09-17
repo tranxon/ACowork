@@ -104,18 +104,18 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       role="alert"
     >
       <span className="shrink-0 text-sm leading-5">{iconMap[toast.type]}</span>
-      <p className="flex-1 text-sm leading-5 text-zinc-700 dark:text-zinc-300">{toast.message}</p>
+      <p className="flex-1 text-sm leading-5 text-text-secondary ">{toast.message}</p>
       {toast.action && (
         <button
           onClick={toast.action.onClick}
-          className="shrink-0 text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+          className="shrink-0 text-xs font-medium text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300"
         >
           {toast.action.label}
         </button>
       )}
       <button
         onClick={onDismiss}
-        className="shrink-0 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+        className="shrink-0 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
         aria-label="Dismiss"
       >
         ✕

@@ -228,7 +228,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                         "flex items-center gap-1 px-2 py-1 cursor-pointer transition-colors text-xs",
                         isSelected
                             ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                            : "hover:bg-zinc-100 dark:hover:bg-zinc-700/50 text-zinc-700 dark:text-zinc-300",
+                            : "hover:bg-zinc-100 dark:hover:bg-zinc-700/50 text-text-secondary ",
                     )}
                     style={{ paddingLeft: `${depth * 16 + 8}px` }}
                     onClick={() => handleSelectDir(entry)}
@@ -249,11 +249,11 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                         <span className="w-3" />
                     )}
                     {isDir ? (
-                        isExpanded ? <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" /> : <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                        isExpanded ? <FolderOpen className="h-3.5 w-3.5 shrink-0 text-text-tertiary" /> : <Folder className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                     ) : null}
                     <span className="truncate min-w-0 flex-1">{entry.name}</span>
                     {!isDir && entry.size != null && (
-                        <span className="text-[10px] text-zinc-400 shrink-0">
+                        <span className="text-[10px] text-text-tertiary shrink-0">
                             {entry.size < 1024 ? `${entry.size} B`
                                 : entry.size < 1024 * 1024 ? `${(entry.size / 1024).toFixed(1)} KB`
                                     : `${(entry.size / (1024 * 1024)).toFixed(1)} MB`}
@@ -269,10 +269,10 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
             <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl flex flex-col max-h-[80vh]">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
-                    <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    <h3 className="text-sm font-semibold text-text ">
                         {t("workspace.remoteBrowseTitle")}
                     </h3>
-                    <button onClick={onCancel} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                    <button onClick={onCancel} className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-800">
                         ✕
                     </button>
                 </div>
@@ -282,18 +282,18 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                     <div className="flex items-center gap-1 px-4 py-2 border-b border-zinc-100 dark:border-zinc-800 overflow-x-auto text-[10px]">
                         <button
                             onClick={() => void navigateTo("")}
-                            className="flex items-center gap-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                            className="flex items-center gap-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
                         >
                             <HardDrive className="h-3 w-3" />
                         </button>
                         {breadcrumbs.map((crumb, i) => (
                             <span key={crumb} className="flex items-center gap-1">
-                                <span className="text-zinc-400">/</span>
+                                <span className="text-text-tertiary">/</span>
                                 <button
                                     onClick={() => void navigateTo(crumb)}
                                     className={cn(
                                         "truncate hover:text-zinc-600 dark:hover:text-zinc-300",
-                                        i === breadcrumbs.length - 1 ? "text-zinc-700 dark:text-zinc-200 font-medium" : "text-zinc-400",
+                                        i === breadcrumbs.length - 1 ? "text-text-secondary  font-medium" : "text-text-tertiary",
                                     )}
                                 >
                                     {crumb.split("/").filter(Boolean).pop() || crumb}
@@ -306,11 +306,11 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                 {/* Directory tree */}
                 <div className="flex-1 overflow-y-auto min-h-0 py-1">
                     {loading ? (
-                        <div className="flex items-center justify-center py-8 text-xs text-zinc-400">
+                        <div className="flex items-center justify-center py-8 text-xs text-text-tertiary">
                             {t("workspace.explorer.loading")}
                         </div>
                     ) : error ? (
-                        <div className="flex flex-col items-center justify-center gap-3 py-8 text-xs text-zinc-400">
+                        <div className="flex flex-col items-center justify-center gap-3 py-8 text-xs text-text-tertiary">
                             <ErrorBox message={error} className="max-w-md" />
                             <button
                                 onClick={() => void fetchEntries(currentPath)}
@@ -320,7 +320,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                             </button>
                         </div>
                     ) : entries.length === 0 ? (
-                        <div className="flex items-center justify-center py-8 text-xs text-zinc-400">
+                        <div className="flex items-center justify-center py-8 text-xs text-text-tertiary">
                             {t("workspace.remoteBrowseEmpty")}
                         </div>
                     ) : (
@@ -331,8 +331,8 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                 {/* Selected path display + action buttons */}
                 <div className="border-t border-zinc-200 dark:border-zinc-700 px-4 py-3">
                     {selectedPath && (
-                        <div className="mb-2 text-xs text-zinc-500 dark:text-zinc-400 truncate">
-                            {t("workspace.remoteBrowseSelected")}: <span className="font-mono text-zinc-700 dark:text-zinc-300">{selectedPath}</span>
+                        <div className="mb-2 text-xs text-text-tertiary  truncate">
+                            {t("workspace.remoteBrowseSelected")}: <span className="font-mono text-text-secondary ">{selectedPath}</span>
                         </div>
                     )}
                     <div className="flex items-center justify-between gap-2">
@@ -350,7 +350,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                         <div className="flex items-center gap-2">
                             <button
                                 onClick={onCancel}
-                                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
                             >
                                 {t("common.cancel")}
                             </button>

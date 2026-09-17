@@ -101,7 +101,7 @@ function McpServerCard({
         // layout shift when it disappears.
         loading ? (
           <Loader2
-            className="h-3 w-3 animate-spin text-zinc-400 dark:text-zinc-500"
+            className="h-3 w-3 animate-spin text-text-tertiary "
             aria-label={`Connecting ${server.name}`}
           />
         ) : (
@@ -148,11 +148,11 @@ function McpServerCard({
               />
             }
           >
-            <span className="block truncate font-mono text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+            <span className="block truncate font-mono text-[11px] font-medium text-text-secondary ">
               {tool.name}
             </span>
             {tool.description && (
-              <span className="block truncate text-[9px] leading-tight text-zinc-400 dark:text-zinc-500">
+              <span className="block truncate text-[9px] leading-tight text-text-tertiary ">
                 {tool.description}
               </span>
             )}
@@ -510,7 +510,7 @@ export function ToolsTab() {
   if (!selectedAgentId || !selectedAgent) {
     return (
       <div className="flex flex-1 items-center justify-center bg-right-panel p-6">
-        <span className="text-xs text-zinc-400 dark:text-zinc-500">{t("agentSetup.noAgentSelected")}</span>
+        <span className="text-xs text-text-tertiary ">{t("agentSetup.noAgentSelected")}</span>
       </div>
     );
   }
@@ -549,7 +549,7 @@ export function ToolsTab() {
                       />
                     }
                   >
-                    <span className="truncate text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                    <span className="truncate text-[11px] font-medium text-text-secondary ">
                       {entry.name}
                     </span>
                   </ListRow>
@@ -558,7 +558,7 @@ export function ToolsTab() {
             )}
           </ExpandableRow>
         </ListBox>
-        <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+        <p className="mt-1 text-[9px] text-text-tertiary ">
           {t("agentSetup.builtinToolsDesc")}
         </p>
       </div>
@@ -601,7 +601,7 @@ export function ToolsTab() {
                                 <button
                                   onClick={() => moveSearchProviderUp(sp.id)}
                                   disabled={searchSaving}
-                                  className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                                  className="shrink-0 rounded p-0.5 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
                                 >
                                   <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                     <path d="m18 15-6-6-6 6" />
@@ -620,7 +620,7 @@ export function ToolsTab() {
                         }
                       >
                         <div className="flex items-center gap-1.5">
-                          <span className="truncate text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                          <span className="truncate text-[11px] font-medium text-text-secondary ">
                             {sp.name || sp.id}
                           </span>
                           {isChecked && priority !== undefined && (
@@ -628,7 +628,7 @@ export function ToolsTab() {
                           )}
                           {!hasKey && <Badge tone="warning">{t("agentSetup.noKey")}</Badge>}
                         </div>
-                        <span className="block truncate text-[9px] leading-tight text-zinc-400 dark:text-zinc-500">
+                        <span className="block truncate text-[9px] leading-tight text-text-tertiary ">
                           {sp.description || sp.base_url || ""}
                         </span>
                       </ListRow>
@@ -639,7 +639,7 @@ export function ToolsTab() {
             )}
           </ExpandableRow>
         </ListBox>
-        <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+        <p className="mt-1 text-[9px] text-text-tertiary ">
           {t("agentSetup.searchProvidersDesc")}
         </p>
       </div>
@@ -695,7 +695,7 @@ export function ToolsTab() {
             )}
           </ExpandableRow>
         </ListBox>
-        <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+        <p className="mt-1 text-[9px] text-text-tertiary ">
           {t("agentSetup.mcpToggleDesc")}
         </p>
         {/* Surface MCP PUT errors that the store would otherwise swallow.

@@ -1331,14 +1331,14 @@ export function FileEditorPanel({ width }: { width: number }) {
                                     ) : (
                                         // Generic file glyph for URL tabs — keeps alignment with
                                         // file-type tabs while signalling "not a workspace file".
-                                        <FileText className="h-3 w-3 shrink-0 text-zinc-400" />
+                                        <FileText className="h-3 w-3 shrink-0 text-text-tertiary" />
                                     )}
                                     {/* Loading / dirty indicator. Preview-mode tabs no longer
                                         render a separate badge here — the right-side toggle button
                                         already exposes the current mode, and adding another icon
                                         next to the file-type icon would crowd the tab. */}
                                     {file.loading ? (
-                                        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-400" />
+                                        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
                                     ) : file.dirty ? (
                                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                                     ) : null}
@@ -1392,8 +1392,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 className={cn(
                                 "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                                 locateDisabled
-                                    ? "text-zinc-300 dark:text-zinc-600 cursor-not-allowed"
-                                    : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                                    ? "text-text-secondary  cursor-not-allowed"
+                                    : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
                             )}
                             >
                                 <Locate className="h-3.5 w-3.5" />
@@ -1420,7 +1420,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         : t("fileEditor.openPreview")
                                 }
                                 onClick={handleTogglePreview}
-                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
                             >
                                 {activeFile.mode === "preview" ? (
                                     <Code2 className="h-3.5 w-3.5" />
@@ -1463,12 +1463,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 className={cn(
                                     "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                                     activeFile.mode === "preview"
-                                        ? "text-zinc-300 dark:text-zinc-600 cursor-not-allowed"
+                                        ? "text-text-secondary  cursor-not-allowed"
                                         : activeFile.saveError
                                           ? "text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30"
                                           : activeFile.dirty
                                             ? "text-[var(--color-accent)] hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-                                            : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 cursor-default",
+                                            : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 cursor-default",
                                 )}
                             >
                                 {activeFile.saving ? (
@@ -1499,7 +1499,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 clip cleanly under `overflow-hidden`. */}
             <div className="relative flex flex-1 flex-col overflow-hidden border-x border-right-panel-border">
                 {!activeFile ? (
-                    <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+                    <div className="flex h-full items-center justify-center text-xs text-text-tertiary ">
                         {t("fileEditor.emptyState")}
                     </div>
                 ) : activeFile.kind === "url" ? (
@@ -1515,7 +1515,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             // placeholder: /git/diff returns kind=binary with no
                             // content, so show an explicit notice rather than two
                             // empty panes.
-                            <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+                            <div className="flex h-full items-center justify-center text-xs text-text-tertiary ">
                                 {t("gitStatus.binaryDiff")}
                             </div>
                         ) : (
@@ -1541,7 +1541,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             "flex items-center gap-2 truncate px-3 py-1 text-left transition-colors " +
                                             (pickerSide === "base"
                                                 ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
-                                                : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800/60")
+                                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800/60")
                                         }
                                     >
                                         <span className="font-medium">
@@ -1549,7 +1549,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                                 ? t("gitStatus.headLabel")
                                                 : activeFile.diffBaseRef.slice(0, 7)}
                                         </span>
-                                        <span className="truncate text-zinc-400 dark:text-zinc-500">
+                                        <span className="truncate text-text-tertiary ">
                                             {sourceRelPath(activeFile)}
                                         </span>
                                         <svg
@@ -1575,10 +1575,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             "flex items-center justify-end gap-2 truncate px-3 py-1 text-right transition-colors " +
                                             (pickerSide === "head"
                                                 ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
-                                                : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800/60")
+                                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800/60")
                                         }
                                     >
-                                        <span className="truncate text-zinc-400 dark:text-zinc-500">
+                                        <span className="truncate text-text-tertiary ">
                                             {sourceRelPath(activeFile)}
                                         </span>
                                         <span className="font-medium">
@@ -1804,7 +1804,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </button>
                         )}
                         {activeFile.loading && (
-                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-page-bg/80 text-xs text-zinc-400">
+                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-page-bg/80 text-xs text-text-tertiary">
                                 <Loader2 className="h-4 w-4 animate-spin" />
                                 Loading...
                             </div>
@@ -1812,12 +1812,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                         </div>
                     </>
                 ) : monacoFailed ? (
-                    <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                    <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
                         <AlertCircle className="h-4 w-4" />
                         Editor failed to load. Close and reopen the panel to retry.
                     </div>
                 ) : (
-                    <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                    <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
                         <Loader2 className="h-4 w-4 animate-spin" />
                         Loading editor...
                     </div>
@@ -1845,10 +1845,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 <FileText className="h-5 w-5 text-amber-600 dark:text-amber-400" />
                             </div>
                             <div className="flex-1">
-                                <h3 className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                                <h3 className="text-sm font-medium text-text ">
                                     {t("fileEditor.unsavedChanges")}
                                 </h3>
-                                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                <p className="mt-1 text-xs text-text-tertiary ">
                                     {t("fileEditor.saveChanges")}
                                 </p>
                             </div>
@@ -1934,10 +1934,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 <FileText className="h-5 w-5 text-amber-600 dark:text-amber-400" />
                             </div>
                             <div className="flex-1">
-                                <h3 className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                                <h3 className="text-sm font-medium text-text ">
                                     {t("fileEditor.unsavedChanges")}
                                 </h3>
-                                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                                <p className="mt-1 text-xs text-text-tertiary ">
                                     {batchCloseRequest.kind === "all"
                                         ? t("fileEditor.batchCloseAllConfirm", {
                                             count: batchCloseRequest.dirtyCount,

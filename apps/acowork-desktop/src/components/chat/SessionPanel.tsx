@@ -101,7 +101,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
       {/* Trigger button */}
       <button
         onClick={() => setOpen(!open)}
-        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
+        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
       >
         <MessageCircle size={14} />
         Session
@@ -114,14 +114,14 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
           {/* Session list */}
           <div ref={listRef} className="max-h-80 overflow-y-auto py-1">
             {isLoading && sessions.length === 0 && (
-              <div className="flex items-center justify-center gap-2 px-3 py-6 text-xs text-zinc-400 dark:text-zinc-500">
+              <div className="flex items-center justify-center gap-2 px-3 py-6 text-xs text-text-tertiary ">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {t("sessionPanel.loadingSessions")}
               </div>
             )}
 
             {!isLoading && sessions.length === 0 && (
-              <div className="px-3 py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
+              <div className="px-3 py-4 text-center text-xs text-text-tertiary ">
                 {t("sessionPanel.noSessions")}
               </div>
             )}
@@ -150,13 +150,13 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                       {isStreaming ? (
                         <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-accent)]" />
                       ) : (
-                        <MessageCircle className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                        <MessageCircle className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
                       )}
-                      <span className={cn("min-w-0 flex-1 truncate text-xs", isActive && "font-semibold text-[var(--color-accent)]", !isActive && "text-zinc-700 dark:text-zinc-300")}>
+                      <span className={cn("min-w-0 flex-1 truncate text-xs", isActive && "font-semibold text-[var(--color-accent)]", !isActive && "text-text-secondary ")}>
                         {session.title || t("sessionPanel.untitledSession")}
                       </span>
                     </div>
-                    <div className="ml-5.5 flex items-center gap-2 text-[10px] text-zinc-400 dark:text-zinc-500">
+                    <div className="ml-5.5 flex items-center gap-2 text-[10px] text-text-tertiary ">
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {formatRelativeTime(session.created_at, t)}
@@ -197,7 +197,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                           setConfirmDelete(session.session_id);
                         }}
                         disabled={deletingId !== null}
-                        className="rounded p-1 text-zinc-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
@@ -215,7 +215,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                 createSession(agentId);
                 setOpen(false);
               }}
-              className="mx-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              className="mx-1.5 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
             >
               <MessageSquarePlus className="h-3.5 w-3.5" />
               {t("sessionPanel.newConversation")}

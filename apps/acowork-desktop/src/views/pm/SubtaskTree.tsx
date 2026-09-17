@@ -23,8 +23,8 @@ const STATUS_STYLE: Partial<Record<TaskStatus, string>> = {
   in_progress: "text-blue-600 dark:text-blue-400",
   submitted: "text-amber-600 dark:text-amber-400",
   rejected: "text-red-600 dark:text-red-400",
-  cancelled: "text-zinc-400 dark:text-zinc-500",
-  pending: "text-zinc-500 dark:text-zinc-400",
+  cancelled: "text-text-tertiary ",
+  pending: "text-text-tertiary ",
 };
 
 function StatusDot({ status }: { status: TaskStatus }) {
@@ -72,7 +72,7 @@ function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRo
         {hasChildren ? (
           <button
             type="button"
-            className="w-4 shrink-0 text-center text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="w-4 shrink-0 text-center text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
             onClick={(e) => {
               e.stopPropagation();
               setCollapsed((v) => !v);
@@ -90,7 +90,7 @@ function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRo
         <span
           className={cn(
             "min-w-0 flex-1 truncate",
-            task.status === "done" && "text-zinc-400 line-through dark:text-zinc-500",
+            task.status === "done" && "text-text-tertiary line-through ",
           )}
         >
           {task.title}
@@ -154,7 +154,7 @@ export function SubtaskTree({
 
   if (!root || children.length === 0) {
     return (
-      <p className="px-1 py-2 text-xs text-zinc-400 dark:text-zinc-500">
+      <p className="px-1 py-2 text-xs text-text-tertiary ">
         {root ? "暂无子任务" : ""}
       </p>
     );

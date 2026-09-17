@@ -2,9 +2,12 @@
 
 @theme {
   --color-accent: #3B82F6;
-  --color-text-secondary: hsl(0 0% 24%);
+  --color-text: hsl(240 10% 15%);
+  /* high-contrast text (light) — mirrors :root token so Tailwind
+     emits the `.text-text` utility; :root/.dark overrides the value */
+  --color-text-secondary: hsl(0 0% 30%);
   /* default UI labels & icons (light) */
-  --color-text-tertiary: hsl(0 0% 44%);
+  --color-text-tertiary: hsl(0 0% 45%);
   /* hints / metadata / placeholder (light) */
   --color-text-disabled: hsl(0 0% 60%);
   /* disabled state (light) */
@@ -193,7 +196,10 @@
 
   /* Background & text tokens for body */
   --color-bg: white;
-  --color-text: hsl(240 10% 3.9%);
+  /* NOTE: --color-text intentionally NOT duplicated here — the light
+     value lives in @theme (single source of truth, also feeds the
+     Tailwind `.text-text` utility); this :root block was overriding it
+     via unlayered cascade priority. Dark value lives in .dark below. */
 
   /* Accent highlight (user-configurable color) */
   --color-accent: #3B82F6;
@@ -372,11 +378,11 @@
   --color-muted-foreground: hsl(215.4 16.3% 65%);
 
   --color-bg: hsl(240 10% 3.9%);
-  --color-text: hsl(0 0% 90%);
+  --color-text: hsl(0 0% 85%);
   /* high-contrast text (dark) — softened from pure white */
-  --color-text-secondary: hsl(0 0% 70%);
+  --color-text-secondary: hsl(0 0% 75%);
   /* default UI labels & icons (dark) */
-  --color-text-tertiary: hsl(0 0% 52%);
+  --color-text-tertiary: hsl(0 0% 60%);
   /* hints / metadata / placeholder (dark) */
   --color-text-disabled: hsl(0 0% 38%);
   /* disabled state (dark) */

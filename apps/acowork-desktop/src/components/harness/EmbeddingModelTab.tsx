@@ -491,7 +491,7 @@ export function EmbeddingModelTab() {
     if (status !== "connected") {
         return (
             <div className="max-w-lg">
-                <p className="text-xs text-zinc-400">{t("embedding.connectToManage")}</p>
+                <p className="text-xs text-text-tertiary">{t("embedding.connectToManage")}</p>
             </div>
         );
     }
@@ -512,7 +512,7 @@ export function EmbeddingModelTab() {
                 >
                     <div className="space-y-2">
                         <div className="flex items-center gap-2 text-xs">
-                            <span className="text-zinc-500 dark:text-zinc-400">{t("embedding.status")}</span>
+                            <span className="text-text-tertiary ">{t("embedding.status")}</span>
                             <span
                                 className={cn(
                                     "h-2 w-2 rounded-full",
@@ -522,14 +522,14 @@ export function EmbeddingModelTab() {
                             <span className={cn(
                                 serviceRunning
                                     ? "text-[var(--color-accent)]"
-                                    : "text-zinc-500 dark:text-zinc-400"
+                                    : "text-text-tertiary "
                             )}>
                                 {serviceRunning ? t("embedding.running") : t("embedding.stopped")}
                             </span>
                         </div>
                         {activeModelId && serviceRunning && (
                             <div className="flex items-center gap-2 text-xs">
-                                <span className="text-zinc-500 dark:text-zinc-400">{t("embedding.activeModel")}</span>
+                                <span className="text-text-tertiary ">{t("embedding.activeModel")}</span>
                                 <span className="font-medium">{activeModelId}</span>
                             </div>
                         )}
@@ -632,7 +632,7 @@ export function EmbeddingModelTab() {
                                         aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
                                         onClick={loadModels}
                                         disabled={loading}
-                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
                                     >
                                         {loading ? (
                                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -690,7 +690,7 @@ export function EmbeddingModelTab() {
                             <span className="font-medium">
                                 {cloudActive.provider_id}/{cloudActive.model_id}
                             </span>
-                            <span className="text-zinc-500">· {cloudActive.dimension}d</span>
+                            <span className="text-text-tertiary">· {cloudActive.dimension}d</span>
                             {!cloudActive.has_api_key && (
                                 <span className="text-amber-600 dark:text-amber-400">
                                     · {t("embedding.apiKeyMissing")}
@@ -721,7 +721,7 @@ export function EmbeddingModelTab() {
                                     <button
                                         aria-label={t("embedding.addCustomProvider")}
                                         onClick={() => setCustomDialogOpen(true)}
-                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
                                     >
                                         <Plus className="h-3.5 w-3.5" />
                                     </button>
@@ -734,7 +734,7 @@ export function EmbeddingModelTab() {
                                         aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
                                         onClick={loadCloudProviders}
                                         disabled={cloudLoading}
-                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                        className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
                                     >
                                         {cloudLoading ? (
                                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -916,7 +916,7 @@ function MigrationPanel({
 
                             {/* Status badge */}
                             {!agent.is_running ? (
-                                <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400">
+                                <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 ">
                                     Not Running
                                 </span>
                             ) : isDone ? (
@@ -946,7 +946,7 @@ function MigrationPanel({
                                             style={{ width: `${pct}%` }}
                                         />
                                     </div>
-                                    <span className="text-[10px] tabular-nums text-zinc-500">
+                                    <span className="text-[10px] tabular-nums text-text-tertiary">
                                         {prog.progress?.rebuilt ?? 0}/{prog.progress?.total_scanned ?? "?"}
                                     </span>
                                 </div>
@@ -1061,7 +1061,7 @@ function ModelCard({
                             </span>
                         )}
                     </div>
-                    <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">{model.id}</p>
+                    <p className="mt-0.5 text-[10px] text-text-tertiary ">{model.id}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                     {/* Variant selector — show when downloading and model has multiple variants */}
@@ -1139,14 +1139,14 @@ function ModelCard({
                             }}
                         />
                     </div>
-                    <p className="text-right text-[10px] text-zinc-500 dark:text-zinc-400">
+                    <p className="text-right text-[10px] text-text-tertiary ">
                         {progress > 0 ? `${progress}%` : t("embedding.connecting")}
                     </p>
                 </div>
             )}
 
             {/* Meta info */}
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-tertiary ">
                 <span className="inline-flex items-center gap-1">
                     <Cpu className="h-3 w-3" />
                     {model.dimension}d
@@ -1160,7 +1160,7 @@ function ModelCard({
                     </span>
                 )}
                 {hasVariants && (
-                    <span className="text-zinc-400">
+                    <span className="text-text-tertiary">
                         {t("embedding.variants")}: {variants.map((v) => VARIANT_LABELS[v] ?? v.toUpperCase()).join("/")}
                     </span>
                 )}
@@ -1223,9 +1223,9 @@ function CloudProviderCard({
                 <div className="min-w-0">
                     <div className="flex items-center gap-2">
                         <h3 className="text-xs font-medium">{provider.name}</h3>
-                        <span className="text-[10px] text-zinc-400">({provider.id})</span>
+                        <span className="text-[10px] text-text-tertiary">({provider.id})</span>
                     </div>
-                    <p className="mt-0.5 truncate font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                    <p className="mt-0.5 truncate font-mono text-[10px] text-text-tertiary ">
                         {provider.api}
                     </p>
                 </div>
@@ -1344,10 +1344,10 @@ function CloudProviderCard({
                         >
                             <div className="flex min-w-0 items-center gap-2">
                                 <span className="font-medium">{m.name || m.id}</span>
-                                <span className="font-mono text-[10px] text-zinc-500">{m.id}</span>
-                                <span className="text-zinc-400">· {m.dimensions}d</span>
+                                <span className="font-mono text-[10px] text-text-tertiary">{m.id}</span>
+                                <span className="text-text-tertiary">· {m.dimensions}d</span>
                                 {m.context_length && (
-                                    <span className="text-zinc-400">· {m.context_length} ctx</span>
+                                    <span className="text-text-tertiary">· {m.context_length} ctx</span>
                                 )}
                                 {isActiveModel && (
                                     <span
@@ -1559,7 +1559,7 @@ function AddCustomEmbeddingProviderDialog({
                 <div className="flex-1 overflow-y-auto px-6 pb-2 space-y-3">
                     {/* Provider Name */}
                     <div>
-                        <label className="mb-1 block text-xs text-zinc-500">
+                        <label className="mb-1 block text-xs text-text-tertiary">
                             {t("embedding.customProviderName")}
                         </label>
                         <input
@@ -1573,7 +1573,7 @@ function AddCustomEmbeddingProviderDialog({
 
                     {/* Provider ID */}
                     <div>
-                        <label className="mb-1 block text-xs text-zinc-500">
+                        <label className="mb-1 block text-xs text-text-tertiary">
                             {t("embedding.customProviderId")}
                         </label>
                         <input
@@ -1587,7 +1587,7 @@ function AddCustomEmbeddingProviderDialog({
 
                     {/* Base URL */}
                     <div>
-                        <label className="mb-1 block text-xs text-zinc-500">
+                        <label className="mb-1 block text-xs text-text-tertiary">
                             {t("embedding.customBaseUrl")}
                         </label>
                         <input
@@ -1601,9 +1601,9 @@ function AddCustomEmbeddingProviderDialog({
 
                     {/* API Key (optional) */}
                     <div>
-                        <label className="mb-1 block text-xs text-zinc-500">
+                        <label className="mb-1 block text-xs text-text-tertiary">
                             {t("embedding.apiKey")}{" "}
-                            <span className="text-zinc-400">({t("embedding.optional")})</span>
+                            <span className="text-text-tertiary">({t("embedding.optional")})</span>
                         </label>
                         <input
                             type="password"
@@ -1617,13 +1617,13 @@ function AddCustomEmbeddingProviderDialog({
                     {/* Models list */}
                     <div>
                         <div className="mb-1 flex items-center justify-between">
-                            <label className="text-xs text-zinc-500">
+                            <label className="text-xs text-text-tertiary">
                                 {t("embedding.customModels")}
                             </label>
                             <button
                                 type="button"
                                 onClick={addModel}
-                                className="inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                                className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-200"
                             >
                                 <Plus className="h-3 w-3" />
                                 {t("embedding.customAddModel")}
@@ -1680,7 +1680,7 @@ function AddCustomEmbeddingProviderDialog({
                                             <button
                                                 type="button"
                                                 onClick={() => removeModel(idx)}
-                                                className="ml-auto text-zinc-400 hover:text-red-500"
+                                                className="ml-auto text-text-tertiary hover:text-red-500"
                                                 title={t("embedding.customRemoveModel")}
                                             >
                                                 <Trash2 className="h-3 w-3" />
@@ -1705,7 +1705,7 @@ function AddCustomEmbeddingProviderDialog({
                     <button
                         onClick={handleClose}
                         disabled={saving}
-                        className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                        className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
                     >
                         {t("embedding.cancel")}
                     </button>

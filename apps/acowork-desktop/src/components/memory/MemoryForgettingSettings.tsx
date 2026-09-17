@@ -159,7 +159,7 @@ export function MemoryForgettingSettings({
 
   // ── Render ────────────────────────────────────────────────────────────
   const numInputCls =
-    "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200";
+    "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 ";
 
   // Visual grammar mirrors the distill card (MemoryDistillSettings.tsx):
   //   - Title row: chevron + "记忆遗忘" + trailing Switch.
@@ -209,7 +209,7 @@ export function MemoryForgettingSettings({
           <div className="flex flex-col gap-2">
             <div className="grid grid-cols-3 gap-2">
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="text-[10px] text-text-tertiary ">
                   {t("memoryPanel.forgettingHalfLife")}
                 </span>
                 <StyledInput
@@ -230,7 +230,7 @@ export function MemoryForgettingSettings({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="text-[10px] text-text-tertiary ">
                   {t("memoryPanel.forgettingDormantThreshold")}
                 </span>
                 <StyledInput
@@ -253,7 +253,7 @@ export function MemoryForgettingSettings({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="text-[10px] text-text-tertiary ">
                   {t("memoryPanel.forgettingArchiveDays")}
                 </span>
                 <StyledInput
@@ -279,7 +279,7 @@ export function MemoryForgettingSettings({
                 distill card). Gated on `!enabled` so it only appears
                 while the user has not yet opted in. */}
             {!enabled && (
-              <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
+              <p className="text-[10px] text-text-tertiary ">
                 {t("memoryPanel.forgettingDisabledHint")}
               </p>
             )}

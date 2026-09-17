@@ -117,7 +117,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
       className="absolute right-0 top-full mt-1 w-72 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700 z-50"
     >
       {/* Header with total count */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-text-tertiary dark:border-zinc-700 ">
         <span>
           {totalCount > 0 ? (
             <>{t("sessionTabBar.sidebarShowing", { start, end, total: totalCount })}</>
@@ -130,7 +130,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
       {/* Search input */}
       <div className="border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-700">
         <div className="relative">
-          <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-400" />
+          <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-text-tertiary" />
           <StyledInput
             type="text"
             value={searchTerm}
@@ -143,7 +143,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
 
       <div className="max-h-80 overflow-y-auto py-1">
         {filteredSessions.length === 0 && (
-          <div className="px-3 py-4 text-center text-xs text-zinc-400 dark:text-zinc-500">
+          <div className="px-3 py-4 text-center text-xs text-text-tertiary ">
             {t("sessionTabBar.sidebarNoSessionsYet")}
           </div>
         )}
@@ -188,18 +188,18 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
                       )}
                     />
                   ) : isProc ? (
-                    <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-zinc-700 dark:text-zinc-200" />
+                    <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
                   ) : (
-                    <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                    <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
                   )}
-                  <span className={cn("min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300")}>
+                  <span className={cn("min-w-0 flex-1 truncate text-xs text-text-secondary ")}>
                     {session.title || "Untitled session"}
                   </span>
                   {isOpen && (
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
                   )}
                 </div>
-                <div className="ml-5.5 flex items-center gap-2 text-[10px] text-zinc-400 dark:text-zinc-500">
+                <div className="ml-5.5 flex items-center gap-2 text-[10px] text-text-tertiary ">
                   <span>{formatRelativeTime(session.created_at, t)}</span>
                   <span>·</span>
                   <span>{session.message_count} msg</span>
@@ -227,7 +227,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
                     disabled={deletingId !== null}
-                    className="rounded p-1 text-zinc-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50"
+                    className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400 disabled:opacity-50"
                   >
                     <Trash2 className="h-3 w-3" />
                   </button>
@@ -244,17 +244,17 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
           <button
             onClick={() => handlePageChange(currentPage - 1)}
             disabled={currentPage <= 1}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
           >
             <ChevronLeft className="h-3.5 w-3.5" />
           </button>
-          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          <span className="text-[11px] text-text-tertiary ">
             Page {currentPage} of {totalPages}
           </span>
           <button
             onClick={() => handlePageChange(currentPage + 1)}
             disabled={currentPage >= totalPages}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
@@ -576,9 +576,9 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                     )}
                   />
                 ) : isProc ? (
-                  <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-zinc-700 dark:text-zinc-200" />
+                  <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
                 ) : (
-                  <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                  <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
                 ))}
               {/* Title — double-click enters inline rename (same action as the
                   right-click "Rename" menu item). */}
@@ -595,7 +595,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                   onDoubleClick={(e) => e.stopPropagation()}
                   onContextMenu={(e) => e.stopPropagation()}
                   aria-label={t("sessionTabBar.rename")}
-                  className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] text-zinc-800 outline-none dark:bg-zinc-900 dark:text-zinc-100"
+                  className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] text-text outline-none dark:bg-zinc-900 "
                 />
               ) : (
                 <span
@@ -605,7 +605,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                   }}
                   className={cn(
                     "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
-                    isProc && isActive && "text-zinc-700 dark:text-zinc-200",
+                    isProc && isActive && "text-text-secondary ",
                   )}
                 >
                   {getTitle(sessionId)}
@@ -652,7 +652,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
           <Tooltip content={t("sessionTabBar.newConversation")} variant="plain">
             <button
               onClick={handleNew}
-              className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+              className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
             >
               <Plus className="h-3.5 w-3.5 shrink-0" />
             </button>
@@ -675,7 +675,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                 "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                 listOpen
                   ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                  : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                  : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
               )}
             >
               <Clock className="h-3.5 w-3.5" />
@@ -704,10 +704,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                 <TriangleAlert className="h-5 w-5 text-amber-600 dark:text-amber-400" />
               </div>
               <div className="flex-1">
-                <h3 className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                <h3 className="text-sm font-medium text-text ">
                   {t("sessionTabBar.llmReasoning")}
                 </h3>
-                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                <p className="mt-1 text-xs text-text-tertiary ">
                   {t("sessionTabBar.closeWarning")}
                 </p>
               </div>

@@ -286,7 +286,7 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
                 }
                 className={BUTTON_CLASS}
             >
-                <ChevronUp className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+                <ChevronUp className="h-4 w-4 text-text-tertiary " />
             </button>
             <button
                 type="button"
@@ -304,7 +304,7 @@ export function GitVirtualNav({ file, diffEditor }: GitVirtualNavProps) {
                 }
                 className={BUTTON_CLASS}
             >
-                <ChevronDown className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+                <ChevronDown className="h-4 w-4 text-text-tertiary " />
             </button>
         </div>
     );

@@ -7,11 +7,11 @@
 
 /** Standard input field (text, number, etc.) */
 export const inputBase =
-  "w-full rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+  "w-full rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900 ";
 
 /** Read-only input field */
 export const inputReadonly =
-  "rounded border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400";
+  "rounded border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 ";
 
 // Note: dropdown styling was historically provided via `selectBase` and
 // `selectArrowStyle` here. Both have been consolidated into the
@@ -21,17 +21,17 @@ export const inputReadonly =
 
 /** Font-mono input (for API keys, codes) */
 export const inputMono =
-  "rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200";
+  "rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 ";
 
 // ── Button styles ───────────────────────────────────────────────────
 
 /** Toolbar button (borderless, compact) — used for Model/Workspace selectors */
 export const toolbarButton =
-  "inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
+  "inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200";
 
 /** Toolbar button active state */
 export const toolbarButtonActive =
-  "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100";
+  "bg-zinc-200 dark:bg-zinc-700 text-text ";
 
 /** Dialog action button (Cancel/Save) — fixed width */
 export const dialogButton =
@@ -43,7 +43,7 @@ export const dialogButtonPrimary =
 
 /** Dialog secondary action (Cancel) */
 export const dialogButtonSecondary =
-  "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700";
+  "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700";
 
 // ── Test result styles ──────────────────────────────────────────────
 

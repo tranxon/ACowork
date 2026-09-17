@@ -123,11 +123,11 @@ export function RetryWaitBanner() {
       <div
         role="status"
         aria-live="polite"
-        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300"
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-text-secondary select-none dark:border-zinc-700 dark:bg-zinc-800/40 "
         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
       >
         <span className="flex shrink-0 items-center gap-1.5">
-          <Clock className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
+          <Clock className="h-3.5 w-3.5 text-text-tertiary " />
           <span className="text-xs font-medium">
             {label} — retrying in{" "}
             <span className="tabular-nums font-mono font-bold">
@@ -137,7 +137,7 @@ export function RetryWaitBanner() {
           </span>
         </span>
 
-        <span className="hidden sm:inline text-[11px] text-zinc-500/70 dark:text-zinc-400/70">
+        <span className="hidden sm:inline text-[11px] text-text-tertiary/70 ">
           {retryInfo.provider}
         </span>
 

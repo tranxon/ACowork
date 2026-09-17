@@ -112,13 +112,13 @@ const ROLE_BADGE_CLASSES: Record<string, string> = {
   user: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
   assistant: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
   tool: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-  system: "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300",
+  system: "bg-zinc-200 text-text-secondary dark:bg-zinc-700 ",
 };
 
 function MessagesView({ content }: { content?: string }) {
   if (!content) {
     return (
-      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+      <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary">
         <Loader className="h-2.5 w-2.5 animate-spin" />
         Loading messages...
       </div>
@@ -131,16 +131,16 @@ function MessagesView({ content }: { content?: string }) {
   } catch {
     // Not valid JSON — fall back to plain text (e.g. error payload).
     return (
-      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-text-secondary ">
         {content.slice(0, 4000)}
-        {content.length > 4000 && <span className="text-zinc-400">... (truncated)</span>}
+        {content.length > 4000 && <span className="text-text-tertiary">... (truncated)</span>}
       </pre>
     );
   }
   return (
     <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
       {messages.length === 0 && (
-        <div className="text-[10px] text-zinc-400">(empty conversation)</div>
+        <div className="text-[10px] text-text-tertiary">(empty conversation)</div>
       )}
       {messages.map((m, i) => {
         const role = m.role ?? "unknown";
@@ -153,31 +153,31 @@ function MessagesView({ content }: { content?: string }) {
               <span
                 className={cn(
                   "rounded px-1 py-px font-medium uppercase",
-                  ROLE_BADGE_CLASSES[role] ?? "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+                  ROLE_BADGE_CLASSES[role] ?? "bg-zinc-200 text-text-secondary dark:bg-zinc-700 "
                 )}
               >
                 {role}
               </span>
-              {m.name && <span className="font-mono text-zinc-400">{m.name}</span>}
-              <span className="ml-auto font-mono text-zinc-400">#{i}</span>
+              {m.name && <span className="font-mono text-text-tertiary">{m.name}</span>}
+              <span className="ml-auto font-mono text-text-tertiary">#{i}</span>
             </div>
             {m.reasoning_content && (
-              <details className="text-[9px] text-zinc-400">
+              <details className="text-[9px] text-text-tertiary">
                 <summary className="cursor-pointer">reasoning_content</summary>
-                <pre className="mt-0.5 whitespace-pre-wrap text-[10px] text-zinc-500 dark:text-zinc-400">
+                <pre className="mt-0.5 whitespace-pre-wrap text-[10px] text-text-tertiary ">
                   {m.reasoning_content}
                 </pre>
               </details>
             )}
-            <pre className="whitespace-pre-wrap text-[10px] leading-snug text-zinc-600 dark:text-zinc-400">
+            <pre className="whitespace-pre-wrap text-[10px] leading-snug text-text-secondary ">
               {m.content ?? ""}
             </pre>
             {m.tool_calls && m.tool_calls.length > 0 && (
-              <details className="text-[9px] text-zinc-400">
+              <details className="text-[9px] text-text-tertiary">
                 <summary className="cursor-pointer">
                   tool_calls ({m.tool_calls.length})
                 </summary>
-                <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-[10px] text-zinc-500 dark:text-zinc-400">
+                <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-[10px] text-text-tertiary ">
                   {JSON.stringify(m.tool_calls, null, 2).slice(0, 2000)}
                 </pre>
               </details>
@@ -213,10 +213,10 @@ export function ControlButton({
         className={cn(
           "rounded p-1.5 transition-colors",
           disabled
-            ? "cursor-not-allowed text-zinc-300 dark:text-zinc-600"
+            ? "cursor-not-allowed text-text-secondary "
             : active
               ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-              : "text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
         )}
       >
         {children}
@@ -240,7 +240,7 @@ export function StateLabel({
       <span
         className={cn(
           "text-right font-mono",
-          highlight ? "text-[var(--color-accent)] dark:text-[var(--color-accent)]" : "text-zinc-700 dark:text-zinc-300"
+          highlight ? "text-[var(--color-accent)] dark:text-[var(--color-accent)]" : "text-text-secondary "
         )}
       >
         {value}
@@ -356,12 +356,12 @@ export function SnapshotNode({
         variant="row"
         surface="inset"
         title={
-          <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+          <span className="text-xs font-medium text-text-tertiary ">
             Iteration #{snapshot.iteration}
           </span>
         }
         meta={
-          <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+          <span className="text-[10px] text-text-tertiary ">
             ~{displayTotalTokens.toLocaleString()} tok
           </span>
         }
@@ -372,7 +372,7 @@ export function SnapshotNode({
                 e.stopPropagation();
                 onRewind(snapshot.iteration);
               }}
-              className="rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
             >
               <Rewind className="h-3 w-3" />
             </button>
@@ -394,7 +394,7 @@ export function SnapshotNode({
           if (rp?.thinking_mode) items.push(`thinking: ${rp.thinking_mode}`);
           if (items.length === 0) return null;
           return (
-            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-400">
+            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-[10px] text-text-tertiary dark:border-zinc-700 dark:bg-zinc-800/40 ">
               {items.map((item) => (
                 <div key={item} className="whitespace-nowrap leading-4">
                   {item}
@@ -430,14 +430,14 @@ export function SnapshotNode({
                     className="flex flex-1 items-center gap-1.5"
                   >
                     {isExpanded ? (
-                      <ChevronDown className="h-2.5 w-2.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      <ChevronDown className="h-2.5 w-2.5 shrink-0 text-text-tertiary " />
                     ) : (
-                      <ChevronRight className="h-2.5 w-2.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      <ChevronRight className="h-2.5 w-2.5 shrink-0 text-text-tertiary " />
                     )}
-                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <span className="text-[11px] text-text-tertiary ">
                       {SECTION_LABELS[sectionKey] ?? sectionKey}
                     </span>
-                    <span className="ml-auto text-[10px] text-zinc-400 dark:text-zinc-500">
+                    <span className="ml-auto text-[10px] text-text-tertiary ">
                       {formatBytes(section.size_bytes)} / ~{(usingRealAnchor ? (realTokenBySection[section.key] ?? section.token_estimate) : section.token_estimate).toLocaleString()} tok
                     </span>
                   </button>
@@ -460,7 +460,7 @@ export function SnapshotNode({
                         }
                       }
                     }}
-                    className="rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                    className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
                   >
                     <Edit3 className="h-2.5 w-2.5" />
                   </button>
@@ -470,7 +470,7 @@ export function SnapshotNode({
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
-                  <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-50 p-2 text-zinc-600 dark:border-zinc-600 dark:bg-zinc-900/40 dark:text-zinc-400">
+                  <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-50 p-2 text-text-secondary dark:border-zinc-600 dark:bg-zinc-900/40 ">
                     {/* ADR-054 step 4: messages render as a conversation
                         list, not raw JSON text. */}
                     {sectionKey === "messages" ? (
@@ -482,7 +482,7 @@ export function SnapshotNode({
                         <textarea
                           value={editingSection.current}
                           onChange={(e) => onEditChange(e.target.value)}
-                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none dark:border-[var(--color-accent)]/50 dark:text-zinc-300"
+                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-[10px] leading-relaxed text-text-secondary outline-none dark:border-[var(--color-accent)]/50 "
                           autoFocus
                         />
                         <div className="flex items-center gap-1">
@@ -495,7 +495,7 @@ export function SnapshotNode({
                           </button>
                           <button
                             onClick={onCancelEdit}
-                            className="flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                            className="flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                           >
                             <X className="h-2.5 w-2.5" />
                             Cancel
@@ -503,7 +503,7 @@ export function SnapshotNode({
                           <Tooltip content={t("debugPanel.copyContent")} variant="plain">
                             <button
                               onClick={() => handleCopy(editingSection.current)}
-                              className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                              className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-[10px] text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                             >
                             {copied ? (
                               <>
@@ -522,19 +522,19 @@ export function SnapshotNode({
                       </div>
                     ) : cachedContent ? (
                       <>
-                        <div className="mb-1 flex items-center gap-2 text-[10px] text-zinc-400">
+                        <div className="mb-1 flex items-center gap-2 text-[10px] text-text-tertiary">
                           <span>{cachedContent.token_count} tokens</span>
                           <span className="font-mono">{cachedContent.hash.slice(0, 8)}</span>
                         </div>
-                        <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+                        <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-text-secondary ">
                           {cachedContent.content.slice(0, 2000)}
                           {cachedContent.content.length > 2000 && (
-                            <span className="text-zinc-400">... (truncated)</span>
+                            <span className="text-text-tertiary">... (truncated)</span>
                           )}
                         </pre>
                       </>
                     ) : (
-                      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+                      <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary">
                         <Loader className="h-2.5 w-2.5 animate-spin" />
                         Loading section...
                       </div>

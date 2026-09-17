@@ -29,19 +29,19 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
     <div className="flex h-screen w-screen items-center justify-center bg-page-bg">
       <div className="mx-auto max-w-md text-center">
         <AlertTriangle className="mx-auto h-12 w-12 text-amber-500" />
-        <h2 className="mt-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+        <h2 className="mt-4 text-lg font-semibold text-text ">
           {t("errorBoundary.title")}
         </h2>
-        <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+        <p className="mt-2 text-sm text-text-tertiary ">
           {t("errorBoundary.description")}
         </p>
         {error && (
-          <p className="mt-2 max-h-24 overflow-auto rounded bg-zinc-100 p-2 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400 select-text">
+          <p className="mt-2 max-h-24 overflow-auto rounded bg-zinc-100 p-2 text-xs text-text-tertiary dark:bg-zinc-800  select-text">
             {error.message}
           </p>
         )}
         {autoRetried && (
-          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">
+          <p className="mt-3 text-xs text-text-tertiary ">
             {t("errorBoundary.autoRecovering")}
           </p>
         )}
@@ -49,7 +49,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
           <div className="mt-6 flex items-center justify-center gap-3">
             <button
               onClick={onRetry}
-              className="flex items-center gap-2 rounded-md bg-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              className="flex items-center gap-2 rounded-md bg-zinc-200 px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-300 dark:bg-zinc-700  dark:hover:bg-zinc-600"
             >
               <RefreshCw className="h-4 w-4" />
               {t("errorBoundary.retry")}

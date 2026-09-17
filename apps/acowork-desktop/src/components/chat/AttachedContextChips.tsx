@@ -66,7 +66,7 @@ export function AttachedContextChips() {
         return (
           <div
             key={item.id}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
           >
             {isOpenable ? (
               /* Clickable chip body — opens the workspace ref in fileTab.
@@ -88,11 +88,11 @@ export function AttachedContextChips() {
                 {item.type === "selection" ? (
                   <Hash className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
                 ) : (
-                  <FileText className="h-3 w-3 shrink-0 text-zinc-400" />
+                  <FileText className="h-3 w-3 shrink-0 text-text-tertiary" />
                 )}
                 <span className="max-w-[200px] truncate">{item.name}</span>
                 {item.type === "selection" && item.startLine != null && item.endLine != null && (
-                  <span className="text-zinc-400 dark:text-zinc-500">
+                  <span className="text-text-tertiary ">
                     {item.startLine}-{item.endLine}
                   </span>
                 )}
@@ -108,7 +108,7 @@ export function AttachedContextChips() {
                 get a button-in-button DOM structure. */}
             <button
               type="button"
-              className="mr-0.5 rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              className="mr-0.5 rounded p-0.5 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
               onClick={handleRemove}
               aria-label={`Remove ${item.name}`}
             >

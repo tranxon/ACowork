@@ -117,7 +117,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Back */}
                 <button
                     onClick={() => { try { iframeRef.current?.contentWindow?.history.back(); } catch {} }}
-                    className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                     title={t("fileEditor.navBack")}
                 >
                     <ArrowLeft className="h-3.5 w-3.5" />
@@ -126,7 +126,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Forward */}
                 <button
                     onClick={() => { try { iframeRef.current?.contentWindow?.history.forward(); } catch {} }}
-                    className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                     title={t("fileEditor.navForward")}
                 >
                     <ArrowRight className="h-3.5 w-3.5" />
@@ -135,7 +135,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Refresh */}
                 <button
                     onClick={handleRefresh}
-                    className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
                     title={t("fileEditor.navRefresh")}
                 >
                     <RefreshCw className="h-3.5 w-3.5" />
@@ -150,7 +150,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                         onFocus={() => { setUrlInputValue(currentUrl); setIsEditingUrl(true); }}
                         onBlur={handleUrlBlur}
                         onKeyDown={handleUrlKeyDown}
-                        className="w-full border-0 bg-transparent px-2 py-1 text-xs text-zinc-600 outline-none placeholder-zinc-400 focus:ring-0 dark:text-zinc-400 dark:focus:text-zinc-100"
+                        className="w-full border-0 bg-transparent px-2 py-1 text-xs text-text-secondary outline-none placeholder-zinc-400 focus:ring-0  dark:focus:text-zinc-100"
                         placeholder={currentUrl}
                     />
                 </div>
@@ -172,8 +172,8 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Loading spinner */}
                 {loading && (
                     <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-page-bg">
-                        <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
-                        <span className="text-sm text-zinc-500">{t("fileEditor.loadingUrl")}</span>
+                        <Loader2 className="h-8 w-8 animate-spin text-text-tertiary" />
+                        <span className="text-sm text-text-tertiary">{t("fileEditor.loadingUrl")}</span>
                     </div>
                 )}
 

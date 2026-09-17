@@ -126,7 +126,7 @@ export function CompressionHistoryCard({
               void load();
             }}
             title={t("rightPanel.buttonRefresh")}
-            className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+            className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
@@ -135,7 +135,7 @@ export function CompressionHistoryCard({
       >
 
       {rows === null && !error && (
-        <div className="flex items-center justify-center gap-2 py-3 text-xs text-zinc-400">
+        <div className="flex items-center justify-center gap-2 py-3 text-xs text-text-tertiary">
           <Loader className="h-3.5 w-3.5 animate-spin" />
           {t("rightPanel.loadingCompressionHistory")}
         </div>
@@ -148,7 +148,7 @@ export function CompressionHistoryCard({
       )}
 
       {rows !== null && !error && rows.length === 0 && (
-        <div className="py-3 text-center text-xs text-zinc-400">
+        <div className="py-3 text-center text-xs text-text-tertiary">
           {t("rightPanel.noCompressionEvents")}
         </div>
       )}
@@ -168,13 +168,13 @@ export function CompressionHistoryCard({
                 onToggle={() => toggleExpanded(i)}
                 surface="inset"
                 title={
-                  <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                  <span className="font-mono text-[11px] text-text-tertiary ">
                     {time}
                   </span>
                 }
                 meta={<span className={cnLevel(m.level)}>Lv{m.level}</span>}
                 trailing={
-                  <span className="font-mono text-[11px] text-zinc-700 dark:text-zinc-300">
+                  <span className="font-mono text-[11px] text-text-secondary ">
                     {ratio}
                   </span>
                 }
@@ -214,5 +214,5 @@ function cnLevel(level: number): string {
   if (level >= 5) {
     return "rounded bg-orange-50 px-1 py-0.5 text-[10px] font-medium text-orange-600 dark:bg-orange-900/20 dark:text-orange-400";
   }
-  return "rounded bg-zinc-100 px-1 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300";
+  return "rounded bg-zinc-100 px-1 py-0.5 text-[10px] font-medium text-text-secondary dark:bg-zinc-800 ";
 }

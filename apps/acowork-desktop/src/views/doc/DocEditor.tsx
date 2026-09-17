@@ -78,12 +78,12 @@ function MonacoPane({
 }) {
   if (!monacoReady) {
     return monacoFailed ? (
-      <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
         <RefreshCw className="h-4 w-4" aria-hidden />
         {loadFailedLabel}
       </div>
     ) : (
-      <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
       </div>
     );
@@ -202,7 +202,7 @@ export function DocEditor() {
   // 空状态
   if (!doc && !loading) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-400">
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-text-tertiary">
         <FileText className="h-8 w-8 opacity-40" aria-hidden />
         <p className="text-xs">{t("doc.editorEmpty")}</p>
       </div>
@@ -211,7 +211,7 @@ export function DocEditor() {
 
   if (loading && !doc) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
       </div>
     );
@@ -257,7 +257,7 @@ export function DocEditor() {
         "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
         mode === key
           ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-          : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+          : "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
       )}
     >
       {(() => {
@@ -272,10 +272,10 @@ export function DocEditor() {
     <div className="flex h-full min-w-0 flex-1 flex-col bg-editor-canvas">
       {/* ── 顶栏：标题 + 元信息 + 模式/保存 ─────────────────── */}
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
-        <FileText className="h-4 w-4 shrink-0 text-zinc-400" aria-hidden />
+        <FileText className="h-4 w-4 shrink-0 text-text-tertiary" aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate text-xs font-medium text-zinc-700 dark:text-zinc-100">
+            <span className="truncate text-xs font-medium text-text-secondary ">
               {doc.meta.name}
             </span>
             {doc.meta.import && (() => {
@@ -296,7 +296,7 @@ export function DocEditor() {
               );
             })()}
           </div>
-          <div className="flex items-center gap-2 text-[10px] text-zinc-400">
+          <div className="flex items-center gap-2 text-[10px] text-text-tertiary">
             <span className="truncate">{doc.path}</span>
             <span aria-label={t("doc.versionLabel")}>v{doc.meta.version}</span>
             {dirty && <span className="text-amber-500">{t("doc.unsaved")}</span>}
@@ -326,7 +326,7 @@ export function DocEditor() {
                 "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
                 engine === "rich"
                   ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+                  : "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
               )}
             >
               <Type className="h-3 w-3" aria-hidden />
@@ -342,7 +342,7 @@ export function DocEditor() {
                 "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
                 engine === "source"
                   ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                  : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+                  : "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
               )}
             >
               <Braces className="h-3 w-3" aria-hidden />
@@ -370,7 +370,7 @@ export function DocEditor() {
             "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-40",
             dirty
               ? "bg-[var(--color-accent)] text-white hover:opacity-90"
-              : "border border-zinc-200 text-zinc-400 dark:border-zinc-700",
+              : "border border-zinc-200 text-text-tertiary dark:border-zinc-700",
           )}
         >
           {saving ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Save className="h-3 w-3" aria-hidden />}
@@ -444,7 +444,7 @@ export function DocEditor() {
                   onSave={() => void handleSave()}
                 />
               ) : (
-                <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400">
+                <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
                   <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                   {t("doc.editorLoadingRich")}
                 </div>

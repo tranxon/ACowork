@@ -318,7 +318,7 @@ export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
 
     if (file.loading) {
         return (
-            <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-400 dark:text-zinc-500">
+            <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary ">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {t("fileEditor.previewLoading")}
             </div>

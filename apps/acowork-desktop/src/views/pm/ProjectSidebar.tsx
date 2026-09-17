@@ -72,14 +72,14 @@ export function ProjectSidebar({ width }: { width?: number }) {
     >
       {/* 标题 + 新建按钮 */}
       <div className="flex items-center justify-between px-3 py-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-text-tertiary ">
           {t("pm.projects")}
         </h2>
         <button
           type="button"
           onClick={() => openCreate()}
           disabled={healthy === false}
-          className="rounded-md px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-nav-item-hover hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:text-zinc-200"
+          className="rounded-md px-1.5 py-0.5 text-xs text-text-tertiary hover:bg-nav-item-hover hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40  dark:hover:text-zinc-200"
           aria-label={t("pm.newProject")}
           title={t("pm.newProject")}
         >
@@ -104,7 +104,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                 "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
                 active
                   ? "bg-[var(--color-accent)]/10 font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20"
-                  : "text-zinc-600 hover:bg-nav-item-hover dark:text-zinc-300",
+                  : "text-text-secondary hover:bg-nav-item-hover ",
               )}
               aria-current={active ? "page" : undefined}
             >
@@ -117,7 +117,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                       {c.submitted}
                     </span>
                   )}
-                  <span className="rounded-full bg-zinc-100 px-1.5 text-[10px] text-zinc-500 group-hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400">
+                  <span className="rounded-full bg-zinc-100 px-1.5 text-[10px] text-text-tertiary group-hover:bg-zinc-200 dark:bg-zinc-800 ">
                     {c.total}
                   </span>
                 </span>
@@ -129,7 +129,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
       {/* 离线时禁用写操作 */}
       {healthy === false && (
-        <div className="border-t border-zinc-200 px-3 py-2 text-[10px] text-zinc-400 dark:border-zinc-700 dark:text-zinc-500">
+        <div className="border-t border-zinc-200 px-3 py-2 text-[10px] text-text-tertiary dark:border-zinc-700 ">
           {t("pm.offlineReadonlyHint")}
         </div>
       )}
@@ -167,7 +167,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
               <button
                 type="button"
                 onClick={() => closeCreate()}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
                 disabled={saving}
               >
                 {t("common.cancel")}

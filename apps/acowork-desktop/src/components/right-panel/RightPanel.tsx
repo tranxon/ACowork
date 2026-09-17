@@ -405,7 +405,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           cut off and resizing would break. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-right-panel-border bg-right-panel">
       {/* Tab title header */}
-      <div className="border-b border-right-panel-border px-3 pt-[10px] pb-[7px] text-xs font-medium text-zinc-500 dark:text-zinc-400">
+      <div className="border-b border-right-panel-border px-3 pt-[10px] pb-[7px] text-xs font-medium text-text-tertiary ">
         {t(`rightPanel.${activeTab}`)}
       </div>
 
@@ -454,7 +454,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           <div className="my-2 border-t border-right-panel-border" />
 
           {!selectedAgent?.alive ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-text-tertiary ">
               <Bug className="h-5 w-5" />
               <span className="text-center">
                 {t("rightPanel.noAgentDebug")}
@@ -607,7 +607,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   commits to a debug session. */}
               {selectedAgent?.debug_state === "enabled" && (
                 !connected ? (
-                  <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+                  <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-text-tertiary ">
                     <WifiOff className="h-5 w-5" />
                     <span className="text-center">
                       {t("rightPanel.debugConnectionLost")}
@@ -656,11 +656,11 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                   setSnapshotsOpen(true);
                                   setSnapshotPage((p) => Math.max(0, p - 1));
                                 }}
-                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
                               >
                                 <ChevronLeft className="h-3.5 w-3.5" />
                               </button>
-                              <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500">
+                              <span className="min-w-[3ch] text-center font-mono text-[10px] tabular-nums text-text-tertiary ">
                                 {snapshotPage + 1}/{snapshotTotalPages}
                               </span>
                               <button
@@ -671,7 +671,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                   setSnapshotsOpen(true);
                                   setSnapshotPage((p) => Math.min(snapshotTotalPages - 1, p + 1));
                                 }}
-                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400 dark:text-zinc-500 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
                               >
                                 <ChevronRight className="h-3.5 w-3.5" />
                               </button>
@@ -680,7 +680,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                         }
                       >
                         {snapshots.length === 0 && (
-                          <div className="px-3 py-3 text-center text-xs text-zinc-400">
+                          <div className="px-3 py-3 text-center text-xs text-text-tertiary">
                             {t("rightPanel.noSnapshots")}
                             <br />
                             {t("rightPanel.sendMessageToGenerate")}
@@ -753,7 +753,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               {contextUsage ? (
                 <div className="mb-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-zinc-500">{t("rightPanel.contextUsage")}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.contextUsage")}</span>
                     <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
                       {formatPercent(contextUsage.usage_percent)}%
                     </span>
@@ -764,7 +764,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       style={{ backgroundColor: "var(--color-accent)", width: `${contextUsage.usage_percent}%` }}
                     />
                   </div>
-                  <div className="flex justify-between text-zinc-400 dark:text-zinc-500">
+                  <div className="flex justify-between text-text-tertiary ">
                     <span>{formatTokenCount(contextUsage.total_tokens)} {t("rightPanel.used")}</span>
                     <span>{formatTokenCount(contextUsage.usable_context)} / {formatTokenCount(contextUsage.context_window)} {t("rightPanel.available")}</span>
                   </div>
@@ -772,12 +772,12 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   {isCompacting && (
                     <div className="flex items-center gap-1.5 mt-1">
                       <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                      <span className="thinking-shimmer text-zinc-500">{t("rightPanel.compacting")}</span>
+                      <span className="thinking-shimmer text-text-tertiary">{t("rightPanel.compacting")}</span>
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="mb-3 text-zinc-400 dark:text-zinc-500 italic">{t("rightPanel.noContextData")}</div>
+                <div className="mb-3 text-text-tertiary  italic">{t("rightPanel.noContextData")}</div>
               )}
               {/* ADR-066: cache hit ratio — same progress-bar style as the
                   context-usage block above.  This is the session-status
@@ -793,7 +793,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               {hasCacheData(contextUsage, "cumulative") && (
                 <div className="mb-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-zinc-500">{t("rightPanel.cacheHitRatio")}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.cacheHitRatio")}</span>
                     <span className="font-mono font-medium" style={{ color: "var(--color-accent)" }}>
                       {cacheHitRateLabel ?? "\u2014"}
                     </span>
@@ -806,7 +806,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       />
                     </div>
                   )}
-                  <div className="flex justify-between text-zinc-400 dark:text-zinc-500">
+                  <div className="flex justify-between text-text-tertiary ">
                     <span>{formatTokenCount(cacheStats.numerator)} {t("rightPanel.cached")}</span>
                     <span>{formatTokenCount(cacheStats.denominator)} {t("rightPanel.promptTokens")}</span>
                   </div>
@@ -853,8 +853,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               )}
               <StatRow label={t("rightPanel.labelTemperature")} value={temperature != null ? temperature.toFixed(2) : undefined} />
               <div className="flex justify-between py-1">
-                <span className="text-zinc-500">{t("rightPanel.sessionStatusLabel")}</span>
-                <span className="flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300">
+                <span className="text-text-tertiary">{t("rightPanel.sessionStatusLabel")}</span>
+                <span className="flex items-center gap-1.5 text-text-secondary ">
                   <span
                     className={cn(
                       "inline-block h-2 w-2 rounded-full",
@@ -895,7 +895,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               {selectedAgent ? (
                 <>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.sessionStatusLabel")}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.sessionStatusLabel")}</span>
                     <span className="flex items-center gap-1.5">
                       <span
                         className={cn(
@@ -903,26 +903,26 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                           selectedAgent.alive ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
                         )}
                       />
-                      <span className="text-zinc-700 dark:text-zinc-300">
+                      <span className="text-text-secondary ">
                         {selectedAgent.alive ? t("rightPanel.running") : t("rightPanel.stopped")}
                       </span>
                     </span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.agent")}</span>
-                    <span className="text-zinc-700 dark:text-zinc-300">{selectedAgent.name}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.agent")}</span>
+                    <span className="text-text-secondary ">{selectedAgent.name}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.version")}</span>
-                    <span className="text-zinc-700 dark:text-zinc-300">{selectedAgent.version}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.version")}</span>
+                    <span className="text-text-secondary ">{selectedAgent.version}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.activeSessions")}</span>
-                    <span className="text-zinc-700 dark:text-zinc-300">{openSessionCount}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.activeSessions")}</span>
+                    <span className="text-text-secondary ">{openSessionCount}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.totalSessions")}</span>
-                    <span className="text-zinc-700 dark:text-zinc-300">{totalSessionCount}</span>
+                    <span className="text-text-tertiary">{t("rightPanel.totalSessions")}</span>
+                    <span className="text-text-secondary ">{totalSessionCount}</span>
                   </div>
                   {/* Divider — separates the identity / session-count
                       cluster above from the agent-scoped token totals
@@ -947,8 +947,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                            the gap before the first LLM call lands, and
                            remains usable even when no session is active. */}
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.agentTotalInputTokens")}</span>
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="text-text-tertiary">{t("rightPanel.agentTotalInputTokens")}</span>
+                    <span className="font-mono text-text-secondary ">
                       {(
                         contextUsage?.agent_total_input_tokens ??
                         agentTokenTotals?.input
@@ -956,8 +956,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                     </span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.agentTotalOutputTokens")}</span>
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="text-text-tertiary">{t("rightPanel.agentTotalOutputTokens")}</span>
+                    <span className="font-mono text-text-secondary ">
                       {(
                         contextUsage?.agent_total_output_tokens ??
                         agentTokenTotals?.output
@@ -976,8 +976,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                            `agentStore.agents[id].agentTokenTotals`,
                            refreshed on every session-list fetch. */}
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("rightPanel.agentTotalCacheReadTokens")}</span>
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="text-text-tertiary">{t("rightPanel.agentTotalCacheReadTokens")}</span>
+                    <span className="font-mono text-text-secondary ">
                       {(
                         contextUsage?.agent_total_cache_read_tokens ??
                         agentTokenTotals?.cacheRead
@@ -994,8 +994,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       for non-Anthropic sessions. */}
                   {cacheProtocol === "anthropic" && (
                     <div className="flex justify-between py-1">
-                      <span className="text-zinc-500">{t("rightPanel.agentTotalCacheWriteTokens")}</span>
-                      <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                      <span className="text-text-tertiary">{t("rightPanel.agentTotalCacheWriteTokens")}</span>
+                      <span className="font-mono text-text-secondary ">
                         {(
                           contextUsage?.agent_total_cache_write_tokens ??
                           agentTokenTotals?.cacheWrite
@@ -1005,7 +1005,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   )}
                 </>
               ) : (
-                <div className="py-1 text-zinc-400 dark:text-zinc-500">{t("rightPanel.noAgentSelected")}</div>
+                <div className="py-1 text-text-tertiary ">{t("rightPanel.noAgentSelected")}</div>
               )}
             </ExpandableRow>
           </ListBox>
@@ -1061,9 +1061,9 @@ function formatTokenCount(n: number): string {
 function StatRow({ label, value }: { label: string; value?: string }) {
   return (
     <div className="flex items-center justify-between gap-2 py-1">
-      <span className="shrink-0 text-zinc-500">{label}</span>
+      <span className="shrink-0 text-text-tertiary">{label}</span>
       <span
-        className="min-w-0 truncate font-mono text-zinc-700 dark:text-zinc-300"
+        className="min-w-0 truncate font-mono text-text-secondary "
         title={value}
       >
         {value ?? "\u2014"}

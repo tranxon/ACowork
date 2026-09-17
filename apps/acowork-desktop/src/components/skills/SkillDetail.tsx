@@ -17,7 +17,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
           <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
             <button
               onClick={onBack}
-              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
               aria-label={t("common.backToList")}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -26,7 +26,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
           </div>
         )}
         <div className="flex flex-1 items-center justify-center">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400 dark:text-zinc-500" />
+          <Loader2 className="h-6 w-6 animate-spin text-text-tertiary " />
         </div>
       </div>
     );
@@ -39,7 +39,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
           <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
             <button
               onClick={onBack}
-              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
               aria-label={t("common.backToList")}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -49,7 +49,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         )}
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
-            <p className="text-sm text-zinc-400 dark:text-zinc-500">
+            <p className="text-sm text-text-tertiary ">
               Select a skill to view details
             </p>
           </div>
@@ -65,7 +65,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
           <button
             onClick={onBack}
-            className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
             aria-label={t("common.backToList")}
           >
             <ArrowLeft className="h-4 w-4" />
@@ -76,13 +76,13 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
       <div className="flex-1 overflow-y-auto p-6">
       {/* Basic info card */}
       <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+        <h2 className="text-lg font-semibold text-text ">
           {detail.name}
         </h2>
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+        <p className="mt-1 text-sm text-text-tertiary ">
           {detail.description}
         </p>
-        <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="mt-3 flex flex-wrap gap-2 text-xs text-text-tertiary ">
           {detail.version && (
             <span className="rounded bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">
               Version: {detail.version}
@@ -99,7 +99,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
       {/* Triggers */}
       {detail.triggers.length > 0 && (
         <div className="mt-5">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary ">
             Triggers
           </h3>
           <div className="mt-2 flex flex-wrap gap-2">
@@ -118,14 +118,14 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
       {/* Tool dependencies */}
       {detail.tool_deps.length > 0 && (
         <div className="mt-5">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary ">
             Tool Dependencies
           </h3>
           <div className="mt-2 flex flex-wrap gap-2">
             {detail.tool_deps.map((tool) => (
               <span
                 key={tool}
-                className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-text-secondary dark:bg-zinc-800 "
               >
                 {tool}
               </span>
@@ -136,11 +136,11 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
 
       {/* Instructions */}
       <div className="mt-5">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary ">
           Instructions
         </h3>
         <div className="mt-2 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
-          <pre className="whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
+          <pre className="whitespace-pre-wrap text-sm text-text-secondary ">
             {detail.instructions}
           </pre>
         </div>
@@ -148,10 +148,10 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
 
       {/* Execution stats */}
       <div className="mt-5">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary ">
           Execution Stats
         </h3>
-        <p className="mt-2 text-sm text-zinc-400 dark:text-zinc-500">
+        <p className="mt-2 text-sm text-text-tertiary ">
           No execution history available
         </p>
       </div>

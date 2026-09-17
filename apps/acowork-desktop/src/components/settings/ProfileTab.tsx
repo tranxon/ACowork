@@ -326,8 +326,8 @@ export function ProfileTab() {
                     <button
                       onClick={() => setAvatarTab("custom")}
                       className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
-                        ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-                        : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                        ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
+                        : "text-text-tertiary hover:text-zinc-600 "
                         }`}
                     >
                       Custom
@@ -335,8 +335,8 @@ export function ProfileTab() {
                     <button
                       onClick={() => setAvatarTab("builtin")}
                       className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
-                        ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-                        : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                        ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
+                        : "text-text-tertiary hover:text-zinc-600 "
                         }`}
                     >
                       Builtin
@@ -349,7 +349,7 @@ export function ProfileTab() {
                       <button
                         onClick={handleUploadClick}
                         disabled={avatarBusy}
-                        className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-500 dark:hover:border-zinc-400"
+                        className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600  dark:hover:border-zinc-400"
                       >
                         <span className="text-lg">+</span>
                       </button>
@@ -418,7 +418,7 @@ export function ProfileTab() {
               )}
           </div>
           <div>
-            <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+            <p className="text-sm font-medium text-text ">
               {profile.displayName}
             </p>
           </div>
@@ -426,7 +426,7 @@ export function ProfileTab() {
 
         {/* Display name */}
         <div className="mt-3 space-y-1.5">
-          <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400">
+          <label className="block text-xs font-medium text-text-secondary ">
             {t("settings.displayName")}
           </label>
           <StyledInput
@@ -441,7 +441,7 @@ export function ProfileTab() {
               }
             }}
             placeholder={t("settings.displayNamePlaceholder")}
-            className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
+            className="rounded border-zinc-300 bg-modal-surface py-2 text-text placeholder:text-text-tertiary dark:border-zinc-600 dark:placeholder:text-text-tertiary"
           />
         </div>
         </ExpandableRow>
@@ -461,19 +461,19 @@ export function ProfileTab() {
                   {savedMsg === "saved" ? t("settings.saved") : t("settings.saveFailed")}
                 </span>
               )}
-              {saving && <span className="text-[10px] text-zinc-400">{t("settings.saving")}</span>}
+              {saving && <span className="text-[10px] text-text-tertiary">{t("settings.saving")}</span>}
             </span>
           }
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
 
         {backendLoading ? (
-          <p className="text-xs text-zinc-400">{t("settings.loading")}</p>
+          <p className="text-xs text-text-tertiary">{t("settings.loading")}</p>
         ) : backendUser ? (
           <div className="space-y-3">
             {/* Language */}
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">{t("settings.language")}</label>
+              <label className="mb-1 block text-xs text-text-tertiary">{t("settings.language")}</label>
               <Dropdown
                 value={language}
                 onChange={(lng) => {
@@ -492,7 +492,7 @@ export function ProfileTab() {
 
             {/* Timezone */}
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">{t("settings.timezone")}</label>
+              <label className="mb-1 block text-xs text-text-tertiary">{t("settings.timezone")}</label>
               <Dropdown
                 value={timezone}
                 onChange={(tz) => {
@@ -505,7 +505,7 @@ export function ProfileTab() {
 
             {/* City */}
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">{t("settings.city")}</label>
+              <label className="mb-1 block text-xs text-text-tertiary">{t("settings.city")}</label>
               <StyledInput
                 type="text"
                 value={city}
@@ -518,13 +518,13 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.cityPlaceholder")}
-                className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
+                className="rounded border-zinc-300 bg-modal-surface py-2 text-text placeholder:text-text-tertiary dark:border-zinc-600 dark:placeholder:text-text-tertiary"
               />
             </div>
 
             {/* Occupation */}
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">{t("settings.occupation")}</label>
+              <label className="mb-1 block text-xs text-text-tertiary">{t("settings.occupation")}</label>
               <StyledInput
                 type="text"
                 value={occupation}
@@ -537,12 +537,12 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.occupationPlaceholder")}
-                className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
+                className="rounded border-zinc-300 bg-modal-surface py-2 text-text placeholder:text-text-tertiary dark:border-zinc-600 dark:placeholder:text-text-tertiary"
               />
             </div>
           </div>
         ) : (
-          <p className="text-xs text-zinc-400">
+          <p className="text-xs text-text-tertiary">
             {t("settings.noProfile")}
           </p>
         )}

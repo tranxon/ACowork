@@ -113,11 +113,11 @@ export function ServicesPanel() {
     <div data-testid="services-panel" className="space-y-3">
       {/* Summary + diagnose button */}
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="flex items-center gap-2 text-xs text-text-tertiary ">
           <Server className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{totalLabel}</span>
           {lastProbeAt !== null && (
-            <span className="text-zinc-400 dark:text-zinc-500">
+            <span className="text-text-tertiary ">
               · {t("settings.services.lastProbeAt", {
                 seconds: Math.max(0, Math.floor((Date.now() - lastProbeAt) / 1000)),
               })}
@@ -128,7 +128,7 @@ export function ServicesPanel() {
               (legacy per-endpoint walk on a pre-P2 Gateway). */}
           {report && (
             <span
-              className="rounded-full border border-zinc-300 px-1.5 py-px text-[10px] leading-4 text-zinc-500 dark:border-zinc-600 dark:text-zinc-400"
+              className="rounded-full border border-zinc-300 px-1.5 py-px text-[10px] leading-4 text-text-tertiary dark:border-zinc-600 "
               data-testid="services-source"
             >
               {t(
@@ -143,7 +143,7 @@ export function ServicesPanel() {
           type="button"
           onClick={() => void diagnose()}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-200 dark:hover:bg-zinc-700"
+          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
           aria-label={t("settings.services.diagnose")}
         >
           {loading ? (
@@ -171,7 +171,7 @@ export function ServicesPanel() {
           if (types.length === 0) return null;
           return (
             <section key={group} className="space-y-1">
-              <h4 className="text-[10px] font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              <h4 className="text-[10px] font-medium uppercase tracking-wider text-text-tertiary ">
                 {t(groupLabelKey(group))}
               </h4>
               <ul className="divide-y divide-zinc-200 overflow-hidden rounded-md border border-zinc-200 dark:divide-zinc-700 dark:border-zinc-700">
@@ -195,7 +195,7 @@ export function ServicesPanel() {
 
       {/* Empty state — first render before any diagnose() call */}
       {!report && !loading && (
-        <div className="rounded-md border border-dashed border-zinc-300 px-3 py-6 text-center text-xs text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+        <div className="rounded-md border border-dashed border-zinc-300 px-3 py-6 text-center text-xs text-text-tertiary dark:border-zinc-700 ">
           {t("settings.services.emptyHint")}
         </div>
       )}
@@ -236,20 +236,20 @@ function ServiceRow({
         title={lastError ?? undefined}
       />
       {/* Name */}
-      <span className="min-w-[7rem] font-medium text-zinc-800 dark:text-zinc-100">
+      <span className="min-w-[7rem] font-medium text-text ">
         {t(NAME_KEY[type])}
       </span>
       {/* Version */}
-      <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+      <span className="font-mono text-[11px] text-text-tertiary ">
         v{version}
       </span>
       {/* Latency */}
-      <span className="font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
+      <span className="font-mono text-[11px] tabular-nums text-text-tertiary ">
         {latency > 0 ? `${latency}ms` : "—"}
       </span>
       {/* Detail */}
       {detail && (
-        <span className="flex-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+        <span className="flex-1 truncate text-[11px] text-text-tertiary ">
           {detail}
         </span>
       )}
@@ -259,7 +259,7 @@ function ServiceRow({
         type="button"
         onClick={onRetry}
         disabled={isProbing}
-        className="ml-auto inline-flex items-center gap-1 rounded border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
+        className="ml-auto inline-flex items-center gap-1 rounded border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
         aria-label={t("settings.services.retry", { name: t(NAME_KEY[type]) })}
       >
         {isProbing ? (

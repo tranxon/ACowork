@@ -443,7 +443,7 @@ export function FileTree({
                           : "request aborted";
                 return (
                     <div
-                        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 py-8 text-zinc-400"
+                        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 py-8 text-text-tertiary"
                         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
                     >
                         <span>{t("workspace.treeLoadFailed") ?? `Failed to load workspace (${detail})`}</span>
@@ -458,14 +458,14 @@ export function FileTree({
                 );
             }
             return (
-                <div className="flex min-h-0 flex-1 items-center justify-center py-8 text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <div className="flex min-h-0 flex-1 items-center justify-center py-8 text-text-tertiary" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                     Loading...
                 </div>
             );
         }
         if (rootEntries.length === 0) {
             return (
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center py-8 text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center py-8 text-text-tertiary" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                     <span>Empty workspace</span>
                 </div>
             );

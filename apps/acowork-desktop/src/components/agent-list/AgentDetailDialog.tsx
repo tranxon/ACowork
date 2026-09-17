@@ -68,7 +68,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
           <button
             ref={closeRef}
             onClick={onClose}
-            className="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
             aria-label={t("agentDetailDialog.ariaLabelClose")}
           >
             ✕
@@ -117,7 +117,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                 value={
                   <span className="flex items-center gap-1.5">
                     <span className="font-mono text-xs" style={{ color: "var(--color-accent)" }}>{modelInfo.model}</span>
-                    <span className="text-[10px] text-zinc-400">({modelInfo.provider})</span>
+                    <span className="text-[10px] text-text-tertiary">({modelInfo.provider})</span>
                   </span>
                 }
               />
@@ -128,7 +128,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
         <div className="mt-6 flex justify-end">
           <button
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
           >
             Close
           </button>
@@ -149,9 +149,9 @@ function DetailRow({
 }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-xs text-zinc-400 dark:text-zinc-500">{label}</span>
+      <span className="text-xs text-text-tertiary ">{label}</span>
       {typeof value === "string" ? (
-        <span className={cn("text-zinc-800 dark:text-zinc-200", mono && "font-mono text-xs")}>
+        <span className={cn("text-text ", mono && "font-mono text-xs")}>
           {value}
         </span>
       ) : (

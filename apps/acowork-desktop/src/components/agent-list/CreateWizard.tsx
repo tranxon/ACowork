@@ -147,8 +147,8 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
       <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
-          <Sparkles className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
-          <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+          <Sparkles className="h-5 w-5 text-text-tertiary " />
+          <h2 className="text-sm font-semibold text-text ">
             Create New Agent
           </h2>
         </div>
@@ -165,10 +165,10 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   className={cn(
                     "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
                     active &&
-                    "bg-zinc-200 text-zinc-800 dark:bg-zinc-300 dark:text-zinc-900",
+                    "bg-zinc-200 text-text dark:bg-zinc-300 ",
                     passed &&
                     "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                    !active && !passed && "text-zinc-400 dark:text-zinc-500",
+                    !active && !passed && "text-text-tertiary ",
                   )}
                 >
                   {passed ? (
@@ -199,8 +199,8 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
           {step === "basic" && (
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                  Agent ID * <span className="font-normal text-zinc-400">(e.g. com.example.myagent)</span>
+                <label className="mb-1 block text-xs font-medium text-text-tertiary ">
+                  Agent ID * <span className="font-normal text-text-tertiary">(e.g. com.example.myagent)</span>
                 </label>
                 <StyledInput
                   type="text"
@@ -211,7 +211,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                <label className="mb-1 block text-xs font-medium text-text-tertiary ">
                   Display Name *
                 </label>
                 <StyledInput
@@ -224,7 +224,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  <label className="mb-1 block text-xs font-medium text-text-tertiary ">
                     Version
                   </label>
                   <StyledInput
@@ -236,7 +236,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  <label className="mb-1 block text-xs font-medium text-text-tertiary ">
                     Author
                   </label>
                   <StyledInput
@@ -249,7 +249,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                 </div>
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                <label className="mb-1 block text-xs font-medium text-text-tertiary ">
                   Description
                 </label>
                 <StyledTextarea
@@ -266,7 +266,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
           {/* Step 2: LLM config — provider/model are now configured via Desktop settings, not manifest */}
           {step === "llm" && (
             <div className="space-y-3">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="text-xs text-text-tertiary ">
                 Provider and model are now configured globally in Settings → AI Providers.
                 This wizard no longer embeds provider/model in the manifest.
               </p>
@@ -276,7 +276,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
           {/* Step 3: Template */}
           {step === "template" && (
             <div className="space-y-3">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="text-xs text-text-tertiary ">
                 Choose a starting template. This sets default provider and model settings.
               </p>
               <div className="grid gap-3">
@@ -290,16 +290,16 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                       }}
                       className="flex items-start gap-3 rounded-md border border-zinc-200 px-3 py-2 text-left transition-colors hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-600 dark:hover:border-zinc-400 dark:hover:bg-zinc-700"
                     >
-                      <Icon className="mt-0.5 h-5 w-5 text-zinc-400" />
+                      <Icon className="mt-0.5 h-5 w-5 text-text-tertiary" />
                       <div>
-                        <p className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                        <p className="text-xs font-medium text-text-secondary ">
                           {tmpl.name}
                         </p>
-                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        <p className="text-xs text-text-tertiary ">
                           {tmpl.desc}
                         </p>
                         {tmpl.provider && (
-                          <p className="mt-1 text-xs text-zinc-400">
+                          <p className="mt-1 text-xs text-text-tertiary">
                             {tmpl.provider} / {tmpl.model}
                           </p>
                         )}
@@ -314,11 +314,11 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
           {/* Step 4: Preview */}
           {step === "preview" && (
             <div className="space-y-3">
-              <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+              <h3 className="text-xs font-medium text-text-secondary ">
                 Review Your Agent
               </h3>
               <div className="rounded-md bg-zinc-50 px-4 py-3 dark:bg-zinc-700/50">
-                <pre className="text-xs text-zinc-600 dark:text-zinc-300">
+                <pre className="text-xs text-text-secondary ">
                   {`[package]
 agent_id = "${form.agent_id}"
 name = "${form.name}"
@@ -344,7 +344,7 @@ dev = true
           <button
             onClick={stepIndex === 0 ? onClose : handleBack}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
           >
             {stepIndex === 0 ? t("common.cancel") : t("common.back")}
           </button>

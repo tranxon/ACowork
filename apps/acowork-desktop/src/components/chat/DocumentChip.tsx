@@ -34,7 +34,7 @@ function formatIcon(format: string) {
     case "xlsx":
       return <Table className="h-4 w-4 shrink-0 text-green-600" />;
     default:
-      return <FileText className="h-4 w-4 shrink-0 text-zinc-400" />;
+      return <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />;
   }
 }
 
@@ -65,7 +65,7 @@ export function DocumentChip({
     <div
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs",
-        "text-zinc-700 dark:text-zinc-300",
+        "text-text-secondary ",
         borderClass,
         className,
       )}
@@ -76,14 +76,14 @@ export function DocumentChip({
       {/* Filename + size */}
       <span className="max-w-[200px] truncate font-medium">{filename}</span>
       {size != null && (
-        <span className="text-zinc-400 dark:text-zinc-500">
+        <span className="text-text-tertiary ">
           {formatSize(size)}
         </span>
       )}
 
       {/* Status indicator */}
       {status === "uploading" && (
-        <Loader className="h-3 w-3 shrink-0 animate-spin text-zinc-400" />
+        <Loader className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
       )}
       {status === "success" && (
         <Check className="h-3 w-3 shrink-0 text-green-500" />
@@ -101,7 +101,7 @@ export function DocumentChip({
       {onRemove && (
         <button
           type="button"
-          className="ml-0.5 rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+          className="ml-0.5 rounded p-0.5 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
           onClick={(e) => {
             e.stopPropagation();
             onRemove();

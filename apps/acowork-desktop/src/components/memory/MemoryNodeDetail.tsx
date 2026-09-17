@@ -174,7 +174,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <button
           onClick={onClose}
-          className="inline-flex items-center gap-1 rounded p-0.5 text-[11px] text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="inline-flex items-center gap-1 rounded p-0.5 text-[11px] text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
           aria-label={t("memoryNodeDetail.ariaLabelBackToList")}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
@@ -193,14 +193,14 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
           </span>
           {node.sub_type && (
             <span
-              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-text-secondary dark:bg-zinc-800 "
               data-sub-type={node.sub_type}
               title={node.sub_type}
             >
               {subLabelOf(node.node_type, node.sub_type)}
             </span>
           )}
-          <span className="text-[11px] text-zinc-400 dark:text-zinc-500">#{node.node_id}</span>
+          <span className="text-[11px] text-text-tertiary ">#{node.node_id}</span>
         </div>
       </div>
 
@@ -208,8 +208,8 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div data-tab-scroll className="flex-1 overflow-y-auto p-3">
         {/* Full content */}
         <div className="mb-3">
-          <h3 className="mb-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400">{t("memoryNodeDetail.content")}</h3>
-          <p className="whitespace-pre-wrap text-xs text-zinc-800 dark:text-zinc-200">{node.content}</p>
+          <h3 className="mb-1 text-[11px] font-medium text-text-tertiary ">{t("memoryNodeDetail.content")}</h3>
+          <p className="whitespace-pre-wrap text-xs text-text ">{node.content}</p>
         </div>
 
         {/* Metadata grid.
@@ -243,7 +243,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
         {/* Decay score visualization */}
         <div className="mb-3">
           <div className="mb-1 flex items-center justify-between">
-            <h3 className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Decay Score</h3>
+            <h3 className="text-[11px] font-medium text-text-tertiary ">Decay Score</h3>
             <span
               className={cn(
                 "text-[11px] font-medium",
@@ -259,7 +259,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
               style={{ width: `${node.decay_score * 100}%` }}
             />
           </div>
-          <p className="mt-1 text-right text-[11px] text-zinc-500 dark:text-zinc-400">
+          <p className="mt-1 text-right text-[11px] text-text-tertiary ">
             {node.decay_score.toFixed(3)}
           </p>
         </div>
@@ -292,8 +292,8 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
 function MetaItem({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-wider text-zinc-400 dark:text-zinc-500">{label}</p>
-      <p className="mt-0.5 text-[11px] text-zinc-700 dark:text-zinc-300">{value}</p>
+      <p className="text-[10px] uppercase tracking-wider text-text-tertiary ">{label}</p>
+      <p className="mt-0.5 text-[11px] text-text-secondary ">{value}</p>
     </div>
   );
 }

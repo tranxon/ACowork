@@ -51,7 +51,7 @@ export function ConfirmDialog({
         <h3 id="confirm-title" className="text-sm font-semibold">
           {title}
         </h3>
-        <p id="confirm-desc" className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+        <p id="confirm-desc" className="mt-2 text-xs text-text-tertiary ">
           {message}
         </p>
 
@@ -59,7 +59,7 @@ export function ConfirmDialog({
           <button
             ref={cancelRef}
             onClick={onCancel}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
           >
             Cancel
           </button>

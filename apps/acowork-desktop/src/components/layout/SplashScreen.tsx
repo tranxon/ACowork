@@ -359,7 +359,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                     <h1 className="leading-none">
                         <img src={brandMark} alt={t("splashScreen.altLogo")} width="360" />
                     </h1>
-                    <p className="text-sm font-medium uppercase tracking-[0.25em] text-zinc-400 dark:text-zinc-500">
+                    <p className="text-sm font-medium uppercase tracking-[0.25em] text-text-tertiary ">
                         Collaborate with your AI colleagues
                     </p>
                 </div>
@@ -370,13 +370,13 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                         <>
                             <div className="flex items-center gap-2">
                                 <div className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
-                                <p className="max-w-md text-center text-sm break-words text-zinc-600 dark:text-zinc-400">
+                                <p className="max-w-md text-center text-sm break-words text-text-secondary ">
                                     {bootError
                                         ? `Gateway initialization failed: ${bootError}`
                                         : `Gateway did not respond within ${MAX_WAIT_MS / 1000}s`}
                                 </p>
                             </div>
-                            <p className="max-w-md text-center text-xs text-zinc-400 dark:text-zinc-500">
+                            <p className="max-w-md text-center text-xs text-text-tertiary ">
                                 {bootError
                                     ? "The Desktop could not complete its startup sequence. Fix the cause and retry."
                                     : "Make sure the Gateway is running on port 19876"}
@@ -391,7 +391,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                             <div className="mt-1 flex flex-col items-center gap-1.5">
                                 <label
                                     htmlFor="splash-gateway-url"
-                                    className="text-xs text-zinc-400 dark:text-zinc-500"
+                                    className="text-xs text-text-tertiary "
                                 >
                                     {t("splashScreen.gatewayAddress")}
                                 </label>
@@ -403,13 +403,13 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                     spellCheck={false}
                                     autoCapitalize="off"
                                     autoCorrect="off"
-                                    className="w-80 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-500"
+                                    className="w-80 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-text-secondary outline-none focus:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-800  dark:focus:border-zinc-500"
                                 />
                             </div>
                             <button
                                 onClick={handleRetry}
                                 disabled={retrying}
-                                className="mt-2 rounded-md bg-zinc-200 px-5 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-300 disabled:opacity-40 dark:bg-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-600"
+                                className="mt-2 rounded-md bg-zinc-200 px-5 py-2 text-sm font-medium text-text-secondary transition-colors hover:bg-zinc-300 disabled:opacity-40 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                             >
                                 {retrying ? t("splashScreen.retrying") : t("splashScreen.retryConnection")}
                             </button>
@@ -429,9 +429,9 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                     }}
                                 />
                             </div>
-                            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                            <p className="text-sm text-text-tertiary ">
                                 {statusText}
-                                <LoadingDots className="inline-block w-5 text-left text-zinc-400 dark:text-zinc-500" />
+                                <LoadingDots className="inline-block w-5 text-left text-text-tertiary " />
                             </p>
                         </>
                     )}
@@ -443,7 +443,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 className={`absolute bottom-6 transition-all duration-700 delay-300 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0"
                     }`}
             >
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-600">ACowork v{pkg.version}</span>
+                <span className="text-[11px] text-text-tertiary ">ACowork v{pkg.version}</span>
             </div>
 
             {/* Keyframe styles injected once */}

@@ -210,7 +210,7 @@ export function MemoryDistillSettings({
 
   // ── Render ────────────────────────────────────────────────────────────
   const numInputCls =
-    "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200";
+    "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 ";
 
   // Backlog / last-run hint lives INSIDE the expanded body — it is
   // status info about the runtime, not metadata about the card itself,
@@ -220,7 +220,7 @@ export function MemoryDistillSettings({
   // Nodes), which keep the title row to chevron + title + trailing.
   const runtimeHint =
     loaded && distillerStatus ? (
-      <p className="flex items-center gap-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+      <p className="flex items-center gap-1.5 text-[10px] text-text-tertiary ">
         <span>
           {t("memoryPanel.distillerBacklog", {
             count: distillerStatus.episode_backlog,
@@ -284,7 +284,7 @@ export function MemoryDistillSettings({
           <div className="flex flex-col gap-2">
             {runtimeHint}
             <label className="flex flex-col gap-1">
-              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+              <span className="text-[10px] text-text-tertiary ">
                 {t("memoryPanel.distillerModel")}
               </span>
               <Dropdown
@@ -313,7 +313,7 @@ export function MemoryDistillSettings({
 
             <div className="grid grid-cols-3 gap-2">
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="text-[10px] text-text-tertiary ">
                   {t("memoryPanel.distillerInterval")}
                 </span>
                 <StyledInput
@@ -334,7 +334,7 @@ export function MemoryDistillSettings({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="text-[10px] text-text-tertiary ">
                   {t("memoryPanel.distillerAccumulation")}
                 </span>
                 <StyledInput
@@ -355,7 +355,7 @@ export function MemoryDistillSettings({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="text-[10px] text-text-tertiary ">
                   {t("memoryPanel.distillerIdle")}
                 </span>
                 <StyledInput
@@ -374,7 +374,7 @@ export function MemoryDistillSettings({
             </div>
 
             {!enabled && (
-              <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
+              <p className="text-[10px] text-text-tertiary ">
                 {t("memoryPanel.distillerDisabledHint")}
               </p>
             )}

@@ -18,7 +18,7 @@ import brandMarkGray from "../../../../../assets/brand-mark-gray.svg";
  * Uses the grayscale brand mark (brand-mark-gray.svg), which is itself
  * theme-aware via an inline <style> + prefers-color-scheme query, so this
  * component needs no React-side theme handling. The tagline relies on
- * `text-zinc-500/40` (Tailwind opacity modifier) so it inherits the
+ * `text-text-tertiary/40` (Tailwind opacity modifier) so it inherits the
  * surrounding surface tone in both light and dark modes.
  */
 export function EmptyState(): React.ReactElement {
@@ -42,7 +42,7 @@ export function EmptyState(): React.ReactElement {
         // placeholder if the asset is ever swapped.
         style={{ maxWidth: "60%", height: "auto", opacity: 0.2 }}
       />
-      <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-zinc-500/40 dark:text-zinc-400/40">
+      <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-text-tertiary/40 ">
         Talk with your AI colleague
       </p>
     </div>

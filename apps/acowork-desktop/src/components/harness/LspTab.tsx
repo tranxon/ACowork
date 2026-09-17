@@ -312,7 +312,7 @@ export function LspTab() {
   if (status !== "connected") {
     return (
       <div className="max-w-lg">
-        <p className="text-xs text-zinc-400">{t("harnessLsp.connectToGateway")}</p>
+        <p className="text-xs text-text-tertiary">{t("harnessLsp.connectToGateway")}</p>
       </div>
     );
   }
@@ -320,7 +320,7 @@ export function LspTab() {
   if (!relayUrl) {
     return (
       <div className="max-w-lg">
-        <p className="text-xs text-zinc-400">
+        <p className="text-xs text-text-tertiary">
           LSP Relay not available. The relay process may not be running.
           Ensure the Gateway started the LSP Relay successfully.
         </p>
@@ -352,7 +352,7 @@ export function LspTab() {
                   aria-label={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
                   onClick={() => void loadAll({ force: true })}
                   disabled={refreshing}
-                  className="inline-flex items-center justify-center rounded h-6 w-6 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
                 >
                   {refreshing ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -374,12 +374,12 @@ export function LspTab() {
 
           {/* Loading state */}
           {refreshing && serverEntries.length === 0 && (
-            <div className="px-3 py-3 text-xs text-zinc-400">{t("harnessLsp.loadingServers")}</div>
+            <div className="px-3 py-3 text-xs text-text-tertiary">{t("harnessLsp.loadingServers")}</div>
           )}
 
           {/* Empty state */}
           {!refreshing && serverEntries.length === 0 && (
-            <div className="px-3 py-3 text-xs text-zinc-400">{t("harnessLsp.noLspServers")}</div>
+            <div className="px-3 py-3 text-xs text-text-tertiary">{t("harnessLsp.noLspServers")}</div>
           )}
 
           {/* Server list — unified ListRow rows (hairline separators, inset
@@ -414,7 +414,7 @@ export function LspTab() {
               <h3 className="text-sm font-semibold">
                 {t("harnessLsp.scriptContent")} — {LANGUAGE_LABELS[scriptDialog.language] ?? scriptDialog.language}
               </h3>
-              <span className="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-mono text-zinc-500 dark:bg-zinc-700">
+              <span className="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-mono text-text-tertiary dark:bg-zinc-700">
                 {scriptDialog.filename}
               </span>
             </div>
@@ -437,8 +437,8 @@ export function LspTab() {
       {scriptLoading && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
           <div className="rounded-md bg-modal-surface p-6 shadow-xl">
-            <Loader2 className="mx-auto h-6 w-6 animate-spin text-zinc-400" />
-            <p className="mt-2 text-xs text-zinc-500">{t("harnessLsp.loading")}</p>
+            <Loader2 className="mx-auto h-6 w-6 animate-spin text-text-tertiary" />
+            <p className="mt-2 text-xs text-text-tertiary">{t("harnessLsp.loading")}</p>
           </div>
         </div>
       )}
@@ -553,7 +553,7 @@ function LspServerCard({
         {healthStatus === "unknown" && (
           <span
             data-testid="lsp-pending-badge"
-            className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400"
+            className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-text-secondary dark:bg-zinc-700 "
           >
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t("harnessLsp.pendingCheck")}
@@ -584,7 +584,7 @@ function LspServerCard({
 
       {/* Description */}
       {entry.description && (
-        <p className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400 line-clamp-1">
+        <p className="mt-0.5 text-[10px] text-text-tertiary  line-clamp-1">
           {entry.description}
         </p>
       )}
@@ -597,11 +597,11 @@ function LspServerCard({
       {/* Candidates list */}
       {entry.candidates.length > 0 && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <span className="text-[10px] text-zinc-400">{t("harnessLsp.candidates")}:</span>
+          <span className="text-[10px] text-text-tertiary">{t("harnessLsp.candidates")}:</span>
           {entry.candidates.map((cmd) => (
             <code
               key={cmd}
-              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-zinc-600 dark:bg-zinc-700 dark:text-zinc-400"
+              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-text-secondary dark:bg-zinc-700 "
             >
               {cmd}
             </code>
@@ -612,7 +612,7 @@ function LspServerCard({
       {/* Install hint */}
       {entry.install_hint && (
         <div className="mt-1.5 flex items-center gap-1">
-          <span className="text-[10px] text-zinc-400">{t("harnessLsp.installHint")}:</span>
+          <span className="text-[10px] text-text-tertiary">{t("harnessLsp.installHint")}:</span>
           <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-mono text-amber-600 dark:bg-zinc-700 dark:text-amber-400">
             {entry.install_hint}
           </code>
@@ -636,7 +636,7 @@ function LspServerCard({
             )}
             <button
               onClick={() => setShowOutput(!showOutput)}
-              className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+              className="text-[10px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
             >
               {showOutput ? "Hide output" : "Show output"}
             </button>

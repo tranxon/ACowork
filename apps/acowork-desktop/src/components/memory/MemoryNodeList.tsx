@@ -79,11 +79,11 @@ export function MemoryNodeList({
           aria-label="Previous memory page"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
-          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
         >
           <ChevronLeft className="h-3.5 w-3.5" />
         </button>
-        <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+        <span className="text-[11px] text-text-tertiary ">
           {t("memoryPanel.pagerOf", { current: page, total: totalPages })}
         </span>
         <button
@@ -91,7 +91,7 @@ export function MemoryNodeList({
           aria-label="Next memory page"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
-          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
         >
           <ChevronRight className="h-3.5 w-3.5" />
         </button>
@@ -102,7 +102,7 @@ export function MemoryNodeList({
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {loading && nodes.length === 0 ? (
         <div className="flex flex-1 items-center justify-center py-10">
-          <Loader2 className="h-5 w-5 animate-spin text-zinc-400 dark:text-zinc-500" />
+          <Loader2 className="h-5 w-5 animate-spin text-text-tertiary " />
         </div>
       ) : !loading && nodes.length === 0 ? (
         <EmptyState
@@ -144,7 +144,7 @@ export function MemoryNodeList({
                               "text-[10px] font-medium",
                               node.status === "active"
                                 ? accentText
-                                : "text-zinc-400 dark:text-zinc-500",
+                                : "text-text-tertiary ",
                             )}
                           >
                             {node.status}
@@ -152,7 +152,7 @@ export function MemoryNodeList({
                         </div>
 
                         {/* Content summary */}
-                        <p className="text-xs text-zinc-700 dark:text-zinc-300">
+                        <p className="text-xs text-text-secondary ">
                           {truncateContent(node.content)}
                         </p>
 
@@ -161,7 +161,7 @@ export function MemoryNodeList({
                             `confidence`; the other three types carry `confidence`
                             (置信度) but no `importance`. Each is shown verbatim —
                             the backend never derives one from the other. */}
-                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 dark:text-zinc-500">
+                        <div className="flex items-center gap-2 text-[11px] text-text-tertiary ">
                           {node.node_type === "Episodic" ? (
                             <span>
                               {t("memoryNodeDetail.labelImportance")}:{" "}

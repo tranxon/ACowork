@@ -61,7 +61,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
 
   if (providers.length === 0) {
     return (
-      <div className="py-3 text-center text-xs text-zinc-400">{t("harness.noProvidersAvailable")}</div>
+      <div className="py-3 text-center text-xs text-text-tertiary">{t("harness.noProvidersAvailable")}</div>
     );
   }
 
@@ -89,13 +89,13 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
                     <button
                       type="button"
                       onClick={() => onConnect(providerId, item)}
-                      className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                      className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                     >
                       {t("harness.connect")}
                     </button>
                   }
                 >
-                  <span className="block truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{providerName}</span>
+                  <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
                 </ListRow>
               );
             })}
@@ -105,7 +105,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
             <button
               type="button"
               onClick={onAddCustom}
-              className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-600 transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-[var(--color-accent)] dark:hover:text-[var(--color-accent)]"
+              className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600  dark:hover:border-[var(--color-accent)] dark:hover:text-[var(--color-accent)]"
             >
               <Plus className="h-4 w-4" />
               {t("harness.addCustomProvider")}
@@ -136,13 +136,13 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
                       <button
                         type="button"
                         onClick={() => onConnect(providerId, item)}
-                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                       >
                         {t("harness.connect")}
                       </button>
                     }
                   >
-                    <span className="block truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{providerName}</span>
+                    <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
                   </ListRow>
                 );
               })}
@@ -169,14 +169,14 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
                     placeholder={t("harness.searchProviders")}
                     className="w-[170px] bg-modal-surface pl-7 pr-2 placeholder-zinc-400 dark:border-zinc-600 dark:placeholder-zinc-500"
                   />
-                  <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400" />
+                  <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-text-tertiary" />
                 </div>
               </span>
             }
             bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
           >
             {providerSearchTerm.trim() && filteredRemoteProviders.length === 0 ? (
-              <div className="py-3 text-center text-xs text-zinc-400">
+              <div className="py-3 text-center text-xs text-text-tertiary">
                 {t("harness.noProvidersMatch")}
               </div>
             ) : (
@@ -194,15 +194,15 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
                           <button
                             type="button"
                             onClick={() => onConnect(providerId, item)}
-                            className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                            className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                           >
                             {t("harness.addKey")}
                           </button>
                         }
                       >
-                        <span className="block truncate text-xs font-medium text-zinc-700 dark:text-zinc-300">{providerName}</span>
+                        <span className="block truncate text-xs font-medium text-text-secondary ">{providerName}</span>
                         {modelCount != null && (
-                          <span className="mt-0.5 block text-[10px] text-zinc-400">{t("harness.modelsAvailable", { count: modelCount })}</span>
+                          <span className="mt-0.5 block text-[10px] text-text-tertiary">{t("harness.modelsAvailable", { count: modelCount })}</span>
                         )}
                       </ListRow>
                     );
@@ -213,7 +213,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
                     <button
                       type="button"
                       onClick={() => setShowAllRemote(true)}
-                      className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-zinc-300 py-2 text-xs text-zinc-500 transition-colors hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-zinc-500 dark:hover:text-zinc-300"
+                      className="flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-zinc-300 py-2 text-xs text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600  dark:hover:border-zinc-500 dark:hover:text-zinc-300"
                     >
                       <ChevronsDown className="h-4 w-4" />
                       <>Show all ({filteredRemoteProviders.length})</>

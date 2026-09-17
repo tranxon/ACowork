@@ -162,7 +162,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
       "flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors",
       active
         ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-        : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+        : "text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800  dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
       inactive && "pointer-events-none opacity-40",
     );
 
@@ -201,7 +201,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
         </button>
         {tableOpen && (
           <div className="absolute right-0 top-full z-30 mt-1 flex items-center gap-2 rounded-md border border-zinc-200 bg-white p-2 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
-            <label className="flex items-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <label className="flex items-center gap-1 text-[11px] text-text-tertiary ">
               {t("doc.tbTableRows")}
               <input
                 type="number"
@@ -212,7 +212,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
                 className="w-12 rounded border border-zinc-200 px-1 py-0.5 text-[11px] dark:border-zinc-700 dark:bg-zinc-800"
               />
             </label>
-            <label className="flex items-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <label className="flex items-center gap-1 text-[11px] text-text-tertiary ">
               {t("doc.tbTableCols")}
               <input
                 type="number"

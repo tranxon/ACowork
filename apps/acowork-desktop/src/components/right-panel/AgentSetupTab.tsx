@@ -641,7 +641,7 @@ export function AgentSetupTab() {
   if (!selectedAgentId || !selectedAgent || !profile) {
     return (
       <div className="flex flex-1 items-center justify-center bg-right-panel p-6">
-        <span className="text-xs text-zinc-400 dark:text-zinc-500">{t("agentSetup.noAgentSelected")}</span>
+        <span className="text-xs text-text-tertiary ">{t("agentSetup.noAgentSelected")}</span>
       </div>
     );
   }
@@ -723,8 +723,8 @@ export function AgentSetupTab() {
                       <button
                         onClick={() => setAvatarTab("custom")}
                         className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
-                          ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-                          : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                          ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
+                          : "text-text-tertiary hover:text-zinc-600 "
                           }`}
                       >
                         Custom
@@ -732,8 +732,8 @@ export function AgentSetupTab() {
                       <button
                         onClick={() => setAvatarTab("builtin")}
                         className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
-                          ? "border-b-2 border-zinc-800 text-zinc-800 dark:border-zinc-200 dark:text-zinc-200"
-                          : "text-zinc-400 hover:text-zinc-600 dark:text-zinc-500"
+                          ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
+                          : "text-text-tertiary hover:text-zinc-600 "
                           }`}
                       >
                         Builtin
@@ -746,7 +746,7 @@ export function AgentSetupTab() {
                         <button
                           onClick={handleUploadClick}
                           disabled={avatarBusy}
-                          className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-zinc-400 transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-500 dark:hover:border-zinc-400"
+                          className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600  dark:hover:border-zinc-400"
                         >
                           <span className="text-lg">+</span>
                         </button>
@@ -815,15 +815,15 @@ export function AgentSetupTab() {
                 )}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
+              <p className="truncate text-sm font-medium text-text ">
                 {agentName}
               </p>
               {selectedAgent.role && (
-                <p className="mt-1.5 truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                <p className="mt-1.5 truncate text-[10px] text-text-tertiary ">
                   {selectedAgent.role}
                 </p>
               )}
-              <p className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+              <p className="truncate text-[10px] text-text-tertiary ">
                 {selectedAgentId}
               </p>
             </div>
@@ -831,7 +831,7 @@ export function AgentSetupTab() {
 
     {/* Agent Name */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.agentName")}
             </label>
             <StyledInput
@@ -875,7 +875,7 @@ export function AgentSetupTab() {
         `null` PUT body thanks to the `value ?? null` shim in
         `putField`, which the runtime maps to `FieldPatch::Clear`. */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.sessionLanguage")}
             </label>
             <Dropdown
@@ -890,14 +890,14 @@ export function AgentSetupTab() {
                 { value: "ko", label: t("language.ko") },
               ]}
             />
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.sessionLanguageDesc")}
             </p>
           </div>
 
     {/* Max Iterations */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.maxIterations")}
             </label>
             <StyledInput
@@ -919,7 +919,7 @@ export function AgentSetupTab() {
 
     {/* Max Sessions (ADR-024) */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.maxSessions")}
             </label>
             <StyledInput
@@ -937,14 +937,14 @@ export function AgentSetupTab() {
               placeholder="2000 (default)"
               className="rounded-md bg-panel-block"
             />
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.maxSessionsDesc")}
             </p>
           </div>
 
     {/* Approval Timeout */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.approvalTimeout")}
             </label>
             <StyledInput
@@ -963,7 +963,7 @@ export function AgentSetupTab() {
               placeholder="300 (5 min)"
               className="rounded-md bg-panel-block"
             />
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.approvalTimeoutDesc")}
             </p>
           </div>
@@ -971,7 +971,7 @@ export function AgentSetupTab() {
     {/* Idle (auto-sleep) Timeout — ponytail: hidden per user request, auto-sleep disabled. Remove `false && (` / `)` to restore. */}
     {false && (
       <div className="space-y-1">
-        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+        <label className="block text-[10px] font-medium text-text-tertiary ">
           {t("agentSetup.idleTimeout")}
         </label>
         <Dropdown
@@ -990,7 +990,7 @@ export function AgentSetupTab() {
             label: t(opt.labelKey),
           }))}
         />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+        <p className="text-[9px] text-text-tertiary ">
           {t("agentSetup.idleTimeoutDesc")}
         </p>
       </div>
@@ -998,7 +998,7 @@ export function AgentSetupTab() {
 
     {/* Shell Command Approval Threshold */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.shellCommandApproval")}
             </label>
             <Dropdown
@@ -1017,7 +1017,7 @@ export function AgentSetupTab() {
                 { value: "auto_approve", label: t("agentSetup.approvalAutoApprove") },
               ]}
             />
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.approvalDesc")}
             </p>
             <button
@@ -1042,7 +1042,7 @@ export function AgentSetupTab() {
                   log.error("[AgentSetupTab] Error opening shell risk rules:", e);
                 }
               }}
-              className="mt-1 text-[9px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 underline underline-offset-2 transition-colors"
+              className="mt-1 text-[9px] text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300 underline underline-offset-2 transition-colors"
             >
               {t("agentSetup.editRiskRules")}
             </button>
@@ -1050,7 +1050,7 @@ export function AgentSetupTab() {
 
     {/* Compression Ratio Threshold (ADR-061) */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.compressionRatioThreshold")}
             </label>
             <div className="flex items-center gap-3">
@@ -1070,11 +1070,11 @@ export function AgentSetupTab() {
                   bg-zinc-200 dark:bg-zinc-700
                   accent-zinc-600 dark:accent-zinc-400"
               />
-              <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+              <span className="w-10 text-right text-xs text-text-secondary  tabular-nums">
                 {ratioPct}%
               </span>
             </div>
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.compressionRatioThresholdDesc")}
             </p>
           </div>
@@ -1101,7 +1101,7 @@ export function AgentSetupTab() {
           <div className="space-y-3">
     {/* Max Output Tokens */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.maxOutputTokens")}
             </label>
             <StyledInput
@@ -1125,14 +1125,14 @@ export function AgentSetupTab() {
               placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
               className="rounded-md bg-panel-block"
             />
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.leaveEmptyDefault")}
             </p>
           </div>
 
     {/* Context Window */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.contextWindow")}
             </label>
             <div className="flex items-center gap-3">
@@ -1157,18 +1157,18 @@ export function AgentSetupTab() {
                 }}
                 className="w-32 rounded-md bg-panel-block"
               />
-              <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+              <span className="text-[10px] text-text-tertiary ">
                 {t("agentSetup.tokens")}
               </span>
             </div>
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.contextWindowDesc")}
             </p>
           </div>
 
     {/* Temperature slider */}
           <div className="space-y-1">
-            <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="block text-[10px] font-medium text-text-tertiary ">
               {t("agentSetup.temperature")}
             </label>
             <div className="flex items-center gap-3">
@@ -1185,11 +1185,11 @@ export function AgentSetupTab() {
                   bg-zinc-200 dark:bg-zinc-700
                   accent-zinc-600 dark:accent-zinc-400"
               />
-              <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400 tabular-nums">
+              <span className="w-10 text-right text-xs text-text-secondary  tabular-nums">
                 {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}
               </span>
             </div>
-            <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+            <p className="text-[9px] text-text-tertiary ">
               {t("agentSetup.temperatureDesc")}
             </p>
           </div>
@@ -1201,7 +1201,7 @@ export function AgentSetupTab() {
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
       <div className="flex items-center gap-3">
         <span
-          className="flex-1 text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500"
+          className="flex-1 text-[10px] tabular-nums text-text-tertiary "
           aria-live="polite"
         >
           {savingFields.size > 0

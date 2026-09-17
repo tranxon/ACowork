@@ -248,7 +248,7 @@ function GatewayTab() {
               local mode, warn that Desktop will probe the remote address
               first (probe-then-spawn in init_local_gateway: ownership=
               foreign if reachable, owned if it has to spawn a child). */}
-          <p className="mt-2.5 text-xs text-zinc-500 dark:text-zinc-400">
+          <p className="mt-2.5 text-xs text-text-tertiary ">
             {t("settings.gatewayUrl")}: <span className="font-mono">{gatewayUrl}</span>
             {gatewayMode === "local" && !/127\.0\.0\.1|::1|localhost/i.test(gatewayUrl) && (
               <span className="ml-2 text-amber-600 dark:text-amber-400">
@@ -271,7 +271,7 @@ function GatewayTab() {
           >
 
           <div className="flex items-center gap-2 text-xs">
-            <span className="text-zinc-500">{t("settings.status")}</span>
+            <span className="text-text-tertiary">{t("settings.status")}</span>
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
@@ -281,7 +281,7 @@ function GatewayTab() {
             <span className={cn(
               localIsRunning ? "text-[var(--color-accent)]" :
                 localIsStarting ? "text-amber-600 dark:text-amber-400" :
-                  "text-zinc-500"
+                  "text-text-tertiary"
             )}>
               {localIsRunning ? t("settings.running") : localIsStarting ? t("settings.starting") : t("settings.stopped")}
             </span>
@@ -289,7 +289,7 @@ function GatewayTab() {
 
           {health && localIsRunning && (
             <div className="mt-2 flex items-center gap-2 text-xs">
-              <span className="text-zinc-500">{t("settings.version")}</span>
+              <span className="text-text-tertiary">{t("settings.version")}</span>
               <span>{health.version}</span>
             </div>
           )}
@@ -316,7 +316,7 @@ function GatewayTab() {
                 <button
                   onClick={handleStopLocal}
                   disabled={stopping}
-                  className="rounded-md border border-zinc-300 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-50"
+                  className="rounded-md border border-zinc-300 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700 disabled:opacity-50"
                 >
                   {stopping ? t("settings.stopping") : t("settings.stop")}
                 </button>
@@ -324,7 +324,7 @@ function GatewayTab() {
             )}
           </div>
           {localIsForeign && (
-            <p className="mt-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+            <p className="mt-2 text-[10px] text-text-tertiary ">
               {t("settings.gatewayRunningExternal")}
             </p>
           )}
@@ -345,7 +345,7 @@ function GatewayTab() {
 
           <div className="space-y-3">
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">{t("settings.gatewayUrl")}</label>
+              <label className="mb-1 block text-xs text-text-tertiary">{t("settings.gatewayUrl")}</label>
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -368,7 +368,7 @@ function GatewayTab() {
             </div>
 
             <div className="flex items-center gap-2 text-xs">
-              <span className="text-zinc-500">{t("settings.status")}</span>
+              <span className="text-text-tertiary">{t("settings.status")}</span>
               <span
                 className={cn(
                   "h-2 w-2 rounded-full",
@@ -378,7 +378,7 @@ function GatewayTab() {
               <span className={cn(
                 status === "connected" ? "text-[var(--color-accent)]" :
                   status === "error" ? "text-red-600 dark:text-red-400" :
-                    "text-zinc-500"
+                    "text-text-tertiary"
               )}>
                 {status === "connected" ? t("settings.connected") : status === "error" ? t("settings.error") : t("settings.disconnected")}
               </span>
@@ -386,7 +386,7 @@ function GatewayTab() {
 
             {health && (
               <div className="flex items-center gap-2 text-xs">
-                <span className="text-zinc-500">{t("settings.version")}</span>
+                <span className="text-text-tertiary">{t("settings.version")}</span>
                 <span>{health.version}</span>
               </div>
             )}
@@ -424,11 +424,11 @@ function GatewayTab() {
           bodyClassName="overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
         >
           {status !== "connected" ? (
-            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.connectToSeeAgents")}</div>
+            <div className="px-3 py-3 text-xs text-text-tertiary">{t("settings.connectToSeeAgents")}</div>
           ) : nodesLoading && nodes.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.loading")}</div>
+            <div className="px-3 py-3 text-xs text-text-tertiary">{t("settings.loading")}</div>
           ) : nodes.length === 0 ? (
-            <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.nodesEmpty")}</div>
+            <div className="px-3 py-3 text-xs text-text-tertiary">{t("settings.nodesEmpty")}</div>
           ) : (
             <NodesTree
               nodes={nodes}
@@ -482,7 +482,7 @@ function RecentEventsLog() {
   const entries = useChatStore((s) => s.transitionLog);
   if (entries.length === 0) {
     return (
-      <div className="px-3 py-3 text-xs text-zinc-500 dark:text-zinc-400">
+      <div className="px-3 py-3 text-xs text-text-tertiary ">
         {t("settings.services.eventsEmpty")}
       </div>
     );
@@ -500,8 +500,8 @@ function RecentEventsLog() {
               key={`${entry.timestamp}-${idx}`}
               className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-mono"
             >
-              <span className="text-zinc-400 dark:text-zinc-500">{ts}</span>
-              <span className="text-zinc-600 dark:text-zinc-300">
+              <span className="text-text-tertiary ">{ts}</span>
+              <span className="text-text-secondary ">
                 {entry.from} → {entry.to}
               </span>
               {entry.reason && (
@@ -510,7 +510,7 @@ function RecentEventsLog() {
                     "flex-1 truncate",
                     isErr
                       ? "text-red-600 dark:text-red-300"
-                      : "text-zinc-500 dark:text-zinc-400",
+                      : "text-text-tertiary ",
                   )}
                   title={entry.reason}
                 >
@@ -579,22 +579,22 @@ function NodesTree({
                     node ? (node.online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500") : "bg-zinc-400 dark:bg-zinc-500",
                   )}
                 />
-                <span className={node?.online ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-500"}>
+                <span className={node?.online ? "text-emerald-600 dark:text-emerald-400" : "text-text-tertiary"}>
                   {node ? (node.online ? t("settings.nodesOnline") : t("settings.nodesOffline")) : t("settings.nodesOffline")}
                 </span>
               </span>
             }
             description={buildNodeDescription(node, t)}
             trailing={
-              <span className="text-xs text-zinc-500">
+              <span className="text-xs text-text-tertiary">
                 {nodeAgents.length}
-                {node?.max_agents !== undefined && <span className="text-zinc-400">/{node.max_agents}</span>}
+                {node?.max_agents !== undefined && <span className="text-text-tertiary">/{node.max_agents}</span>}
               </span>
             }
             bodyClassName="bg-zinc-50 dark:bg-zinc-900/60"
           >
             {nodeAgents.length === 0 ? (
-              <div className="px-3 py-3 text-xs text-zinc-400">{t("settings.noAgentsRunning")}</div>
+              <div className="px-3 py-3 text-xs text-text-tertiary">{t("settings.noAgentsRunning")}</div>
             ) : (
               <ListBox variant="plain">
                 {nodeAgents.map((agent) => (
@@ -645,13 +645,13 @@ function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "d
     <ListRow
       surface="inset"
       padding={padding ?? "default"}
-      leading={<Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />}
+      leading={<Monitor className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />}
       trailing={
         <div className="flex items-center gap-2 shrink-0">
           {modelInfo ? (
-            <span className="text-xs text-zinc-500">{modelInfo.provider}/{modelInfo.model}</span>
+            <span className="text-xs text-text-tertiary">{modelInfo.provider}/{modelInfo.model}</span>
           ) : (
-            <span className="text-xs text-zinc-400">—</span>
+            <span className="text-xs text-text-tertiary">—</span>
           )}
         </div>
       }
@@ -736,7 +736,7 @@ function AppearanceTab() {
           ariaLabel={t("settings.accentColor")}
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
-          <p className="mb-3 text-xs text-zinc-500">{t("settings.accentColor")}</p>
+          <p className="mb-3 text-xs text-text-tertiary">{t("settings.accentColor")}</p>
           <div className="flex flex-wrap gap-[14px]">
             {ACCENT_PRESETS.map((c) => (
               <Tooltip content={c.label} variant="plain" key={c.id}>
@@ -769,7 +769,7 @@ function AppearanceTab() {
           ariaLabel={t("settings.contentWidth")}
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
-          <p className="mb-2 text-xs text-zinc-500">{t("settings.contentWidthHint")}</p>
+          <p className="mb-2 text-xs text-text-tertiary">{t("settings.contentWidthHint")}</p>
           <RadioGroup
             name="contentWidth"
             value={contentWidth}
@@ -805,7 +805,7 @@ function AppearanceTab() {
           ariaLabel={t("settings.opacity")}
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
-          <p className="mb-2 text-xs text-zinc-500">{t("settings.opacityHint")}</p>
+          <p className="mb-2 text-xs text-text-tertiary">{t("settings.opacityHint")}</p>
           <div className="flex items-center gap-3">
             <input
               type="range"
@@ -817,7 +817,7 @@ function AppearanceTab() {
               className="flex-1"
               style={{ "--progress": `${opacity * 100}%` } as React.CSSProperties}
             />
-            <span className="w-10 text-right text-xs text-zinc-600 dark:text-zinc-400">
+            <span className="w-10 text-right text-xs text-text-secondary ">
               {Math.round(opacity * 100)}%
             </span>
           </div>
@@ -915,7 +915,7 @@ function GeneralTab() {
 
         {/* Log level */}
         <div className="mb-3">
-          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+          <label className="block mb-1.5 text-xs text-text-tertiary ">
             {t("settings.logLevel")}
           </label>
           <div>
@@ -946,7 +946,7 @@ function GeneralTab() {
 
         {/* Frontend log level (DevTools console) */}
         <div className="mb-3">
-          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+          <label className="block mb-1.5 text-xs text-text-tertiary ">
             {t("settings.frontendLogLevel")}
           </label>
           <div>
@@ -964,14 +964,14 @@ function GeneralTab() {
               ]}
             />
           </div>
-          <p className="mt-1 text-[10px] text-zinc-400">
+          <p className="mt-1 text-[10px] text-text-tertiary">
             {t("settings.frontendLogLevelHint")}
           </p>
         </div>
 
         {/* Log file size */}
         <div className="mb-3">
-          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+          <label className="block mb-1.5 text-xs text-text-tertiary ">
             {t("settings.logFileSize")}
           </label>
           <div className="flex items-center gap-2">
@@ -994,18 +994,18 @@ function GeneralTab() {
               }}
               className="w-16"
             />
-            <span className="text-xs text-zinc-400">
+            <span className="text-xs text-text-tertiary">
               {currentLogFileSize === 0 ? t("settings.noSplit") : t("settings.autoSplit", { size: currentLogFileSize })}
             </span>
           </div>
-          <p className="mt-1 text-[10px] text-zinc-400">
+          <p className="mt-1 text-[10px] text-text-tertiary">
             {t("settings.logFileSizeHint")}
           </p>
         </div>
 
         {/* Max log file count */}
         <div className="mb-3">
-          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+          <label className="block mb-1.5 text-xs text-text-tertiary ">
             {t("settings.maxLogFiles")}
           </label>
           <div className="flex items-center gap-2">
@@ -1028,11 +1028,11 @@ function GeneralTab() {
               }}
               className="w-16"
             />
-            <span className="text-xs text-zinc-400">
+            <span className="text-xs text-text-tertiary">
               {currentLogFileCount === 0 ? t("settings.unlimited") : t("settings.keepFiles", { count: currentLogFileCount })}
             </span>
           </div>
-          <p className="mt-1 text-[10px] text-zinc-400">
+          <p className="mt-1 text-[10px] text-text-tertiary">
             {t("settings.maxLogFilesHint")}
           </p>
         </div>
@@ -1051,13 +1051,13 @@ function GeneralTab() {
           <div className="fixed inset-0 z-50 flex items-cell justify-center bg-modal-overlay">
             <div className="w-[380px] rounded-md bg-modal-surface p-6 shadow-xl">
               <h3 className="mb-2 text-sm font-semibold">{t("settings.deleteLogsConfirmTitle")}</h3>
-              <p className="mb-4 text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="mb-4 text-xs text-text-tertiary ">
                 {t("settings.deleteLogsConfirmMsg")}
               </p>
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setShowDeleteConfirm(false)}
-                  className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                  className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
                 >
                   {t("common.cancel")}
                 </button>
@@ -1099,7 +1099,7 @@ function GeneralTab() {
           ariaLabel={t("settings.about")}
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
-          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+          <div className="text-xs text-text-tertiary ">
             <p>ACowork Desktop v0.1.0</p>
             <p className="mt-1">Built with Tauri v2 + React 19</p>
           </div>
@@ -1115,7 +1115,7 @@ function GeneralTab() {
           ariaLabel={t("settings.resetOnboarding")}
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
         >
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          <p className="text-xs text-text-tertiary ">
             {t("settings.resetOnboardingDesc")}
           </p>
           <button

@@ -108,10 +108,10 @@ function OfflinePanel({
   const { t } = useTranslation();
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
-      <BookOpen className="h-10 w-10 text-zinc-300 dark:text-zinc-600" aria-hidden />
+      <BookOpen className="h-10 w-10 text-text-secondary " aria-hidden />
       <div>
-        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-300">{message}</p>
-        <p className="mt-1 max-w-sm text-xs leading-relaxed text-zinc-400">{hint}</p>
+        <p className="text-sm font-medium text-text-secondary ">{message}</p>
+        <p className="mt-1 max-w-sm text-xs leading-relaxed text-text-tertiary">{hint}</p>
       </div>
       <button
         type="button"

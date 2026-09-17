@@ -393,7 +393,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
       {/* Title bar — matches CodeBlock pattern */}
       <div className="flex items-center justify-between border-b border-chat-border bg-chat-title px-3 py-1.5">
         <div className="flex items-center gap-1.5">
-          <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+          <span className="text-xs font-medium text-text-tertiary ">
             mermaid
           </span>
         </div>
@@ -405,7 +405,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
             aria-label="缩小"
             title="缩小"
             data-version={transformVersion}
-            className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ZoomOut className="h-3.5 w-3.5" />
           </button>
@@ -415,7 +415,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
             aria-label="重置缩放（撑满显示区域）"
             title="重置缩放（撑满显示区域）"
             data-version={transformVersion}
-            className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
+            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
           >
             <Maximize2 className="h-3.5 w-3.5" />
           </button>
@@ -426,7 +426,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
             aria-label="放大"
             title="放大"
             data-version={transformVersion}
-            className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ZoomIn className="h-3.5 w-3.5" />
           </button>
@@ -446,12 +446,12 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
           />
         </div>
       ) : renderFailed ? (
-        <pre className="m-0 whitespace-pre-wrap bg-chat-body p-3 font-mono text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+        <pre className="m-0 whitespace-pre-wrap bg-chat-body p-3 font-mono text-xs leading-relaxed text-text-tertiary ">
           {chart}
         </pre>
       ) : (
         <div className="flex min-h-[140px] items-center justify-center bg-chat-body">
-          <div className="flex items-center gap-2 text-zinc-300 select-none dark:text-zinc-500">
+          <div className="flex items-center gap-2 text-text-secondary select-none ">
             <svg
               className="h-4 w-4 animate-spin"
               xmlns="http://www.w3.org/2000/svg"

@@ -42,9 +42,9 @@ interface TooltipProps {
 
 const variantClasses: Record<TooltipVariant, string> = {
   inverted:
-    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 dark:text-zinc-800",
+    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 ",
   plain:
-    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 dark:text-zinc-800",
+    "rounded-md shadow-lg bg-zinc-800 text-white dark:bg-zinc-200 ",
 };
 
 const GAP = 6; // px gap between trigger and tooltip

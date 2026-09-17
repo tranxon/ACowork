@@ -47,7 +47,7 @@ export function TitleBar() {
     >
       {/* Left: App title */}
       <div className="flex items-center gap-2">
-        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+        <span className="text-xs font-medium text-text-secondary ">
           ACowork
         </span>
       </div>
@@ -56,19 +56,19 @@ export function TitleBar() {
       {!isMacOS && (
         <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
           <button
-            className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
             onClick={handleMinimize}
           >
             <Minus className="h-3.5 w-3.5" />
           </button>
           <button
-            className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-zinc-300 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
             onClick={handleMaximize}
           >
             <Square className="h-3 w-3" />
           </button>
           <button
-            className="flex h-8 w-8 items-center justify-center rounded text-zinc-600 hover:bg-red-500 hover:text-white dark:text-zinc-400 dark:hover:bg-red-600"
+            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-red-500 hover:text-white  dark:hover:bg-red-600"
             onClick={handleClose}
           >
             <X className="h-3.5 w-3.5" />

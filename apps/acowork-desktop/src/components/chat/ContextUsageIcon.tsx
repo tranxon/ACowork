@@ -269,7 +269,7 @@ const handleCompressSummary = () => {
       <button
         className={cn(
           "rounded-md p-1.5 transition-colors",
-          "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200",
+          "text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200",
         )}
         aria-label={t("contextUsage.ariaLabel")}
       >
@@ -297,10 +297,10 @@ const handleCompressSummary = () => {
           // ponytail: cap is viewport-bound so the editor expands naturally
           // without a scrollbar; the previous 460px ceiling was too low once
           // the inline window editor + presets + breakdown all rendered.
-          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-modal-surface text-zinc-700 shadow-lg dark:border-zinc-700 dark:text-zinc-200"
+          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-modal-surface text-text-secondary shadow-lg dark:border-zinc-700 "
         >
           <div className="flex items-center justify-between px-3 pt-2.5">
-            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+            <h2 className="text-sm font-normal text-text-secondary ">
               {t("contextUsage.title")}
             </h2>
             <button
@@ -308,7 +308,7 @@ const handleCompressSummary = () => {
               onClick={() => setOpen(false)}
               aria-label={t("contextUsage.close")}
               title={t("contextUsage.close")}
-              className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+              className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
             >
               <X size={14} strokeWidth={2.25} />
             </button>
@@ -316,16 +316,16 @@ const handleCompressSummary = () => {
 
           <div className="px-3 pt-2">
             <div className="flex items-center gap-2 whitespace-nowrap">
-              <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] text-zinc-700 tabular-nums dark:text-zinc-200">
+              <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] text-text-secondary tabular-nums ">
                 {formatDetailedPercent(usagePercent)}%
               </span>
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="text-xs text-text-tertiary ">
                 {t("contextUsage.used")} {" "}
-                <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                <span className="font-mono text-text-secondary ">
                   {formatTokens(contextUsage?.total_tokens ?? 0)}
                 </span>
-                <span className="text-zinc-400 dark:text-zinc-500"> / </span>
-                <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                <span className="text-text-tertiary "> / </span>
+                <span className="font-mono text-text-secondary ">
                   {formatTokens(contextUsage?.context_window ?? 0)}
                 </span>
               </span>
@@ -335,7 +335,7 @@ const handleCompressSummary = () => {
                 onClick={openWindowEditor}
                 aria-label={t("contextUsage.editWindow")}
                 title={t("contextUsage.editWindow")}
-                className="ml-1 rounded p-0.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-500 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
               >
                 <Pencil size={11} strokeWidth={2.25} />
               </button>
@@ -360,9 +360,9 @@ const handleCompressSummary = () => {
                     }}
                     placeholder={formatTokens(contextUsage?.context_window ?? 0)}
                     aria-label={t("contextUsage.editWindow")}
-                    className="w-full min-w-0 rounded border border-zinc-300 bg-white px-1.5 py-1 text-xs tabular-nums text-zinc-700 outline-none focus:border-indigo-400 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200"
+                    className="w-full min-w-0 rounded border border-zinc-300 bg-white px-1.5 py-1 text-xs tabular-nums text-text-secondary outline-none focus:border-indigo-400 dark:border-zinc-600 dark:bg-zinc-900 "
                   />
-                  <span className="shrink-0 text-[10px] text-zinc-400">{t("contextUsage.windowUnitK")}</span>
+                  <span className="shrink-0 text-[10px] text-text-tertiary">{t("contextUsage.windowUnitK")}</span>
                 </div>
                 <div className="mt-1.5 flex flex-wrap gap-1">
                   {WINDOW_PRESETS.map((preset) => (
@@ -374,9 +374,9 @@ const handleCompressSummary = () => {
                         setWindowError(null);
                       }}
                       className={cn(
-                        "rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-600 transition-colors",
+                        "rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-text-secondary transition-colors",
                         "hover:border-indigo-300 hover:text-indigo-600",
-                        "dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300",
+                        "dark:border-zinc-700  dark:hover:border-indigo-500/50 dark:hover:text-indigo-300",
                       )}
                     >
                       {preset / 1000}K
@@ -402,7 +402,7 @@ const handleCompressSummary = () => {
                   <button
                     type="button"
                     onClick={() => setEditingWindow(false)}
-                    className="rounded px-2 py-1 text-[11px] text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700/50"
+                    className="rounded px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700/50"
                   >
                     {t("contextUsage.cancel")}
                   </button>
@@ -445,10 +445,10 @@ const handleCompressSummary = () => {
                     className="h-2 w-2 shrink-0 rounded-full"
                     style={{ backgroundColor: meta.color }}
                   />
-                  <span className="font-normal text-zinc-700 dark:text-zinc-200">
+                  <span className="font-normal text-text-secondary ">
                     {t(meta.labelKey)}
                   </span>
-                  <span className="ml-auto font-mono tabular-nums text-zinc-700 dark:text-zinc-300">
+                  <span className="ml-auto font-mono tabular-nums text-text-secondary ">
                     {category.percentage.toFixed(1)}%
                   </span>
                 </div>
@@ -460,20 +460,20 @@ const handleCompressSummary = () => {
             <>
               <div className="border-t border-zinc-200 dark:border-zinc-700" />
               <div className="px-3 pt-2 pb-3">
-                <div className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+                <div className="text-sm font-normal text-text-secondary ">
                   {t("contextUsage.cacheHitLabel")}
                 </div>
                 <div className="mt-1 flex items-baseline gap-2 whitespace-nowrap">
-                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] tabular-nums text-zinc-700 dark:text-zinc-200">
+                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] tabular-nums text-text-secondary ">
                     {cacheHitRateLabel ?? "\u2014"}
                   </span>
-                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  <span className="text-xs text-text-tertiary ">
                     {t("contextUsage.cached")}{" "}
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="font-mono text-text-secondary ">
                       {formatTokens(cacheStats.numerator)}
                     </span>
-                    <span className="text-zinc-400 dark:text-zinc-500"> / </span>
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="text-text-tertiary "> / </span>
+                    <span className="font-mono text-text-secondary ">
                       {formatTokens(cacheStats.denominator)}
                     </span>
                   </span>
@@ -486,20 +486,20 @@ const handleCompressSummary = () => {
             <>
               <div className="border-t border-zinc-200 dark:border-zinc-700" />
               <div className="px-3 pt-2 pb-3">
-                <div className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+                <div className="text-sm font-normal text-text-secondary ">
                   {t("contextUsage.cacheHitPerTurnLabel")}
                 </div>
                 <div className="mt-1 flex items-baseline gap-2 whitespace-nowrap">
-                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-semibold leading-none tracking-[-0.01em] tabular-nums text-zinc-700 dark:text-zinc-200">
+                  <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-semibold leading-none tracking-[-0.01em] tabular-nums text-text-secondary ">
                     {perTurnCacheHitRateLabel ?? "\u2014"}
                   </span>
-                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  <span className="text-xs text-text-tertiary ">
                     {t("contextUsage.cached")}{" "}
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="font-mono text-text-secondary ">
                       {formatTokens(perTurnCacheStats.numerator)}
                     </span>
-                    <span className="text-zinc-400 dark:text-zinc-500"> / </span>
-                    <span className="font-mono text-zinc-700 dark:text-zinc-300">
+                    <span className="text-text-tertiary "> / </span>
+                    <span className="font-mono text-text-secondary ">
                       {formatTokens(perTurnCacheStats.denominator)}
                     </span>
                   </span>
@@ -514,8 +514,8 @@ const handleCompressSummary = () => {
             disabled={!canAct}
             className={cn(
               "mx-3 mb-2.5 mt-2 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-              "bg-zinc-100 text-zinc-700 hover:bg-zinc-200 hover:text-zinc-900",
-              "dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100",
+              "bg-zinc-100 text-text-secondary hover:bg-zinc-200 hover:text-zinc-900",
+              "dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100",
               "disabled:cursor-not-allowed disabled:opacity-40",
             )}
           >

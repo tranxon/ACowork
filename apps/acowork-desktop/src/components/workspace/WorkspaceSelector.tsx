@@ -204,7 +204,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
           )} style={{ zIndex: 100 }}>
             {/* Menu title */}
             <div className="px-3 pt-2.5 pb-1">
-              <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+              <h2 className="text-sm font-normal text-text-secondary ">
                 {t("workspace.title")}
               </h2>
             </div>
@@ -222,12 +222,12 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                   "flex w-full items-center gap-2 px-3 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50",
                 )}
               >
-                <Home className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                <Home className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                 <div className="min-w-0 flex-1 text-left">
-                  <div className={cn("truncate text-xs", currentWsId === "__agent_home__" ? "font-semibold" : "text-zinc-800 dark:text-zinc-200")} style={currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : {}}>
+                  <div className={cn("truncate text-xs", currentWsId === "__agent_home__" ? "font-semibold" : "text-text ")} style={currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : {}}>
                     Agent Home
                   </div>
-                  <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                  <div className="truncate text-[10px] text-text-tertiary ">
                     {t("workspace.defaultWorkingDirectory")}
                   </div>
                 </div>
@@ -240,9 +240,9 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
               <div className="mx-3 my-1 border-t border-zinc-200 dark:border-zinc-700" />
 
               {loading ? (
-                <div className="py-4 text-center text-xs text-zinc-400">{t("workspace.loading")}</div>
+                <div className="py-4 text-center text-xs text-text-tertiary">{t("workspace.loading")}</div>
               ) : filteredWorkspaces.length === 0 ? (
-                <div className="py-4 text-center text-xs text-zinc-400">
+                <div className="py-4 text-center text-xs text-text-tertiary">
                   {searchQuery ? t("workspace.noMatchingWorkspaces") : t("workspace.noWorkspacesConfigured")}
                 </div>
               ) : (
@@ -262,13 +262,13 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                           onClick={() => handleSelect(dir)}
                           className="flex min-w-0 flex-1 items-center gap-2 text-left"
                         >
-                          <FolderOpen className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                          <FolderOpen className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                           <div className="min-w-0 flex-1">
-                            <div className={cn("truncate text-xs font-medium", isCurrent ? "text-[var(--color-accent)]" : "text-zinc-700 dark:text-zinc-200")}>
+                            <div className={cn("truncate text-xs font-medium", isCurrent ? "text-[var(--color-accent)]" : "text-text-secondary ")}>
                               {displayName}
                             </div>
                             <Tooltip content={dir.path} variant="plain" position="bottom">
-                              <div className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                              <div className="truncate text-[10px] text-text-tertiary ">
                                 {dir.path}
                               </div>
                             </Tooltip>
@@ -296,7 +296,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                                   e.stopPropagation();
                                   setConfirmDelete(null);
                                 }}
-                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-500"
+                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-text-secondary hover:bg-zinc-300 dark:bg-zinc-600  dark:hover:bg-zinc-500"
                               >
                                 {t("workspace.cancel")}
                               </button>
@@ -309,7 +309,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                                   setConfirmDelete(dir.id);
                                 }}
                                 disabled={deletingId !== null}
-                                className="rounded p-1 text-zinc-400 opacity-0 transition-all group-hover:opacity-100 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed"
                                 style={{}}
                               >
                                 <Trash2 className="h-3 w-3" />
@@ -333,8 +333,8 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
                                 </>
                               ) : (
                                 <>
-                                  <Shield className="h-3 w-3 text-zinc-500" />
-                                  <span className="font-medium text-zinc-600 dark:text-zinc-400">RO</span>
+                                  <Shield className="h-3 w-3 text-text-tertiary" />
+                                  <span className="font-medium text-text-secondary ">RO</span>
                                 </>
                               )}
                             </button>
@@ -353,7 +353,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
             {/* Add workspace button */}
             <button
               onClick={handleBrowse}
-              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
+              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}

@@ -71,15 +71,15 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
       {/* Header */}
       <div className="flex items-start gap-1.5 mb-1.5">
         <MessageCircleQuestion
-          className="h-3.5 w-3.5 shrink-0 mt-0.5 text-zinc-500 dark:text-zinc-400"
+          className="h-3.5 w-3.5 shrink-0 mt-0.5 text-text-tertiary "
         />
         <div className="min-w-0 flex-1">
           {event.title && (
-            <div className="text-xs font-medium text-zinc-800 dark:text-zinc-200 mb-0.5">
+            <div className="text-xs font-medium text-text  mb-0.5">
               {event.title}
             </div>
           )}
-          <div className="text-xs text-zinc-700 dark:text-zinc-300">
+          <div className="text-xs text-text-secondary ">
             {event.question}
           </div>
         </div>
@@ -93,7 +93,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
           </span>
         )}
         {countdownLabel === "expired" && (
-          <span className="text-[10px] font-mono text-zinc-400 dark:text-zinc-500 shrink-0 mt-0.5">
+          <span className="text-[10px] font-mono text-text-tertiary  shrink-0 mt-0.5">
             {t("askQuestionCard.expired")}
           </span>
         )}
@@ -118,9 +118,9 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
               className="shrink-0 h-3 w-3"
               style={{ accentColor: "var(--color-accent)" }}
             />
-            <span className="font-medium text-zinc-800 dark:text-zinc-200">{opt.label}</span>
+            <span className="font-medium text-text ">{opt.label}</span>
             {opt.description && (
-              <span className="text-zinc-500 dark:text-zinc-400">— {opt.description}</span>
+              <span className="text-text-tertiary ">— {opt.description}</span>
             )}
           </label>
         ))}
@@ -141,7 +141,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
             className="shrink-0 h-3 w-3"
             style={{ accentColor: "var(--color-accent)" }}
           />
-          <span className="font-medium text-zinc-800 dark:text-zinc-200">{t("askQuestionCard.other")}</span>
+          <span className="font-medium text-text ">{t("askQuestionCard.other")}</span>
         </label>
 
         {/* Other textarea */}
@@ -168,7 +168,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
           {submitted ? t("askQuestionCard.submitted") : t("askQuestionCard.submit")}
         </button>
         {submitted && (
-          <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+          <span className="text-[10px] text-text-tertiary ">
             Answer sent
           </span>
         )}

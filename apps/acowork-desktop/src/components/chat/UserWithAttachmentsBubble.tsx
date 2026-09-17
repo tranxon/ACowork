@@ -132,7 +132,7 @@ export function UserWithAttachmentsBubble({
     <div className="flex items-start justify-end gap-2">
       <div className="min-w-0 flex-1 flex flex-col items-end">
         {liveUserName && (
-          <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">
+          <span className="mt-[2px] text-xs text-text-tertiary ">
             {liveUserName}
           </span>
         )}
@@ -177,7 +177,7 @@ export function UserWithAttachmentsBubble({
               </div>
             </div>
             {userMessage.timestamp && (
-              <span className="mt-1 text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+              <span className="mt-1 text-[10px] text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
                 {formatBubbleTime(userMessage.timestamp)}
               </span>
             )}

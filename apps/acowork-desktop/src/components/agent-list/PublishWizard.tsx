@@ -280,8 +280,8 @@ export function PublishWizard({
       <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
-          <Package className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
-          <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+          <Package className="h-5 w-5 text-text-tertiary " />
+          <h2 className="text-sm font-semibold text-text ">
             Publish: {agentName}
           </h2>
         </div>
@@ -297,9 +297,9 @@ export function PublishWizard({
                 <div
                   className={cn(
                     "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
-                    active && "bg-zinc-200 text-zinc-800 dark:bg-zinc-300 dark:text-zinc-900",
+                    active && "bg-zinc-200 text-text dark:bg-zinc-300 ",
                     passed && "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-                    !active && !passed && "text-zinc-400 dark:text-zinc-500",
+                    !active && !passed && "text-text-tertiary ",
                   )}
                 >
                   {passed ? (
@@ -329,7 +329,7 @@ export function PublishWizard({
           {/* Check results */}
           {checkResult && (
             <div className="space-y-2">
-              <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+              <h3 className="text-xs font-medium text-text-secondary ">
                 Check Results
               </h3>
               {checkResult.checks.map((item, i) => (
@@ -352,7 +352,7 @@ export function PublishWizard({
                   <div>
                     <span className="font-medium">{item.name}</span>
                     {item.detail && (
-                      <span className="ml-1 text-zinc-500 dark:text-zinc-400">
+                      <span className="ml-1 text-text-tertiary ">
                         — {item.detail}
                       </span>
                     )}
@@ -381,10 +381,10 @@ export function PublishWizard({
           {/* Clean results */}
           {cleanResult && (
             <div className="space-y-2">
-              <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+              <h3 className="text-xs font-medium text-text-secondary ">
                 Clean Results
               </h3>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="text-xs text-text-tertiary ">
                 {cleanResult.cleaned
                   ? "Cleaned: removed dev flag, cleared recordings, reset config."
                   : "Clean completed (no changes needed)."}
@@ -409,7 +409,7 @@ export function PublishWizard({
               />
               {buildResult && (
                 <div className="space-y-2">
-                  <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+                  <h3 className="text-xs font-medium text-text-secondary ">
                     Build Result
                   </h3>
                   <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
@@ -430,7 +430,7 @@ export function PublishWizard({
           {/* Sign result */}
           {signResult && (
             <div className="space-y-2">
-              <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+              <h3 className="text-xs font-medium text-text-secondary ">
                 Sign Result
               </h3>
               <div
@@ -454,7 +454,7 @@ export function PublishWizard({
           {/* Export result */}
           {exportResult && (
             <div className="space-y-2">
-              <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+              <h3 className="text-xs font-medium text-text-secondary ">
                 Export Result
               </h3>
               <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
@@ -469,16 +469,16 @@ export function PublishWizard({
           {/* Distribute step - manual actions */}
           {step === "distribute" && (
             <div className="space-y-3">
-              <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+              <h3 className="text-xs font-medium text-text-secondary ">
                 Distribute
               </h3>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="text-xs text-text-tertiary ">
                 The package is ready. You can export it or install it locally.
               </p>
               <button
                 onClick={runExport}
                 disabled={busy}
-                className="flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                className="flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
               >
                 {busy ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -501,7 +501,7 @@ export function PublishWizard({
           <button
             onClick={onClose}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
           >
             {step === "distribute" ? t("publishWizard.buttonClose") : t("common.cancel")}
           </button>
@@ -604,10 +604,10 @@ function AvatarPickerSubForm({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <h3 className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+        <h3 className="text-xs font-medium text-text-secondary ">
           Default Avatar
         </h3>
-        <span className="text-[10px] text-zinc-400">
+        <span className="text-[10px] text-text-tertiary">
           baked into manifest.toml at build time
         </span>
       </div>
@@ -680,10 +680,10 @@ function AvatarPickerSubForm({
       {value.kind === "packaged" && (
         <div className="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700">
           <div className="min-w-0">
-            <div className="font-mono text-zinc-700 dark:text-zinc-200">
+            <div className="font-mono text-text-secondary ">
               {value.relativePath}
             </div>
-            <div className="text-[10px] text-zinc-400">
+            <div className="text-[10px] text-text-tertiary">
               ship as part of the .agent package
             </div>
           </div>
@@ -692,7 +692,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handlePickFile}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-[10px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="rounded-md px-2 py-1 text-[10px] text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
             >
               Replace
             </button>
@@ -700,7 +700,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handleClearPackaged}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-[10px] text-zinc-500 hover:bg-zinc-100 hover:text-red-600 disabled:opacity-50 dark:hover:bg-zinc-700"
+              className="rounded-md px-2 py-1 text-[10px] text-text-tertiary hover:bg-zinc-100 hover:text-red-600 disabled:opacity-50 dark:hover:bg-zinc-700"
               aria-label={t("publishWizard.ariaLabelRemoveAvatar")}
             >
               <XIcon className="h-3.5 w-3.5" />
@@ -711,7 +711,7 @@ function AvatarPickerSubForm({
 
       {/* None — random fallback note */}
       {value.kind === "none" && (
-        <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+        <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 text-[11px] text-text-tertiary dark:border-zinc-700 ">
           The client will assign a random builtin icon on first install.
         </p>
       )}
@@ -751,8 +751,8 @@ function ModeTab({
       className={cn(
         "rounded-md px-2 py-1 font-medium transition-colors disabled:opacity-50",
         active
-          ? "bg-modal-surface text-zinc-800 shadow-sm dark:text-zinc-100"
-          : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200",
+          ? "bg-modal-surface text-text shadow-sm "
+          : "text-text-tertiary hover:text-zinc-800  dark:hover:text-zinc-200",
       )}
     >
       {children}
@@ -772,10 +772,10 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
           className="h-16 w-16 rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
         />
         <div>
-          <div className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+          <div className="text-xs font-medium text-text-secondary ">
             Builtin icon: <span className="font-mono">{selection.iconId}</span>
           </div>
-          <div className="text-[10px] text-zinc-400">
+          <div className="text-[10px] text-text-tertiary">
             stored as <span className="font-mono">builtin_avatar</span> in manifest.toml
           </div>
         </div>
@@ -805,10 +805,10 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
           <div className="h-16 w-16" />
         )}
         <div>
-          <div className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+          <div className="text-xs font-medium text-text-secondary ">
             Local image: <span className="font-mono">{selection.relativePath}</span>
           </div>
-          <div className="text-[10px] text-zinc-400">
+          <div className="text-[10px] text-text-tertiary">
             stored as <span className="font-mono">avatar</span> in manifest.toml
           </div>
         </div>
@@ -817,14 +817,14 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
   }
   return (
     <div className="flex items-center gap-3 rounded-md border border-dashed border-zinc-200 px-3 py-2 dark:border-zinc-700">
-      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-zinc-400 dark:bg-zinc-800">
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-text-tertiary dark:bg-zinc-800">
         <ImagePlus className="h-6 w-6" />
       </div>
       <div>
-        <div className="text-xs font-medium text-zinc-700 dark:text-zinc-200">
+        <div className="text-xs font-medium text-text-secondary ">
           No avatar selected
         </div>
-        <div className="text-[10px] text-zinc-400">
+        <div className="text-[10px] text-text-tertiary">
           clients will fall back to a random builtin icon at install time
         </div>
       </div>

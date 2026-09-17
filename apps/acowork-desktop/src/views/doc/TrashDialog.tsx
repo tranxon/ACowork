@@ -98,15 +98,15 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
         className="relative z-10 flex max-h-[70vh] w-[440px] flex-col overflow-hidden rounded-lg border border-zinc-200 bg-surface shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
       >
         <div className="flex items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
-          <Trash2 className="h-4 w-4 text-zinc-500" aria-hidden />
-          <span className="flex-1 text-sm font-medium text-zinc-700 dark:text-zinc-100">
+          <Trash2 className="h-4 w-4 text-text-tertiary" aria-hidden />
+          <span className="flex-1 text-sm font-medium text-text-secondary ">
             {t("doc.trash")}
           </span>
           <button
             type="button"
             aria-label={t("common.close")}
             onClick={onClose}
-            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+            className="rounded p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
           >
             <X className="h-4 w-4" />
           </button>
@@ -114,12 +114,12 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
 
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {loading && (
-            <div className="flex items-center justify-center gap-2 py-6 text-zinc-400">
+            <div className="flex items-center justify-center gap-2 py-6 text-text-tertiary">
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
             </div>
           )}
           {isEmpty && (
-            <div className="py-8 text-center text-xs text-zinc-400">{t("doc.trashEmpty")}</div>
+            <div className="py-8 text-center text-xs text-text-tertiary">{t("doc.trashEmpty")}</div>
           )}
           {!loading &&
             list.map((entry) => (
@@ -128,10 +128,10 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
                 className="group flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs text-zinc-700 dark:text-zinc-200">
+                  <div className="truncate text-xs text-text-secondary ">
                     {entry.original_name}
                   </div>
-                  <div className="truncate text-[10px] text-zinc-400">
+                  <div className="truncate text-[10px] text-text-tertiary">
                     {new Date(entry.deleted_at).toLocaleString()} · {fmtSize(entry.file_size_bytes)}
                   </div>
                 </div>
@@ -142,7 +142,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
                       title={t("doc.restore")}
                       aria-label={t("doc.restore")}
                       onClick={() => void handleRestore(entry)}
-                      className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-emerald-600 dark:hover:bg-zinc-700"
+                      className="rounded p-1 text-text-tertiary hover:bg-zinc-200 hover:text-emerald-600 dark:hover:bg-zinc-700"
                     >
                       <ArchiveRestore className="h-3.5 w-3.5" />
                     </button>
@@ -152,7 +152,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
                     title={t("doc.purge")}
                     aria-label={t("doc.purge")}
                     onClick={() => setPurgeTarget(entry)}
-                    className="rounded p-1 text-zinc-400 hover:bg-zinc-200 hover:text-red-500 dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary hover:bg-zinc-200 hover:text-red-500 dark:hover:bg-zinc-700"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -162,7 +162,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
         </div>
 
         {!isEmpty && (
-          <div className="border-t border-zinc-200 px-3 py-1.5 text-[10px] text-zinc-400 dark:border-zinc-700">
+          <div className="border-t border-zinc-200 px-3 py-1.5 text-[10px] text-text-tertiary dark:border-zinc-700">
             {t("doc.trashNote")}
           </div>
         )}

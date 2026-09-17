@@ -126,7 +126,7 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
                 <div className="flex items-center gap-1.5">
                     <button
                         onClick={() => setCollapsed(!collapsed)}
-                        className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
+                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
                         aria-label={collapsed ? "Expand code" : "Collapse code"}
                     >
                         {collapsed ? (
@@ -135,13 +135,13 @@ export function CodeBlock({ language, code }: CodeBlockProps) {
                             <ChevronDown className="h-3.5 w-3.5" />
                         )}
                     </button>
-                    <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    <span className="text-xs font-medium text-text-tertiary ">
                         {langLabel}
                     </span>
                 </div>
                 <button
                     onClick={handleCopy}
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
                     aria-label={t("codeBlock.ariaLabelCopy")}
                 >
                     {copied ? (

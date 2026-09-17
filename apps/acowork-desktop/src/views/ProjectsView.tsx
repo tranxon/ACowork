@@ -148,10 +148,10 @@ export function ProjectsView() {
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-3xl dark:bg-zinc-800">
                 📋
               </div>
-              <h2 className="text-base font-semibold text-zinc-700 dark:text-zinc-200">
+              <h2 className="text-base font-semibold text-text-secondary ">
                 {t("pm.emptyTitle")}
               </h2>
-              <p className="max-w-sm text-center text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="max-w-sm text-center text-xs text-text-tertiary ">
                 {t("pm.emptyDesc")}
               </p>
               <button

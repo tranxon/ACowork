@@ -499,7 +499,7 @@ export const FileTreeNode = memo(function FileTreeNode({
           {isDir ? (
             <ChevronRight
               className={cn(
-                "h-[0.8em] w-[0.8em] text-zinc-400 transition-transform duration-150",
+                "h-[0.8em] w-[0.8em] text-text-tertiary transition-transform duration-150",
                 isExpanded && "rotate-90",
               )}
             />
@@ -524,16 +524,16 @@ export const FileTreeNode = memo(function FileTreeNode({
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.stopPropagation()}
-            className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-zinc-700 outline-none dark:bg-zinc-900 dark:text-zinc-300"
+            className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-text-secondary outline-none dark:bg-zinc-900 "
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           />
         ) : (
-          <span className="whitespace-nowrap text-zinc-700 dark:text-zinc-400">{entry.name}</span>
+          <span className="whitespace-nowrap text-text-secondary ">{entry.name}</span>
         )}
 
         {/* Loading indicator for directories being fetched */}
         {isLoading && isDir && isExpanded && (
-          <span className="ml-auto text-zinc-400" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>...</span>
+          <span className="ml-auto text-text-tertiary" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.78)" }}>...</span>
         )}
 
         {/* Open-files dot indicator for directories (VS Code style) */}

@@ -361,7 +361,7 @@ function ConnectionStatusBanner({
           {retryText}
         </span>
       ) : (
-        <span className="text-zinc-500 dark:text-zinc-400">
+        <span className="text-text-tertiary ">
           {t("chatPanel.connectionBanner.recoveringHint")}
         </span>
       )}
@@ -1902,9 +1902,9 @@ export function ChatPanel() {
     return (
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
-          <Bot className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
-          <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">No agents available</p>
-          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-600">Connect to Gateway and install the System Agent</p>
+          <Bot className="mx-auto h-12 w-12 text-text-secondary " />
+          <p className="mt-3 text-sm text-text-tertiary ">No agents available</p>
+          <p className="mt-1 text-xs text-text-tertiary ">Connect to Gateway and install the System Agent</p>
         </div>
       </div>
     );
@@ -1915,9 +1915,9 @@ export function ChatPanel() {
     return (
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
-          <Bot className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
-          <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">Select an agent to start chatting</p>
-          <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-600">or install a new agent from the sidebar</p>
+          <Bot className="mx-auto h-12 w-12 text-text-secondary " />
+          <p className="mt-3 text-sm text-text-tertiary ">Select an agent to start chatting</p>
+          <p className="mt-1 text-xs text-text-tertiary ">or install a new agent from the sidebar</p>
         </div>
       </div>
     );
@@ -1956,7 +1956,7 @@ export function ChatPanel() {
               <Play className="h-8 w-8" />
             </button>
           </Tooltip>
-          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">{agentDisplayName} is sleeping</p>
+          <p className="mt-3 text-xs text-text-tertiary ">{agentDisplayName} is sleeping</p>
         </div>
       </div>
     );
@@ -1995,7 +1995,7 @@ export function ChatPanel() {
       <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading session...</p>
+          <p className="mt-3 text-xs text-text-tertiary ">Loading session...</p>
         </div>
       </div>
     );
@@ -2132,7 +2132,7 @@ export function ChatPanel() {
             {isCompacting && (
               <div className="mt-1 ml-12 flex items-center gap-1.5" role="status">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
-                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.compacting")}
                 </span>
               </div>
@@ -2158,7 +2158,7 @@ export function ChatPanel() {
             {!isCompacting && phase === "thinking" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-purple-500 animate-pulse" />
-                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.phaseThinking", { defaultValue: "Thinking…" })}
                 </span>
               </div>
@@ -2166,7 +2166,7 @@ export function ChatPanel() {
             {!isCompacting && phase === "waiting" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
-                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.phaseWaiting", { defaultValue: "Waiting for model…" })}
                 </span>
               </div>
@@ -2174,7 +2174,7 @@ export function ChatPanel() {
             {!isCompacting && phase === "streaming" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.phaseStreaming", { defaultValue: "Generating reply…" })}
                 </span>
               </div>
@@ -2182,7 +2182,7 @@ export function ChatPanel() {
             {!isCompacting && phase === "tool_executing" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
-                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.phaseToolExecuting", { defaultValue: "Running tool…" })}
                 </span>
               </div>
@@ -2190,7 +2190,7 @@ export function ChatPanel() {
             {!isCompacting && phase === "waiting_approval" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-yellow-500 animate-pulse" />
-                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.phaseWaitingApproval", { defaultValue: "Waiting for tool approval…" })}
                 </span>
               </div>
@@ -2198,7 +2198,7 @@ export function ChatPanel() {
 {/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-text-secondary select-none dark:border-zinc-700 dark:bg-zinc-800/40 ">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2219,7 +2219,7 @@ export function ChatPanel() {
             )}
             {loopDetectedPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-text-secondary select-none dark:border-zinc-700 dark:bg-zinc-800/40 ">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2279,8 +2279,8 @@ export function ChatPanel() {
               <div className="space-y-1">
                 {/* Progress indicator */}
                 <div className="flex items-center gap-2 px-1">
-                  <div className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                    <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                  <div className="flex items-center gap-1.5 text-xs text-text-tertiary ">
+                    <span className="font-medium text-text-secondary ">
                       {currentQuestionIndex + 1} / {pendingQuestions.length}
                     </span>
                     <span>{t("askQuestionCard.questions")}</span>
@@ -2290,7 +2290,7 @@ export function ChatPanel() {
                       <button
                         onClick={() => setCurrentQuestionIndex((i) => Math.max(0, i - 1))}
                         disabled={currentQuestionIndex === 0}
-                        className="rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        className="rounded p-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         aria-label={t("askQuestionCard.previous")}
                       >
                         <ChevronLeft className="h-3.5 w-3.5" />
@@ -2313,7 +2313,7 @@ export function ChatPanel() {
                       <button
                         onClick={() => setCurrentQuestionIndex((i) => Math.min(pendingQuestions.length - 1, i + 1))}
                         disabled={currentQuestionIndex === pendingQuestions.length - 1}
-                        className="rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        className="rounded p-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         aria-label={t("askQuestionCard.next")}
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
@@ -2344,7 +2344,7 @@ export function ChatPanel() {
               className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
               aria-label="Scroll to top"
             >
-              <ChevronsUp className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+              <ChevronsUp className="h-4 w-4 text-text-tertiary " />
             </button>
           )}
           {/* Scroll-to-bottom button — visible when scrolled up > 1 screen.
@@ -2356,7 +2356,7 @@ export function ChatPanel() {
               className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
               aria-label={t("chatPanel.ariaLabelScrollToBottom")}
             >
-              <ChevronsDown className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+              <ChevronsDown className="h-4 w-4 text-text-tertiary " />
             </button>
           )}
         </div>
@@ -2370,11 +2370,11 @@ export function ChatPanel() {
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
             >
               {session.todosCollapsed ? (
-                <ChevronRight className="h-3 w-3 mr-1 text-zinc-400 dark:text-zinc-500 shrink-0" />
+                <ChevronRight className="h-3 w-3 mr-1 text-text-tertiary  shrink-0" />
               ) : (
-                <ChevronDown className="h-3 w-3 mr-1 text-zinc-400 dark:text-zinc-500 shrink-0" />
+                <ChevronDown className="h-3 w-3 mr-1 text-text-tertiary  shrink-0" />
               )}
-              <span className="min-w-0 truncate text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+              <span className="min-w-0 truncate text-[10px] font-medium text-text-tertiary  uppercase tracking-wider">
                 {(() => {
                   const completed = todos.filter(t => t.status === "completed").length;
                   const total = todos.length;
@@ -2386,7 +2386,7 @@ export function ChatPanel() {
                       {!isAllCompleted && currentTodo && (
                         <>
                           <span className="inline-block w-8"/>
-                          <span className="normal-case text-zinc-500 dark:text-zinc-400 truncate">
+                          <span className="normal-case text-text-tertiary  truncate">
                             {t("chatPanel.currentTask", { current: currentTodo.content })}
                           </span>
                         </>
@@ -2409,10 +2409,10 @@ export function ChatPanel() {
                       <span className={cn(
                         "shrink-0 mt-0.5 select-none",
                         isCompleted
-                          ? "text-zinc-400 dark:text-zinc-500"
+                          ? "text-text-tertiary "
                           : isInProgress
-                            ? "text-zinc-500 dark:text-zinc-300"
-                            : "text-zinc-400 dark:text-zinc-500"
+                            ? "text-text-tertiary "
+                            : "text-text-tertiary "
                       )}>
                         {isCompleted ? (
                           <CircleDot className="h-3.5 w-3.5" strokeWidth={2.25} />
@@ -2425,10 +2425,10 @@ export function ChatPanel() {
                       <span className={cn(
                         "flex-1 min-w-0 text-xs leading-relaxed truncate",
                         isCompleted
-                          ? "text-zinc-400 dark:text-zinc-500 line-through"
+                          ? "text-text-tertiary  line-through"
                           : isInProgress
-                            ? "text-zinc-700 dark:text-zinc-200 font-medium"
-                            : "text-zinc-600 dark:text-zinc-300"
+                            ? "text-text-secondary  font-medium"
+                            : "text-text-secondary "
                       )}>
                         {item.content}
                       </span>
@@ -2448,7 +2448,7 @@ export function ChatPanel() {
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
-              <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+              <span className="text-[10px] font-medium text-text-tertiary  uppercase tracking-wider">
                 {t("chatPanel.messageQueue", { count: queuedMessages.length })}
               </span>
             </div>
@@ -2458,15 +2458,15 @@ export function ChatPanel() {
                   key={i}
                   className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-zinc-100 dark:border-zinc-700/30 last:border-b-0"
                 >
-                  <span className="shrink-0 text-[10px] mt-0.5 text-zinc-400 dark:text-zinc-500 select-none">{i + 1}.</span>
-                  <span className="flex-1 min-w-0 text-xs text-zinc-700 dark:text-zinc-300 truncate leading-relaxed">
+                  <span className="shrink-0 text-[10px] mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
+                  <span className="flex-1 min-w-0 text-xs text-text-secondary  truncate leading-relaxed">
                     {msg}
                   </span>
                   <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       type="button"
                       onClick={() => handleEditQueued(i)}
-                      className="rounded-sm p-0.5 text-zinc-400 hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
+                      className="rounded-sm p-0.5 text-text-tertiary hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
                       aria-label={`Edit message ${i + 1}`}
                     >
                       <Pencil size={12} />
@@ -2474,7 +2474,7 @@ export function ChatPanel() {
                     <button
                       type="button"
                       onClick={() => handleRemoveQueued(i)}
-                      className="rounded-sm p-0.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 dark:hover:text-red-400 dark:hover:bg-red-900/30"
+                      className="rounded-sm p-0.5 text-text-tertiary hover:text-red-500 hover:bg-red-50 dark:hover:text-red-400 dark:hover:bg-red-900/30"
                       aria-label={`Remove message ${i + 1}`}
                     >
                       <X size={12} />
@@ -2613,7 +2613,7 @@ export function ChatPanel() {
               `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill)}`,
             )}
             disabled={inputDisabled}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-tertiary  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" || e.shiftKey) return;
@@ -2742,7 +2742,7 @@ export function ChatPanel() {
                 <button
                   className={`rounded-md p-1.5 transition-colors ${sending
                     ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
-                    : "text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
+                    : "text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:opacity-50"
                     }`}
                   onClick={sending ? handleStop : handleSend}
                   disabled={
@@ -2801,10 +2801,10 @@ function UnsupportedImageDialog({
         className="w-[400px] overflow-hidden rounded-md bg-modal-surface shadow-xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="shrink-0 px-6 pt-6 pb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+        <h3 className="shrink-0 px-6 pt-6 pb-2 text-sm font-semibold text-text ">
           {t("chatPanel.imageUnsupportedTitle")}
         </h3>
-        <p className="px-6 pb-4 text-xs text-zinc-500 dark:text-zinc-400">
+        <p className="px-6 pb-4 text-xs text-text-tertiary ">
           {t("chatPanel.imageUnsupportedDesc")}
         </p>
 
@@ -2816,7 +2816,7 @@ function UnsupportedImageDialog({
               onClick={() => {
                 onSelect(m.name, m.provider);
               }}
-              className="flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700/50 text-zinc-600 dark:text-zinc-300"
+              className="flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors rounded-md hover:bg-zinc-50 dark:hover:bg-zinc-700/50 text-text-secondary "
             >
               <span className="flex items-center gap-1.5 min-w-0">
                 <Image size={12} className="shrink-0 text-blue-400" />
@@ -2830,11 +2830,11 @@ function UnsupportedImageDialog({
                   })()}
                 </span>
                 <span className="flex items-center gap-0.5 shrink-0">
-                  {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
+                  {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
                   {m.reasoning && <Brain size={10} className="text-purple-400" />}
                 </span>
               </span>
-              <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
+              <span className="text-[10px] text-text-tertiary  shrink-0 ml-2">
                 {m.provider}
               </span>
             </button>
@@ -2844,7 +2844,7 @@ function UnsupportedImageDialog({
         <div className="shrink-0 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-4 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
           >
             {t("chatPanel.close")}
           </button>
@@ -2942,7 +2942,7 @@ function ModelMenu({
         >
           {/* Menu title */}
           <div className="px-3 pt-2.5 pb-1">
-            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+            <h2 className="text-sm font-normal text-text-secondary ">
               {t("chatPanel.modelMenuTitle")}
             </h2>
           </div>
@@ -2963,7 +2963,7 @@ function ModelMenu({
                     "flex w-full items-center justify-between px-3 py-1.5 text-xs font-medium transition-colors",
                     isActive
                       ? "text-[var(--color-accent)]"
-                      : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
+                      : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
                   )}
                 >
                   <span className="flex items-center gap-1 min-w-0">
@@ -2979,12 +2979,12 @@ function ModelMenu({
                       })()}
                     </span>
                     <span className="flex items-center gap-0.5 ml-2">
-                      {m.tool_call && <Wrench size={10} className="text-zinc-400" />}
+                      {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
                       {m.reasoning && <Brain size={10} className="text-purple-400" />}
                       {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
                     </span>
                   </span>
-                  <span className="text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0 ml-2">
+                  <span className="text-[10px] text-text-tertiary  shrink-0 ml-2">
                     {m.provider}
                   </span>
                 </button>
@@ -3002,7 +3002,7 @@ function ModelMenu({
               setShowAddDialog(true);
               setOpen(false);
             }}
-            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:hover:text-zinc-100"
+            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("chatPanel.addModel")}
@@ -3090,7 +3090,7 @@ function ReasoningEffortMenu({
         >
           {/* Menu title */}
           <div className="px-3 pt-2.5 pb-1">
-            <h2 className="text-sm font-normal text-zinc-700 dark:text-zinc-200">
+            <h2 className="text-sm font-normal text-text-secondary ">
               {t("chatPanel.reasoningMenuTitle")}
             </h2>
           </div>
@@ -3111,7 +3111,7 @@ function ReasoningEffortMenu({
                     "flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium transition-colors",
                     isActive
                       ? "text-[var(--color-accent)]"
-                      : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-700/50",
+                      : "text-text-secondary hover:bg-zinc-50  dark:hover:bg-zinc-700/50",
                   )}
                 >
                   <span

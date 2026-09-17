@@ -103,8 +103,8 @@ export function CloneDialog({
       <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
-          <Copy className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
-          <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+          <Copy className="h-5 w-5 text-text-tertiary " />
+          <h2 className="text-sm font-semibold text-text ">
             {t("cloneDialog.title")}
           </h2>
         </div>
@@ -113,19 +113,19 @@ export function CloneDialog({
         <div className="space-y-4 px-5 py-4">
           {/* Source info */}
           <div className="flex items-center gap-2 rounded-md bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-700/50">
-            <Info className="h-4 w-4 text-zinc-400" />
-            <span className="text-zinc-500 dark:text-zinc-400">
+            <Info className="h-4 w-4 text-text-tertiary" />
+            <span className="text-text-tertiary ">
               {t("cloneDialog.cloningFrom")}{" "}
             </span>
-            <span className="font-medium text-zinc-700 dark:text-zinc-200">
+            <span className="font-medium text-text-secondary ">
               {agentName}
             </span>
-            <span className="text-xs text-zinc-400">({agentId})</span>
+            <span className="text-xs text-text-tertiary">({agentId})</span>
           </div>
 
           {/* New agent ID */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="mb-1.5 block text-xs font-medium text-text-tertiary ">
               {t("cloneDialog.newAgentIdLabel")}
             </label>
             <StyledInput
@@ -146,7 +146,7 @@ export function CloneDialog({
 
           {/* Clone mode */}
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            <label className="mb-1.5 block text-xs font-medium text-text-tertiary ">
               {t("cloneDialog.cloneModeLabel")}
             </label>
             <div className="flex gap-2">
@@ -157,15 +157,15 @@ export function CloneDialog({
                   className={cn(
                     "flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
                     mode === m
-                      ? "border-zinc-200 bg-zinc-200 text-zinc-800 dark:border-zinc-300 dark:bg-zinc-300 dark:text-zinc-900"
-                      : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-700",
+                      ? "border-zinc-200 bg-zinc-200 text-text dark:border-zinc-300 dark:bg-zinc-300 "
+                      : "border-zinc-200 text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700",
                   )}
                 >
                   {modeDescriptions[m].label}
                 </button>
               ))}
             </div>
-            <p className="mt-1.5 text-xs text-zinc-400 dark:text-zinc-500">
+            <p className="mt-1.5 text-xs text-text-tertiary ">
               {modeInfo.desc}
             </p>
           </div>
@@ -181,7 +181,7 @@ export function CloneDialog({
           <button
             onClick={onClose}
             disabled={cloning}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
           >
             {t("common.cancel")}
           </button>

@@ -59,7 +59,7 @@ export function ToolbarDropdownTrigger({
                     className={cn(
                         toolbarButton,
                         "min-w-0",
-                        open && "bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100",
+                        open && "bg-zinc-200 dark:bg-zinc-700 text-text ",
                         buttonClassName,
                     )}
                 >
@@ -71,7 +71,7 @@ export function ToolbarDropdownTrigger({
                     >{label}</span>
                     <ChevronDown
                         data-toolbar-chevron=""
-                        className={cn("h-3 w-3 shrink-0 text-zinc-400", collapseClass)}
+                        className={cn("h-3 w-3 shrink-0 text-text-tertiary", collapseClass)}
                         style={{ display: textHidden ? "none" : undefined }}
                     />
                 </button>

@@ -255,7 +255,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
                 void reload();
               }}
               disabled={reloading}
-              className="rounded p-1 transition-colors text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-300 dark:disabled:text-zinc-600"
+              className="rounded p-1 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:text-zinc-300 dark:disabled:text-zinc-600"
               aria-label={t("prompts.reloadAria")}
             >
               {reloading ? (
@@ -268,7 +268,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
           bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
         >
           {loading && (
-            <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] text-zinc-400">
+            <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] text-text-tertiary">
               <Loader2 className="h-3 w-3 animate-spin" />
               {t("prompts.loading")}
             </div>
@@ -302,13 +302,13 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
                           "h-3 w-3",
                           p.overridden
                             ? "text-emerald-500 dark:text-emerald-400"
-                            : "text-zinc-400 dark:text-zinc-500",
+                            : "text-text-tertiary ",
                         )}
                       />
                     }
                   >
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 truncate font-mono text-[11px] font-medium text-zinc-800 dark:text-zinc-200">
+                      <span className="min-w-0 truncate font-mono text-[11px] font-medium text-text ">
                         {p.name}
                       </span>
                       <span className="flex shrink-0 items-center gap-1">
@@ -335,7 +335,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
                         )}
                       </span>
                     </div>
-                    <div className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                    <div className="mt-0.5 text-[10px] text-text-tertiary ">
                       {p.purpose}
                     </div>
                   </ListRow>
@@ -346,7 +346,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
       </ListBox>
 
       {/* Bottom — ToolsTab-style help hint under the card. */}
-      <p className="mt-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+      <p className="mt-1 text-[9px] text-text-tertiary ">
         {t("prompts.help")}
       </p>
     </div>

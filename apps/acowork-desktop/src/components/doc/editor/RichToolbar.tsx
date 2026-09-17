@@ -66,7 +66,7 @@ function ToolButton({
         "flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors",
         active
           ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-          : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+          : "text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800  dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
         disabled && "pointer-events-none opacity-40",
       )}
     >

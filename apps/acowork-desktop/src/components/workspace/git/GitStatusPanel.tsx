@@ -46,7 +46,7 @@ const EMPTY_CHANGES: GitChangeDto[] = [];
  *  decorations (absolute, shadow, animate-in) which would look out
  *  of place inside the flat file-list footer. */
 const PAGINATION_BUTTON_CLASS =
-  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-zinc-500 transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-600";
+  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-text-tertiary transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700  dark:hover:bg-zinc-600";
 
 interface GitStatusPanelProps {
   agentId: string;
@@ -103,7 +103,7 @@ function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; la
   if (c.index === "renamed" || c.index === "added") {
     return {
       icon: c.index === "renamed" ? <ArrowRightLeft size={13} /> : <FilePlus size={13} />,
-      color: c.staged ? "text-emerald-600 dark:text-emerald-400" : "text-zinc-500 dark:text-zinc-400",
+      color: c.staged ? "text-emerald-600 dark:text-emerald-400" : "text-text-tertiary ",
       labelKey: c.index === "renamed" ? "gitStatus.renamed" : "gitStatus.added",
     };
   }
@@ -291,7 +291,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
   const body = (() => {
     if (loading && !data) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400">
+        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
           {t("gitStatus.loading")}
         </div>
       );
@@ -306,7 +306,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     if (!data) return null;
     if (!data.isRepo) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400">
+        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
           {data.error === "git_unavailable"
             ? t("gitStatus.gitUnavailable")
             : t("gitStatus.notRepo")}
@@ -315,7 +315,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     }
     if (changes.length === 0) {
       return (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400">
+        <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
           {t("gitStatus.clean")}
         </div>
       );
@@ -349,11 +349,11 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
               <span className={cn("shrink-0", meta.color)} title={t(meta.labelKey)}>
                 {meta.icon}
               </span>
-              <span className="flex-1 truncate text-zinc-700 dark:text-zinc-400">
+              <span className="flex-1 truncate text-text-secondary ">
                 {c.path}
               </span>
               {c.oldPath && (
-                <span className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                <span className="truncate text-[10px] text-text-tertiary ">
                   ← {c.oldPath}
                 </span>
               )}
@@ -374,7 +374,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
           data-testid="git-status-pagination"
           className="flex shrink-0 items-center justify-between gap-2 border-t border-zinc-200 px-2 py-1 dark:border-zinc-700"
         >
-          <span className="text-[10px] tabular-nums text-zinc-500 dark:text-zinc-400">
+          <span className="text-[10px] tabular-nums text-text-tertiary ">
             {pageIndex * PAGE_SIZE + 1}–{Math.min((pageIndex + 1) * PAGE_SIZE, changes.length)} / {changes.length}
           </span>
           <div className="flex items-center gap-1">

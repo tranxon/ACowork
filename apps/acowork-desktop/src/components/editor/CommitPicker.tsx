@@ -243,7 +243,7 @@ export function CommitPicker({
             {showChrome && (
                 <div className="flex flex-col gap-1 border-b border-right-panel-border px-2 py-1.5 shrink-0">
                     <div className="relative">
-                        <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-400" />
+                        <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-text-tertiary" />
                         <StyledInput
                             type="text"
                             value={search}
@@ -254,7 +254,7 @@ export function CommitPicker({
                         />
                     </div>
                     {pagination && (
-                        <div className="text-[10px] text-zinc-400 dark:text-zinc-500 px-1">
+                        <div className="text-[10px] text-text-tertiary  px-1">
                             {(() => {
                                 const start = (pagination.currentPage - 1) * pagination.pageSize + 1;
                                 const end = Math.min(
@@ -292,22 +292,22 @@ export function CommitPicker({
                             "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors " +
                             (currentRef === WORKING_TREE_REF
                                 ? "bg-blue-50 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                                : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-700")
+                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700")
                         }
                     >
-                        <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-[10px] text-zinc-600 dark:bg-zinc-600 dark:text-zinc-200">
+                        <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-[10px] text-text-secondary dark:bg-zinc-600 ">
                             WT
                         </span>
                         <span className="truncate">{t(WORKING_TREE_LABEL_KEY)}</span>
                     </button>
                 )}
                 {loading2 && (
-                    <div className="px-3 py-2 text-zinc-400">
+                    <div className="px-3 py-2 text-text-tertiary">
                         {t("gitStatus.loading")}
                     </div>
                 )}
                 {!loading2 && filteredCommits.length === 0 && (
-                    <div className="px-3 py-2 text-zinc-400">
+                    <div className="px-3 py-2 text-text-tertiary">
                         {search.trim()
                             ? t("gitStatus.commitPickerNoMatches")
                             : t("gitStatus.noCommits")}
@@ -330,13 +330,13 @@ export function CommitPicker({
                                     : "hover:bg-zinc-100 dark:hover:bg-zinc-700",
                             )}
                         >
-                            <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-[10px] text-zinc-600 dark:bg-zinc-600 dark:text-zinc-200">
+                            <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-[10px] text-text-secondary dark:bg-zinc-600 ">
                                 {c.shortHash}
                             </span>
-                            <span className="min-w-0 flex-1 truncate text-zinc-700 dark:text-zinc-200">
+                            <span className="min-w-0 flex-1 truncate text-text-secondary ">
                                 {c.subject}
                             </span>
-                            <span className="shrink-0 text-[10px] text-zinc-400 dark:text-zinc-500">
+                            <span className="shrink-0 text-[10px] text-text-tertiary ">
                                 {c.author}
                             </span>
                         </button>
@@ -355,11 +355,11 @@ export function CommitPicker({
                         onClick={() => setPage((p) => Math.max(1, p - 1))}
                         disabled={pagination.currentPage <= 1 || loading2}
                         aria-label={t("gitStatus.commitPickerPrevPage")}
-                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-700"
                     >
                         <ChevronLeft className="h-3.5 w-3.5" />
                     </button>
-                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <span className="text-[11px] text-text-tertiary ">
                         {t("gitStatus.commitPickerPageOf", {
                             current: pagination.currentPage,
                             total: pagination.totalPages,
@@ -374,7 +374,7 @@ export function CommitPicker({
                             pagination.currentPage >= pagination.totalPages || loading2
                         }
                         aria-label={t("gitStatus.commitPickerNextPage")}
-                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-700"
                     >
                         <ChevronRight className="h-3.5 w-3.5" />
                     </button>

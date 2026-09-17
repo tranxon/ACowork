@@ -378,14 +378,14 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
             manuallyCollapsed.current = false;
           }
         }}
-        className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-700"
+        className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30  dark:hover:bg-zinc-700"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
-        <Search className="h-3.5 w-3.5 shrink-0 text-zinc-400 dark:text-zinc-500" />
-        <span className="font-medium text-zinc-400 dark:text-zinc-500">
+        <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
+        <span className="font-medium text-text-tertiary ">
           {hasFollowUpReply ? t("exploreBlock.explored") : t("exploreBlock.exploring")}
         </span>
-        <span className="text-zinc-400 dark:text-zinc-500">
+        <span className="text-text-tertiary ">
           ({t("exploreBlock.step", { count: stepCount })}
           {/* When collapsed and at least one tool is still awaiting its
               result, append a "· M running" suffix so the user can see
@@ -401,9 +401,9 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           )
         </span>
         {expanded ? (
-          <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-zinc-400" />
+          <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         ) : (
-          <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-zinc-400" />
+          <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         )}
       </button>
 
@@ -555,7 +555,7 @@ function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionI
 
   // Fallback
   return (
-    <div className="text-zinc-500 dark:text-zinc-400" style={{ fontSize: EXPLORE_FONT_SIZE }}>
+    <div className="text-text-tertiary " style={{ fontSize: EXPLORE_FONT_SIZE }}>
       {item.msg.content.slice(0, 120)}
     </div>
   );
@@ -656,15 +656,15 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <button className="flex min-w-0 flex-1 items-center gap-2" onClick={() => setShowDetails(!showDetails)}>
-          <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-          <span className="shrink-0 font-medium text-zinc-700 dark:text-zinc-300">{toolLabel}</span>
+          <Icon className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+          <span className="shrink-0 font-medium text-text-secondary ">{toolLabel}</span>
           {summary && (
-            <span className="min-w-0 flex-1 truncate ml-1 text-left text-zinc-500 dark:text-zinc-400">
+            <span className="min-w-0 flex-1 truncate ml-1 text-left text-text-tertiary ">
               {summary}
             </span>
           )}
           {showProgress && progressEntry && call.toolCallId && (
-            <div className="ml-2 flex items-center gap-2 text-[10px] text-zinc-400 dark:text-zinc-500">
+            <div className="ml-2 flex items-center gap-2 text-[10px] text-text-tertiary ">
               <div className="relative h-0.5 w-12 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                 <div
                   className="absolute inset-y-0 left-0 bg-amber-500 dark:bg-amber-400 transition-[width] duration-500"
@@ -676,7 +676,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
                 <button
                   onClick={handleCancel}
                   disabled={cancelling}
-                  className="ml-1 text-zinc-400 hover:text-red-500 transition-colors disabled:opacity-30"
+                  className="ml-1 text-text-tertiary hover:text-red-500 transition-colors disabled:opacity-30"
                   title={t("exploreBlock.cancelTool")}
                   aria-label={t("exploreBlock.cancelTool")}
                 >
@@ -701,7 +701,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             )}
             <button
               onClick={() => onApprove("deny", specificApproval)}
-              className="rounded-md border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-200 dark:border-zinc-500 dark:text-zinc-400 dark:hover:bg-zinc-600"
+              className="rounded-md border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-zinc-200 dark:border-zinc-500  dark:hover:bg-zinc-600"
             >
               Deny
             </button>
@@ -738,21 +738,21 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         ) : null}
         <button onClick={() => setShowDetails(!showDetails)}>
           {showDetails ? (
-            <ChevronDown className="h-3 w-3 shrink-0 text-zinc-400" />
+            <ChevronDown className="h-3 w-3 shrink-0 text-text-tertiary" />
           ) : (
-            <ChevronRight className="h-3 w-3 shrink-0 text-zinc-400" />
+            <ChevronRight className="h-3 w-3 shrink-0 text-text-tertiary" />
           )}
         </button>
       </div>
       {showDetails && (
         <div className="mt-0.5 ml-5 space-y-0.5">
           {/* Call params */}
-          <pre className="rounded bg-zinc-100 p-2 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 whitespace-pre-wrap break-all" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
+          <pre className="rounded bg-zinc-100 p-2 text-text-secondary dark:bg-zinc-800  whitespace-pre-wrap break-all" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
             {call.content}
           </pre>
           {/* Result */}
           {result && (
-            <pre className={`rounded p-2 whitespace-pre-wrap break-all ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-[var(--color-accent)]/10 text-zinc-600 dark:bg-[var(--color-accent)]/10 dark:text-zinc-400"}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
+            <pre className={`rounded p-2 whitespace-pre-wrap break-all ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-[var(--color-accent)]/10 text-text-secondary dark:bg-[var(--color-accent)]/10 "}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
               {/* ADR-035 D9.2: backend already truncates tool_result to first 5 lines
                   in ALL paths (MQTT + HTTP); frontend does NOT re-truncate. */}
               {result.content}

@@ -10,7 +10,7 @@ const STYLES: Record<Priority, string> = {
   urgent: "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-400",
   high: "bg-orange-100 text-orange-700 dark:bg-orange-950/60 dark:text-orange-400",
   normal: "bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400",
-  low: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
+  low: "bg-zinc-100 text-text-secondary dark:bg-zinc-800 ",
 };
 
 const LABELS: Record<Priority, string> = {

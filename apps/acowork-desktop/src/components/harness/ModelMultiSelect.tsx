@@ -197,7 +197,7 @@ export function ModelMultiSelect({
   return (
     <div className={className}>
       {/* Header label + selected counter */}
-      <label className="mb-1 block text-xs text-zinc-500">
+      <label className="mb-1 block text-xs text-text-tertiary">
         {t("harness.defaultModel")}
         {showSelectedCount && selected.length > 0 && (
           <span className="text-accent-green">
@@ -216,7 +216,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("tool_call")
                 ? "bg-accent-green/10 text-accent-green"
-                : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400",
+                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
             )}
           >
             🔧 {t("harness.toolCalling")}
@@ -228,7 +228,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("reasoning")
                 ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
-                : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400",
+                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
             )}
           >
             🧠 {t("harness.reasoning")}
@@ -240,7 +240,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("image")
                 ? "bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-300"
-                : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-400",
+                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
             )}
           >
             🖼️ {t("harness.image")}
@@ -280,9 +280,9 @@ export function ModelMultiSelect({
       {/* Model list */}
       <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
         {loading ? (
-          <div className="px-3 py-2 text-xs text-zinc-400">{t("harness.loadingModels")}</div>
+          <div className="px-3 py-2 text-xs text-text-tertiary">{t("harness.loadingModels")}</div>
         ) : visibleModels.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-zinc-400">{t("harness.noModelsFound")}</div>
+          <div className="px-3 py-2 text-xs text-text-tertiary">{t("harness.noModelsFound")}</div>
         ) : (
           visibleModels.map((m) => (
             <label
@@ -298,7 +298,7 @@ export function ModelMultiSelect({
               <div className="flex flex-1 flex-col gap-0.5">
                 <span className="truncate">{m.name || m.id}</span>
                 {showMetadata && (
-                  <div className="flex gap-2 text-xs text-zinc-400">
+                  <div className="flex gap-2 text-xs text-text-tertiary">
                     {m.context_window != null && (
                       <span>{(m.context_window / 1000).toFixed(0)}K {t("harness.context")}</span>
                     )}
@@ -344,7 +344,7 @@ export function ModelMultiSelect({
         onExpandedToggle &&
         selected.length > 0 && (
         <div className="mt-2">
-          <label className="mb-1 block text-xs text-zinc-500">
+          <label className="mb-1 block text-xs text-text-tertiary">
             {t("harness.modelCapabilities")}
             <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
           </label>
@@ -370,7 +370,7 @@ export function ModelMultiSelect({
       {/* Compact model selector */}
       {showCompactModel && onCompactModelChange && selected.length > 0 && (
         <div className="mt-2">
-          <label className="mb-1 block text-xs text-zinc-500">
+          <label className="mb-1 block text-xs text-text-tertiary">
             {t("harness.compactModel")}
           </label>
           <Dropdown

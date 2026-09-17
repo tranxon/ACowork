@@ -967,7 +967,7 @@ export function AppLayout() {
                   fallback={
                     <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-4 text-center">
                       <AlertTriangle className="h-6 w-6 text-amber-500" />
-                      <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      <p className="text-sm text-text-tertiary ">
                         {t("errorBoundary.title")}
                       </p>
                       {/* Retry re-imports the chunk (works when the fetch failed
@@ -980,7 +980,7 @@ export function AppLayout() {
                         <button
                           type="button"
                           onClick={() => setEditorLoadAttempt((n) => n + 1)}
-                          className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+                          className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-zinc-300 dark:bg-zinc-700  dark:hover:bg-zinc-600"
                         >
                           <RefreshCw className="h-4 w-4" />
                           {t("errorBoundary.retry")}
@@ -1070,7 +1070,7 @@ export function AppLayout() {
       {/* Per-key:value pill style: opaque backdrop so the text stays readable when window opacity < 1 */}
       {/* `relative` so the file-status cluster can anchor absolutely to */}
       {/* the file editor panel's left/right edges via PR-1's filePanelBounds. */}
-      <div className="relative flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-[11px] select-none dark:text-zinc-300">
+      <div className="relative flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-[11px] select-none ">
         {statusVisible && (
           <Tooltip
             content={statusMsg}
@@ -1096,7 +1096,7 @@ export function AppLayout() {
                 statusType === "warning" &&
                   "text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border-amber-300/70 dark:border-amber-800/70 hover:bg-amber-200/80 dark:hover:bg-amber-900/70",
                 statusType === "info" &&
-                  "text-zinc-700 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
+                  "text-text-secondary  bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
               )}
             >
               {statusCopied ? (
@@ -1113,16 +1113,16 @@ export function AppLayout() {
         {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentDisplayName && (
           <span className="flex items-center gap-2 truncate">
             <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-              <Bot className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
-              <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.agent")}: </span>
-              <span className="font-medium text-zinc-600 dark:text-zinc-400">{agentDisplayName}</span>
+              <Bot className="h-3 w-3 text-text-secondary " aria-hidden="true" />
+              <span className="text-text-secondary ">{t("statusBar.agent")}: </span>
+              <span className="font-medium text-text-secondary ">{agentDisplayName}</span>
             </span>
             {contextUsage && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-                <Cpu className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
-                <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.context")}: </span>
+                <Cpu className="h-3 w-3 text-text-secondary " aria-hidden="true" />
+                <span className="text-text-secondary ">{t("statusBar.context")}: </span>
                 <span
-                  className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400"
+                  className="tabular-nums font-medium text-text-secondary "
                   style={{
                     color:
                       contextUsage.usage_percent >= 90
@@ -1132,8 +1132,8 @@ export function AppLayout() {
                 >
                   {formatPercent(contextUsage.usage_percent)}%
                 </span>
-                <span className="text-zinc-400 dark:text-zinc-500"> | </span>
-                <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">
+                <span className="text-text-tertiary "> | </span>
+                <span className="tabular-nums font-medium text-text-secondary ">
                   {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
                 </span>
               </span>
@@ -1145,10 +1145,10 @@ export function AppLayout() {
                 falls back to a dash when it isn't computable yet. */}
             {hasCacheData(contextUsage, "cumulative") && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-                <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">
+                <span className="tabular-nums font-medium text-text-secondary ">
                   {cacheHitRateLabel ?? "\u2014"}
                 </span>
-                <span className="text-zinc-400 dark:text-zinc-500">{t("statusBar.cached")}</span>
+                <span className="text-text-tertiary ">{t("statusBar.cached")}</span>
               </span>
             )}
           </span>

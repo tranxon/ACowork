@@ -117,12 +117,12 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
       >
         <div className="flex items-start gap-1.5">
           <TaskTypeIcon type={task.type} className="mt-0.5 text-xs leading-none" />
-          <span className="min-w-0 flex-1 text-xs font-medium leading-snug text-zinc-800 dark:text-zinc-100">
+          <span className="min-w-0 flex-1 text-xs font-medium leading-snug text-text ">
             {task.title}
           </span>
         </div>
 
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-text-tertiary ">
           <PriorityBadge priority={task.priority} />
 
           {task.is_blocked && (
@@ -162,7 +162,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
         {task.status === "submitted" && (
           <div className="mt-2 border-t border-amber-200/70 pt-1.5 dark:border-amber-800/40">
             {creatorName && (
-              <p className="mb-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+              <p className="mb-1.5 text-[10px] text-text-tertiary ">
                 {t("pm.review.createdByLabel")}{" "}
                 <span className="font-medium text-amber-700 dark:text-amber-300">{creatorName}</span>
               </p>

@@ -178,13 +178,13 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
       <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
         <div className="absolute inset-0 bg-black/30" onClick={onClose} />
         <aside className="absolute inset-y-0 right-0 w-[480px] bg-page-bg p-6 shadow-xl dark:bg-zinc-900">
-          <p className="text-xs text-zinc-500">
+          <p className="text-xs text-text-tertiary">
             {error ?? t("pm.task.taskNotFound")}
           </p>
           <button
             type="button"
             onClick={onClose}
-            className="mt-3 rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="mt-3 rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
           >
             {t("common.close") ?? "Close"}
           </button>
@@ -208,10 +208,10 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         <header className="shrink-0 border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
-              <h2 className="break-words text-sm font-semibold text-zinc-800 dark:text-zinc-100">
+              <h2 className="break-words text-sm font-semibold text-text ">
                 {detail.title}
               </h2>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-tertiary ">
                 <TaskTypeIcon type={detail.type} className="text-xs" />
                 <PriorityBadge priority={detail.priority} />
                 <span>{statusLabel(t, detail.status)}</span>
@@ -220,7 +220,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
             <button
               type="button"
               onClick={onClose}
-              className="shrink-0 rounded-md px-1.5 py-0.5 text-sm text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="shrink-0 rounded-md px-1.5 py-0.5 text-sm text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
               aria-label={t("common.close") ?? "Close"}
             >
               ×
@@ -250,8 +250,8 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                 className={cn(
                   "-mb-px border-b-2 px-2 py-1 text-[11px] font-medium transition-colors",
                   activeTab === tab.id
-                    ? "border-[var(--color-accent)] text-zinc-800 dark:text-zinc-100"
-                    : "border-transparent text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300",
+                    ? "border-[var(--color-accent)] text-text "
+                    : "border-transparent text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300",
                 )}
               >
                 {tab.label}
@@ -298,11 +298,11 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
           )}
 
           {activeTab === "description" && (
-            <div className="text-xs leading-relaxed text-zinc-700 dark:text-zinc-300">
+            <div className="text-xs leading-relaxed text-text-secondary ">
               {detail.description ? (
                 <p className="whitespace-pre-wrap break-words">{detail.description}</p>
               ) : (
-                <p className="italic text-zinc-400">{t("pm.noDescription")}</p>
+                <p className="italic text-text-tertiary">{t("pm.noDescription")}</p>
               )}
             </div>
           )}
@@ -310,13 +310,13 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
           {activeTab === "dependencies" && (
             <ul className="space-y-1 text-xs">
               {detail.depends_on.length === 0 ? (
-                <li className="text-zinc-400">{t("pm.task.noDependencies")}</li>
+                <li className="text-text-tertiary">{t("pm.task.noDependencies")}</li>
               ) : (
                 detail.depends_on.map((dep, i) => (
                   <li key={i} className="flex items-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1.5 dark:bg-zinc-800">
                     <span aria-hidden>🔗</span>
                     <span className="break-all">{dep.task_id}</span>
-                    <span className="ml-auto text-zinc-400">({dep.kind})</span>
+                    <span className="ml-auto text-text-tertiary">({dep.kind})</span>
                   </li>
                 ))
               )}
@@ -331,7 +331,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                   type="button"
                   disabled={uploading}
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800  dark:hover:bg-zinc-700"
                 >
                   <span aria-hidden>⬆</span>
                   {uploading ? t("pm.task.uploading") : t("pm.task.uploadAttachment")}
@@ -356,7 +356,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
               </div>
 
               {attachments.length === 0 ? (
-                <p className="text-xs text-zinc-400">{t("pm.task.noAttachments")}</p>
+                <p className="text-xs text-text-tertiary">{t("pm.task.noAttachments")}</p>
               ) : (
                 <ul className="grid grid-cols-3 gap-2">
                   {attachments.map((att) => (
@@ -376,7 +376,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                       ) : (
                         <a
                           href={attachmentUrl(att.id, { download: true })}
-                          className="flex h-20 flex-col items-center justify-center gap-0.5 text-zinc-500 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-700"
+                          className="flex h-20 flex-col items-center justify-center gap-0.5 text-text-tertiary hover:bg-zinc-50  dark:hover:bg-zinc-700"
                         >
                           <span className="text-lg" aria-hidden>📄</span>
                           <span className="max-w-full truncate px-1 text-[10px]">{att.filename}</span>
@@ -392,7 +392,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                       >
                         ✕
                       </button>
-                      <div className="px-1.5 py-1 text-[9px] text-zinc-400">
+                      <div className="px-1.5 py-1 text-[9px] text-text-tertiary">
                         <span className="block truncate">{att.filename}</span>
                         <span>{formatBytes(att.size)}</span>
                       </div>
@@ -409,7 +409,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
               <button
                 type="button"
                 onClick={() => onAddSubtask?.(detail.id)}
-                className="mt-2 w-full rounded-md border border-dashed border-zinc-300 px-3 py-1.5 text-xs text-zinc-500 hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600"
+                className="mt-2 w-full rounded-md border border-dashed border-zinc-300 px-3 py-1.5 text-xs text-text-tertiary hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600"
               >
                 + {t("pm.task.addSubtask")}
               </button>
@@ -424,7 +424,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
             <button
               type="button"
               onClick={() => onEdit(detail)}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
             >
               {t("pm.task.edit")}
             </button>
@@ -472,8 +472,8 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
 function Field({ label, value, className }: { label: string; value: string; className?: string }) {
   return (
     <div className="flex gap-2">
-      <dt className="w-20 shrink-0 text-zinc-400 dark:text-zinc-500">{label}</dt>
-      <dd className={cn("min-w-0 flex-1 text-zinc-700 dark:text-zinc-300", className)}>{value}</dd>
+      <dt className="w-20 shrink-0 text-text-tertiary ">{label}</dt>
+      <dd className={cn("min-w-0 flex-1 text-text-secondary ", className)}>{value}</dd>
     </div>
   );
 }

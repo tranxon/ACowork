@@ -51,13 +51,13 @@ export function RejectDialog({ open, taskTitle, onConfirm, onCancel }: RejectDia
         <h3 id="reject-title" className="text-sm font-semibold">
           {t("pm.reject.title")}
         </h3>
-        <p id="reject-desc" className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+        <p id="reject-desc" className="mt-1.5 text-xs text-text-tertiary ">
           {t("pm.reject.desc")} "{taskTitle}"?
         </p>
 
         <div className="mt-4">
-          <label className="mb-1 block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-            {t("pm.reject.reason")} <span className="text-zinc-400">({t("pm.reject.optional")})</span>
+          <label className="mb-1 block text-[11px] font-medium text-text-tertiary ">
+            {t("pm.reject.reason")} <span className="text-text-tertiary">({t("pm.reject.optional")})</span>
           </label>
           <StyledTextarea
             ref={textareaRef}
@@ -72,7 +72,7 @@ export function RejectDialog({ open, taskTitle, onConfirm, onCancel }: RejectDia
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
           >
             {t("common.cancel")}
           </button>

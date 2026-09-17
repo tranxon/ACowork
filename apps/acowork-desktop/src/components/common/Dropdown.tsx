@@ -53,7 +53,7 @@ const ARROW_SVG =
 const baseBySize: Record<DropdownSize, { className: string; style: React.CSSProperties }> = {
   standard: {
     className:
-      "w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200",
+      "w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-text focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 ",
     style: {
       backgroundImage: ARROW_SVG,
       backgroundPosition: "right 0.5rem center",
@@ -67,7 +67,7 @@ const baseBySize: Record<DropdownSize, { className: string; style: React.CSSProp
   },
   small: {
     className:
-      "h-7 appearance-none rounded-md border border-zinc-200 bg-modal-surface px-1.5 text-[11px] text-zinc-700 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-600 dark:text-zinc-300",
+      "h-7 appearance-none rounded-md border border-zinc-200 bg-modal-surface px-1.5 text-[11px] text-text-secondary outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-600 ",
     style: {
       backgroundImage: ARROW_SVG,
       backgroundPosition: "right 0.25rem center",

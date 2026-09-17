@@ -114,7 +114,7 @@ export function ExpandableRow({
           <ChevronRight
             aria-hidden
             className={cn(
-              "h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-150 dark:text-zinc-500",
+              "h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform duration-150 ",
               open && "rotate-90",
             )}
           />
@@ -123,13 +123,13 @@ export function ExpandableRow({
         )}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
-            <span className="truncate text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+            <span className="truncate text-[11px] font-medium text-text-secondary ">
               {title}
             </span>
             {meta != null && <span className="flex shrink-0 items-center gap-1">{meta}</span>}
           </div>
           {description != null && (
-            <div className="truncate text-[9px] leading-tight text-zinc-400 dark:text-zinc-500">
+            <div className="truncate text-[9px] leading-tight text-text-tertiary ">
               {description}
             </div>
           )}

@@ -218,7 +218,7 @@ export function TaskEditDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-1.5 py-0.5 text-sm text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+            className="rounded-md px-1.5 py-0.5 text-sm text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
             aria-label={t("common.close") ?? "Close"}
           >
             ×
@@ -271,7 +271,7 @@ export function TaskEditDialog({
           <div className="grid grid-cols-2 gap-3">
             <Field label={t("pm.task.assignee")}>
               {memberIds.size === 0 ? (
-                <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-[11px] text-zinc-400 dark:border-zinc-600">
+                <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-[11px] text-text-tertiary dark:border-zinc-600">
                   {t("pm.assigneeNoMembersHint")}
                 </p>
               ) : (
@@ -302,13 +302,13 @@ export function TaskEditDialog({
 
           <Field label={t("pm.task.dependencies")}>
             {depOptions.length === 0 ? (
-              <p className="text-xs text-zinc-400">{t("pm.task.noCandidates")}</p>
+              <p className="text-xs text-text-tertiary">{t("pm.task.noCandidates")}</p>
             ) : (
               <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border border-zinc-200 p-2 dark:border-zinc-700">
                 {depOptions.map((opt) => (
                   <label
                     key={opt.value}
-                    className="flex cursor-pointer items-center gap-2 text-xs text-zinc-700 dark:text-zinc-300"
+                    className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary "
                   >
                     <input
                       type="checkbox"
@@ -329,7 +329,7 @@ export function TaskEditDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
             disabled={saving}
           >
             {t("common.cancel")}
@@ -359,7 +359,7 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+      <span className="mb-1 block text-[11px] font-medium text-text-tertiary ">
         {label}
         {required && <span className="ml-0.5 text-red-500" aria-hidden>*</span>}
       </span>

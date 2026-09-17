@@ -118,7 +118,7 @@ function WorkspaceRefChip({
     <Tag
       type={Tag === "button" ? "button" : undefined}
       className={
-        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
         + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -129,9 +129,9 @@ function WorkspaceRefChip({
       onClick={onClick}
     >
       {pending ? (
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-zinc-400" />
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-text-tertiary" />
       ) : (
-        <FileText className="h-4 w-4 shrink-0 text-zinc-400" />
+        <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />
       )}
       <span className="max-w-[200px] truncate font-medium">{item.name}</span>
     </Tag>
@@ -154,7 +154,7 @@ function SelectionChip({
     <Tag
       type={Tag === "button" ? "button" : undefined}
       className={
-        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
         + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -170,7 +170,7 @@ function SelectionChip({
         <Hash className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
       )}
       <span className="max-w-[180px] truncate font-medium">{item.name}</span>
-      <span className="text-zinc-400 dark:text-zinc-500">
+      <span className="text-text-tertiary ">
         {item.startLine}-{item.endLine}
       </span>
     </Tag>
@@ -193,7 +193,7 @@ function FolderChip({
     <Tag
       type={Tag === "button" ? "button" : undefined}
       className={
-        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
         + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -308,7 +308,7 @@ function ImageAttachmentThumbnail({
           }
         />
       ) : (
-        <div className="flex h-full w-full items-center justify-center text-[10px] text-zinc-400">
+        <div className="flex h-full w-full items-center justify-center text-[10px] text-text-tertiary">
           {failed ? "!" : "…"}
         </div>
       )}

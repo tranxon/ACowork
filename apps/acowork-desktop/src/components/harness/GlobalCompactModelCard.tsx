@@ -157,7 +157,7 @@ export function GlobalCompactModelCard({
         bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
       >
         <div className="space-y-2">
-          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          <p className="text-[11px] text-text-tertiary ">
             {t("harness.globalCompactModel.description")}
           </p>
           <Dropdown

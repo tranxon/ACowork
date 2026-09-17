@@ -107,7 +107,7 @@ export function ReviewQueue() {
           "flex w-full items-center gap-2 px-3 py-1 text-left text-[11px] transition-colors",
           pendingCount > 0
             ? "bg-amber-50 text-amber-800 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-200 dark:hover:bg-amber-900/30"
-            : "text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
+            : "text-text-tertiary hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
         )}
       >
         <Inbox className="h-3.5 w-3.5" aria-hidden />
@@ -121,17 +121,17 @@ export function ReviewQueue() {
       {open && (
         <div className="max-h-64 overflow-y-auto border-t border-zinc-100 px-1 py-1 dark:border-zinc-800/60">
           {loading && (
-            <div className="flex items-center justify-center gap-2 py-3 text-zinc-400">
+            <div className="flex items-center justify-center gap-2 py-3 text-text-tertiary">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
             </div>
           )}
           {!loading && pendingCount === 0 && (
-            <div className="flex items-center justify-between px-2 py-2 text-[11px] text-zinc-400">
+            <div className="flex items-center justify-between px-2 py-2 text-[11px] text-text-tertiary">
               <span>{t("doc.reviewQueueEmpty")}</span>
               <button
                 type="button"
                 onClick={() => void loadPending()}
-                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
               >
                 <RefreshCw className="h-3 w-3" />
                 {t("common.refresh")}
@@ -150,13 +150,13 @@ export function ReviewQueue() {
                   className="min-w-0 flex-1 text-left"
                   title={t("doc.reviewOpenDoc")}
                 >
-                  <div className="flex items-center gap-1.5 truncate text-xs text-zinc-700 dark:text-zinc-200">
+                  <div className="flex items-center gap-1.5 truncate text-xs text-text-secondary ">
                     <span className="truncate font-medium">{req.path}</span>
-                    <span className="shrink-0 rounded bg-zinc-100 px-1 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                    <span className="shrink-0 rounded bg-zinc-100 px-1 text-[10px] text-text-tertiary dark:bg-zinc-800 ">
                       base v{req.base_version}
                     </span>
                   </div>
-                  <div className="truncate text-[10px] text-zinc-400">
+                  <div className="truncate text-[10px] text-text-tertiary">
                     {resolveAgentName(agents, req.submitted_by) ?? req.submitted_by} ·{" "}
                     {new Date(req.created_at).toLocaleString()}
                   </div>
@@ -178,7 +178,7 @@ export function ReviewQueue() {
                       setNoteTarget(req);
                       setNote("");
                     }}
-                    className="inline-flex items-center gap-0.5 rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                    className="inline-flex items-center gap-0.5 rounded border border-zinc-200 px-1.5 py-0.5 text-[10px] text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700  dark:hover:bg-zinc-800"
                   >
                     <X className="h-2.5 w-2.5" aria-hidden />
                     {t("doc.reject")}
@@ -198,7 +198,7 @@ export function ReviewQueue() {
             aria-label={t("doc.reject")}
             className="relative z-10 w-[400px] rounded-lg border border-zinc-200 bg-surface p-3 shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
           >
-            <div className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-100">
+            <div className="mb-2 text-sm font-medium text-text-secondary ">
               {t("doc.rejectTitle", { name: noteTarget.path })}
             </div>
             <textarea
@@ -213,7 +213,7 @@ export function ReviewQueue() {
               <button
                 type="button"
                 onClick={() => setNoteTarget(null)}
-                className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-text-secondary hover:bg-zinc-100 dark:border-zinc-700  dark:hover:bg-zinc-800"
               >
                 {t("common.cancel")}
               </button>

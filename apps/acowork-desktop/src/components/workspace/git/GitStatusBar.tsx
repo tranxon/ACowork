@@ -132,7 +132,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // so the bottom-of-panel strip reads as part of the same toolbar family.
           "flex h-6 w-full shrink-0 items-center gap-1.5 px-3 text-left",
           "text-[10px] font-medium uppercase tracking-wide",
-          "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200",
+          "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
           "transition-colors duration-150",
           "border-y border-nav-divider/40 dark:border-zinc-600/40",
           // Subtle elevation when expanded. Collapsed = transparent so the
@@ -189,7 +189,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
                   "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                   historyAnchor || viewingCommit
                     ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                    : "text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                    : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
                 )}
               >
                 <Clock className="h-3.5 w-3.5" />
@@ -214,7 +214,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
                     void refresh(agentId, workspaceId);
                   }
                 }}
-                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-zinc-400 hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </span>

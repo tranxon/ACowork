@@ -148,7 +148,7 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
               />
             ))}
           </div>
-          <p className="mt-2 text-xs text-zinc-400">{t("onboarding.step", { current: state.currentStep, total: TOTAL_STEPS })}</p>
+          <p className="mt-2 text-xs text-text-tertiary">{t("onboarding.step", { current: state.currentStep, total: TOTAL_STEPS })}</p>
         </div>
 
         {/* Step content */}
@@ -180,7 +180,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
     <div className="text-center">
       <div className="text-4xl">🎉🎉🎉</div>
       <h1 className="mt-4 text-2xl font-bold flex items-center justify-center gap-2"><span>{t("onboarding.welcome.title")}</span><img src={brandMark} alt="ACowork" className="h-10" /></h1>
-      <p className="mt-2 text-sm text-zinc-500">{t("onboarding.welcome.subtitle")}</p>
+      <p className="mt-2 text-sm text-text-tertiary">{t("onboarding.welcome.subtitle")}</p>
       <div className="mt-8 space-y-3">
         <button
           onClick={onNext}
@@ -190,7 +190,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
         </button>
         <button
           onClick={onSkip}
-          className="w-full py-2 text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="w-full py-2 text-xs text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
         >
           {t("onboarding.welcome.skip")}
         </button>
@@ -263,12 +263,12 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
   return (
     <div>
       <h2 className="text-lg font-semibold">{t("onboarding.gateway.title")}</h2>
-      <p className="mt-1 text-sm text-zinc-500">{t("onboarding.gateway.subtitle")}</p>
+      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.gateway.subtitle")}</p>
 
       <div className="mt-6 space-y-4">
         {/* Mode selection */}
         <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
-          <label className="mb-2 block text-xs text-zinc-500">{t("onboarding.gateway.modeLabel")}</label>
+          <label className="mb-2 block text-xs text-text-tertiary">{t("onboarding.gateway.modeLabel")}</label>
           <RadioGroup
             name="gatewayMode"
             value={gatewayMode}
@@ -279,12 +279,12 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
             onChange={handleModeChange}
           />
           {gatewayMode === "local" && (
-            <p className="mt-1 text-xs text-zinc-400">
+            <p className="mt-1 text-xs text-text-tertiary">
               {t("onboarding.gateway.localHint")}
             </p>
           )}
           {gatewayMode === "remote" && (
-            <p className="mt-1 text-xs text-zinc-400">
+            <p className="mt-1 text-xs text-text-tertiary">
               {t("onboarding.gateway.remoteHint")}
             </p>
           )}
@@ -294,9 +294,9 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         {gatewayMode === "local" && (
           <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-zinc-500">{t("onboarding.gateway.status")}</span>
+              <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
               {starting ? (
-                <span className="text-zinc-400">{t("onboarding.gateway.starting")}</span>
+                <span className="text-text-tertiary">{t("onboarding.gateway.starting")}</span>
               ) : localConnected ? (
                 <>
                   <span className="h-2 w-2 rounded-full bg-green-500" />
@@ -331,14 +331,14 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         {/* Remote mode: URL config + test */}
         {gatewayMode === "remote" && (
           <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
-            <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.gateway.urlLabel")}</label>
+            <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.gateway.urlLabel")}</label>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
                 placeholder={DEFAULT_GATEWAY_URL}
-                className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
               />
               {urlDraft !== gatewayUrl && (
                 <button
@@ -352,9 +352,9 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
             </div>
 
             <div className="mt-3 flex items-center gap-2 text-sm">
-              <span className="text-zinc-500">{t("onboarding.gateway.status")}</span>
+              <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
               {checking ? (
-                <span className="text-zinc-400">{t("onboarding.gateway.checking")}</span>
+                <span className="text-text-tertiary">{t("onboarding.gateway.checking")}</span>
               ) : status === "connected" ? (
                 <>
                   <span className="h-2 w-2 rounded-full bg-green-500" />
@@ -382,7 +382,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
       </div>
 
       <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.gateway.back")}
         </button>
         <button
@@ -488,7 +488,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
   return (
     <div>
       <h2 className="text-lg font-semibold">{t("onboarding.apiKey.title")}</h2>
-      <p className="mt-1 text-sm text-zinc-500">{t("onboarding.apiKey.subtitle")}</p>
+      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.apiKey.subtitle")}</p>
 
       <div className="mt-6 space-y-4">
         {/* Provider selector */}
@@ -509,7 +509,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaved(false); }}
               placeholder={keyPlaceholder(provider)}
-              className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
             />
           )}
 
@@ -520,7 +520,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               value={baseUrl}
               onChange={(e) => { setBaseUrl(e.target.value); setSaved(false); }}
               placeholder={t("onboarding.apiKey.baseUrlPlaceholder")}
-              className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-xs font-mono dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-xs font-mono dark:border-zinc-700 dark:bg-zinc-800 "
             />
           )}
 
@@ -560,14 +560,14 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
             <span className="text-lg">🏠</span>
             <span className="text-sm font-medium">{t("onboarding.apiKey.localProvidersLabel")}</span>
           </div>
-          <p className="mt-1 text-xs text-zinc-400">
+          <p className="mt-1 text-xs text-text-tertiary">
             {dynamicProviders.filter(p => !needsApiKey(p.id)).map((p) => p.name).join(", ") || t("onboarding.apiKey.localProvidersFallback")}
           </p>
         </div>
       </div>
 
       <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.apiKey.back")}
         </button>
         <button
@@ -596,21 +596,21 @@ function IdentityStep({
   return (
     <div>
       <h2 className="text-lg font-semibold">{t("onboarding.identity.title")}</h2>
-      <p className="mt-1 text-sm text-zinc-500">{t("onboarding.identity.subtitle")}</p>
+      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.identity.subtitle")}</p>
 
       <div className="mt-6 space-y-4">
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.nameLabel")}</label>
+          <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.nameLabel")}</label>
           <StyledInput
             type="text"
             value={name}
             onChange={(e) => onUpdate({ name: e.target.value })}
             placeholder={t("onboarding.identity.namePlaceholder")}
-            className="rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.languageLabel")}</label>
+          <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.languageLabel")}</label>
           <Dropdown
             value={language}
             onChange={(v) => onUpdate({ language: v })}
@@ -624,7 +624,7 @@ function IdentityStep({
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.timezoneLabel")}</label>
+          <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.timezoneLabel")}</label>
           <Dropdown
             value={timezone}
             onChange={(v) => onUpdate({ timezone: v })}
@@ -639,33 +639,33 @@ function IdentityStep({
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.cityLabel")}</label>
+          <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.cityLabel")}</label>
           <input
             type="text"
             value={city}
             onChange={(e) => onUpdate({ city: e.target.value })}
-            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.occupationLabel")}</label>
+          <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.identity.occupationLabel")}</label>
           <input
             type="text"
             value={occupation}
             onChange={(e) => onUpdate({ occupation: e.target.value })}
-            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
           />
         </div>
       </div>
 
       <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.identity.back")}
         </button>
         <button
           onClick={onNext}
           disabled={!requiredFilled}
-          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
         >
           {t("onboarding.identity.next")}
         </button>
@@ -887,12 +887,12 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
   return (
     <div>
       <h2 className="text-lg font-semibold">{t("onboarding.installAgent.title")}</h2>
-      <p className="mt-1 text-sm text-zinc-500">{t("onboarding.installAgent.subtitle")}</p>
+      <p className="mt-1 text-sm text-text-tertiary">{t("onboarding.installAgent.subtitle")}</p>
 
       <div className="mt-6 space-y-3">
         {/* Bootstrap readiness status (ADR-059 §5.2) */}
         {installing !== null && bootstrap && bootstrap.phase !== "READY" && bootstrap.phase !== "DEGRADED" && (
-          <p className="text-xs text-zinc-400">
+          <p className="text-xs text-text-tertiary">
             {t("onboarding.installAgent.preparing", { detail: bootstrap.phase_detail })}
           </p>
         )}
@@ -901,11 +901,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-sm font-medium">{t("onboarding.installAgent.recommendedTitle")}</h3>
-              <p className="mt-1 text-xs text-zinc-400">{t("onboarding.installAgent.recommendedSubtitle")}</p>
+              <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.installAgent.recommendedSubtitle")}</p>
             </div>
             <button
               onClick={() => setSelectedAgents(selectedAgents.length === RECOMMENDED_AGENTS.length ? [] : RECOMMENDED_AGENTS.map((agent) => agent.resourceName))}
-              className="text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+              className="text-xs text-text-tertiary hover:text-zinc-800 dark:hover:text-zinc-200"
             >
               {selectedAgents.length === RECOMMENDED_AGENTS.length ? t("onboarding.installAgent.clear") : t("onboarding.installAgent.selectAll")}
             </button>
@@ -927,12 +927,12 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
                   />
                   <span className="flex-1">
                     <span className="block text-sm font-medium">{agent.name} · {agent.role}</span>
-                    <span className="mt-0.5 block text-xs text-zinc-400">{agent.description}</span>
+                    <span className="mt-0.5 block text-xs text-text-tertiary">{agent.description}</span>
                   </span>
                   {/* Per-operation status badge (ADR-059 §6: operation_id tracking) */}
                   {op && (
                     <span className="self-center text-xs">
-                      {op.state === "pending" && <span className="text-zinc-400">{t("onboarding.installAgent.opPending")}</span>}
+                      {op.state === "pending" && <span className="text-text-tertiary">{t("onboarding.installAgent.opPending")}</span>}
                       {op.state === "submitted" && op.operationId && (
                         <span className="text-blue-600 dark:text-blue-400">
                           {t("onboarding.installAgent.opSubmitted", { opId: op.operationId.slice(0, 8) })}
@@ -969,11 +969,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           className="w-full rounded-md border border-zinc-200 p-4 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           <span className="text-sm font-medium">{t("onboarding.installAgent.fromFileTitle")}</span>
-          <p className="mt-1 text-xs text-zinc-400">{t("onboarding.installAgent.fromFileSubtitle")}</p>
+          <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.installAgent.fromFileSubtitle")}</p>
         </button>
 
         {installing && !bootstrap && (
-          <p className="text-xs text-zinc-400">{t("onboarding.installAgent.waitingReady")}</p>
+          <p className="text-xs text-text-tertiary">{t("onboarding.installAgent.waitingReady")}</p>
         )}
         {installError && (
           <ErrorBox message={installError} />
@@ -981,12 +981,12 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       </div>
 
       <div className="mt-8 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-4 py-2 text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
           {t("onboarding.installAgent.back")}
         </button>
         <button
           onClick={onComplete}
-          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-zinc-800 hover:bg-zinc-300 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded-md bg-zinc-200 px-4 py-2 text-xs font-medium text-text hover:bg-zinc-300 dark:bg-zinc-700 dark:hover:bg-zinc-600"
         >
           {t("onboarding.installAgent.complete")}
         </button>

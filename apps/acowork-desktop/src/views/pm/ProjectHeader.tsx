@@ -113,12 +113,12 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
                   setEditingTitle(false);
                 }
               }}
-              className="w-full rounded border border-zinc-200 bg-modal-surface px-2 py-0.5 text-base font-semibold text-zinc-800 outline-none focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
+              className="w-full rounded border border-zinc-200 bg-modal-surface px-2 py-0.5 text-base font-semibold text-text outline-none focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-900 "
               aria-label={t("pm.projectTitleEdit")}
             />
           ) : (
             <h2
-              className="cursor-text text-base font-semibold text-zinc-800 hover:text-zinc-600 dark:text-zinc-100 dark:hover:text-zinc-300"
+              className="cursor-text text-base font-semibold text-text hover:text-zinc-600  dark:hover:text-zinc-300"
               onClick={() => {
                 setTitleDraft(project.title);
                 setEditingTitle(true);
@@ -149,13 +149,13 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
                   setEditingDesc(false);
                 }
               }}
-              className="mt-1 w-full resize-y rounded border border-zinc-200 bg-modal-surface px-2 py-1 text-xs text-zinc-500 outline-none focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300"
+              className="mt-1 w-full resize-y rounded border border-zinc-200 bg-modal-surface px-2 py-1 text-xs text-text-tertiary outline-none focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-900 "
               rows={2}
               aria-label={t("pm.projectDescEdit")}
             />
           ) : (
             <p
-              className="mt-1 line-clamp-1 cursor-text text-xs text-zinc-500 hover:text-zinc-400 dark:text-zinc-400 dark:hover:text-zinc-300"
+              className="mt-1 line-clamp-1 cursor-text text-xs text-text-tertiary hover:text-zinc-400  dark:hover:text-zinc-300"
               onClick={() => {
                 setDescDraft(project.description);
                 setEditingDesc(true);
@@ -167,7 +167,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
           )}
 
           {/* 统计 */}
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-tertiary ">
             <span>
               {t("pm.statTotal")}: <strong className="tabular-nums">{total}</strong>
             </span>
@@ -189,7 +189,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
             <button
               type="button"
               onClick={() => setMembersOpen(true)}
-              className="group flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300 px-2 py-0.5 text-[11px] text-zinc-500 hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600 dark:text-zinc-400 dark:hover:border-zinc-400 dark:hover:text-zinc-200"
+              className="group flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300 px-2 py-0.5 text-[11px] text-text-tertiary hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600  dark:hover:border-zinc-400 dark:hover:text-zinc-200"
               aria-label={t("pm.manageMembers")}
             >
               {project.members.length === 0 ? (
@@ -231,7 +231,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
             <button
               type="button"
               onClick={() => setMenuOpen((v) => !v)}
-              className="rounded-md px-1.5 py-1 text-xs text-zinc-500 hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="rounded-md px-1.5 py-1 text-xs text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
               aria-label={t("pm.projectMenu")}
               aria-expanded={menuOpen}
             >

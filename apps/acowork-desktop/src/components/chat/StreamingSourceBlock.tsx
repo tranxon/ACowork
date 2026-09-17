@@ -148,7 +148,7 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
             manuallyCollapsed.current = false;
           }
         }}
-        className="flex items-center gap-2 text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300 transition-colors"
+        className="flex items-center gap-2 text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-300 transition-colors"
         style={{ fontSize: HEADER_FONT_SIZE }}
       >
         <Icon className="h-3 w-3 shrink-0" />
@@ -165,11 +165,11 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
 
       {expanded && (
         <div
-          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-hidden"
+          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-text-tertiary  border-l-2 border-zinc-300 dark:border-zinc-600 overflow-hidden"
           style={{ maxHeight: `${maxVisibleLines * LINE_HEIGHT_REM}rem` }}
         >
           {showTruncationNotice && (
-            <div className="text-xs text-zinc-400 dark:text-zinc-500 italic mb-1 select-none">
+            <div className="text-xs text-text-tertiary  italic mb-1 select-none">
               … ({t("thinkBlock.showingLatest")})
             </div>
           )}
@@ -178,7 +178,7 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
               element tree churn — flat memory during streaming. */}
           <pre
             ref={preRef}
-            className="text-sm whitespace-pre-wrap break-words m-0 font-mono text-zinc-500 dark:text-zinc-400"
+            className="text-sm whitespace-pre-wrap break-words m-0 font-mono text-text-tertiary "
             style={{ fontSize: "var(--ui-font-size, 0.875rem)", lineHeight: LINE_HEIGHT_REM }}
           >
             {content || "..."}

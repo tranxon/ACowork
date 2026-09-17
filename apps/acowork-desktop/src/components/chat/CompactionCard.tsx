@@ -101,20 +101,20 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-fit items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:text-zinc-400 dark:hover:bg-zinc-800/50"
+        className="flex w-fit items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30  dark:hover:bg-zinc-800/50"
         style={{ fontSize: CARD_FONT_SIZE }}
       >
-        <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+        <FileText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         <span className="shrink-0 font-medium">{t("compactionCard.title")}</span>
         {hasTokenStats && (
-          <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
+          <span className="shrink-0 text-text-tertiary ">
             · {beforeStr} → {afterStr} tokens
           </span>
         )}
         {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         )}
       </button>
 
@@ -127,17 +127,17 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
           style={{ maxHeight: "240px" }}
         >
           <div
-            className="prose prose-sm max-w-none text-zinc-700 dark:prose-invert dark:text-zinc-300 select-text"
+            className="prose prose-sm max-w-none text-text-secondary dark:prose-invert  select-text"
             style={{ fontSize: CARD_FONT_SIZE }}
           >
             {summary ? (
               <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={markdownComponents}>{summary}</ReactMarkdown>
             ) : (
-              <span className="italic text-zinc-400">{t("compactionCard.empty")}</span>
+              <span className="italic text-text-tertiary">{t("compactionCard.empty")}</span>
             )}
           </div>
           <div
-            className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-zinc-500 dark:text-zinc-400 select-text"
+            className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-text-tertiary  select-text"
             style={{ fontSize: DETAIL_FONT_SIZE }}
           >
             {meta?.model && <span>{t("compactionCard.model", { model: meta.model })}</span>}

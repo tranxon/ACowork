@@ -97,8 +97,8 @@ export function DocTreeSidebar({ width }: { width?: number }) {
     >
       {/* ── 头部：标题 + 新建按钮 ───────────────────────────── */}
       <div className="flex items-center gap-1 border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-800">
-        <BookOpen className="mr-1 h-3.5 w-3.5 text-zinc-500" aria-hidden />
-        <span className="flex-1 truncate font-medium text-zinc-700 dark:text-zinc-200">
+        <BookOpen className="mr-1 h-3.5 w-3.5 text-text-tertiary" aria-hidden />
+        <span className="flex-1 truncate font-medium text-text-secondary ">
           {t("doc.title")}
         </span>
         <IconBtn
@@ -148,7 +148,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
           type="button"
           onClick={() => setTrashOpen(true)}
           disabled={healthy === false}
-          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-zinc-500 transition-colors hover:bg-nav-item-hover hover:text-zinc-700 disabled:opacity-40 dark:hover:text-zinc-200"
+          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-700 disabled:opacity-40 dark:hover:text-zinc-200"
         >
           <Trash2 className="h-3.5 w-3.5" aria-hidden />
           <span>{t("doc.trash")}</span>
@@ -220,7 +220,7 @@ function IconBtn({
         e.stopPropagation();
         onClick();
       }}
-      className="rounded p-1 text-zinc-400 transition-colors hover:bg-nav-item-hover hover:text-zinc-700 focus-visible:bg-nav-item-hover focus-visible:text-zinc-700 disabled:opacity-30 dark:hover:text-zinc-100 dark:focus-visible:text-zinc-100"
+      className="rounded p-1 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-700 focus-visible:bg-nav-item-hover focus-visible:text-text-secondary disabled:opacity-30 dark:hover:text-zinc-100 dark:focus-visible:text-text"
     >
       {children}
     </button>
@@ -261,7 +261,7 @@ function DirContents({
   if (!node) {
     if (loading) {
       return (
-        <div className="flex items-center gap-1 px-2 py-1 text-zinc-400" style={{ paddingLeft: depth * 14 + 8 }}>
+        <div className="flex items-center gap-1 px-2 py-1 text-text-tertiary" style={{ paddingLeft: depth * 14 + 8 }}>
           <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
           <span className="text-[11px]">…</span>
         </div>
@@ -376,7 +376,7 @@ function DirRow({
     <div role="treeitem" aria-expanded={isOpen} aria-selected={false}>
       <div
         className={cn(
-          "group flex cursor-pointer items-center gap-0.5 rounded-md py-1 pr-1 text-zinc-600 hover:bg-nav-item-hover dark:text-zinc-300",
+          "group flex cursor-pointer items-center gap-0.5 rounded-md py-1 pr-1 text-text-secondary hover:bg-nav-item-hover ",
         )}
         style={{ paddingLeft: depth * 14 + 4 }}
       >
@@ -394,7 +394,7 @@ function DirRow({
               void toggle();
             }
           }}
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100"
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-100"
         >
           {isLoading ? (
             <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
@@ -416,7 +416,7 @@ function DirRow({
           )}
           <span className="truncate">{dir.name}</span>
           {isOpen && childCount > 0 && (
-            <span className="ml-0.5 text-[10px] text-zinc-300 dark:text-zinc-600">{childCount}</span>
+            <span className="ml-0.5 text-[10px] text-text-secondary ">{childCount}</span>
           )}
         </span>
         <span className="hidden shrink-0 items-center gap-0 group-hover:flex group-focus-within:flex">
@@ -526,7 +526,7 @@ function DocRow({
     <div role="treeitem" aria-selected={selected}>
       <div
         className={cn(
-          "group flex items-center gap-1 rounded-md py-1 pr-1 text-zinc-600 hover:bg-nav-item-hover dark:text-zinc-300",
+          "group flex items-center gap-1 rounded-md py-1 pr-1 text-text-secondary hover:bg-nav-item-hover ",
           selected &&
             "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20",
         )}
@@ -542,7 +542,7 @@ function DocRow({
             selected ? "font-medium" : "",
           )}
         >
-          <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-400" aria-hidden />
+          <FileText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" aria-hidden />
           <span className="truncate">{doc.name}</span>
         </button>
         <span className="hidden shrink-0 items-center group-hover:flex group-focus-within:flex">

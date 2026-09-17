@@ -156,14 +156,14 @@ export function LspIndicator({
     let content: React.ReactNode;
     if (status === "disconnected") {
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-zinc-400 dark:text-zinc-500">
+            <span className="flex items-center gap-1 text-[10px] text-text-tertiary ">
                 <Circle className="h-2 w-2" />
                 <span>{t("fileStatus.lsp.unavailable", { language })}</span>
             </span>
         );
     } else if (status === "connecting") {
         content = (
-            <span className="flex items-center gap-1 text-[10px] text-zinc-400">
+            <span className="flex items-center gap-1 text-[10px] text-text-tertiary">
                 <Circle className="h-2 w-2 animate-pulse" />
                 <span>{t("fileStatus.lsp.connecting", { language })}</span>
             </span>
@@ -224,18 +224,18 @@ export function LspIndicator({
             {/* Install hint popover */}
             {showPopover && hint && (
                 <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 text-xs">
-                    <div className="font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
+                    <div className="font-medium text-text-secondary  mb-1.5">
                         {t("fileStatus.lsp.installTitle", { name: hint.name })}
                     </div>
                     <div className="flex items-center gap-1.5 rounded bg-zinc-100 dark:bg-zinc-900 px-2 py-1.5 font-mono text-[11px]">
-                        <span className="flex-1 select-all break-all text-zinc-700 dark:text-zinc-300">
+                        <span className="flex-1 select-all break-all text-text-secondary ">
                             {hint.command}
                         </span>
                         <Tooltip content={t("fileEditor.copy")} variant="plain">
                             <button
                                 type="button"
                                 onClick={copyToClipboard}
-                                className="shrink-0 rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
+                                className="shrink-0 rounded p-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
                             >
                                 {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
                             </button>
@@ -250,7 +250,7 @@ export function LspIndicator({
                         className={cn(
                             "mt-2 flex w-full items-center justify-center gap-1.5 rounded px-3 py-1.5 text-[11px] font-medium transition-colors",
                             installing
-                                ? "bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400 cursor-not-allowed"
+                                ? "bg-zinc-200 text-text-tertiary dark:bg-zinc-700  cursor-not-allowed"
                                 : "bg-[var(--color-accent)] text-white hover:opacity-90",
                         )}
                     >

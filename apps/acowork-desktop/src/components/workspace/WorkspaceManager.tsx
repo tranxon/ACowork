@@ -126,12 +126,12 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
       <div className="w-full max-w-2xl rounded-md bg-modal-surface shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
-          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+          <h2 className="text-lg font-semibold text-text ">
             Workspaces
           </h2>
           <button
             onClick={onClose}
-            className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
           >
             <X className="h-5 w-5" />
           </button>
@@ -147,16 +147,16 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
           )}
 
           {loading ? (
-            <div className="flex items-center justify-center py-12 text-sm text-zinc-500">
+            <div className="flex items-center justify-center py-12 text-sm text-text-tertiary">
               Loading...
             </div>
           ) : workspaces.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <FolderOpen className="mb-3 h-12 w-12 text-zinc-300 dark:text-zinc-600" />
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              <FolderOpen className="mb-3 h-12 w-12 text-text-secondary " />
+              <p className="text-sm text-text-tertiary ">
                 No additional workspaces configured
               </p>
-              <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
+              <p className="mt-1 text-xs text-text-tertiary ">
                 Add directories for this agent to access
               </p>
             </div>
@@ -166,12 +166,12 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                 <div key={dir.id} className="flex items-center justify-between px-6 py-4">
                   <div className="flex-1">
                     <div className="flex items-center gap-2">
-                      <FolderOpen className="h-4 w-4 text-zinc-400" />
-                      <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                      <FolderOpen className="h-4 w-4 text-text-tertiary" />
+                      <span className="font-medium text-text ">
                         {dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path}
                       </span>
                     </div>
-                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{dir.path}</p>
+                    <p className="mt-1 text-xs text-text-tertiary ">{dir.path}</p>
                   </div>
 
                   <div className="flex items-center gap-3">
@@ -181,7 +181,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                       onChange={(v) => handleAccessChange(dir, v as "read-only" | "read-write")}
                       className={`rounded-md border px-2 py-1.5 text-xs font-medium ${dir.access === "read-write"
                         ? "border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-                        : "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                        : "border-zinc-300 bg-zinc-50 text-text-secondary dark:border-zinc-600 dark:bg-zinc-800 "
                         }`}
                       options={[
                         { value: "read-only", label: "🔒 Read-only" },
@@ -192,7 +192,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                     {/* Delete Button */}
                     <button
                       onClick={() => setDeleteConfirm({ open: true, id: dir.id, name: dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path })}
-                      className="rounded-md p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
+                      className="rounded-md p-1.5 text-text-tertiary hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
 
                     >
                       <Trash2 className="h-4 w-4" />
@@ -215,7 +215,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
           </button>
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
           >
             Done
           </button>
@@ -298,15 +298,15 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
       <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl">
         <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
-          <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Add Workspace</h3>
-          <button onClick={onClose} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <h3 className="text-base font-semibold text-text ">Add Workspace</h3>
+          <button onClick={onClose} className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-800">
             <X className="h-5 w-5" />
           </button>
         </div>
 
         <div className="space-y-4 px-6 py-6">
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            <label className="mb-1.5 block text-sm font-medium text-text-secondary ">
               Path
             </label>
             <div className="flex gap-2">
@@ -327,7 +327,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            <label className="mb-1.5 block text-sm font-medium text-text-secondary ">
               Alias (optional)
             </label>
             <StyledInput
@@ -340,7 +340,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            <label className="mb-1.5 block text-sm font-medium text-text-secondary ">
               Access Level
             </label>
             <div className="space-y-2">
@@ -360,10 +360,10 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                   className="mt-0.5"
                 />
                 <div>
-                  <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                  <div className="text-sm font-medium text-text ">
                     🔒 Read-only (default)
                   </div>
-                  <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                  <div className="text-xs text-text-tertiary ">
                     Agent can only read files
                   </div>
                 </div>
@@ -384,7 +384,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                   className="mt-0.5"
                 />
                 <div>
-                  <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                  <div className="text-sm font-medium text-text ">
                     ✏️ Read-write
                   </div>
                   <div className="flex items-center gap-1 text-xs text-orange-600 dark:text-orange-400">
@@ -400,7 +400,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
         <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
           >
             Cancel
           </button>
@@ -454,13 +454,13 @@ function ConfirmPermissionChange({
             <AlertCircle className="h-5 w-5 text-orange-600 dark:text-orange-400" />
           </div>
           <div className="flex-1">
-            <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+            <h3 className="text-base font-semibold text-text ">
               Change to Read-write?
             </h3>
-            <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+            <p className="mt-2 text-sm text-text-secondary ">
               Agent will be able to <strong>modify and delete</strong> files in:
             </p>
-            <p className="mt-1 text-xs font-mono text-zinc-500 dark:text-zinc-500">
+            <p className="mt-1 text-xs font-mono text-text-tertiary ">
               {dir.path}
             </p>
           </div>
@@ -469,7 +469,7 @@ function ConfirmPermissionChange({
         <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <button
             onClick={onCancel}
-            className="rounded-md px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
           >
             Cancel
           </button>
