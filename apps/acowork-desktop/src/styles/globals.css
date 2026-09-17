@@ -2,12 +2,12 @@
 
 @theme {
   --color-accent: #3B82F6;
-  --color-text: hsl(240 10% 15%);
+  --color-text: hsl(240 10% 10%);
   /* high-contrast text (light) — mirrors :root token so Tailwind
      emits the `.text-text` utility; :root/.dark overrides the value */
-  --color-text-secondary: hsl(0 0% 30%);
+  --color-text-secondary: hsl(0 0% 25%);
   /* default UI labels & icons (light) */
-  --color-text-tertiary: hsl(0 0% 45%);
+  --color-text-tertiary: hsl(0 0% 40%);
   /* hints / metadata / placeholder (light) */
   --color-text-disabled: hsl(0 0% 60%);
   /* disabled state (light) */
