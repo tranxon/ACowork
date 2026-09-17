@@ -27,7 +27,9 @@ impl TodoWriteTool {
             name: "todo_write".to_string(),
             description:
                 "Create and manage a structured task list for your current working session. \
-                 Use this to track progress, organize complex tasks, and demonstrate thoroughness. \
+                 Update the list in real time as you work: write it before starting, mark each \
+                 item in_progress when you begin it, and mark it completed as soon as you finish — \
+                 do not batch updates at the end of the task. \
                  Only one todo list exists per session — each call replaces or merges into the current list."
                     .to_string(),
             input_schema: serde_json::json!({
