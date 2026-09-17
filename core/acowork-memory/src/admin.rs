@@ -224,4 +224,20 @@ pub trait MemoryAdminService: Send + Sync {
         embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
         new_dim: usize,
     ) -> Result<RebuildStats>;
+
+    /// Like [`Self::migrate_embedding_dimension`], but reports progress.
+    ///
+    /// `progress` is called with `(processed, total)` as nodes are
+    /// re-embedded (from a blocking thread). Default implementation just
+    /// delegates to the non-progress variant; engines that can report
+    /// progress (Grafeo) override it.
+    fn migrate_embedding_dimension_with_progress(
+        &self,
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<RebuildStats> {
+        let _ = progress;
+        self.migrate_embedding_dimension(embed_fn, new_dim)
+    }
 }

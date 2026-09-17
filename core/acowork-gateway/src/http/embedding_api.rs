@@ -763,6 +763,32 @@ pub async fn get_migration_progress(
 /// Restores the dimension-migration feature that was lost in the
 /// gRPC→MQTT refactor (Bug3): reads the active embed config from the
 /// Gateway state, enumerates the target running agents, and forwards a
+/// Write the terminal state of a migration background task into
+/// `running_agents[agent_id].migration`. Shared by the start-failure and
+/// poll-finished paths of [`start_migration`]'s spawned tasks.
+async fn write_migration_terminal(
+    state: &AppState,
+    agent_id: &str,
+    progress: Option<(u64, u64, u64, String, String)>,
+    done: bool,
+    error: Option<String>,
+) {
+    let mut gw = state.gateway_state.write().await;
+    if let Some(info) = gw.running_agents.get_mut(agent_id) {
+        if let Some(m) = info.migration.as_mut() {
+            m.progress = progress;
+            m.done = done;
+            m.error = error;
+        } else {
+            tracing::warn!(
+                target: "migration_diag",
+                agent_id = %agent_id,
+                "start_migration_bg: migration state was cleared before background task completed"
+            );
+        }
+    }
+}
+
 /// `POST /memory/rebuild-embeddings` request to each agent's Runtime
 /// localhost HTTP server (via the ADR-055 D3 endpoint registry). Each
 /// agent's progress is recorded in `RunningAgentInfo.migration` and
@@ -975,8 +1001,16 @@ pub async fn start_migration(
                 target: "migration_diag",
                 agent_id = %agent_id_owned,
                 request_id = %request_id_owned,
-                "start_migration_bg: invoking runtime rebuild endpoint"
+                "start_migration_bg: invoking runtime rebuild start endpoint"
             );
+
+            // 3c. POST /memory/rebuild-embeddings — the Runtime returns 202
+            //     immediately and runs the rebuild as its own detached task;
+            //     progress is polled below. Default proxy timeout (30 s) is
+            //     plenty since no work is done synchronously. The previous
+            //     600 s synchronous wait was scrapped: it still tripped the
+            //     proxy timeout on very large stores and made the UI look
+            //     hung for the entire duration.
             let resp = crate::http::proxy::proxy_to_runtime_with_method(
                 &state_for_task,
                 &agent_id_owned,
@@ -987,7 +1021,6 @@ pub async fn start_migration(
                 &headers_for_task,
             )
             .await;
-
             let status_code = resp.status();
             let body_bytes = match to_bytes(resp.into_body(), usize::MAX).await {
                 Ok(b) => b,
@@ -1003,73 +1036,159 @@ pub async fn start_migration(
                 }
             };
             let text = String::from_utf8_lossy(&body_bytes).to_string();
-            let success = status_code.is_success();
-            let error_msg: Option<String> = if success {
-                None
-            } else {
-                Some(if text.is_empty() {
+            if !status_code.is_success() {
+                let error_msg = if text.is_empty() {
                     format!("HTTP {} (empty body)", status_code.as_u16())
                 } else {
                     text.clone()
-                })
-            };
+                };
+                tracing::warn!(
+                    target: "migration_diag",
+                    agent_id = %agent_id_owned,
+                    request_id = %request_id_owned,
+                    http_status = %status_code,
+                    error = %error_msg,
+                    "start_migration_bg: runtime rejected rebuild start"
+                );
+                write_migration_terminal(
+                    &state_for_task,
+                    &agent_id_owned,
+                    None,
+                    false,
+                    Some(error_msg),
+                )
+                .await;
+                return;
+            }
 
-            // 3d. Best-effort parse of the Runtime's `RebuildReport` (see
-            //     `core/acowork-runtime/src/usecases/memory_query.rs`). If
-            //     parsing fails we still write a terminal state, just
-            //     without a `progress` tuple — the desktop will see
-            //     `done=true` regardless.
-            let final_progress: Option<(u64, u64, u64, String, String)> = if success {
-                serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| {
-                        let rebuilt = v.get("rebuilt")?.as_u64()?;
-                        let total = v.get("total_scanned")?.as_u64()?;
-                        let errors = v
-                            .get("errors")
-                            .and_then(|x| x.as_u64())
-                            .unwrap_or(0);
-                        Some((
-                            rebuilt,
-                            total,
-                            errors,
-                            "reembed".to_string(),
-                            "completed".to_string(),
-                        ))
-                    })
-            } else {
-                None
-            };
-
-            tracing::info!(
-                target: "migration_diag",
-                agent_id = %agent_id_owned,
-                request_id = %request_id_owned,
-                http_status = %status_code,
-                success,
-                progress = ?final_progress,
-                error = ?error_msg,
-                "start_migration_bg: completed, writing terminal state"
-            );
-
-            // 3e. Write terminal state — either `done=true,
-            //     progress=(rebuilt,total,...)` on success or
-            //     `done=false, error=Some(msg)` on failure.
-            let mut gw = state_for_task.gateway_state.write().await;
-            if let Some(info) = gw.running_agents.get_mut(&agent_id_owned) {
-                if let Some(m) = info.migration.as_mut() {
-                    m.progress = final_progress;
-                    m.done = success;
-                    m.error = error_msg;
-                } else {
+            // 3d. Poll GET /memory/rebuild-progress every 2 s until the
+            //     Runtime reports done/error. No time cap — a rebuild of a
+            //     huge store legitimately runs for many minutes and the
+            //     whole point of the poll model is to outlive any proxy
+            //     timeout. Three consecutive poll failures (e.g. Runtime
+            //     restarted mid-rebuild) abort with an error.
+            let mut consecutive_failures = 0u32;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let resp = crate::http::proxy::proxy_to_runtime_with_method(
+                    &state_for_task,
+                    &agent_id_owned,
+                    "/memory/rebuild-progress",
+                    "",
+                    reqwest::Method::GET,
+                    None,
+                    &headers_for_task,
+                )
+                .await;
+                let status_code = resp.status();
+                let body_bytes = match to_bytes(resp.into_body(), usize::MAX).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "migration_diag",
+                            agent_id = %agent_id_owned,
+                            request_id = %request_id_owned,
+                            error = %e,
+                            "start_migration_bg: failed to read runtime progress body"
+                        );
+                        axum::body::Bytes::new()
+                    }
+                };
+                let text = String::from_utf8_lossy(&body_bytes).to_string();
+                if !status_code.is_success() {
+                    consecutive_failures += 1;
                     tracing::warn!(
                         target: "migration_diag",
                         agent_id = %agent_id_owned,
                         request_id = %request_id_owned,
-                        "start_migration_bg: migration state was cleared before background task completed"
+                        http_status = %status_code,
+                        failures = consecutive_failures,
+                        "start_migration_bg: runtime progress poll failed"
                     );
+                    if consecutive_failures >= 3 {
+                        let error_msg = if text.is_empty() {
+                            format!(
+                                "HTTP {} while polling rebuild progress",
+                                status_code.as_u16()
+                            )
+                        } else {
+                            text.clone()
+                        };
+                        write_migration_terminal(
+                            &state_for_task,
+                            &agent_id_owned,
+                            None,
+                            false,
+                            Some(error_msg),
+                        )
+                        .await;
+                        return;
+                    }
+                    continue;
+                }
+                consecutive_failures = 0;
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let rebuilt = v.get("rebuilt").and_then(|x| x.as_u64()).unwrap_or(0);
+                let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+                let done = v.get("done").and_then(|x| x.as_bool()).unwrap_or(false);
+                let error = v
+                    .get("error")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty());
+
+                // Feed the desktop's 2 s poll loop live numbers.
+                {
+                    let mut gw = state_for_task.gateway_state.write().await;
+                    if let Some(info) = gw.running_agents.get_mut(&agent_id_owned)
+                        && let Some(m) = info.migration.as_mut()
+                    {
+                        m.progress = Some((
+                            rebuilt,
+                            total,
+                            0,
+                            "reembed".to_string(),
+                            "running".to_string(),
+                        ));
+                    }
+                }
+
+                if done || error.is_some() {
+                    tracing::info!(
+                        target: "migration_diag",
+                        agent_id = %agent_id_owned,
+                        request_id = %request_id_owned,
+                        rebuilt,
+                        total,
+                        done,
+                        error = ?error,
+                        "start_migration_bg: runtime rebuild finished, writing terminal state"
+                    );
+                    let final_progress = if error.is_none() {
+                        Some((
+                            rebuilt,
+                            total,
+                            0,
+                            "reembed".to_string(),
+                            "completed".to_string(),
+                        ))
+                    } else {
+                        None
+                    };
+                    write_migration_terminal(
+                        &state_for_task,
+                        &agent_id_owned,
+                        final_progress,
+                        error.is_none(),
+                        error,
+                    )
+                    .await;
+                    return;
                 }
             }
+
         });
 
         results.push(serde_json::json!({
@@ -1160,21 +1279,26 @@ mod tests {
                     axum::body::to_bytes(req.into_body(), usize::MAX)
                         .await
                         .unwrap_or_default();
+                // Realistic Runtime contract (start/progress split): the
+                // start endpoint returns 202 immediately, and the progress
+                // endpoint reports the run as finished on the first poll.
+                let is_progress = uri.ends_with("/memory/rebuild-progress");
                 received_for_server.lock().unwrap().push((
                     method,
                     uri,
                     headers_csv,
                     String::from_utf8_lossy(&body_bytes).to_string(),
                 ));
-                // Realistic RebuildReport payload so start_migration can
-                // serialise the response and the body contains a useful
-                // success signal.
-                axum::Json(serde_json::json!({
-                    "total_scanned": 107,
-                    "rebuilt": 95,
-                    "skipped_no_embedding": 12,
-                    "errors": 0,
-                }))
+                if is_progress {
+                    axum::Json(serde_json::json!({
+                        "rebuilt": 95,
+                        "total": 107,
+                        "done": true,
+                        "error": null,
+                    }))
+                } else {
+                    axum::Json(serde_json::json!({"status": "started"}))
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1303,10 +1427,10 @@ mod tests {
         );
 
         // ── 3b. Yield long enough for the spawned background task to call
-        //     the mock runtime and write the terminal state. 200ms is
-        //     comfortably above the localhost HTTP roundtrip + lock
-        //     acquisition cost without making the test noticeably slow.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        //     the mock runtime (start POST, then the first progress poll
+        //     after the 2s poll interval) and write the terminal state.
+        //     2.5s clears the poll sleep plus the localhost round-trips.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
         // ── 4. Verify the spawned task actually forwarded the rebuild
         //    request to the Runtime with the right headers and body. This
@@ -1315,10 +1439,9 @@ mod tests {
         //    never actually calling the runtime) and the Desktop would
         //    never recover from the missing-embedding state.
         let got = received.lock().unwrap().clone();
-        assert_eq!(
-            got.len(),
-            1,
-            "expected exactly 1 forwarded rebuild request; got: {:?}",
+        assert!(
+            got.len() >= 2,
+            "expected start POST + progress GET(s); got: {:?}",
             got
         );
         let (method, uri, headers_csv, body) = &got[0];
@@ -1336,6 +1459,17 @@ mod tests {
             uri, "/agents/com.test.architect/memory/rebuild-embeddings",
             "proxy must build /agents/{{id}}/memory/rebuild-embeddings, got {}",
             uri
+        );
+
+        // Start/progress split: the background task must also poll
+        // `GET /memory/rebuild-progress` (the Runtime's new contract —
+        // the start endpoint returns 202 and the rebuild runs detached).
+        assert!(
+            got.iter().any(|(m, u, _, _)| {
+                m == "GET" && u == "/agents/com.test.architect/memory/rebuild-progress"
+            }),
+            "spawned task must poll GET /memory/rebuild-progress; got: {:?}",
+            got
         );
 
         // Fix3 regression: the runtime's `Json<RebuildEmbeddingsBody>`

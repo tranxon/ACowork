@@ -527,6 +527,24 @@ impl MemoryAdminService for GrafeoStore {
             errors: stats.errors,
         })
     }
+
+    fn migrate_embedding_dimension_with_progress(
+        &self,
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<RebuildStats> {
+        let stats =
+            GrafeoStore::migrate_embedding_dimension_with_progress(self, |text| embed_fn(text), new_dim, progress)
+                .map_err(|e| AcoworkError::Memory(e.to_string()))?;
+        Ok(RebuildStats {
+            total_scanned: stats.total_scanned,
+            rebuilt: stats.rebuilt,
+            skipped_no_embedding: stats.skipped_no_embedding,
+            skipped_no_content: stats.skipped_no_content,
+            errors: stats.errors,
+        })
+    }
 }
 
 // ── Helper functions (moved from memory_query.rs) ─────────────────────

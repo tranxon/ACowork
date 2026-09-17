@@ -12,6 +12,7 @@
 //! layer that could drift from the public contract.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -132,18 +133,26 @@ pub trait MemoryQueryService: Send + Sync {
     /// Get memory store statistics.
     async fn get_stats(&self) -> Result<MemoryStats>;
 
-    /// Re-embed all nodes with a new embedding function/dimension.
+    /// Re-embed all nodes with a new embedding function/dimension, reporting
+    /// progress.
     ///
     /// `endpoint` / `model_id` / `dimension` describe the new embedding
     /// model the Gateway has switched to. The implementation builds a
     /// temporary provider and migrates the stored vectors, rebuilding the
     /// HNSW indexes (Bug3: restores the dimension-migration feature that
     /// was lost in the gRPC→MQTT refactor).
-    async fn rebuild_embeddings(
+    ///
+    /// `progress` is called with `(processed, total)` after each node is
+    /// re-embedded. The HTTP layer uses this to power a long-running
+    /// rebuild as a background task plus a `GET /memory/rebuild-progress`
+    /// polling endpoint, so a large store never trips a client/proxy
+    /// timeout and the UI can show `rebuilt/total`.
+    async fn rebuild_embeddings_with_progress(
         &self,
         endpoint: &str,
         model_id: &str,
         dimension: usize,
+        progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<RebuildReport>;
 
     /// Delete a node by id.

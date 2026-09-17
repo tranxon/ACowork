@@ -280,6 +280,16 @@ pub(crate) struct HttpState {
     session_metadata:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
     memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+    /// Live state of a background `/memory/rebuild-embeddings` run.
+    ///
+    /// The rebuild is started as a detached task (the HTTP handler
+    /// returns immediately with `{"status":"started"}`) and progress is
+    /// read back via `GET /memory/rebuild-progress`. Keeping the slot
+    /// here (not as a constructor argument) means the many test
+    /// construction sites of `HttpState` are untouched. `std::sync::Mutex`
+    /// (not tokio) because the progress callback fires from the
+    /// `spawn_blocking` migration thread — a sync context.
+    rebuild_progress: Arc<std::sync::Mutex<Option<RebuildProgress>>>,
     workspace_query:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
     workspace_mutation:
@@ -565,6 +575,7 @@ impl RuntimeHttpServer {
             mqtt_client,
             session_metadata,
             memory_query,
+            rebuild_progress: Arc::new(std::sync::Mutex::new(None)),
             workspace_query,
             workspace_mutation,
             git_query,
@@ -629,6 +640,7 @@ impl RuntimeHttpServer {
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/distill", post(post_memory_distill))
             .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
+            .route("/memory/rebuild-progress", get(rebuild_progress))
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
             // of the ADR-040 / ADR-009 v2 workspace consolidation. Workspace
@@ -1353,55 +1365,140 @@ struct RebuildEmbeddingsBody {
     dimension: usize,
 }
 
-/// `POST /memory/rebuild-embeddings` — re-embed all nodes with a new model.
+/// Live progress of a background `/memory/rebuild-embeddings` run.
+///
+/// Serialized verbatim by `GET /memory/rebuild-progress` so the Gateway
+/// can poll and forward `rebuilt/total` to the UI.
+#[derive(Debug, Clone, Serialize)]
+struct RebuildProgress {
+    rebuilt: u64,
+    total: u64,
+    /// `true` once the background task has finished (success or error).
+    done: bool,
+    /// Set when the run fails; `None` while running or on success.
+    error: Option<String>,
+}
+
+/// `POST /memory/rebuild-embeddings` — start a background re-embed and
+/// return immediately (`202`).
+///
+/// The rebuild may take minutes on a large store; the client polls
+/// `GET /memory/rebuild-progress` for `rebuilt/total` instead of holding
+/// the connection open (a single synchronous call would trip the
+/// Gateway's 30s proxy timeout and give the UI a bogus failure).
 async fn rebuild_embeddings(
     State(state): State<HttpState>,
     Json(body): Json<RebuildEmbeddingsBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     tracing::info!(
         target: "migration_diag",
         endpoint = %body.endpoint,
         model_id = %body.model_id,
         dimension = body.dimension,
-        "rebuild_embeddings: received request"
+        "rebuild_embeddings: received start request"
     );
 
     // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    if svc.is_none() {
+    let svc = {
+        let guard = state.memory_query.lock().await;
+        guard.clone()
+    };
+    let Some(svc) = svc else {
         tracing::warn!(
             target: "migration_diag",
             "rebuild_embeddings: memory_query service not ready, returning 503"
         );
         return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    let svc = svc.as_ref().unwrap();
-    tracing::info!(
-        target: "migration_diag",
-        "rebuild_embeddings: invoking memory_query.rebuild_embeddings"
-    );
-    let report = svc
-        .rebuild_embeddings(&body.endpoint, &body.model_id, body.dimension)
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                target: "migration_diag",
-                error = %e,
-                "rebuild_embeddings: memory_query.rebuild_embeddings failed"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    tracing::info!(
-        target: "migration_diag",
-        total_scanned = report.total_scanned,
-        rebuilt = report.rebuilt,
-        skipped_no_embedding = report.skipped_no_embedding,
-        errors = report.errors,
-        "rebuild_embeddings: completed"
-    );
-    Ok(Json(
-        serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
+
+    // Mark the slot as running so GET /memory/rebuild-progress returns a
+    // live (0/total) answer even before the first progress callback fires.
+    *state
+        .rebuild_progress
+        .lock()
+        .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
+        rebuilt: 0,
+        total: 0,
+        done: false,
+        error: None,
+    });
+
+    // Detached task: hold the service Arc and a clone of the shared state,
+    // write progress from the migration's blocking thread, flip `done`
+    // when finished. The HTTP handler returns before the work starts.
+    let state_for_task = state.clone();
+    // Clone the progress slot once; the `move` closure below consumes this
+    // clone while the outer task still needs it to write the final state.
+    let progress_slot = state_for_task.rebuild_progress.clone();
+    let endpoint = body.endpoint.clone();
+    let model_id = body.model_id.clone();
+    let dimension = body.dimension;
+    tokio::spawn(async move {
+        let progress: Arc<dyn Fn(u64, u64) + Send + Sync> = Arc::new(move |rebuilt, total| {
+            *progress_slot
+                .lock()
+                .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
+                rebuilt,
+                total,
+                done: false,
+                error: None,
+            });
+        });
+        let report = svc
+            .rebuild_embeddings_with_progress(&endpoint, &model_id, dimension, Some(progress))
+            .await;
+        let (rebuilt, total, error) = match report {
+            Ok(r) => {
+                tracing::info!(
+                    target: "migration_diag",
+                    total_scanned = r.total_scanned,
+                    rebuilt = r.rebuilt,
+                    skipped_no_embedding = r.skipped_no_embedding,
+                    errors = r.errors,
+                    "rebuild_embeddings: completed"
+                );
+                (r.rebuilt, r.total_scanned, None)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::warn!(
+                    target: "migration_diag",
+                    error = %msg,
+                    "rebuild_embeddings: background task failed"
+                );
+                (0, 0, Some(msg))
+            }
+        };
+        *state_for_task
+            .rebuild_progress
+            .lock()
+            .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
+            rebuilt,
+            total,
+            done: true,
+            error,
+        });
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"status": "started"})),
     ))
+}
+
+/// `GET /memory/rebuild-progress` — current state of the background
+/// rebuild started by `POST /memory/rebuild-embeddings`.
+async fn rebuild_progress(
+    State(state): State<HttpState>,
+) -> Result<Json<RebuildProgress>, StatusCode> {
+    let slot = state
+        .rebuild_progress
+        .lock()
+        .expect("rebuild progress mutex poisoned");
+    match slot.as_ref() {
+        Some(p) => Ok(Json(p.clone())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 // ── Session detail (ADR-034 §11.2 #4 — panel 4) ──────────────

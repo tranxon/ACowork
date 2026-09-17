@@ -116,11 +116,12 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
         memory_query::update_node(Some(&store), node_id, properties)
     }
 
-    async fn rebuild_embeddings(
+    async fn rebuild_embeddings_with_progress(
         &self,
         endpoint: &str,
         model_id: &str,
         dimension: usize,
+        progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<RebuildReport> {
         let store = self
             .memory_store
@@ -169,8 +170,11 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
                 }
             };
 
+            let progress_cb: Option<&dyn Fn(u64, u64)> = progress
+                .as_ref()
+                .map(|cb| &**cb as &dyn Fn(u64, u64));
             admin
-                .migrate_embedding_dimension(&embed_fn, dimension)
+                .migrate_embedding_dimension_with_progress(&embed_fn, dimension, progress_cb)
                 .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
         })
         .await
