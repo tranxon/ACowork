@@ -8,6 +8,7 @@ pub mod cancellation;
 pub mod cli;
 pub mod config;
 pub mod conversation;
+pub mod conversation_index;
 pub mod debug;
 pub mod embedding;
 pub mod episode_distill;

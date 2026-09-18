@@ -5,6 +5,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry } from "../../stores/fileTree";
 import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
+import { useLayoutStore } from "../../stores/layoutStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { FileTree } from "./FileTree/FileTree";
 import { WorkspaceSelector } from "./WorkspaceSelector";
@@ -477,6 +478,22 @@ export function WorkspaceExplorer() {
     useEffect(() => {
         setFocusedIdx((i) => (i >= matchingFiles.length ? 0 : i));
     }, [searchQuery, matchingFiles.length]);
+
+    // Ctrl+F (no file-tab focus) — AppLayout requests that the workspace
+    // search input take focus. Consume each new seq once so a repeat press
+    // re-focuses even when the user is already inside the input.
+    const workspaceSearchFocusSeq = useLayoutStore((s) => s.workspaceSearchFocusSeq);
+    const consumedSearchFocusSeqRef = useRef(-1);
+    useEffect(() => {
+        if (workspaceSearchFocusSeq <= consumedSearchFocusSeqRef.current) return;
+        consumedSearchFocusSeqRef.current = workspaceSearchFocusSeq;
+        const el = searchInputRef.current;
+        if (!el) return;
+        el.focus();
+        // Select any existing query so a second Ctrl+F starts with a
+        // clean slate that the user can immediately overwrite.
+        el.select();
+    }, [workspaceSearchFocusSeq]);
 
     const handleSearchSelect = useCallback((relPath: string) => {
         if (!selectedAgentId) return;

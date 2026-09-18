@@ -194,3 +194,19 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
 
   return blocks;
 }
+
+/**
+ * ADR-081 §4.2: index of the folded block containing the raw
+ * `messages[]` entry `rawIdx`, or -1 when the target is not inside any
+ * block (e.g. a live-buffer entry that predates the loaded window).
+ * Blocks are consecutive spans of `items`, so a linear accumulate is
+ * exact — no per-block index bookkeeping needed.
+ */
+export function blockIndexOfRawMessage(blocks: readonly MessageBlock[], rawIdx: number): number {
+  let acc = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    if (rawIdx < acc + blocks[i].items.length) return i;
+    acc += blocks[i].items.length;
+  }
+  return -1;
+}

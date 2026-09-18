@@ -176,6 +176,19 @@ pub trait MemoryAdminService: Send + Sync {
     /// List memory nodes with pagination, filtering, and search.
     fn list_nodes(&self, params: &AdminListNodesParams) -> AdminListNodesOutput;
 
+    /// Semantic (vector/hybrid) search over memory nodes (ADR-081 P1-1).
+    ///
+    /// `mode` ∈ `{"vector", "hybrid"}`; when `embedding` is `None` the
+    /// engine falls back to text search (embedding model not ready).
+    /// Returns up to `limit` records ranked by descending relevance score.
+    fn semantic_search(
+        &self,
+        query_text: &str,
+        embedding: Option<&[f32]>,
+        mode: &str,
+        limit: usize,
+    ) -> Vec<AdminNodeRecord>;
+
     /// Get a single node's full detail by numeric ID.
     fn get_node(&self, node_id: u64) -> AdminNodeDetail;
 

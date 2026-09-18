@@ -34,7 +34,7 @@ use crate::config::PmConfig;
 use crate::mcp::AgentDirectory;
 use crate::store::tree::TreePmStore;
 
-use super::{attachments, projects, tasks, ApiState};
+use super::{attachments, projects, search, tasks, ApiState};
 
 /// 构建 PM API 路由树（内部路径**不带** `/api` 前缀）。
 ///
@@ -100,5 +100,7 @@ pub fn pm_router(
             "/attachments/{aid}",
             get(attachments::download).delete(attachments::delete),
         )
+        // ── Search (ADR-081 P0-2) ────────────────────────────────
+        .route("/search", get(search::search))
         .with_state(state)
 }

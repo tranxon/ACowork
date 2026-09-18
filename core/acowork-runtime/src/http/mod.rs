@@ -9,12 +9,14 @@
 
 pub mod avatar;
 pub mod debug;
+pub mod global_search;
 pub mod memory_query;
 pub mod prompts;
 pub mod server;
 pub mod skills;
 
 pub use server::{
-    RuntimeHttpServer, RuntimeHttpServerError, SharedAgentCore, SharedDegradation,
-    SharedDispatchSender, SharedEmbedDimension, SharedMemoryStore, SharedMqttClientSlot,
+    RuntimeHttpServer, RuntimeHttpServerError, SharedAgentCore, SharedConsolidationTimer,
+    SharedConversationIndex, SharedDegradation, SharedDispatchSender, SharedEmbedDimension,
+    SharedMemoryStore, SharedMqttClientSlot,
 };

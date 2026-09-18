@@ -9,10 +9,14 @@
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.12"/>
     </filter>
-    <!-- Apple-style bite: white reveals the dot; black bite circle (offset right, vertically centered) carves the C silhouette that mirrors the wordmark's "Co". -->
+    <!-- Apple-style bite: white reveals the dot; small black circle carves the C-notch.
+         Small circle = half the big circle's diameter (5.1 = 10.2/2),
+         cy = big cy (vertically centered, same horizontal line),
+         cx + r = big cx + big r (right edge tangent to big circle's right edge)
+         → cx = 56 + 10.2 − 5.1 = 61.1. -->
     <mask id="bite" maskUnits="userSpaceOnUse" x="40" y="40" width="40" height="40">
       <rect x="40" y="40" width="40" height="40" fill="white"/>
-      <circle cx="62" cy="54" r="3.6" fill="black"/>
+      <circle cx="61.1" cy="54" r="5.1" fill="black"/>
     </mask>
   </defs>
   <!-- warm yellow icon background -->
@@ -23,17 +27,25 @@
        Strokes are separated at the apex: the left stroke runs to the apex,
        the right stroke ends short with its own round cap (centerline end
        (63.4,34.8), ~16.5 px from the apex) leaving a ~3 px gap. -->
-  <path d="M32 68 L56 20"
-        fill="none"
-        stroke="#404040"
-        stroke-width="10"
-        stroke-linecap="round"/>
-  <path d="M63.4 34.8 L80 68"
-        fill="none"
-        stroke="#606060"
-        stroke-width="10"
-        stroke-linecap="round"/>
-  <circle cx="56" cy="54" r="10.2" fill="#202020" mask="url(#bite)"/>
+  <!-- "A" group: scaled to 90% (–10%) around the in-tile center (56,44).
+       Includes both strokes AND the C-notch dot — the dot replaces the A's
+       crossbar, so it must shrink with the strokes to keep the "A" as a
+       single coherent glyph. (A bbox incl. dot: x 32→80, y 20→68, center
+       exactly the icon-tile center.) Stroke-width / radius shrink together
+       to preserve the stroke-to-edge ratio. -->
+  <g transform="translate(56 44) scale(0.9) translate(-56 -44)">
+    <path d="M32 68 L56 20"
+          fill="none"
+          stroke="#404040"
+          stroke-width="10"
+          stroke-linecap="round"/>
+    <path d="M63.4 34.8 L80 68"
+          fill="none"
+          stroke="#606060"
+          stroke-width="10"
+          stroke-linecap="round"/>
+    <circle cx="56" cy="54" r="10.2" fill="#202020" mask="url(#bite)"/>
+  </g>
   <!-- tighter, cleaner wordmark -->
   <text x="106" y="71"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"

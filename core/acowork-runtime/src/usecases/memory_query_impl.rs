@@ -15,7 +15,7 @@ use crate::error::Result;
 use crate::http::{SharedEmbedDimension, SharedMemoryStore, memory_query};
 use crate::usecases::memory_query::{
     CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse, MemoryNodeQuery, MemoryQueryService,
-    MemoryStats, RebuildReport,
+    MemoryStats, RebuildReport, SemanticMemoryQuery,
 };
 
 pub struct GrafeoMemoryAdapter {
@@ -45,6 +45,47 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             time_range: query.time_range.clone(),
         };
         let out = memory_query::list_nodes(store.as_ref(), params);
+        let dim = self.embed_dim.read().map(|d| *d).unwrap_or(0);
+
+        let nodes: Vec<MemoryNode> = out
+            .nodes
+            .into_iter()
+            .map(|n| MemoryNode {
+                node_id: n.node_id,
+                node_type: n.node_type,
+                sub_type: n.sub_type,
+                content: n.content,
+                confidence: n.confidence,
+                importance: n.importance,
+                decay_score: n.decay_score,
+                created_at: n.created_at,
+                last_accessed_at: n.last_accessed_at,
+                access_count: n.access_count,
+                status: n.status,
+            })
+            .collect();
+
+        Ok(MemoryNodeListResponse {
+            nodes,
+            total: out.total,
+            page: out.page,
+            size: out.size,
+            model_dim: dim,
+        })
+    }
+
+    async fn semantic_search(
+        &self,
+        query: &SemanticMemoryQuery,
+    ) -> Result<MemoryNodeListResponse> {
+        let store = self.memory_store.read().ok().and_then(|g| g.clone());
+        let out = memory_query::semantic_search(
+            store.as_ref(),
+            &query.query_text,
+            query.embedding.as_deref(),
+            &query.mode,
+            query.limit,
+        );
         let dim = self.embed_dim.read().map(|d| *d).unwrap_or(0);
 
         let nodes: Vec<MemoryNode> = out
@@ -272,5 +313,24 @@ mod tests {
         let kn = by_type.get("Knowledge").expect("knowledge node");
         assert_eq!(kn.confidence, 0.7);
         assert_eq!(kn.importance, 0.5);
+    }
+
+    #[tokio::test]
+    async fn semantic_search_keyword_falls_back_to_text_without_embedding() {
+        let adapter = seeded_adapter();
+        // No embedding provider is bound in the adapter test; mode=hybrid
+        // with `embedding: None` must still surface BM25 text matches.
+        let resp = adapter
+            .semantic_search(&SemanticMemoryQuery {
+                query_text: "systems language".to_string(),
+                mode: "hybrid".to_string(),
+                limit: 20,
+                embedding: None,
+            })
+            .await
+            .expect("semantic search should succeed");
+        assert_eq!(resp.total, 1);
+        assert_eq!(resp.nodes[0].node_type, "Knowledge");
+        assert!(resp.nodes[0].content.contains("Rust"));
     }
 }

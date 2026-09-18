@@ -216,3 +216,22 @@ export function attachmentUrl(aid: string, opts?: { download?: boolean; thumb?: 
   const qs = q.toString();
   return `${getGatewayUrl()}/api/pm/attachments/${encodeURIComponent(aid)}${qs ? `?${qs}` : ""}`;
 }
+
+// ── Search（ADR-081 P0-2）────────────────────────────────────────────
+
+/** `GET /api/pm/search?q=&limit=` — 项目/任务子串搜索，命中字段加权
+ *  title > description > assignee（服务端 `api/search.rs`）。 */
+export interface PmSearchHit {
+  kind: "project" | "task";
+  id: string;
+  title: string;
+  snippet: string;
+  score: number;
+  project_id: string;
+  task_id?: string;
+}
+
+export function searchPm(q: string, limit = 20, signal?: AbortSignal): Promise<PmSearchHit[]> {
+  const qs = new URLSearchParams({ q, limit: String(limit) });
+  return request<PmSearchHit[]>(`/search?${qs.toString()}`, { signal });
+}

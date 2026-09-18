@@ -36,8 +36,8 @@ import { MarkdownToolbar } from "../markdown/MarkdownToolbar";
 import { registerMarkdownTableNavigation } from "../markdown/editorAid";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
-import { GlobalSearchPanel } from "./GlobalSearchPanel";
 import { SymbolSearchPanel } from "./SymbolSearchPanel";
+import { useSearchStore } from "../../stores/searchStore";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
@@ -151,7 +151,6 @@ export function FileEditorPanel({ width }: { width: number }) {
         { kind: "others" | "all"; fileIds: string[]; dirtyCount: number; keepFileId?: string } | null
     >(null);
     const [showGoToFile, setShowGoToFile] = useState(false);
-    const [showGlobalSearch, setShowGlobalSearch] = useState(false);
     const [showSymbolSearch, setShowSymbolSearch] = useState(false);
     const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
     const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
@@ -618,21 +617,24 @@ export function FileEditorPanel({ width }: { width: number }) {
             },
         });
 
-        // Ctrl+Shift+F / Cmd+Shift+F — Search in files (ripgrep backend).
-        // Same visual style as GoToFilePalette.
+        // Ctrl+Shift+F / Cmd+Shift+F — Global search (ADR-081). The old
+        // editor-internal GlobalSearchPanel was merged into the app-wide
+        // GlobalSearchDialog (文件 tab uses the same ripgrep backend). Monaco
+        // intercepts the combo while the editor is focused; AppLayout's
+        // window-level keydown covers everywhere else — both open the same
+        // dialog via searchStore.
         // KeyCode.KeyF = 33 in monaco-editor 0.55.x.
         // Use addAction (not addCommand) to ensure the keybinding overrides
         // any built-in Monaco action that may silently consume the event.
         editor.addAction({
             id: "acowork.globalSearch",
-            label: "Search in Files",
+            label: "Global Search",
             keybindings: [
                 // eslint-disable-next-line no-bitwise
                 monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF,
             ],
             run: () => {
-                log.debug("[GlobalSearch] addAction fired — opening panel");
-                setShowGlobalSearch(true);
+                useSearchStore.getState().openDialog();
             },
         });
 
@@ -1298,6 +1300,7 @@ export function FileEditorPanel({ width }: { width: number }) {
     return (
         <div
             ref={rootRef}
+            data-panel="file-editor"
             className="relative flex flex-col shrink-0 bg-page-bg dark:border-zinc-800 rounded-xl overflow-hidden"
             style={{ width }}
         >
@@ -1878,18 +1881,6 @@ export function FileEditorPanel({ width }: { width: number }) {
                     workspaceId={activeFile.workspaceId}
                     onClose={() => {
                         setShowGoToFile(false);
-                        editorRef.current?.focus();
-                    }}
-                />
-            )}
-
-            {/* Global Search panel (Ctrl+Shift+F) */}
-            {showGlobalSearch && activeFile && (
-                <GlobalSearchPanel
-                    agentId={activeFile.agentId}
-                    workspaceId={activeFile.workspaceId}
-                    onClose={() => {
-                        setShowGlobalSearch(false);
                         editorRef.current?.focus();
                     }}
                 />

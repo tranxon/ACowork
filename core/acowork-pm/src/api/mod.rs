@@ -28,6 +28,7 @@
 pub mod attachments;
 pub mod projects;
 pub mod routes;
+pub mod search;
 pub mod tasks;
 
 use std::sync::Arc;

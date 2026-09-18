@@ -267,6 +267,8 @@ pub(crate) struct AgentBootContext {
     /// ADR-040: Late-bind slot for memory query service.
     pub memory_query_slot:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+    /// ADR-081 §4.2: Late-bind slot for the conversation vector index.
+    pub conversation_index_slot: crate::http::SharedConversationIndex,
     /// ADR-040: Late-bind slot for workspace query service
     /// (read-only: `list_workspaces` / `list_tree` / `read_file` /
     /// `find_files` / `search_files`).

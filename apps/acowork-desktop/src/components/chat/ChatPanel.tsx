@@ -17,6 +17,7 @@ import { AddProviderFlow } from "../harness/AddProviderFlow";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
+import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
@@ -202,13 +203,19 @@ type InputPlaceholderKey =
   | "inputMessageReconnecting"
   | "inputParamsStale"
   | "inputMessageStale"
+  | "inputParamsQueueing"
+  | "inputMessageQueueing"
   | "inputGatewayDisconnected";
 
 function getInputPlaceholderKey(
   gatewayStatus: string,
   effective: ConnectionStatus,
   activeSkill: boolean,
+  sending: boolean,
 ): InputPlaceholderKey {
+  // Agent is busy — Enter will queue the message. Hint the user up-front
+  // so they don't think Enter is a no-op while waiting for the stream.
+  if (sending) return activeSkill ? "inputParamsQueueing" : "inputMessageQueueing";
   if (gatewayStatus !== "connected") return "inputGatewayDisconnected";
   switch (effective) {
     case "connecting":
@@ -937,6 +944,33 @@ export function ChatPanel() {
   // - the virtualizer count === messageBlocks.length.  Live streaming
   // content is folded into blocks by the adapter (isLive: true).
   const messageBlocks = adapter.blocks;
+
+  // ADR-081 §4.2: conversation-hit locate — scroll to + briefly highlight
+  // the block containing the target raw message (pendingLocate is set by
+  // chatStore.locateMessage and auto-cleared after 5s).
+  const pendingLocate = sessionState?.pendingLocate ?? null;
+  const [highlightBlock, setHighlightBlock] = useState<number | null>(null);
+  useEffect(() => {
+    if (
+      !pendingLocate ||
+      pendingLocate.sessionId !== currentSessionId ||
+      messageBlocks.length === 0
+    ) {
+      setHighlightBlock(null);
+      return;
+    }
+    // Map the raw messages[] index to the folded block that contains it.
+    const targetBlock = blockIndexOfRawMessage(messageBlocks, pendingLocate.targetArrayIdx);
+    if (targetBlock >= 0) {
+      vmlRef.current?.scrollToIndex(targetBlock);
+      setHighlightBlock(targetBlock);
+      return;
+    }
+    // Target not in any rendered block (extreme edge — e.g. live buffer
+    // before history lands): leave the highlight off, session is open.
+    setHighlightBlock(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingLocate, currentSessionId, messageBlocks]);
 
   // ScrollController owns pagination, scroll-arrow visibility, and init-scroll
   // restoration via the data-driven snapshot { atBottom, firstVisibleBlockId }.
@@ -2098,6 +2132,7 @@ export function ChatPanel() {
               ref={vmlRef}
               onRetryLoadSession={handleRetryLoadSession}
               messageBlocks={messageBlocks}
+              highlightBlockIndex={highlightBlock}
               sending={sending}
               pendingApproval={pendingApproval}
               currentSessionId={currentSessionId}
@@ -2610,10 +2645,10 @@ export function ChatPanel() {
             value={session.inputValue}
             onChange={(e) => session.setInputValue(e.target.value)}
             placeholder={t(
-              `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill)}`,
+              `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
             )}
             disabled={inputDisabled}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-tertiary  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
+            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
               if (e.key !== "Enter" || e.shiftKey) return;

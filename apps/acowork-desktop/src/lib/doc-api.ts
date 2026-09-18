@@ -224,7 +224,7 @@ export function purgeTrash(trashId: string): Promise<void> {
 }
 
 /** `GET /api/search?keyword=&limit=` */
-export function searchDocs(keyword: string, limit = 20): Promise<SearchHit[]> {
+export function searchDocs(keyword: string, limit = 20, signal?: AbortSignal): Promise<SearchHit[]> {
   const q = `?keyword=${encodeURIComponent(keyword)}&limit=${limit}`;
-  return request<SearchHit[]>(`/search${q}`);
+  return request<SearchHit[]>(`/search${q}`, { signal });
 }

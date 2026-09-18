@@ -256,6 +256,7 @@ async fn spawn_server(e2e: &Adr071E2e) -> u16 {
         mqtt_client,
         session_metadata,
         memory_query,
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
         workspace_query,
         workspace_mutation,
         agent_tools,

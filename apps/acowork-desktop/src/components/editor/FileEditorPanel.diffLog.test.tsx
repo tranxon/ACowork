@@ -161,7 +161,6 @@ vi.mock("./MarkdownPreviewView", () => ({ MarkdownPreviewView: () => null }));
 vi.mock("./UrlPreviewView", () => ({ UrlPreviewView: () => null }));
 vi.mock("./HtmlPreviewView", () => ({ HtmlPreviewView: () => null }));
 vi.mock("./GoToFilePalette", () => ({ GoToFilePalette: () => null }));
-vi.mock("./GlobalSearchPanel", () => ({ GlobalSearchPanel: () => null }));
 vi.mock("./SymbolSearchPanel", () => ({ SymbolSearchPanel: () => null }));
 vi.mock("../common/ScrollableTabBar", () => ({ ScrollableTabBar: () => null }));
 vi.mock("../common/tab", () => ({ TabItem: () => null }));

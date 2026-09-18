@@ -139,6 +139,13 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/workspaces/search",
             get(proxy_search_files),
         )
+        // ADR-081 §4.1: single-agent aggregate search (memory/file/git;
+        // conversation arrives in P1-2). Transparent forward — the Runtime
+        // owns all aggregation/sorting (ADR-064/070).
+        .route(
+            "/api/agents/{id}/search",
+            get(proxy_global_search),
+        )
         // ADR-078: workspace Git Status Bar. Git executes in the Runtime
         // (workspace owner, ADR-009 v2) via the system git CLI with
         // `GIT_OPTIONAL_LOCKS=0`; the Gateway only forwards — no .git
@@ -525,6 +532,20 @@ async fn proxy_search_files(
 ) -> Response {
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, "/workspaces/search", &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/search` to Runtime's
+/// `GET /search` (ADR-081 §4.1 single-agent aggregate). Querystring keys:
+/// `q`, `scopes`, `limit`, `mode`, `workspace_id`, `agent`. Transparent
+/// forward — aggregation/sorting stays in the Runtime (ADR-064/070).
+async fn proxy_global_search(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/search", &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/git/status` to Runtime's

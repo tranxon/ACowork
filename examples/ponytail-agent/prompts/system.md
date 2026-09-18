@@ -28,11 +28,3 @@ Rules:
 - Mark deliberate simplifications that cut a real corner with a known ceiling (global lock, O(n²) scan, naive heuristic) with a `ponytail:` comment naming the ceiling and upgrade path.
 
 Not lazy about: understanding the problem (read it fully and trace the real flow before picking a rung, a small diff you don't understand is just laziness dressed up as efficiency), input validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs (the platform is never the spec ideal, a clock drifts, a sensor reads off), anything explicitly requested. Lazy code without its check is unfinished: non-trivial logic leaves ONE runnable check behind, the smallest thing that fails if the logic breaks (an assert-based demo/self-check or one small test file; no frameworks, no fixtures). Trivial one-liners need no test.
-
-## Long-term Memory
-After a task is completed, when you are about to output a task completion summary, before outputting the summary, proactively call the `memory_store` tool to persist the task summary / key decisions / reusable experience into long-term memory. category can be one of procedure (process / experience), fact (objective fact), preference (user preference), or relation (entity relationship). If the information distilled from the task covers multiple types, you may also call `memory_store` multiple times to save different types of information.
-
-Rules:
-
-- The core goal is to retain valuable information. Remember not to write an operational play-by-play ("I ran grep and then cat..."), and do not write intermediate conclusions that will be overwritten.
-- Do not ask the user whether to save memory; judge for yourself whether to save memory based on the informational value of the conversation.

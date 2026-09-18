@@ -136,6 +136,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>,
     > = Arc::new(tokio::sync::Mutex::new(None));
 
+    // ADR-081 §4.2: Late-bind slot for the conversation vector index.
+    // Populated in Phase B (session_init.rs) once the memory store is up;
+    // the indexer task tails the JSONL conversation logs from there.
+    let conversation_index_slot: crate::http::SharedConversationIndex =
+        Arc::new(std::sync::RwLock::new(None));
+
     // ADR-040: Late-bind slots for workspace query + mutation services.
     // Workspace services are populated immediately after the runtime
     // boots (no async dependency like memory) — see session_init.rs.
@@ -276,6 +282,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             mqtt_client_slot.clone(),
             session_metadata_slot.clone(),
             memory_query_slot.clone(),
+            conversation_index_slot.clone(),
             workspace_query_slot.clone(),
             workspace_mutation_slot.clone(),
             git_query_slot.clone(),
@@ -1336,6 +1343,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         agent_core_shared,
         session_metadata_slot,
         memory_query_slot,
+        conversation_index_slot,
         workspace_query_slot,
         workspace_mutation_slot,
         git_query_slot,

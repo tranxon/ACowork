@@ -29,6 +29,11 @@ interface VirtualMessageListProps {
    */
   adapter: ChatListAdapterV2;
   /**
+   * ADR-081 §4.2: block index to highlight (conversation-hit locate).
+   * The row gets a transient background tint; null = no highlight.
+   */
+  highlightBlockIndex?: number | null;
+  /**
    * Pre-folded display blocks from the adapter (adapter.blocks).
    * Kept as a separate prop for direct access in the virtualizer's
    * estimateSize and render functions.
@@ -180,6 +185,7 @@ export const VirtualMessageList = React.forwardRef<
     loadError,
     messages,
     onRetryLoadSession,
+    highlightBlockIndex,
   } = props;
 
   // ── Refs ────────────────────────────────────────────────────────
@@ -552,6 +558,15 @@ export const VirtualMessageList = React.forwardRef<
                   left: 0,
                   width: "100%",
                   transform: `translateY(${virtualRow.start}px)`,
+                  // ADR-081 §4.2: locate highlight — transient tint on the
+                  // target block (ChatPanel clears pendingLocate after 5s).
+                  ...(highlightBlockIndex === virtualRow.index
+                    ? {
+                        backgroundColor: "var(--color-highlight-locate, rgba(59, 130, 246, 0.14))",
+                        borderRadius: 8,
+                        transition: "background-color 0.6s ease",
+                      }
+                    : {}),
                 }}
               >
                 {/* Agent header — shown before first agent message after a user block.

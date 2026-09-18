@@ -42,6 +42,8 @@ import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { useSearchStore, isGlobalSearchShortcut } from "../../stores/searchStore";
+import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useActiveHeartbeatForSelection } from "../../hooks/useActiveHeartbeat";
 import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
@@ -910,6 +912,19 @@ export function AppLayout() {
     document.addEventListener("mouseup", handleMouseUpFile);
   }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightWidth, rightPanelCollapsed]);
 
+  // ── ADR-081: global search shortcut (Ctrl/Cmd+Shift+F) ──────────────
+  // Window-level handler so the dialog opens regardless of focus; while the
+  // Monaco editor is focused its own addAction intercepts first (same store).
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!isGlobalSearchShortcut(e)) return;
+      e.preventDefault();
+      useSearchStore.getState().toggleDialog();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
     <div className="flex h-full w-full flex-col" style={{ backgroundColor: glassBg } as React.CSSProperties}>
       {/* Custom title bar — on macOS, sits under the native traffic lights
@@ -1096,7 +1111,7 @@ export function AppLayout() {
                 statusType === "warning" &&
                   "text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border-amber-300/70 dark:border-amber-800/70 hover:bg-amber-200/80 dark:hover:bg-amber-900/70",
                 statusType === "info" &&
-                  "text-text-secondary  bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
+                  "text-text-tertiary  bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
               )}
             >
               {statusCopied ? (
@@ -1113,16 +1128,16 @@ export function AppLayout() {
         {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentDisplayName && (
           <span className="flex items-center gap-2 truncate">
             <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-              <Bot className="h-3 w-3 text-text-secondary " aria-hidden="true" />
-              <span className="text-text-secondary ">{t("statusBar.agent")}: </span>
-              <span className="font-medium text-text-secondary ">{agentDisplayName}</span>
+              <Bot className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
+              <span className="text-text-tertiary ">{t("statusBar.agent")}: </span>
+              <span className="font-medium text-text-tertiary ">{agentDisplayName}</span>
             </span>
             {contextUsage && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-                <Cpu className="h-3 w-3 text-text-secondary " aria-hidden="true" />
-                <span className="text-text-secondary ">{t("statusBar.context")}: </span>
+                <Cpu className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
+                <span className="text-text-tertiary ">{t("statusBar.context")}: </span>
                 <span
-                  className="tabular-nums font-medium text-text-secondary "
+                  className="tabular-nums font-medium text-text-tertiary "
                   style={{
                     color:
                       contextUsage.usage_percent >= 90
@@ -1133,7 +1148,7 @@ export function AppLayout() {
                   {formatPercent(contextUsage.usage_percent)}%
                 </span>
                 <span className="text-text-tertiary "> | </span>
-                <span className="tabular-nums font-medium text-text-secondary ">
+                <span className="tabular-nums font-medium text-text-tertiary ">
                   {formatTokenCount(contextUsage.total_tokens)}/{formatTokenCount(contextUsage.context_window)}
                 </span>
               </span>
@@ -1145,7 +1160,7 @@ export function AppLayout() {
                 falls back to a dash when it isn't computable yet. */}
             {hasCacheData(contextUsage, "cumulative") && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-                <span className="tabular-nums font-medium text-text-secondary ">
+                <span className="tabular-nums font-medium text-text-tertiary ">
                   {cacheHitRateLabel ?? "\u2014"}
                 </span>
                 <span className="text-text-tertiary ">{t("statusBar.cached")}</span>
@@ -1186,6 +1201,10 @@ export function AppLayout() {
           </div>
         )}
       </div>
+
+      {/* ADR-081: app-wide global search dialog (Ctrl+Shift+F). Fixed
+          overlay; mounted regardless of current view. */}
+      <GlobalSearchDialog onNavigate={(view) => setCurrentView(view)} />
 
     </div>
   );

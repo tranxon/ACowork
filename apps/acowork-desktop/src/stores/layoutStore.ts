@@ -45,6 +45,15 @@ interface LayoutState {
     requestShowWorkspacePanel: () => void;
 
     /**
+     * Monotonically-increasing counter for "focus the workspace search input"
+     * requests. WorkspaceExplorer consumes each new value once (via a local
+     * ref) so the same Ctrl+F press can both open the panel (via the AppLayout
+     * handler) and place the caret in the input (via this counter).
+     */
+    workspaceSearchFocusSeq: number;
+    requestFocusWorkspaceSearch: () => void;
+
+    /**
      * Live bounding rect of the file editor panel. Updated by
      * `useReportFilePanelBounds` running inside `FileEditorPanel`.
      */
@@ -73,6 +82,10 @@ export const useLayoutStore = create<LayoutState>((set) => ({
     workspacePanelRequestSeq: 0,
     requestShowWorkspacePanel: () =>
         set((state) => ({ workspacePanelRequestSeq: state.workspacePanelRequestSeq + 1 })),
+
+    workspaceSearchFocusSeq: 0,
+    requestFocusWorkspaceSearch: () =>
+        set((state) => ({ workspaceSearchFocusSeq: state.workspaceSearchFocusSeq + 1 })),
 
     filePanelBounds: { left: 0, right: 0, mounted: false },
     setFilePanelBounds: (bounds) => set({ filePanelBounds: bounds }),

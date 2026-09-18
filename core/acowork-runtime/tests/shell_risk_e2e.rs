@@ -59,6 +59,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         mqtt_client,
         session_metadata,
         memory_query,
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
         workspace_query,
         workspace_mutation,
         agent_tools,

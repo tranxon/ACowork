@@ -335,6 +335,19 @@ interface SessionChatState {
   tokenUsage: TokenUsage | null;
   contextUsage: ContextUsageInfo | null;
   /**
+   * One-shot locate request (ADR-081 §4.2 conversation hits): when set
+   * and matching the active session, ChatPanel scrolls the message list
+   * to `targetArrayIdx` (index into `messages[]`) and briefly
+   * highlights the block. Cleared after the highlight timeout — it is a
+   * transient hint, not persisted state.
+   */
+  pendingLocate: {
+    sessionId: string;
+    messageIndex: number;
+    /** Resolved index into `messages[]` after window alignment. */
+    targetArrayIdx: number;
+  } | null;
+  /**
    * Pagination window coordinates returned by the last /messages HTTP
    * response. Both `messageOffset` and `messageLimit` are measured in
    * **raw entries** (one JSONL line each — a single user / assistant /
@@ -461,6 +474,7 @@ interface SessionChatState {
 
 const DEFAULT_SESSION_STATE: SessionChatState = {
   messages: [],
+  pendingLocate: null,
   tokenUsage: null,
   contextUsage: null,
   messageOffset: 0,
@@ -811,6 +825,15 @@ interface ChatStore {
     /** When true, REPLACE the cached window with the fetched page instead of merging. */
     replaceCache?: boolean,
   ) => Promise<{ offset: number; limit: number; total: number } | undefined>;
+  /**
+   * Open a session and locate a specific message (ADR-081 conversation
+   * hit). `messageIndex` is the raw JSONL line number — the same unit
+   * the backend paginates by. Aligns the load window so the target is
+   * in `messages[]`, then sets `pendingLocate` for ChatPanel to scroll
+   * + highlight. Resolves after the session is open (even if locate
+   * could not be resolved — the user still lands in the session).
+   */
+  locateMessage: (agentId: string, sessionId: string, messageIndex: number) => Promise<void>;
   abortSessionLoad: (agentId: string, sessionId: string) => void;
   /**
    * One-shot jump to the latest page (offset=0).
@@ -2350,6 +2373,48 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         loadSequence: getSessionState(state, agentId, sessionId).loadSequence + 1,
       }),
     }));
+  },
+
+  /** ADR-081 §4.2: open a session and locate one message (raw line). */
+  locateMessage: async (agentId: string, sessionId: string, messageIndex: number) => {
+    await get().openSession(agentId, sessionId);
+    let st = getSessionState(get(), agentId, sessionId);
+    // The initial tail window may not reach an old hit — reload a window
+    // anchored at the target (replaceCache so messages[] lines up with
+    // `messageOffset`; the window is contiguous by construction).
+    const inWindow =
+      messageIndex >= st.messageOffset &&
+      messageIndex < st.messageOffset + st.messages.length;
+    if (!inWindow) {
+      try {
+        await get().loadSessionMessages(agentId, sessionId, messageIndex, 50, true);
+      } catch (err) {
+        log.warn("[chatStore] locateMessage window load failed:", err);
+        return; // session is open — user still lands there
+      }
+    }
+    st = getSessionState(get(), agentId, sessionId);
+    const targetArrayIdx = messageIndex - st.messageOffset;
+    if (targetArrayIdx < 0 || targetArrayIdx >= st.messages.length) {
+      log.warn("[chatStore] locateMessage out of bounds:", {
+        sessionId,
+        messageIndex,
+        messageOffset: st.messageOffset,
+        loaded: st.messages.length,
+      });
+      return;
+    }
+    set((state) =>
+      updateSessionState(state, agentId, sessionId, {
+        pendingLocate: { sessionId, messageIndex, targetArrayIdx },
+      }),
+    );
+    // Transient highlight — clear it after the visual fade.
+    window.setTimeout(() => {
+      set((state) =>
+        updateSessionState(state, agentId, sessionId, { pendingLocate: null }),
+      );
+    }, 5_000);
   },
 
 

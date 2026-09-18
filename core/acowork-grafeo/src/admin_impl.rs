@@ -18,6 +18,7 @@ use grafeo_core::graph::lpg::Node;
 
 use crate::grafeo::GrafeoStore;
 use crate::labels;
+use crate::retrieval::cosine_distance_to_similarity;
 use crate::stats;
 
 /// Maximum number of nodes to scan without any filter (keyword or type).
@@ -285,6 +286,126 @@ impl MemoryAdminService for GrafeoStore {
             nodes,
             rejected_unfiltered: None,
         }
+    }
+
+    fn semantic_search(
+        &self,
+        query_text: &str,
+        embedding: Option<&[f32]>,
+        mode: &str,
+        limit: usize,
+    ) -> Vec<AdminNodeRecord> {
+        let limit = limit.clamp(1, 100);
+        if query_text.is_empty() && embedding.is_none() {
+            return vec![];
+        }
+
+        // Per-label retrieval, merged by descending score. Labels are
+        // disjoint, so node_ids cannot collide across labels.
+        let mut scored: Vec<(f64, String, u64)> = Vec::new();
+        for label in &MEMORY_LABELS {
+            let hits: crate::error::Result<Vec<(NodeId, f64)>> = match mode {
+                "vector" => match embedding {
+                    Some(emb) => self
+                        .vector_search(label, emb, limit, None)
+                        .map(|v| {
+                            v.into_iter()
+                                .map(|(id, dist)| {
+                                    (id, cosine_distance_to_similarity(dist))
+                                })
+                                .collect()
+                        }),
+                    None => self.text_search(label, query_text, limit),
+                },
+                "hybrid" => match embedding {
+                    Some(emb) => {
+                        self.hybrid_search(label, "content", "embedding", query_text, emb, limit)
+                    }
+                    None => self.text_search(label, query_text, limit),
+                },
+                // "keyword" / "" / any other mode → BM25 text search.
+                _ => self.text_search(label, query_text, limit),
+            };
+
+            match hits {
+                Ok(v) => scored.extend(v.into_iter().map(|(id, score)| (score, (*label).to_string(), id.0))),
+                Err(e) => {
+                    tracing::warn!(
+                        label,
+                        error = %e,
+                        "memory semantic_search: label search failed, skipping"
+                    );
+                }
+            }
+        }
+
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored.truncate(limit);
+
+        let mut records = Vec::with_capacity(scored.len());
+        for (_, label, id) in scored {
+            let Some(n) = self.db().get_node(NodeId(id)) else {
+                continue;
+            };
+            let content = extract_node_content(&label, &n);
+            let created_at = n
+                .get_property("created_at")
+                .and_then(|v| v.as_timestamp())
+                .map(|ts| ts.as_secs())
+                .unwrap_or(0);
+            let last_accessed_at = n
+                .get_property("last_accessed_at")
+                .and_then(|v| v.as_timestamp())
+                .map(|ts| ts.as_secs())
+                .unwrap_or(created_at);
+            let access_count = n
+                .get_property("access_count")
+                .and_then(|v| v.as_int64())
+                .unwrap_or(0) as u32;
+            let confidence = n
+                .get_property("confidence")
+                .and_then(|v| v.as_float64())
+                .unwrap_or(0.0);
+            let importance = n
+                .get_property("importance")
+                .and_then(|v| v.as_float64())
+                .unwrap_or(0.0);
+            let decay_score = n
+                .get_property("decay_score")
+                .and_then(|v| v.as_float64())
+                .unwrap_or(1.0);
+            let status = n
+                .get_property("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Active")
+                .to_string();
+            let sub_type = extract_sub_type(&label, &n);
+            records.push(AdminNodeRecord {
+                node_id: id,
+                node_type: label,
+                sub_type,
+                content,
+                confidence,
+                importance,
+                decay_score,
+                created_at,
+                last_accessed_at,
+                access_count,
+                status,
+            });
+        }
+
+        tracing::info!(
+            mode,
+            limit,
+            returned = records.len(),
+            "memory semantic_search: done"
+        );
+        records
     }
 
     fn get_node(&self, node_id: u64) -> AdminNodeDetail {
@@ -662,6 +783,12 @@ mod tests {
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().expect("in-memory store should open")
+    }
+
+    /// Ramp vector `[0, 0.001, 0.002, ...]` — the exact embedding assigned
+    /// by [`make_node`], so a query with this vector matches node A exactly.
+    fn query_vec(dim: usize) -> Vec<f32> {
+        (0..dim).map(|i| (i as f32) * 0.001).collect()
     }
 
     /// Seed two Knowledge nodes with different sub_types, one
@@ -1049,5 +1176,63 @@ mod tests {
                 rec.node_type
             );
         }
+    }
+
+    #[test]
+    fn semantic_search_vector_ranks_closest_node_first() {
+        const EMB_DIM: usize = acowork_memory::types::DEFAULT_EMBEDDING_DIM;
+        let store = test_store();
+
+        // Node A embedding matches the query vector exactly (same ramp).
+        let a = store
+            .store_node(
+                labels::KNOWLEDGE,
+                [
+                    ("subject", Value::from("Rust")),
+                    ("predicate", Value::from("owns")),
+                    ("object", Value::from("borrow checker")),
+                ],
+            )
+            .expect("store_node should succeed")
+            .0;
+        store
+            .db()
+            .set_node_property(
+                grafeo_common::NodeId(a),
+                "embedding",
+                Value::Vector(Arc::from(query_vec(EMB_DIM).as_slice())),
+            );
+        // Node B embedding is orthogonal to the query ramp.
+        let b = make_node(&store, labels::EPISODIC, "user prefers dark mode", Some(EMB_DIM));
+        store
+            .db()
+            .set_node_property(
+                grafeo_common::NodeId(b),
+                "embedding",
+                Value::Vector(Arc::from(vec![1.0f32; EMB_DIM].as_slice())),
+            );
+
+        let query = query_vec(EMB_DIM);
+        let records = store.semantic_search("", Some(&query), "vector", 10);
+
+        assert_eq!(records.len(), 2, "both seeded nodes carry embeddings");
+        assert_eq!(records[0].node_id, a, "closest embedding must rank first");
+        assert_eq!(records[0].node_type, "Knowledge");
+        assert!(records[0].content.contains("Rust"));
+    }
+
+    #[test]
+    fn semantic_search_keyword_falls_back_to_text() {
+        let store = seed_mixed_store();
+        // seed_mixed_store has a Knowledge node "Rust is a systems language".
+        let records = store.semantic_search("systems language", None, "keyword", 10);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].node_type, "Knowledge");
+    }
+
+    #[test]
+    fn semantic_search_empty_input_returns_nothing() {
+        let store = seed_mixed_store();
+        assert!(store.semantic_search("", None, "hybrid", 10).is_empty());
     }
 }

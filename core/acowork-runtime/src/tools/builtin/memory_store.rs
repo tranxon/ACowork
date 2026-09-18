@@ -68,18 +68,16 @@ impl MemoryStoreTool {
         ToolSpec {
             name: "memory_store".to_string(),
             description: "Store a memory in long-term memory for later recall. \
-                Use 'category' to tag what kind of observation this is — this \
-                tag is consumed by the offline EpisodicDistiller to promote \
-                evidence-backed clusters into the semantic layer:\n\
+                After a task is completed, when you are about to output a task completion summary, before outputting the summary, proactively call the `memory_store` tool to persist the task summary / key decisions / reusable experience into long-term memory. \
+                Category can be: \
                 - 'fact': objective truth about the user or world.\n\
                 - 'preference': user taste / habit.\n\
                 - 'relation': relationship between entities.\n\
                 - 'procedure': behavioural pattern — 'when X, do Y'.\n\
                 Autobiographical feedback about the agent itself should be \
                 written the same way as any other observation (it will be \
-                recognised offline by the distiller's server-side LLM). Do \
-                NOT split your text into subject/predicate/object — the \
-                distiller handles that. Describe what to remember in \
+                recognised offline by the distiller's server-side LLM). \
+                Describe what to remember in \
                 'content' (natural language). Estimate your confidence \
                 (0.0-1.0). Optionally provide keywords."
                 .to_string(),

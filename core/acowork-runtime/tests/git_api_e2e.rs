@@ -138,6 +138,7 @@ async fn spawn_server_with_git_bin(tag: &str, git_bin: String) -> (u16, std::pat
         mqtt_client,
         session_metadata,
         memory_query,
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
         workspace_query,
         workspace_mutation,
         git_query,

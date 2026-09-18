@@ -86,6 +86,13 @@ interface MemoryStore {
   // Actions
   fetchNodes: (agentId: string) => Promise<void>;
   fetchStats: (agentId: string) => Promise<void>;
+  /**
+   * Fetch a single memory node by id — `GET /memory/nodes/{nid}`. Used by
+   * the global search dialog to render a node's full detail inline without
+   * depending on it being present in the paginated `nodes` list.
+   * Returns `null` on any error (best-effort; the caller shows a fallback).
+   */
+  fetchNode: (agentId: string, nodeId: number) => Promise<MemoryNodeResponse | null>;
   deleteNode: (agentId: string, nodeId: number) => Promise<void>;
   /**
    * Trigger one manual EpisodicDistiller pass — `POST /memory/distill`
@@ -189,6 +196,24 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       set({ stats: data });
     } catch (e) {
       log.error("Failed to fetch memory stats:", e);
+    }
+  },
+
+  fetchNode: async (agentId, nodeId) => {
+    try {
+      const res = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes/${nodeId}`),
+        { tag: `MemoryStore.fetchNode(${agentId},${nodeId})`, logger: log },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // `GET /memory/nodes/{nid}` returns the raw node JSON (with a `found`
+      // flag). It carries every field MemoryNodeDetail reads.
+      const data = (await res.json()) as MemoryNodeResponse & { found?: boolean };
+      if (data.found === false) return null;
+      return data;
+    } catch (e) {
+      log.error("Failed to fetch memory node:", e);
+      return null;
     }
   },
 

@@ -186,6 +186,15 @@ window.addEventListener("keydown", (e: KeyboardEvent) => {
   }
 });
 
+// KNOWN ISSUE (dev only, accepted for now): React.StrictMode double-invokes
+// effects on first mount (mount → unmount → remount). @monaco-editor/react's
+// Editor cleanup disposes the Monaco instance but keeps its internal ref
+// pointing at the disposed editor, so the StrictMode remount re-runs its
+// setModel() effect against a disposed instance → "InstantiationService has
+// been disposed" (file editor crashes on open in dev). Production builds
+// never double-mount, so release artifacts are unaffected. Proper fix would
+// bypass @monaco-editor/react's Editor lifecycle (useMonaco + manual
+// editor.create with ref cleanup) — deferred.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App />

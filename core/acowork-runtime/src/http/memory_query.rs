@@ -197,6 +197,50 @@ pub(crate) fn list_nodes(
     }
 }
 
+/// Semantic search over memory nodes (ADR-081 P1-1).
+///
+/// Thin wrapper over `MemoryAdminService::semantic_search`, mirroring
+/// [`list_nodes`]'s record mapping. `embedding` is `None` when the agent
+/// has no live embedding provider — the engine then falls back to BM25.
+pub(crate) fn semantic_search(
+    admin: Option<&Arc<dyn MemoryAdminService>>,
+    query_text: &str,
+    embedding: Option<&[f32]>,
+    mode: &str,
+    limit: usize,
+) -> ListNodesOutput {
+    let svc = match admin {
+        Some(s) => s,
+        None => {
+            tracing::warn!("memory semantic_search: no memory admin service available");
+            return empty_list_output(1, limit.clamp(1, 100) as u32);
+        }
+    };
+    let records = svc.semantic_search(query_text, embedding, mode, limit);
+    ListNodesOutput {
+        total: records.len() as u64,
+        page: 1,
+        size: limit.clamp(1, 100) as u32,
+        nodes: records
+            .into_iter()
+            .map(|n| MemoryNodeRecord {
+                node_id: n.node_id,
+                node_type: n.node_type,
+                sub_type: n.sub_type,
+                content: n.content,
+                confidence: n.confidence,
+                importance: n.importance,
+                decay_score: n.decay_score,
+                created_at: n.created_at,
+                last_accessed_at: n.last_accessed_at,
+                access_count: n.access_count,
+                status: n.status,
+            })
+            .collect(),
+        rejected_unfiltered: None,
+    }
+}
+
 /// Collect memory statistics, including vector-index diagnostics.
 pub(crate) fn get_stats(
     admin: Option<&Arc<dyn MemoryAdminService>>,

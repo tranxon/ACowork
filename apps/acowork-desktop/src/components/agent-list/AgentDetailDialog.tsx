@@ -62,8 +62,9 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
       <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
 
       {/* Dialog */}
-      <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700">
-        <div className="mb-4 flex items-center justify-between">
+      <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-700">
           <h3 className="text-sm font-semibold">Agent Details</h3>
           <button
             ref={closeRef}
@@ -75,20 +76,22 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
           </button>
         </div>
 
-        {loading && (
-          <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-          </div>
-        )}
+        {/* Body */}
+        <div className="space-y-3 px-5 py-4 text-xs">
+          {loading && (
+            <div className="flex items-center justify-center py-8">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+            </div>
+          )}
 
-        {error && (
-          <div className="text-sm">
-            <ErrorBox message={`Failed to load agent details: ${error}`} onClose={() => setError(null)} />
-          </div>
-        )}
+          {error && (
+            <div className="text-sm">
+              <ErrorBox message={`Failed to load agent details: ${error}`} onClose={() => setError(null)} />
+            </div>
+          )}
 
-        {detail && !loading && (
-          <div className="space-y-3 text-xs">
+          {detail && !loading && (
+            <div className="space-y-3 text-xs">
             <DetailRow label={t("agentDetailDialog.labelName")} value={detail.name} />
             <DetailRow label={t("agentDetailDialog.labelAgentId")} value={detail.agent_id} mono />
             <DetailRow label={t("agentDetailDialog.labelVersion")} value={detail.version} />
@@ -122,10 +125,12 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                 }
               />
             )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
 
-        <div className="mt-6 flex justify-end">
+        {/* Footer */}
+        <div className="flex justify-end border-t border-zinc-200 px-5 py-3 dark:border-zinc-700">
           <button
             onClick={onClose}
             className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"

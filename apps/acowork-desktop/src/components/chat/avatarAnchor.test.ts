@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../lib/types";
-import { foldMessages } from "./messageFolder";
+import { blockIndexOfRawMessage, foldMessages } from "./messageFolder";
 import { isAgentBlock, shouldShowAgentAvatar, shouldShowTrailingAgentHeader } from "./avatarAnchor";
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -520,5 +520,32 @@ describe("shouldShowTrailingAgentHeader", () => {
     ];
     const blocks = foldMessages(messages);
     expect(shouldShowTrailingAgentHeader(blocks, 1)).toBe(false);
+  });
+});
+
+describe("blockIndexOfRawMessage — ADR-081 locate", () => {
+  const raw = (id: string, type: ChatMessage["type"]): ChatMessage =>
+    ({ id, type, content: "", timestamp: 0 } as ChatMessage);
+
+  it("maps a raw index into the folded block that contains it", () => {
+    // user, thought+tool_call+tool_result (folded), assistant
+    const blocks = foldMessages([
+      raw("u1", "user"),
+      raw("t1", "thought"),
+      raw("tc1", "tool_call"),
+      raw("tr1", "tool_result"),
+      raw("a1", "assistant"),
+    ]);
+    expect(blocks).toHaveLength(3); // user / explore_group / assistant
+    expect(blockIndexOfRawMessage(blocks, 0)).toBe(0); // user
+    expect(blockIndexOfRawMessage(blocks, 1)).toBe(1); // thought
+    expect(blockIndexOfRawMessage(blocks, 3)).toBe(1); // tool_result
+    expect(blockIndexOfRawMessage(blocks, 4)).toBe(2); // assistant
+  });
+
+  it("returns -1 for an index outside every block", () => {
+    const blocks = foldMessages([raw("a1", "assistant")]);
+    expect(blockIndexOfRawMessage(blocks, 5)).toBe(-1);
+    expect(blockIndexOfRawMessage([], 0)).toBe(-1);
   });
 });

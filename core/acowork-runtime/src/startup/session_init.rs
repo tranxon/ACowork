@@ -19,6 +19,7 @@ use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext, build_session_manager_config};
 use acowork_core::timeout_config::constants;
+use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
 
 /// Cached result of the background scan that finds the most recently active
 /// session — `(session_id, title)`. Held in an `Arc<RwLock<…>>` so the
@@ -529,6 +530,51 @@ pub(crate) async fn phase_b_init_session(
             );
             let mut slot = ctx.memory_query_slot.lock().await;
             *slot = Some(adapter);
+        }
+
+        // ADR-081 §4.2 (P1-2): open the conversation vector index and
+        // publish it to the late-bind slot, then spawn the tailer. The
+        // tailer reads the live embedding provider from `agent_core_shared`
+        // each sweep, so it picks up the provider whenever it binds. The
+        // index store is physically isolated (`{work_dir}/conversation_index/`)
+        // and rebuildable from the JSONL history — delete + restart rebuilds.
+        {
+            // Size the index to the live provider's dimension. Hardcoding
+            // the default (384) made every write mismatch a 512-dim provider
+            // and the indexer deferred every sweep forever (ADR-081 P1-2).
+            let embed_dim = ctx
+                .emb_provider
+                .as_ref()
+                .map(|p| p.dimension())
+                .unwrap_or(DEFAULT_EMBEDDING_DIM);
+            match crate::conversation_index::ConversationIndex::open(work_dir_path, embed_dim) {
+                Ok(index) => {
+                    let index = Arc::new(index);
+                    if let Ok(mut slot) = ctx.conversation_index_slot.write() {
+                        *slot = Some(index.clone());
+                    } else {
+                        tracing::warn!(
+                            "Failed to publish conversation_index_slot — /search conversation scope unavailable"
+                        );
+                    }
+                    let indexer = Arc::new(crate::conversation_index::ConversationIndexer::new(
+                        index,
+                        work_dir_path,
+                        ctx.agent_core_shared.clone(),
+                    ));
+                    tokio::spawn(async move { indexer.run().await });
+                    tracing::info!(
+                        dir = %work_dir_path.join("conversation_index").display(),
+                        "conversation index: opened, tailer spawned"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "conversation index: failed to open store — conversation search will report not_indexed"
+                    );
+                }
+            }
         }
 
         // ADR-040: Publish workspace query + mutation services. Workspace
