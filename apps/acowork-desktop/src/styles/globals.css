@@ -378,9 +378,9 @@
   --color-muted-foreground: hsl(215.4 16.3% 65%);
 
   --color-bg: hsl(240 10% 3.9%);
-  --color-text: hsl(0 0% 85%);
+  --color-text: hsl(0 0% 90%);
   /* high-contrast text (dark) — softened from pure white */
-  --color-text-secondary: hsl(0 0% 75%);
+  --color-text-secondary: hsl(0 0% 80%);
   /* default UI labels & icons (dark) */
   --color-text-tertiary: hsl(0 0% 60%);
   /* hints / metadata / placeholder (dark) */

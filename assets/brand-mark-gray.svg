@@ -9,19 +9,21 @@
       within the black/gray band so the mark never introduces a hue into
       a neutral surface.
 
-      Light: chip #D4D4D4 → #B0B0B0, "A" near-white, wordmark #6B6B6B.
-            Co gets a touch more weight (#5A5A5A) than work (#9A9A9A)
-            so the brand reads as "A" first, "Co" second, "work" last.
-      Dark:  chip #3A3A3A → #2A2A2A, "A" near-white, wordmark #A8A8A8.
-            Co (#C8C8C8) > work (#7A7A7A) keeps the same hierarchy and
-            prevents Co from going dimmer than the chip.
+      Light: chip #D4D4D4 → #B0B0B0, "A" 3-tone (circle #E8, left #C8, right #A8),
+            wordmark #6B6B6B. Co (#5A5A5A) > work (#9A9A9A) so "A" first, "Co" second.
+      Dark:  chip #3A3A3A → #2A2A2A, "A" 3-tone (circle #E8, left #C8, right #A8),
+            wordmark #A8A8A8. Co (#C8C8C8) > work (#7A7A7A).
+            The A gradient runs light (circle) → mid (left stroke) → dark (right stroke),
+            mirroring the color variant's depth cue. Same A tones in both modes:
+            the chip background inverts, the A itself does not.
     -->
     <style>
       .chip-stop-a { stop-color: #D4D4D4; }
       .chip-stop-b { stop-color: #B0B0B0; }
       .chip-shadow { flood-color: #000000; flood-opacity: 0.08; }
       .letter-a    { fill: #E8E8E8; }
-      .letter-a-stroke { stroke: #E8E8E8; }
+      .letter-a-left { stroke: #C8C8C8; }
+      .letter-a-right { stroke: #A8A8A8; }
       .wordmark    { fill: #6B6B6B; }
       .co          { fill: #5A5A5A; }
       .work        { fill: #9A9A9A; }
@@ -30,8 +32,9 @@
         .chip-stop-a { stop-color: #3A3A3A; }
         .chip-stop-b { stop-color: #2A2A2A; }
         .chip-shadow { flood-color: #000000; flood-opacity: 0.30; }
-        .letter-a    { fill: #D8D8D8; }
-        .letter-a-stroke { stroke: #D8D8D8; }
+        .letter-a    { fill: #E8E8E8; }
+        .letter-a-left { stroke: #C8C8C8; }
+        .letter-a-right { stroke: #A8A8A8; }
         .wordmark    { fill: #A8A8A8; }
         .co          { fill: #C8C8C8; }
         .work        { fill: #7A7A7A; }
@@ -58,12 +61,12 @@
        (63.4,34.8), ~16.5 px from the apex) leaving a ~3 px gap. -->
   <path d="M32 68 L56 20"
         fill="none"
-        class="letter-a-stroke"
+        class="letter-a-left"
         stroke-width="10"
         stroke-linecap="round"/>
   <path d="M63.4 34.8 L80 68"
         fill="none"
-        class="letter-a-stroke"
+        class="letter-a-right"
         stroke-width="10"
         stroke-linecap="round"/>
   <circle cx="56" cy="54" r="10.2" class="letter-a" mask="url(#bite)"/>

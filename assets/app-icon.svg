@@ -34,14 +34,14 @@
        the left stroke's edge, plus a ~39 px gap between the two caps. -->
   <path d="M110 402 L256 110"
         fill="none"
-        stroke="#383838"
+        stroke="#404040"
         stroke-width="61"
         stroke-linecap="round"/>
   <path d="M300.7 199.4 L402 402"
         fill="none"
-        stroke="#383838"
+        stroke="#606060"
         stroke-width="61"
         stroke-linecap="round"/>
   <!-- Dot with C-notch from the bite mask, sitting below the A's apex. -->
-  <circle cx="256" cy="317" r="62" fill="#303030" mask="url(#bite)"/>
+  <circle cx="256" cy="317" r="62" fill="#202020" mask="url(#bite)"/>
 </svg>
