@@ -1522,7 +1522,12 @@ impl SessionTask {
                             Arc::new(
                                 crate::embedding::FallbackEmbeddingProvider::with_providers(
                                     vec![
-                                (Box::new(new_onnx_provider), 500),
+                                // ONNX local base timeout: 5s. The effective
+                                // timeout is scaled by in-flight concurrency
+                                // (ProviderEntry::scaled_timeout_ms) so queued
+                                // attempts on the serialized ONNX session are
+                                // not killed before they get to run.
+                                (Box::new(new_onnx_provider), 5000),
                                 (
                                     Box::new(
                                         crate::embedding::ArcDelegateEmbeddingProvider::from_arc(
@@ -1539,7 +1544,7 @@ impl SessionTask {
                         } else {
                             Arc::new(
                                 crate::embedding::FallbackEmbeddingProvider::with_providers(
-                                    vec![(Box::new(new_onnx_provider), 500)],
+                                    vec![(Box::new(new_onnx_provider), 5000)],
                                     crate::embedding::EmbeddingConfig::default(),
                                 )
                                 .with_locked_dimension(embed_dimension),

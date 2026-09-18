@@ -6,9 +6,18 @@
 //! - ONNX: local embedding via acowork-embed (OpenAI-compatible API)
 //! - Extensible via [`EmbeddingProvider`] trait for custom/local backends
 //!
-//! Fallback chain: ONNX local (500ms) → Ollama (200ms) → Remote API (no timeout).
-//! Each provider has its own timeout and consecutive failure tracking.
+//! Fallback chain: ONNX local (5s) → Ollama (2s) → Remote API (5s).
+//! Each provider has its own base timeout and consecutive failure tracking.
 //! After exceeding the failure threshold, a provider is temporarily skipped.
+//!
+//! # Concurrency-aware timeouts
+//!
+//! Providers with a serialized backend (the ONNX session is guarded by a
+//! single mutex) make concurrent attempts queue behind each other, so a fixed
+//! wall-clock timeout fires on queued attempts before they ever get to run.
+//! Each attempt's effective timeout is therefore scaled by the number of
+//! attempts currently in flight on that entry (`base × inflight`, capped at
+//! [`MAX_EFFECTIVE_TIMEOUT_MS`]). See `ProviderEntry::scaled_timeout_ms`.
 
 pub mod ollama;
 pub mod remote;
@@ -22,9 +31,12 @@ use std::sync::Arc;
 /// Configuration for the embedding fallback chain
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// Timeout in milliseconds for each embedding request (default: 200)
+    /// Base timeout in milliseconds for each embedding request (default: 2000).
+    /// This is the per-attempt budget for a single in-flight request; the
+    /// effective timeout is scaled by the in-flight concurrency (see
+    /// [`ProviderEntry::scaled_timeout_ms`]).
     pub timeout_ms: u64,
-    /// Number of consecutive failures before switching to fallback (default: 2)
+    /// Number of consecutive failures before switching to fallback (default: 5)
     pub failure_threshold: u32,
     /// Whether to prefer local embeddings when available (default: true)
     pub prefer_local: bool,
@@ -35,27 +47,39 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            timeout_ms: 200,
-            failure_threshold: 2,
+            timeout_ms: 2000,
+            failure_threshold: 5,
             prefer_local: true,
             max_batch_size: 32,
         }
     }
 }
 
+/// Maximum effective timeout budget for a single embedding attempt.
+///
+/// Concurrent attempts scale their budget by the in-flight count (`base ×
+/// inflight`), but the budget is capped so a genuinely stuck backend fails
+/// fast instead of blocking the caller for minutes under heavy concurrency.
+const MAX_EFFECTIVE_TIMEOUT_MS: u64 = 60_000;
+
 // ── Provider entry (for the providers chain) ────────────────────────────
 
 /// Entry in the provider fallback chain.
 ///
-/// Each provider has its own timeout and consecutive failure counter.
+/// Each provider has its own base timeout and consecutive failure counter.
 /// After exceeding `failure_threshold` consecutive failures, the provider
 /// is temporarily skipped until a subsequent success resets the counter.
 struct ProviderEntry {
     provider: Box<dyn EmbeddingProvider>,
-    /// Per-provider timeout in milliseconds.
+    /// Per-provider base timeout in milliseconds (single in-flight request).
     timeout_ms: u64,
     /// Consecutive failure counter (atomic for thread safety).
     consecutive_failures: std::sync::atomic::AtomicU32,
+    /// Number of embedding attempts currently in flight through this entry,
+    /// across all concurrent callers sharing this chain. Used to scale the
+    /// per-attempt timeout so it covers the queue-wait on serialized
+    /// backends (e.g. the single ONNX session mutex).
+    inflight: std::sync::atomic::AtomicU32,
 }
 
 impl ProviderEntry {
@@ -64,6 +88,7 @@ impl ProviderEntry {
             provider,
             timeout_ms,
             consecutive_failures: std::sync::atomic::AtomicU32::new(0),
+            inflight: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -91,6 +116,47 @@ impl ProviderEntry {
     fn record_success(&self) {
         self.consecutive_failures
             .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Effective timeout for one attempt, scaled by the current in-flight
+    /// concurrency on this entry.
+    ///
+    /// A serialized backend (ONNX mutex) serves concurrent attempts one at a
+    /// time; the k-th queued attempt actually finishes after ~k × T where T is
+    /// the single-attempt service time. A fixed budget would fire on queued
+    /// attempts before they get to run, so the budget is `base × inflight`.
+    /// `multiplier` additionally scales per-unit work (e.g. batch chunk size).
+    /// Always capped at [`MAX_EFFECTIVE_TIMEOUT_MS`].
+    fn scaled_timeout_ms(&self, multiplier: u64) -> u64 {
+        let inflight = self
+            .inflight
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(1) as u64;
+        (self.timeout_ms * multiplier * inflight).min(MAX_EFFECTIVE_TIMEOUT_MS)
+    }
+}
+
+/// RAII guard holding one in-flight slot on a [`ProviderEntry`].
+///
+/// The slot must be acquired **before** the wall-clock timeout is computed so
+/// the budget covers the queue wait behind already-running attempts. The slot
+/// is released on drop — including on timeout, error, and early return.
+struct InflightGuard<'a> {
+    entry: &'a ProviderEntry,
+}
+
+impl<'a> InflightGuard<'a> {
+    fn acquire(entry: &'a ProviderEntry) -> Self {
+        entry.inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { entry }
+    }
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.entry
+            .inflight
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -158,13 +224,17 @@ impl FallbackEmbeddingProvider {
     /// ```ignore
     /// let fallback = FallbackEmbeddingProvider::with_providers(
     ///     vec![
-    ///         (Box::new(onnx_provider), 500),     // ONNX local: 500ms timeout
-    ///         (Box::new(ollama_provider), 200),    // Ollama: 200ms timeout
-    ///         (Box::new(remote_provider), 5000),   // Remote API: 5s timeout
+    ///         (Box::new(onnx_provider), 5000),     // ONNX local: 5s base timeout
+    ///         (Box::new(ollama_provider), 2000),    // Ollama: 2s base timeout
+    ///         (Box::new(remote_provider), 5000),   // Remote API: 5s base timeout
     ///     ],
     ///     EmbeddingConfig::default(),
     /// );
     /// ```
+    ///
+    /// The base timeouts are scaled by the in-flight concurrency on each
+    /// entry (see [`ProviderEntry::scaled_timeout_ms`]) so queued attempts
+    /// on serialized backends are not killed before they get to run.
     pub fn with_providers(
         providers: Vec<(Box<dyn EmbeddingProvider>, u64)>,
         config: EmbeddingConfig,
@@ -249,8 +319,14 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
                 continue;
             }
 
+            // Hold one in-flight slot for the duration of this attempt so the
+            // timeout budget covers the queue wait behind concurrent attempts
+            // on serialized backends (ONNX session mutex). Released on drop.
+            let _inflight = InflightGuard::acquire(entry);
+            let effective_timeout_ms = entry.scaled_timeout_ms(1);
+
             match tokio::time::timeout(
-                std::time::Duration::from_millis(entry.timeout_ms),
+                std::time::Duration::from_millis(effective_timeout_ms),
                 entry.provider.embed(text),
             )
             .await
@@ -271,11 +347,11 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
                 Err(_) => {
                     tracing::warn!(
                         provider = entry.provider.name(),
-                        timeout_ms = entry.timeout_ms,
+                        timeout_ms = effective_timeout_ms,
                         "Embedding provider timed out"
                     );
                     entry.record_failure(self.config.failure_threshold);
-                    last_error = EmbeddingError::Timeout(entry.timeout_ms);
+                    last_error = EmbeddingError::Timeout(effective_timeout_ms);
                 }
             }
         }
@@ -306,8 +382,11 @@ impl EmbeddingProvider for FallbackEmbeddingProvider {
                     continue;
                 }
 
-                // Scale timeout by chunk size
-                let timeout = entry.timeout_ms * chunk.len().max(1) as u64;
+                // Hold one in-flight slot for this chunk attempt so the budget
+                // covers queue wait on serialized backends; scale additionally
+                // by chunk size (per-unit work).
+                let _inflight = InflightGuard::acquire(entry);
+                let timeout = entry.scaled_timeout_ms(chunk.len().max(1) as u64);
 
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(timeout),
@@ -429,5 +508,381 @@ impl EmbeddingProvider for ArcDelegateEmbeddingProvider {
 
     async fn is_available(&self) -> bool {
         self.inner.is_available().await
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fake provider that serializes access through a shared tokio mutex and
+    /// sleeps per call — models the serialized ONNX session backend.
+    #[derive(Clone)]
+    struct SerializedSlowProvider {
+        serializer: Arc<tokio::sync::Mutex<()>>,
+        delay: std::time::Duration,
+        dim: usize,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for SerializedSlowProvider {
+        fn name(&self) -> &str {
+            "fake-serialized"
+        }
+
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            let _guard = self.serializer.lock().await;
+            tokio::time::sleep(self.delay).await;
+            Ok(vec![text.len() as f32; self.dim])
+        }
+
+        async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            let _guard = self.serializer.lock().await;
+            tokio::time::sleep(self.delay.mul_f32(texts.len() as f32)).await;
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32; self.dim])
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Fake provider that never returns (used to exercise the timeout path).
+    #[derive(Clone)]
+    struct HangingProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for HangingProvider {
+        fn name(&self) -> &str {
+            "fake-hanging"
+        }
+
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(Vec::new())
+        }
+
+        async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(Vec::new())
+        }
+
+        fn dimension(&self) -> usize {
+            8
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Regression test for the concurrent-timeout bug: three concurrent
+    /// `embed` calls against a serialized backend must all succeed.
+    ///
+    /// Single-attempt service time is 100ms; base timeout is 150ms. Without
+    /// in-flight scaling the second and third calls (finishing at ~200ms and
+    /// ~300ms) would be killed by the fixed 150ms budget. With scaling the
+    /// budgets are 150/300/450ms and all three complete.
+    ///
+    /// Determinism: `tokio::join!` polls its futures in argument order, and
+    /// `fetch_add` happens synchronously before the first `.await`, so the
+    /// in-flight rank matches the serializer lock queue order.
+    #[tokio::test]
+    async fn concurrent_embed_scales_timeout_by_inflight() {
+        let provider = SerializedSlowProvider {
+            serializer: Arc::new(tokio::sync::Mutex::new(())),
+            delay: std::time::Duration::from_millis(100),
+            dim: 8,
+        };
+
+        let fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(Box::new(provider), 150)],
+            EmbeddingConfig {
+                failure_threshold: 5,
+                ..Default::default()
+            },
+        );
+
+        let (a, b, c) = tokio::join!(
+            fallback.embed("aaaa"),
+            fallback.embed("bbbb"),
+            fallback.embed("cccc"),
+        );
+
+        for (idx, res) in [a, b, c].into_iter().enumerate() {
+            let emb = res.unwrap_or_else(|e| panic!("call {} failed: {e}", idx + 1));
+            assert_eq!(emb.len(), 8);
+            assert!(emb.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    /// Concurrent `embed_batch` calls also scale by in-flight concurrency
+    /// (plus chunk size), so queued batch attempts must not be killed.
+    #[tokio::test]
+    async fn concurrent_embed_batch_scales_timeout_by_inflight() {
+        let provider = SerializedSlowProvider {
+            serializer: Arc::new(tokio::sync::Mutex::new(())),
+            delay: std::time::Duration::from_millis(100),
+            dim: 8,
+        };
+
+        let fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(Box::new(provider), 150)],
+            EmbeddingConfig {
+                failure_threshold: 5,
+                ..Default::default()
+            },
+        );
+
+        let texts1 = ["aaaa", "bbbb"];
+        let texts2 = ["cccc", "dddd"];
+        let (r1, r2) = tokio::join!(
+            fallback.embed_batch(&texts1),
+            fallback.embed_batch(&texts2),
+        );
+
+        let e1 = r1.expect("batch 1 must succeed");
+        let e2 = r2.expect("batch 2 must succeed");
+        assert_eq!(e1.len(), 2);
+        assert_eq!(e2.len(), 2);
+        for emb in e1.iter().chain(e2.iter()) {
+            assert_eq!(emb.len(), 8);
+        }
+    }
+
+    /// The timeout path itself must still work: a genuinely stuck backend is
+    /// killed at the scaled budget and the failure is recorded.
+    #[tokio::test]
+    async fn hanging_provider_still_times_out() {
+        let provider = Box::new(HangingProvider);
+
+        let fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(provider, 100)],
+            EmbeddingConfig {
+                failure_threshold: 5,
+                ..Default::default()
+            },
+        );
+
+        let start = std::time::Instant::now();
+        let res = fallback.embed("x").await;
+        let elapsed = start.elapsed();
+
+        assert!(res.is_err(), "hanging provider must time out");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "timeout must fire promptly, took {elapsed:?}"
+        );
+    }
+
+    /// `scaled_timeout_ms` unit checks: linear in in-flight count, chunk
+    /// multiplier applied, and the cap at [`MAX_EFFECTIVE_TIMEOUT_MS`] holds.
+    #[test]
+    fn scaled_timeout_ms_is_linear_and_capped() {
+        let provider = Box::new(HangingProvider);
+        let entry = ProviderEntry::new(provider, 5_000);
+
+        // Single in-flight attempt: base timeout.
+        assert_eq!(entry.scaled_timeout_ms(1), 5_000);
+        // Chunk multiplier scales per-unit work.
+        assert_eq!(entry.scaled_timeout_ms(4), 20_000);
+
+        // Three concurrent attempts: budget covers the queue wait.
+        entry.inflight.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(entry.scaled_timeout_ms(1), 15_000);
+        assert_eq!(entry.scaled_timeout_ms(2), 30_000);
+
+        // Heavy concurrency is capped, not unbounded.
+        entry.inflight.fetch_add(100_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(entry.scaled_timeout_ms(1), MAX_EFFECTIVE_TIMEOUT_MS);
+        assert_eq!(entry.scaled_timeout_ms(32), MAX_EFFECTIVE_TIMEOUT_MS);
+    }
+
+    /// The RAII in-flight guard must be released on success, error, and
+    /// timeout so the counter never leaks across attempts.
+    #[tokio::test]
+    async fn inflight_guard_released_on_all_outcomes() {
+        let provider = SerializedSlowProvider {
+            serializer: Arc::new(tokio::sync::Mutex::new(())),
+            delay: std::time::Duration::from_millis(20),
+            dim: 8,
+        };
+
+        // Success path: inflight returns to zero after completion.
+        let ok_fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(Box::new(provider), 5_000)],
+            EmbeddingConfig {
+                failure_threshold: 5,
+                ..Default::default()
+            },
+        );
+        let _ = ok_fallback.embed("ok").await.unwrap();
+        assert_eq!(
+            ok_fallback.providers[0]
+                .inflight
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "inflight must be released after success"
+        );
+
+        // Timeout path (hanging provider only): guard released after timeout.
+        let timeout_fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(Box::new(HangingProvider), 100)],
+            EmbeddingConfig {
+                failure_threshold: 5,
+                ..Default::default()
+            },
+        );
+        assert!(timeout_fallback.embed("fail").await.is_err());
+        assert_eq!(
+            timeout_fallback.providers[0]
+                .inflight
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "inflight must be released after timeout"
+        );
+    }
+
+    /// Failure-threshold default protects background consolidation work from
+    /// transient spikes: a single timeout must not degrade the provider.
+    #[test]
+    fn single_failure_does_not_degrade_provider() {
+        let provider = Box::new(HangingProvider);
+        let entry = ProviderEntry::new(provider, 100);
+        let threshold = EmbeddingConfig::default().failure_threshold;
+
+        assert_eq!(threshold, 5, "default failure_threshold must be 5");
+        entry.record_failure(threshold);
+        assert!(!entry.is_degraded(threshold), "1 failure < threshold 5");
+        entry.record_failure(threshold);
+        entry.record_failure(threshold);
+        entry.record_failure(threshold);
+        assert!(!entry.is_degraded(threshold));
+        entry.record_failure(threshold);
+        assert!(entry.is_degraded(threshold), "5 consecutive failures degrade");
+    }
+
+    /// Default config uses the new sane base timeout and failure threshold.
+    #[test]
+    fn default_config_uses_sane_timeouts() {
+        let cfg = EmbeddingConfig::default();
+        assert_eq!(cfg.timeout_ms, 2000, "base timeout default must be 2000ms");
+        assert_eq!(cfg.failure_threshold, 5, "failure threshold default must be 5");
+    }
+
+    /// `new()` constructor path: the primary provider uses `config.timeout_ms`
+    /// as its base; a hanging primary must time out and the fallback must then
+    /// serve the request.
+    #[tokio::test]
+    async fn new_constructor_primary_uses_config_timeout() {
+        let fallback = FallbackEmbeddingProvider::new(
+            Some(Box::new(HangingProvider)),
+            Box::new(SerializedSlowProvider {
+                serializer: Arc::new(tokio::sync::Mutex::new(())),
+                delay: std::time::Duration::from_millis(10),
+                dim: 8,
+            }),
+            EmbeddingConfig {
+                timeout_ms: 100,
+                failure_threshold: 5,
+                ..Default::default()
+            },
+        );
+
+        let start = std::time::Instant::now();
+        let emb = fallback
+            .embed("x")
+            .await
+            .expect("fallback must serve after primary timeout");
+        let elapsed = start.elapsed();
+
+        assert_eq!(emb.len(), 8);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "primary timeout + fallback must be prompt, took {elapsed:?}"
+        );
+        // The primary must have actually been attempted (and timed out), not
+        // skipped: it records a failure.
+        assert!(
+            fallback.providers[0]
+                .consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 1,
+            "hanging primary must have recorded a timeout failure"
+        );
+    }
+
+    /// `embed_batch` splits inputs into chunks of `max_batch_size`; each chunk
+    /// is attempted independently and the scaled timeout applies per chunk.
+    #[tokio::test]
+    async fn embed_batch_multi_chunk_succeeds() {
+        let provider = SerializedSlowProvider {
+            serializer: Arc::new(tokio::sync::Mutex::new(())),
+            delay: std::time::Duration::from_millis(10),
+            dim: 8,
+        };
+        let fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(Box::new(provider), 200)],
+            EmbeddingConfig {
+                failure_threshold: 5,
+                max_batch_size: 2,
+                ..Default::default()
+            },
+        );
+
+        let texts = ["a", "bb", "ccc", "dddd", "eeeee"];
+        let res = fallback
+            .embed_batch(&texts)
+            .await
+            .expect("multi-chunk batch must succeed");
+        assert_eq!(res.len(), 5);
+        for (emb, t) in res.iter().zip(texts.iter()) {
+            assert_eq!(emb.len(), 8);
+            assert_eq!(emb[0], t.len() as f32, "embedding must match its input");
+        }
+    }
+
+    /// A provider already degraded past `failure_threshold` is skipped without
+    /// acquiring an in-flight slot — no hang, no counter leak.
+    #[tokio::test]
+    async fn degraded_provider_skipped_inflight_stays_zero() {
+        let fallback = FallbackEmbeddingProvider::with_providers(
+            vec![(Box::new(HangingProvider), 100)],
+            EmbeddingConfig {
+                failure_threshold: 2,
+                ..Default::default()
+            },
+        );
+
+        // Two hangs reach the failure threshold.
+        assert!(fallback.embed("x").await.is_err());
+        assert!(fallback.embed("y").await.is_err());
+        assert!(fallback.providers[0].is_degraded(2));
+
+        // Third call: skipped immediately — fast error, inflight never taken.
+        let start = std::time::Instant::now();
+        let res = fallback.embed("z").await;
+        let elapsed = start.elapsed();
+        assert!(res.is_err());
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "degraded provider must be skipped fast, took {elapsed:?}"
+        );
+        assert_eq!(
+            fallback.providers[0]
+                .inflight
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "degraded skip must not acquire in-flight slot"
+        );
     }
 }
