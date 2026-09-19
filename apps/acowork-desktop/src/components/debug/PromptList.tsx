@@ -265,7 +265,7 @@ export function PromptList({ defaultOpen = false, agentIdOverride }: PromptListP
               )}
             </button>
           }
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           {loading && (
             <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] text-text-tertiary">

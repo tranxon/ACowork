@@ -204,7 +204,7 @@ export function MemoryForgettingSettings({
               />
             </span>
           }
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-2"
         >
           <div className="flex flex-col gap-2">
             <div className="grid grid-cols-3 gap-2">

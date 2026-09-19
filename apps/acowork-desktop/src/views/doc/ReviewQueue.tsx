@@ -119,7 +119,7 @@ export function ReviewQueue() {
 
       {/* ── 面板 ──────────────────────────────────────────── */}
       {open && (
-        <div className="max-h-64 overflow-y-auto border-t border-zinc-100 px-1 py-1 dark:border-zinc-800/60">
+        <div className="max-h-64 overflow-y-auto border-t border-border-divider px-1 py-1">
           {loading && (
             <div className="flex items-center justify-center gap-2 py-3 text-text-tertiary">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />

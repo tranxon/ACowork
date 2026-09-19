@@ -154,7 +154,7 @@ export function GlobalCompactModelCard({
         onToggle={() => setOpen((v) => !v)}
         title={t("harness.globalCompactModel.title")}
         ariaLabel={t("harness.globalCompactModel.title")}
-        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
       >
         <div className="space-y-2">
           <p className="text-[11px] text-text-tertiary ">

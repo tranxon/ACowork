@@ -229,7 +229,7 @@ function GatewayTab() {
           onToggle={() => setGatewayModeOpen((v) => !v)}
           title={t("settings.gatewayMode")}
           ariaLabel={t("settings.gatewayMode")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <RadioGroup
             name="gatewayMode"
@@ -267,7 +267,7 @@ function GatewayTab() {
             onToggle={() => setLocalGatewayOpen((v) => !v)}
             title={t("settings.localGateway")}
             ariaLabel={t("settings.localGateway")}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
           >
 
           <div className="flex items-center gap-2 text-xs">
@@ -340,7 +340,7 @@ function GatewayTab() {
             onToggle={() => setGatewayConnOpen((v) => !v)}
             title={t("settings.gatewayConnection")}
             ariaLabel={t("settings.gatewayConnection")}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
           >
 
           <div className="space-y-3">
@@ -421,7 +421,7 @@ function GatewayTab() {
               </button>
             </span>
           }
-          bodyClassName="overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="overflow-hidden rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           {status !== "connected" ? (
             <div className="px-3 py-3 text-xs text-text-tertiary">{t("settings.connectToSeeAgents")}</div>
@@ -449,7 +449,7 @@ function GatewayTab() {
           onToggle={() => setServicesOpen((v) => !v)}
           title={t("settings.servicesTitle")}
           ariaLabel={t("settings.servicesTitle")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <ServicesPanel />
         </ExpandableRow>
@@ -464,7 +464,7 @@ function GatewayTab() {
           onToggle={() => setEventsOpen((v) => !v)}
           title={t("settings.services.eventsTitle")}
           ariaLabel={t("settings.services.eventsTitle")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           <RecentEventsLog />
         </ExpandableRow>
@@ -488,7 +488,7 @@ function RecentEventsLog() {
     );
   }
   return (
-    <ul className="max-h-48 overflow-y-auto divide-y divide-zinc-200 dark:divide-zinc-700">
+    <ul className="max-h-48 overflow-y-auto divide-y divide-border-divider">
       {entries
         .slice()
         .reverse()
@@ -713,7 +713,7 @@ function AppearanceTab() {
           onToggle={() => setThemeOpen((v) => !v)}
           title={t("settings.theme")}
           ariaLabel={t("settings.theme")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <RadioGroup
             name="theme"
@@ -734,7 +734,7 @@ function AppearanceTab() {
           onToggle={() => setAccentOpen((v) => !v)}
           title={t("settings.accentColor")}
           ariaLabel={t("settings.accentColor")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="mb-3 text-xs text-text-tertiary">{t("settings.accentColor")}</p>
           <div className="flex flex-wrap gap-[14px]">
@@ -767,7 +767,7 @@ function AppearanceTab() {
           onToggle={() => setContentWidthOpen((v) => !v)}
           title={t("settings.contentWidth")}
           ariaLabel={t("settings.contentWidth")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="mb-2 text-xs text-text-tertiary">{t("settings.contentWidthHint")}</p>
           <RadioGroup
@@ -786,7 +786,7 @@ function AppearanceTab() {
           onToggle={() => setFontSizeOpen((v) => !v)}
           title={t("settings.fontSize")}
           ariaLabel={t("settings.fontSize")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <RadioGroup
             name="fontSize"
@@ -803,7 +803,7 @@ function AppearanceTab() {
           onToggle={() => setOpacityOpen((v) => !v)}
           title={t("settings.opacity")}
           ariaLabel={t("settings.opacity")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="mb-2 text-xs text-text-tertiary">{t("settings.opacityHint")}</p>
           <div className="flex items-center gap-3">
@@ -831,7 +831,7 @@ function AppearanceTab() {
           onToggle={() => setResetOpen((v) => !v)}
           title={t("settings.resetAppearance")}
           ariaLabel={t("settings.resetAppearance")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <button
             onClick={() => setShowResetConfirm(true)}
@@ -910,7 +910,7 @@ function GeneralTab() {
           onToggle={() => setLogSetupOpen((v) => !v)}
           title={t("settings.logSetup")}
           ariaLabel={t("settings.logSetup")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
 
         {/* Log level */}
@@ -1080,7 +1080,7 @@ function GeneralTab() {
           onToggle={() => setDataDirectoryOpen((v) => !v)}
           title={t("settings.dataDirectory")}
           ariaLabel={t("settings.dataDirectory")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <input
             type="text"
@@ -1097,7 +1097,7 @@ function GeneralTab() {
           onToggle={() => setAboutOpen((v) => !v)}
           title={t("settings.about")}
           ariaLabel={t("settings.about")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <div className="text-xs text-text-tertiary ">
             <p>ACowork Desktop v0.1.0</p>
@@ -1113,7 +1113,7 @@ function GeneralTab() {
           onToggle={() => setResetOnboardingOpen((v) => !v)}
           title={t("settings.resetOnboarding")}
           ariaLabel={t("settings.resetOnboarding")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="text-xs text-text-tertiary ">
             {t("settings.resetOnboardingDesc")}

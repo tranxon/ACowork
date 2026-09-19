@@ -373,7 +373,7 @@ export function MemoryPanel() {
             onToggle={() => setSearchOpen((v) => !v)}
             title={t("memoryPanel.searchSectionTitle")}
             ariaLabel={t("memoryPanel.searchSectionTitle")}
-            bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             {/* Search row + filters. shrink-0 so the flex-1 master-detail
                 below always claims the remaining height regardless of how

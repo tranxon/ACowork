@@ -159,7 +159,7 @@ export function SearchTab() {
             onToggle={() => setConfiguredOpen((v) => !v)}
             title={t("harnessSearch.configuredSearchProviders", { count: keys.length })}
             ariaLabel={t("harnessSearch.configuredSearchProviders", { count: keys.length })}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             <ListBox variant="plain">
               {keys.map((keyEntry) => {
@@ -210,7 +210,7 @@ export function SearchTab() {
           onToggle={() => setAvailableOpen((v) => !v)}
           title={t("harnessSearch.availableSearchProviders", { count: availableProviders.length })}
           ariaLabel={t("harnessSearch.availableSearchProviders", { count: availableProviders.length })}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           {availableProviders.length === 0 ? (
             <div className="px-3 py-3 text-center text-xs text-text-tertiary">{t("harnessSearch.allConfigured")}</div>

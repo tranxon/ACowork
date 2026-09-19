@@ -277,7 +277,7 @@ export function ProfileTab() {
           onToggle={() => setProfileOpen((v) => !v)}
           title={t("settings.profileTitle")}
           ariaLabel={t("settings.profileTitle")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
 
         {/* Avatar preview — click to open picker popup */}
@@ -464,7 +464,7 @@ export function ProfileTab() {
               {saving && <span className="text-[10px] text-text-tertiary">{t("settings.saving")}</span>}
             </span>
           }
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
 
         {backendLoading ? (

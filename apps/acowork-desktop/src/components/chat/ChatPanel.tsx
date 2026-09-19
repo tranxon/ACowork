@@ -2439,7 +2439,7 @@ export function ChatPanel() {
                   return (
                     <div
                       key={item.id}
-                      className="flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-zinc-100 dark:border-zinc-700/30 last:border-b-0"
+                      className="flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-border-divider last:border-b-0"
                     >
                       <span className={cn(
                         "shrink-0 mt-0.5 select-none",
@@ -2491,7 +2491,7 @@ export function ChatPanel() {
               {queuedMessages.map((msg, i) => (
                 <div
                   key={i}
-                  className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-zinc-100 dark:border-zinc-700/30 last:border-b-0"
+                  className="group flex items-start gap-1.5 px-2.5 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-700/40 border-b border-border-divider last:border-b-0"
                 >
                   <span className="shrink-0 text-[10px] mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
                   <span className="flex-1 min-w-0 text-xs text-text-secondary  truncate leading-relaxed">
@@ -2876,7 +2876,7 @@ function UnsupportedImageDialog({
           ))}
         </div>
 
-        <div className="shrink-0 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
+        <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onClose}
             className="rounded-md px-4 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"

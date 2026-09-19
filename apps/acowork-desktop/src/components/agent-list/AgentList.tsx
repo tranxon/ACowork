@@ -709,7 +709,7 @@ export function AgentList({ width }: AgentListProps) {
                 ))}
                 <button
                   onClick={() => setInstallNodes(null)}
-                  className="flex w-full items-center gap-2 border-t border-zinc-100 px-3 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-zinc-50 dark:border-zinc-700/50  dark:hover:bg-zinc-700/50"
+                  className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-700/50"
                 >
                   {t("agentList.back")}
                 </button>

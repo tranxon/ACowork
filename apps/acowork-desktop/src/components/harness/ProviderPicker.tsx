@@ -237,7 +237,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
           onToggle={() => setCustomOpen((v) => !v)}
           title={<span className="flex items-center gap-1">🔧 {t("harness.customProviders", { count: availableCustom.length })}</span>}
           ariaLabel={t("harness.customProviders", { count: availableCustom.length })}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           <ListBox variant="plain">
             {availableCustom.map((item) => {
@@ -283,8 +283,8 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
             open={localOpen}
             onToggle={() => setLocalOpen((v) => !v)}
             title={<span className="flex items-center gap-1">🏠 {t("harness.localProviders", { count: availableLocal.length })}</span>}
-            ariaLabel={t("harness.localProviders", { count: availableLocal.length })}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          ariaLabel={t("harness.localProviders", { count: availableLocal.length })}
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             <ListBox variant="plain">
               {availableLocal.map((item) => {
@@ -403,7 +403,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                 </div>
               </span>
             }
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             {providerSearchTerm.trim() && filteredRemoteProviders.length === 0 ? (
               <div className="py-3 text-center text-xs text-text-tertiary">

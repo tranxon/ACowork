@@ -161,7 +161,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
+            <div className="divide-y divide-border-divider">
               {workspaces.map((dir) => (
                 <div key={dir.id} className="flex items-center justify-between px-6 py-4">
                   <div className="flex-1">

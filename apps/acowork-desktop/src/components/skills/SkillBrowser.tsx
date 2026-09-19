@@ -195,7 +195,7 @@ export function SkillBrowser() {
                 </div>
               )}
 
-              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              <div className="divide-y divide-border-divider">
                 {filteredSkills.map((skill) => {
                   const isSelected = skill.name === selectedSkillName;
                   return (

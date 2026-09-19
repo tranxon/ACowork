@@ -279,7 +279,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
 
                 {/* Breadcrumb navigation */}
                 {breadcrumbs.length > 0 && (
-                    <div className="flex items-center gap-1 px-4 py-2 border-b border-zinc-100 dark:border-zinc-800 overflow-x-auto text-[10px]">
+                    <div className="flex items-center gap-1 px-4 py-2 border-b border-border-divider overflow-x-auto text-[10px]">
                         <button
                             onClick={() => void navigateTo("")}
                             className="flex items-center gap-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"

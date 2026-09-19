@@ -363,7 +363,7 @@ export function LspTab() {
               </Tooltip>
             </span>
           }
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           {/* Error message */}
           {error && (

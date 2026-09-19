@@ -265,7 +265,7 @@ function ProvidersTab() {
             onToggle={() => setConfiguredOpen((v) => !v)}
             title={t("harness.configuredProviders", { count: keys.length })}
             ariaLabel={t("harness.configuredProviders", { count: keys.length })}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             <ListBox variant="plain">
               {keys.map((keyEntry) => {
@@ -645,12 +645,12 @@ function McpTab() {
                 onClick={() => setShowAddForm(true)}
                 className="inline-flex items-center gap-1 rounded btn-solid px-2 py-1 text-[11px] font-medium"
               >
-                {t("harnessMcp.addServer")}
-              </button>
-            </span>
-          }
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
-        >
+              {t("harnessMcp.addServer")}
+            </button>
+          </span>
+        }
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
+      >
           {error && (
             <div className="px-3 pt-2">
               <ErrorBox message={error} onClose={() => useMcpStore.setState({ error: null })} />
@@ -752,7 +752,7 @@ function McpTab() {
           onToggle={() => setRecommendedOpen((v) => !v)}
           title={t("harnessMcp.recommendedMcpServers", { count: MCP_PRESETS.length })}
           ariaLabel={t("harnessMcp.recommendedMcpServers", { count: MCP_PRESETS.length })}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
           <ListBox variant="plain">
             {MCP_PRESETS.map((preset) => {

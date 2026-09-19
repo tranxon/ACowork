@@ -131,7 +131,7 @@ export function CompressionHistoryCard({
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
         }
-        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
       >
 
       {rows === null && !error && (

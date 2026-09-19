@@ -185,7 +185,7 @@ export function ServicesPanel() {
               <h4 className="text-[10px] font-medium uppercase tracking-wider text-text-tertiary ">
                 {t(groupLabelKey(group))}
               </h4>
-              <ul className="divide-y divide-zinc-200 overflow-hidden rounded-md border border-border-outer dark:divide-zinc-700">
+              <ul className="divide-y divide-border-divider overflow-hidden rounded-md border border-border-outer">
                 {types.map((type) => {
                   const row = report?.services[type];
                   return (

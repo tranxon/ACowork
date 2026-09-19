@@ -41,7 +41,7 @@ export function ListBox({
           // collapsible title row) would paint over the card's top/bottom
           // rounded corners and turn them into right angles on hover.
           "overflow-hidden rounded-md border border-border-outer bg-panel-block",
-        dividers && "divide-y divide-zinc-200 dark:divide-zinc-700",
+        dividers && "divide-y divide-border-divider",
         className,
       )}
       style={maxHeight !== undefined ? { maxHeight, overflowY: "auto" } : undefined}

@@ -476,7 +476,7 @@ export function AddProviderFlow({
         </div>
 
         {/* Footer */}
-        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
+        <div className="shrink-0 flex items-center justify-between gap-2 border-t border-border-divider px-6 py-4">
           {/* Status on the left */}
           <div className="flex-1 min-w-0">
             {step === "add" && testResult && testResult.success && (

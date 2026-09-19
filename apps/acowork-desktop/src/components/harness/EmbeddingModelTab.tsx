@@ -508,7 +508,7 @@ export function EmbeddingModelTab() {
                     onToggle={() => setServiceStatusOpen((v) => !v)}
                     title={t("embedding.serviceStatus")}
                     ariaLabel={t("embedding.serviceStatus")}
-                    bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset p-3 dark:border-zinc-700"
+                    bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
                 >
                     <div className="space-y-2">
                         <div className="flex items-center gap-2 text-xs">
@@ -612,7 +612,7 @@ export function EmbeddingModelTab() {
                         </span>
                     }
                     ariaLabel={t("embedding.localModels", { count: models.length })}
-                    bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                    bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
                 >
                     {loading && models.length === 0 ? (
                         <EmptyState message={t("embedding.loading")} />
@@ -679,7 +679,7 @@ export function EmbeddingModelTab() {
                         </span>
                     }
                     ariaLabel={t("embedding.cloudProviders", { count: cloudProviders.length })}
-                    bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                    bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
                 >
                     {/* Active cloud selection summary — inline status row
                         (no nested card box; the surrounding ExpandableRow
@@ -1701,7 +1701,7 @@ function AddCustomEmbeddingProviderDialog({
                 </div>
 
                 {/* Footer */}
-                <div className="shrink-0 flex items-center justify-end gap-2 border-t border-zinc-100 dark:border-zinc-800 px-6 py-4">
+                <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
                     <button
                         onClick={handleClose}
                         disabled={saving}
