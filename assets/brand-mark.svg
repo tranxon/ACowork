@@ -44,7 +44,7 @@
           stroke="#606060"
           stroke-width="10"
           stroke-linecap="round"/>
-    <circle cx="56" cy="54" r="10.2" fill="#202020" mask="url(#bite)"/>
+    <circle cx="56" cy="54" r="10.2" fill="#303030" mask="url(#bite)"/>
   </g>
   <!-- tighter, cleaner wordmark -->
   <text x="106" y="71"

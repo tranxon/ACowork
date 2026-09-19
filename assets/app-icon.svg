@@ -53,6 +53,6 @@
           stroke="#606060"
           stroke-width="61"
           stroke-linecap="round"/>
-    <circle cx="256" cy="317" r="62" fill="#202020" mask="url(#bite)"/>
+    <circle cx="256" cy="317" r="62" fill="#303030" mask="url(#bite)"/>
   </g>
 </svg>
