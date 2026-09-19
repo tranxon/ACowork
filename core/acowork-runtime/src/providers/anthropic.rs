@@ -111,18 +111,43 @@ struct AnthropicRequest {
 /// Anthropic cache control directive (prompt caching, ADR-060).
 ///
 /// Maps to the `cache_control` field on a message or system content block:
-/// `{ "type": "ephemeral" }`. Applies to the Anthropic ephemeral prompt cache
-/// breakpoints placed at Block A (system) and Block C (todo snapshot).
+/// `{ "type": "ephemeral", "ttl": "1h" }`. Applies to the Anthropic
+/// ephemeral prompt cache breakpoints placed at Block A (system) and
+/// Block C (todo snapshot).
+///
+/// ## TTL choice: 1h vs default 5m
+///
+/// Anthropic defaults `ephemeral` to a 5-minute TTL. In long-running
+/// sessions with periodic compaction, a 5-minute window means the
+/// Block A cache frequently invalidates between user turns (especially
+/// when the user pauses to think or read), forcing re-writes that
+/// double the `cache_creation_input_tokens` cost.
+///
+/// With `ttl: "1h"`, Block A stays warm across the entire realistic
+/// shape of a working session. Trade-off: per-write token cost is ~2x
+/// the 5m rate, but break-even is reached at round 2 of cache reuse,
+/// which is the common case.
+///
+/// ponytail: ceiling — fixed 1h hard-coded. If we ever need per-tenant
+/// TTLs (e.g. cost-sensitive enterprise users on 5m, power users on
+/// 1h), promote `ttl` to a config field on `ChatRequest` and let the
+/// session loop override.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct AnthropicCacheControl {
     #[serde(rename = "type")]
     cache_type: String,
+    /// Anthropic cache TTL: "5m" (default) or "1h". Defaulted to "1h"
+    /// here to keep Block A warm across realistic working sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
 }
 
 impl AnthropicCacheControl {
+    /// Default ephemeral breakpoint: 1h TTL.
     fn ephemeral() -> Self {
         Self {
             cache_type: "ephemeral".to_string(),
+            ttl: Some("1h".to_string()),
         }
     }
 }
@@ -1680,5 +1705,34 @@ mod tests {
         let count = rt.block_on(provider.chat_token_count(&messages)).unwrap();
         // 4 CJK chars ≈ 4/2 = 2 tokens
         assert!(count >= 2);
+    }
+
+    /// ADR-060 + concurrency-cost fix: ephemeral breakpoints must carry
+    /// `ttl: "1h"` so Block A stays warm across realistic working
+    /// sessions (vs Anthropic's 5-minute default that invalidates
+    /// between user turns).
+    #[test]
+    fn test_ephemeral_cache_control_emits_ttl_1h() {
+        let cc = AnthropicCacheControl::ephemeral();
+        let json = serde_json::to_value(&cc).unwrap();
+        assert_eq!(json["type"], "ephemeral");
+        assert_eq!(
+            json["ttl"], "1h",
+            "Anthropic ephemeral cache must use 1h TTL to keep \
+             Block A warm across long-running concurrent sessions"
+        );
+    }
+
+    /// Sanity: a TTL-less AnthropicCacheControl (e.g. a deserialized
+    /// legacy payload from before the TTL change) must still serialize
+    /// without the `ttl` field, not as `"ttl": null`.
+    #[test]
+    fn test_ephemeral_cache_control_omits_ttl_when_none() {
+        let cc = AnthropicCacheControl {
+            cache_type: "ephemeral".to_string(),
+            ttl: None,
+        };
+        let json = serde_json::to_value(&cc).unwrap();
+        assert!(json.get("ttl").is_none(), "ttl=None must skip serialization");
     }
 }

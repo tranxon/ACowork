@@ -7,9 +7,10 @@
 //!
 //! Data source: offline_providers.json loaded at startup into a static cache.
 
-use axum::{Json, Router, extract::{Path, State}, http::StatusCode, response::IntoResponse, routing::{get, post}};
+use axum::{Json, Router, extract::{Path, State}, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use parking_lot::RwLock;
 
 use crate::http::routes::AppState;
 
@@ -119,6 +120,7 @@ pub fn models_routes() -> Router<AppState> {
     Router::new()
         .route("/api/models", get(list_all_providers))
         .route("/api/models/discover", post(discover_models))
+        .route("/api/models/refresh-catalog", post(refresh_catalog))
         .route("/api/models/{provider}", get(get_provider_models))
 }
 
@@ -248,6 +250,301 @@ async fn discover_models(
     Ok(Json(serde_json::json!({"models": models})))
 }
 
+// ── Catalog refresh ────────────────────────────────────────────────────
+
+/// Default source URL for the offline provider catalog. Override with the
+/// `ACOWORK_CATALOG_URL` env var (e.g. for internal mirrors).
+fn catalog_source_url() -> String {
+    std::env::var("ACOWORK_CATALOG_URL")
+        .unwrap_or_else(|_| "https://models.dev/catalog.json".to_string())
+}
+
+/// Request body for `POST /api/models/refresh-catalog` (all fields optional).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RefreshCatalogRequest {
+    /// Override the catalog source URL for this call (env var wins if unset).
+    url: Option<String>,
+    /// Hard cap on overall request duration in seconds (server-side, 1..=60).
+    timeout_secs: Option<u64>,
+}
+
+/// Summary returned to the caller after a successful refresh.
+#[derive(Serialize)]
+struct RefreshCatalogResponse {
+    url: String,
+    providers: usize,
+    models: usize,
+    bytes: usize,
+    path: String,
+}
+
+/// `POST /api/models/refresh-catalog` — download the latest provider
+/// catalog, persist it to `data_dir/offline_providers.json`, and swap the
+/// in-memory cache so subsequent requests see the new data immediately.
+///
+/// Returns 502 on network/parse failure (the on-disk file and in-memory
+/// cache are left untouched on failure).
+async fn refresh_catalog(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<RefreshCatalogRequest>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let url = req
+        .url
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(catalog_source_url);
+    let timeout_secs = req.timeout_secs.unwrap_or(30).clamp(1, 120);
+    let sse = wants_sse(&headers);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("build http client: {e}"),
+            );
+        }
+    };
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("fetch catalog failed: {e}"),
+            );
+        }
+    };
+
+    if !resp.status().is_success() {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            format!("upstream returned HTTP {}", resp.status()),
+        );
+    }
+
+    let total = resp.content_length();
+
+    if sse {
+        return refresh_catalog_sse(state, url, resp, total).await;
+    }
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            return error_response(StatusCode::BAD_GATEWAY, format!("read body: {e}"));
+        }
+    };
+    match finalize_refresh(state, url, bytes) {
+        Ok(summary) => Json(summary).into_response(),
+        Err((code, msg)) => error_response(code, msg),
+    }
+}
+
+/// True if the client wants SSE (`Accept: text/event-stream`).
+fn wants_sse(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+fn error_response(code: StatusCode, message: impl Into<String>) -> Response {
+    (
+        code,
+        Json(serde_json::json!({ "error": message.into() })),
+    )
+        .into_response()
+}
+
+/// Streaming variant of the refresh — drives `resp.bytes_stream()`,
+/// accumulates into a `Vec<u8>`, emits `progress` events (≥256 KiB or
+/// ≥200 ms cadence), then persists + swaps cache and emits `done`.
+///
+/// Returns an SSE response. The producer task drains the chunk stream
+/// in the background; the consumer stream forwards events to the client.
+/// On disconnect the producer is cleaned up via the trailing `.chain`
+/// join.
+async fn refresh_catalog_sse(
+    state: AppState,
+    url: String,
+    resp: reqwest::Response,
+    total: Option<u64>,
+) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::stream::StreamExt;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
+
+    let producer = tokio::spawn(async move {
+        let mut byte_stream = resp.bytes_stream();
+        let mut buf: Vec<u8> =
+            Vec::with_capacity(total.unwrap_or(5 * 1024 * 1024) as usize);
+        let mut last_emit = Instant::now();
+        let mut last_bytes: u64 = 0;
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    buf.extend_from_slice(&chunk);
+                    let now = buf.len() as u64;
+                    let delta = now - last_bytes;
+                    let elapsed = last_emit.elapsed();
+                    if delta >= 256 * 1024 || elapsed >= Duration::from_millis(200) {
+                        last_bytes = now;
+                        last_emit = Instant::now();
+                        let payload = serde_json::json!({
+                            "bytes": now,
+                            "total": total,
+                        });
+                        let event = Event::default()
+                            .event("progress")
+                            .json_data(payload)
+                            .unwrap_or_else(|_| {
+                                Event::default().event("progress").data("{}")
+                            });
+                        if tx.send(Ok(event)).await.is_err() {
+                            return; // client disconnected
+                        }
+                    }
+                }
+                Err(e) => {
+                    let payload = serde_json::json!({ "error": format!("read body: {e}") });
+                    let event = Event::default()
+                        .event("error")
+                        .json_data(payload)
+                        .unwrap_or_else(|_| Event::default().event("error").data("{}"));
+                    let _ = tx.send(Ok(event)).await;
+                    let _ = tx
+                        .send(Ok(Event::default()
+                            .event("done")
+                            .json_data(serde_json::json!({ "ok": false }))
+                            .unwrap_or_else(|_| Event::default().event("done").data("{}"))))
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        match finalize_refresh(state, url.clone(), buf) {
+            Ok(summary) => {
+                let event = Event::default()
+                    .event("done")
+                    .json_data(summary)
+                    .unwrap_or_else(|_| Event::default().event("done").data("{}"));
+                let _ = tx.send(Ok(event)).await;
+            }
+            Err((code, msg)) => {
+                let payload = serde_json::json!({ "error": msg, "status": code.as_u16() });
+                let event = Event::default()
+                    .event("error")
+                    .json_data(payload)
+                    .unwrap_or_else(|_| Event::default().event("error").data("{}"));
+                let _ = tx.send(Ok(event)).await;
+                let _ = tx
+                    .send(Ok(Event::default()
+                        .event("done")
+                        .json_data(serde_json::json!({ "ok": false }))
+                        .unwrap_or_else(|_| Event::default().event("done").data("{}"))))
+                    .await;
+            }
+        }
+    });
+
+    // Bridge tokio mpsc Receiver into the SSE response stream. After the
+    // channel closes (producer finished or client dropped), wait for the
+    // spawned task to clean up so we don't leak a JoinHandle.
+    let mut rx = rx;
+    let consumer = futures_util::stream::poll_fn(move |cx| {
+        let r = std::pin::Pin::new(&mut rx).poll_recv(cx);
+        match r {
+            std::task::Poll::Ready(Some(event)) => std::task::Poll::Ready(Some(Some(event))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    })
+    .chain(futures_util::stream::once(async move {
+        // Drain the producer after the channel closed so the task is
+        // awaited (no leaked JoinHandle). Yields no event.
+        let _ = producer.await;
+        None
+    }))
+    .filter_map(|x| async move { x });
+
+    Sse::new(consumer)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Persist `bytes` to `data_dir/offline_providers.json` and swap the
+/// in-memory cache. Shared by the JSON and SSE code paths.
+fn finalize_refresh(
+    state: AppState,
+    url: String,
+    bytes: Vec<u8>,
+) -> Result<RefreshCatalogResponse, (StatusCode, String)> {
+    let raw: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("invalid JSON: {e}")))?;
+    let providers_val = raw
+        .get("providers")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "catalog missing 'providers' object".to_string(),
+            )
+        })?;
+    let models_val = raw.get("models").and_then(|v| v.as_object());
+    let providers_count = providers_val.len();
+    let models_count = models_val.map(|m| m.len()).unwrap_or(0);
+
+    let target_dir = refresh_target_dir();
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("create data dir: {e}")))?;
+    let target = target_dir.join("offline_providers.json");
+    let tmp = target.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write tmp: {e}")))?;
+    std::fs::rename(&tmp, &target)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("rename: {e}")))?;
+
+    let cached = match raw.get("providers") {
+        Some(serde_json::Value::Object(p)) => serde_json::Value::Object(p.clone()),
+        _ => raw,
+    };
+    replace_offline_providers(cached);
+
+    tracing::info!(
+        url = %url,
+        providers = providers_count,
+        models = models_count,
+        bytes = bytes.len(),
+        path = %target.display(),
+        "Refreshed offline provider catalog"
+    );
+
+    if let Some(trigger) = state.mqtt_publisher_trigger.as_ref() {
+        trigger.trigger();
+    }
+
+    Ok(RefreshCatalogResponse {
+        url,
+        providers: providers_count,
+        models: models_count,
+        bytes: bytes.len(),
+        path: target.display().to_string(),
+    })
+}
+
 // ── Offline data ──────────────────────────────────────────────────────
 
 /// Load offline provider data from a file on disk.
@@ -257,24 +554,99 @@ async fn discover_models(
 ///   2. {exe_dir}/offline_providers.json                          (installer-provided)
 ///   3. {cwd}/offline_providers.json                              (dev convenience)
 ///
-/// Returns an empty JSON object if no file is found anywhere.
-fn offline_providers() -> &'static serde_json::Value {
-    static DATA: OnceLock<serde_json::Value> = OnceLock::new();
-    DATA.get_or_init(|| {
-        load_offline_providers_from_file()
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
+/// Static cache holding the offline providers map. Wrapped in `Arc<Value>`
+/// so a refresh can swap the inner `Value` atomically without invalidating
+/// outstanding references, and so callers can hold an `Arc<Value>` cheaply
+/// instead of cloning the multi-MB tree.
+static OFFLINE_PROVIDERS: OnceLock<RwLock<Arc<serde_json::Value>>> = OnceLock::new();
+
+/// `data_dir` captured at startup so the read candidates and refresh writes
+/// agree on a single, writable location. `None` = test/dev only (no refresh).
+static OFFLINE_DATA_DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+
+/// Initialise the offline providers cache. Must be called once during
+/// Gateway startup, before the HTTP server begins serving requests, with
+/// the resolved `data_dir`. Safe to call multiple times — only the first
+/// call wins.
+pub fn init_offline_providers(data_dir: &std::path::Path) {
+    let _ = OFFLINE_DATA_DIR.set(Some(data_dir.to_path_buf()));
+    let _ = OFFLINE_PROVIDERS.get_or_init(|| {
+        let v = load_offline_providers_from_file(Some(data_dir))
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        RwLock::new(Arc::new(v))
+    });
+}
+
+fn offline_providers_cache() -> &'static RwLock<Arc<serde_json::Value>> {
+    OFFLINE_PROVIDERS.get_or_init(|| {
+        let v = load_offline_providers_from_file(OFFLINE_DATA_DIR.get().and_then(|o| o.as_deref()))
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        RwLock::new(Arc::new(v))
     })
 }
 
-fn load_offline_providers_from_file() -> Option<serde_json::Value> {
-    let candidates = build_offline_file_candidates();
+/// Returns the current offline providers map (clones the Arc, cheap).
+fn offline_providers() -> Arc<serde_json::Value> {
+    offline_providers_cache().read().clone()
+}
+
+/// Atomically swap the cached offline providers map (used by
+/// `POST /api/models/refresh-catalog`).
+fn replace_offline_providers(new_value: serde_json::Value) {
+    *offline_providers_cache().write() = Arc::new(new_value);
+}
+
+/// `data_dir` to use as the writable refresh target. Falls back to the
+/// first existing candidate (or cwd) so dev/test without `init` still work.
+fn refresh_target_dir() -> std::path::PathBuf {
+    if let Some(Some(d)) = OFFLINE_DATA_DIR.get() {
+        return d.clone();
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return cwd;
+    }
+    std::path::PathBuf::from(".")
+}
+
+/// Catalog file shape (models.dev catalog.json):
+///
+/// ```json
+/// { "models": { ... }, "providers": { "<provider_id>": { id, env, npm, api, name, doc, models: {...} } } }
+/// ```
+///
+/// We keep the filename as `offline_providers.json` for backward compat with
+/// installer/tauri bundling, but its content follows the catalog schema.
+/// Downstream code consumes a flat `{ provider_id: provider_obj }` map, so the
+/// loader unwraps `.providers` here — one boundary, no caller changes.
+fn load_offline_providers_from_file(data_dir: Option<&std::path::Path>) -> Option<serde_json::Value> {
+    let candidates = build_offline_file_candidates(data_dir);
 
     for path in &candidates {
         if path.exists() {
             match std::fs::read_to_string(path) {
                 Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                    Ok(data) => {
-                        tracing::info!("Loaded offline providers from: {}", path.display());
+                    Ok(raw) => {
+                        // Adapt catalog.json wrapper `{ models, providers }` → flat provider map.
+                        // Fall back to treating the root itself as the provider map for
+                        // backward compat with the pre-catalog flat layout.
+                        let data = match raw.get("providers") {
+                            Some(serde_json::Value::Object(p)) => {
+                                serde_json::Value::Object(p.clone())
+                            }
+                            Some(other) => {
+                                tracing::warn!(
+                                    "offline_providers.json: 'providers' is not an object ({:?}), using empty",
+                                    other
+                                );
+                                serde_json::Value::Object(serde_json::Map::new())
+                            }
+                            None => raw,
+                        };
+                        tracing::info!(
+                            "Loaded offline providers from: {} (providers={})",
+                            path.display(),
+                            data.as_object().map(|m| m.len()).unwrap_or(0)
+                        );
                         return Some(data);
                     }
                     Err(e) => {
@@ -300,10 +672,16 @@ fn load_offline_providers_from_file() -> Option<serde_json::Value> {
     None
 }
 
-fn build_offline_file_candidates() -> Vec<std::path::PathBuf> {
+fn build_offline_file_candidates(data_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
 
-    // 0. CARGO_MANIFEST_DIR ../../assets/  (dev and test via cargo)
+    // 0. data_dir/offline_providers.json (highest priority — written by
+    //    POST /api/models/refresh-catalog, survives Gateway restarts).
+    if let Some(d) = data_dir {
+        candidates.push(d.join("offline_providers.json"));
+    }
+
+    // 1. CARGO_MANIFEST_DIR ../../assets/  (dev and test via cargo)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let assets = std::path::PathBuf::from(&manifest_dir)
             .join("..")
@@ -315,14 +693,14 @@ fn build_offline_file_candidates() -> Vec<std::path::PathBuf> {
         }
     }
 
-    // 1. Same directory as the executable (installer-provided, read-only)
+    // 2. Same directory as the executable (installer-provided, read-only)
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(exe_dir) = exe_path.parent()
     {
         candidates.push(exe_dir.join("offline_providers.json"));
     }
 
-    // 2. Current working directory (dev convenience)
+    // 3. Current working directory (dev convenience)
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("offline_providers.json"));
     }
@@ -775,7 +1153,7 @@ async fn get_provider_models(
     }
 
     // 2. Try offline data (instant, no network)
-    if let Some((name, models)) = resolve_provider(offline_providers(), &provider_id) {
+    if let Some((name, models)) = resolve_provider(&offline_providers(), &provider_id) {
         return Ok(Json(ProviderModels {
             id: provider_id,
             name,
@@ -1016,7 +1394,7 @@ pub fn lookup_model_capabilities(
     model_id: &str,
 ) -> Option<acowork_core::protocol::ModelCapabilitiesInfo> {
     let data = offline_providers();
-    lookup_model_capabilities_from_data(data, provider, model_id)
+    lookup_model_capabilities_from_data(&data, provider, model_id)
 }
 
 /// Internal helper: look up model capabilities from a JSON data source.
@@ -1094,7 +1472,7 @@ pub fn lookup_protocol_info(
     model_id: Option<&str>,
 ) -> (acowork_core::protocol::ProtocolType, Option<String>) {
     let data = offline_providers();
-    lookup_protocol_info_from_data(data, provider_id, model_id)
+    lookup_protocol_info_from_data(&data, provider_id, model_id)
 }
 
 /// Internal helper: look up protocol info from a JSON data source.
@@ -1439,7 +1817,7 @@ mod tests {
     #[test]
     fn test_resolve_provider_from_offline() {
         let data = offline_providers();
-        let result = resolve_provider(data, "openai");
+        let result = resolve_provider(&data, "openai");
         assert!(result.is_some());
         let (name, models) = result.unwrap();
         assert!(!name.is_empty());
@@ -1450,7 +1828,7 @@ mod tests {
     fn test_resolve_provider_cn_variant() {
         let data = offline_providers();
         // minimax should resolve both minimax and minimax-cn
-        let result = resolve_provider(data, "minimax");
+        let result = resolve_provider(&data, "minimax");
         assert!(result.is_some());
         let (_, models) = result.unwrap();
         assert!(
@@ -1462,7 +1840,98 @@ mod tests {
     #[test]
     fn test_resolve_provider_not_found() {
         let data = offline_providers();
-        let result = resolve_provider(data, "nonexistent-provider");
+        let result = resolve_provider(&data, "nonexistent-provider");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_offline_file_candidates_data_dir_first() {
+        let data_dir = std::path::Path::new("/tmp/fake-data-dir");
+        let cands = build_offline_file_candidates(Some(data_dir));
+        // The very first candidate must be the data_dir-joined file, so a
+        // refreshed catalog always wins over the bundled baseline.
+        assert!(
+            cands.first().unwrap().starts_with(data_dir),
+            "expected first candidate to live under data_dir, got {:?}",
+            cands.first()
+        );
+        assert!(cands[0].ends_with("offline_providers.json"));
+    }
+
+    #[test]
+    fn test_catalog_source_url_default_and_env_override() {
+        // Default: hard-coded models.dev URL when env var unset.
+        // SAFETY: tests in this module run on the same thread; we set a
+        // process-scoped env var briefly and restore it to avoid leaking
+        // state into other tests.
+        let prev = std::env::var("ACOWORK_CATALOG_URL").ok();
+        // SAFETY: see note above. Tests are single-threaded w.r.t. env access.
+        unsafe {
+            std::env::remove_var("ACOWORK_CATALOG_URL");
+        }
+        assert_eq!(catalog_source_url(), "https://models.dev/catalog.json");
+        // Override: env var wins.
+        // SAFETY: see note above.
+        unsafe {
+            std::env::set_var("ACOWORK_CATALOG_URL", "https://mirror.example/catalog.json");
+        }
+        assert_eq!(catalog_source_url(), "https://mirror.example/catalog.json");
+        // Restore.
+        match prev {
+            Some(v) => unsafe {
+                std::env::set_var("ACOWORK_CATALOG_URL", v);
+            },
+            None => unsafe {
+                std::env::remove_var("ACOWORK_CATALOG_URL");
+            },
+        }
+    }
+
+    #[test]
+    fn test_catalog_adapt_keeps_providers_object() {
+        // Mirrors the adapt step `load_offline_providers_from_file` and
+        // `refresh_catalog` both perform: drop the wrapper, keep `.providers`
+        // as the new root object.
+        let raw = serde_json::json!({
+            "models": {"foo": {"id": "foo"}},
+            "providers": {"acme": {"id": "acme", "models": {"x": {"id": "x"}}}}
+        });
+        let adapted = match raw.get("providers") {
+            Some(serde_json::Value::Object(p)) => serde_json::Value::Object(p.clone()),
+            _ => raw.clone(),
+        };
+        let obj = adapted.as_object().expect("object");
+        assert!(obj.contains_key("acme"));
+        assert!(!obj.contains_key("models"));
+        // Now go through the consumer helper to prove end-to-end shape.
+        // `extract_models` expects a single-provider object: drill into `acme`.
+        let models = extract_models(&adapted["acme"]);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "x");
+    }
+
+    #[test]
+    fn test_wants_sse_dispatch() {
+        // No Accept header → JSON (default).
+        let h = axum::http::HeaderMap::new();
+        assert!(!wants_sse(&h));
+        // Explicit JSON Accept → JSON.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::ACCEPT, "application/json".parse().unwrap());
+        assert!(!wants_sse(&h));
+        // SSE Accept → SSE.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::ACCEPT,
+            "text/event-stream".parse().unwrap(),
+        );
+        assert!(wants_sse(&h));
+        // Mixed Accept where SSE appears → SSE (browser-style "q=" ok too).
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::ACCEPT,
+            "application/json, text/event-stream".parse().unwrap(),
+        );
+        assert!(wants_sse(&h));
     }
 }

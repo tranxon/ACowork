@@ -1,22 +1,30 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import type { VaultKeyEntry, ProviderListEntry } from "../../lib/types";
 import { isLocalProvider } from "../../lib/providers";
 import { StyledInput } from "../common/StyledInput";
 import { ListBox, ListRow, ExpandableRow } from "../common/list";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Search, Plus, ChevronsDown } from "lucide-react";
+import { getGatewayUrl } from "../../lib/config";
+import { cn } from "../../lib/utils";
+import { Search, Plus, ChevronsDown, RefreshCw, Check, AlertCircle } from "lucide-react";
 
 interface ProviderPickerProps {
   providers: ProviderListEntry[];
   keys: VaultKeyEntry[];
   onConnect: (providerId: string, provider: ProviderListEntry) => void;
   onAddCustom: () => void;
+  /**
+   * Called after a successful catalog refresh so the parent can re-fetch
+   * the provider list (the in-memory Gateway cache was swapped and the
+   * next /api/models call returns the new set).
+   */
+  onCatalogRefreshed?: () => void | Promise<void>;
 }
 
 /** Reusable available-providers list. Renders custom / local / remote sections
  *  with "Connect" buttons and an "Add Custom Provider" button. Pure UI —
  *  caller handles the add flow. */
-export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: ProviderPickerProps) {
+export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCatalogRefreshed }: ProviderPickerProps) {
   const { t } = useTranslation();
   const [providerSearchTerm, setProviderSearchTerm] = useState("");
   const [showAllRemote, setShowAllRemote] = useState(false);
@@ -24,6 +32,160 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
   const [customOpen, setCustomOpen] = useState(true);
   const [localOpen, setLocalOpen] = useState(true);
   const [remoteOpen, setRemoteOpen] = useState(true);
+
+  // Catalog-refresh state machine. Drives the refresh-button icon, the
+  // status pip next to the search box, the progress bar, and the timeout
+  // guard. `downloading` carries cumulative bytes from the SSE `progress`
+  // events so the user sees a live fill as the ~5MB body streams in.
+  type RefreshStatus =
+    | { kind: "idle" }
+    | { kind: "loading"; bytes: number; total: number | null }
+    | { kind: "ok"; providers: number; models: number; bytes: number }
+    | { kind: "error"; message: string };
+  const [refreshStatus, setRefreshStatus] = useState<RefreshStatus>({ kind: "idle" });
+
+  const handleRefreshCatalog = useCallback(async () => {
+    if (refreshStatus.kind === "loading") return; // re-entry guard
+    setRefreshStatus({ kind: "loading", bytes: 0, total: null });
+
+    // 60s hard timeout — the server's default is 30s but a slow CDN +
+    // 5MB payload + cold TLS handshake can stretch further. We bound
+    // it client-side too so a hung connection doesn't pin the spinner
+    // forever. This is intentionally > server default so the server's
+    // own 502 path triggers first on real network failures.
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 60_000);
+
+    // Parse one SSE event from a buffer. SSE format:
+    //   event: <name>\n
+    //   data: <json>\n
+    //   \n
+    // We scan for `\n\n` (end-of-event) and return the parsed event
+    // plus the remainder. Multiple events can land in one chunk after
+    // a long pause, so we loop until the buffer holds no full event.
+    const readSseEvent = async (
+      reader: ReadableStreamDefaultReader<Uint8Array>,
+      decoder: TextDecoder,
+      buffer: { value: string },
+    ): Promise<{ event: string; data: string } | null> => {
+      while (true) {
+        const sep = buffer.value.indexOf("\n\n");
+        if (sep >= 0) {
+          const raw = buffer.value.slice(0, sep);
+          buffer.value = buffer.value.slice(sep + 2);
+          // Parse event: / data: lines.
+          let event = "message";
+          const dataLines: string[] = [];
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+          }
+          return { event, data: dataLines.join("\n") };
+        }
+        const { value, done } = await reader.read();
+        if (done) return null;
+        buffer.value += decoder.decode(value, { stream: true });
+      }
+    };
+
+    try {
+      const resp = await fetch(`${getGatewayUrl()}/api/models/refresh-catalog`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({ timeout_secs: 30 }),
+        signal: controller.signal,
+      });
+
+      if (!resp.ok || !resp.body) {
+        // Non-streaming error path: read body once, surface `error` field.
+        let detail = `HTTP ${resp.status}`;
+        try {
+          const body = await resp.json();
+          if (body && typeof body.error === "string") detail = body.error;
+        } catch {
+          /* body wasn't JSON; keep the HTTP status */
+        }
+        throw new Error(detail);
+      }
+
+      // Streaming SSE parse loop.
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      const buffer = { value: "" };
+      let finalSummary: { providers: number; models: number; bytes: number } | null = null;
+      let errorMessage: string | null = null;
+
+      while (true) {
+        const evt = await readSseEvent(reader, decoder, buffer);
+        if (evt === null) break; // stream closed
+        if (evt.event === "progress") {
+          try {
+            const payload = JSON.parse(evt.data) as { bytes: number; total: number | null };
+            setRefreshStatus({ kind: "loading", bytes: payload.bytes, total: payload.total });
+          } catch {
+            /* malformed event — ignore */
+          }
+        } else if (evt.event === "done") {
+          try {
+            const payload = JSON.parse(evt.data) as {
+              providers?: number;
+              models?: number;
+              bytes?: number;
+              ok?: boolean;
+            };
+            if (payload.ok !== false && typeof payload.providers === "number") {
+              finalSummary = {
+                providers: payload.providers,
+                models: payload.models ?? 0,
+                bytes: payload.bytes ?? 0,
+              };
+            }
+          } catch {
+            /* malformed done — error event will follow if real failure */
+          }
+          break;
+        } else if (evt.event === "error") {
+          try {
+            const payload = JSON.parse(evt.data) as { error?: string };
+            if (typeof payload.error === "string") errorMessage = payload.error;
+          } catch {
+            /* malformed */
+          }
+          // Wait for the trailing `done` so we don't double-finalise.
+        }
+      }
+
+      if (errorMessage) throw new Error(errorMessage);
+      if (!finalSummary) throw new Error("stream ended without done event");
+
+      setRefreshStatus({
+        kind: "ok",
+        providers: finalSummary.providers,
+        models: finalSummary.models,
+        bytes: finalSummary.bytes,
+      });
+      // Auto-clear the success pip after 4s so the row returns to a calm state.
+      window.setTimeout(() => {
+        setRefreshStatus((s) => (s.kind === "ok" ? { kind: "idle" } : s));
+      }, 4000);
+      if (onCatalogRefreshed) {
+        await onCatalogRefreshed();
+      }
+    } catch (e) {
+      const aborted = e instanceof DOMException && e.name === "AbortError";
+      setRefreshStatus({
+        kind: "error",
+        message: aborted
+          ? t("harness.refreshCatalogTimeout")
+          : t("harness.refreshCatalogFailed", { error: e instanceof Error ? e.message : String(e) }),
+      });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }, [refreshStatus.kind, onCatalogRefreshed, t]);
 
   // Split providers into local / custom / remote
   const { localProviders, remoteProviders, customProviders } = useMemo(() => {
@@ -160,7 +322,75 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
             title={<span className="flex items-center gap-1">☁️ {t("harness.remoteProviders", { count: providerSearchTerm.trim() ? `${filteredRemoteProviders.length}/${availableRemote}` : availableRemote })}</span>}
             ariaLabel={t("harness.remoteProviders", { count: providerSearchTerm.trim() ? `${filteredRemoteProviders.length}/${availableRemote}` : availableRemote })}
             trailing={
-              <span onClick={(e) => e.stopPropagation()}>
+              <span onClick={(e) => e.stopPropagation()} className="flex items-center gap-1.5">
+                {/* Catalog refresh — fetches the latest models.dev catalog,
+                    persists it to data_dir/offline_providers.json, and
+                    swaps the in-memory cache. 15s client-side timeout
+                    (AbortController) prevents an indefinite spinner. */}
+                <button
+                  type="button"
+                  onClick={handleRefreshCatalog}
+                  disabled={refreshStatus.kind === "loading"}
+                  title={
+                    refreshStatus.kind === "error"
+                      ? refreshStatus.message
+                      : t("harness.refreshCatalog")
+                  }
+                  aria-label={t("harness.refreshCatalog")}
+                  data-testid="refresh-catalog-button"
+                  className={cn(
+                    "flex h-7 w-7 items-center justify-center rounded-md border transition-colors",
+                    refreshStatus.kind === "error"
+                      ? "border-red-300 bg-red-50 text-red-600 hover:bg-red-100 dark:border-red-700 dark:bg-red-950 dark:text-red-400"
+                      : refreshStatus.kind === "ok"
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-600 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-400"
+                      : "border-zinc-300 bg-modal-surface text-text-secondary hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-700",
+                    refreshStatus.kind === "loading" && "cursor-wait opacity-70",
+                  )}
+                >
+                  {refreshStatus.kind === "loading" ? (
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  ) : refreshStatus.kind === "ok" ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : refreshStatus.kind === "error" ? (
+                    <AlertCircle className="h-3.5 w-3.5" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                </button>
+                {/* Status pip — shows success counts, live progress, or error
+                    text inline next to the search box. Idle state is silent. */}
+                {refreshStatus.kind === "loading" && (
+                  <span className="flex items-center gap-1.5 text-[10px] text-text-tertiary" data-testid="refresh-catalog-progress">
+                    {refreshStatus.total != null ? (
+                      <>
+                        <span className="tabular-nums">
+                          {t("harness.refreshCatalogProgress", {
+                            bytes: formatBytes(refreshStatus.bytes),
+                            total: formatBytes(refreshStatus.total),
+                          })}
+                        </span>
+                        <progress
+                          max={100}
+                          value={Math.min(100, Math.round((refreshStatus.bytes / refreshStatus.total) * 100))}
+                          className="h-1 w-16 appearance-none overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700 [&::-webkit-progress-bar]:bg-zinc-200 [&::-webkit-progress-bar]:dark:bg-zinc-700 [&::-webkit-progress-value]:bg-blue-500 [&::-moz-progress-bar]:bg-blue-500"
+                        />
+                      </>
+                    ) : (
+                      <span className="tabular-nums">{formatBytes(refreshStatus.bytes)}</span>
+                    )}
+                  </span>
+                )}
+                {refreshStatus.kind === "ok" && (
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                    {t("harness.refreshCatalogSuccess", { providers: refreshStatus.providers, models: refreshStatus.models })}
+                  </span>
+                )}
+                {refreshStatus.kind === "error" && (
+                  <span className="max-w-[180px] truncate text-[10px] text-red-600 dark:text-red-400">
+                    {refreshStatus.message}
+                  </span>
+                )}
                 <div className="relative">
                   <StyledInput
                     type="text"
@@ -227,4 +457,18 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
       )}
     </div>
   );
+}
+
+/** Human-readable byte count (1024-based). */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
 }

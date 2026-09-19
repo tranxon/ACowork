@@ -149,6 +149,12 @@ pub(crate) async fn start_http_server(
     app_state.bootstrap_registry = bootstrap_registry;
     app_state.operation_store = operation_store;
 
+    // Prime the offline providers cache so `data_dir/offline_providers.json`
+    // (written by `POST /api/models/refresh-catalog`) takes priority over the
+    // bundled `assets/offline_providers.json`. Must run before any HTTP handler
+    // touches `models_api::offline_providers()`.
+    crate::http::models_api::init_offline_providers(data_dir);
+
     // Peer-IP allowlist (security backstop). Read from the loaded Gateway
     // config — this happens AFTER config load, so the values include the
     // env override applied in `GatewayConfig::load`. Boot-time only.

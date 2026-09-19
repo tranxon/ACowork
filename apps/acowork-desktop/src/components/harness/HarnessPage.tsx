@@ -371,6 +371,7 @@ function ProvidersTab() {
           setAddFlowEntry(undefined);
           setShowAddFlow(true);
         }}
+        onCatalogRefreshed={loadProviders}
       />
 
       {/* Add Provider Flow dialog (picker → add / custom) */}
