@@ -25,7 +25,7 @@ export function ModelCapEditor({
   const { t } = useTranslation();
 
   return (
-    <div className="rounded border border-zinc-200 dark:border-zinc-700">
+    <div className="rounded border border-border-outer">
       <button
         type="button"
         onClick={onToggle}
@@ -36,7 +36,7 @@ export function ModelCapEditor({
         <span className="text-text-tertiary">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
       </button>
       {expanded && (
-        <div className="border-t border-zinc-200 px-2 py-2 dark:border-zinc-700">
+        <div className="border-t border-border-divider px-2 py-2">
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.contextWindow")}</label>

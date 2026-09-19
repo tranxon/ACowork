@@ -788,7 +788,7 @@ export function WorkspaceExplorer() {
     return (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
             {/* Workspace selector + action buttons */}
-            <div className="flex items-center gap-0.5 border-b border-zinc-200 px-1.5 py-1.5 dark:border-zinc-800">
+            <div className="flex items-center gap-0.5 border-b border-border-divider px-1.5 py-1.5">
                 <WorkspaceSelector dropDirection="down" />
                 <div className="ml-auto flex items-center gap-1 pr-1 shrink-0">
                     {/* Toolbar action buttons. The class string + Tooltip
@@ -837,7 +837,7 @@ export function WorkspaceExplorer() {
                 sync with the workspace-selector toolbar row above so the
                 two header strips read as the same height — otherwise the
                 selector row visually dwarfs the search row (~40px vs ~28px). */}
-            <div className="relative border-b border-zinc-200 dark:border-zinc-800">
+            <div className="relative border-b border-border-divider">
                 <div className="flex items-center gap-1.5 px-3 py-1.5 min-h-[2.5rem]">
                     <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
                     <input
@@ -867,9 +867,9 @@ export function WorkspaceExplorer() {
 
                 {/* Dropdown results */}
                 {showDropdown && (
-                    <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700">
+                    <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-border-outer bg-modal-surface shadow-lg">
                         {/* Header with count */}
-                        <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-text-tertiary dark:border-zinc-700 ">
+                        <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-[11px] text-text-tertiary">
                             {searchLoading ? (
                                 <span>Searching…</span>
                             ) : matchingFiles.length > 0 ? (

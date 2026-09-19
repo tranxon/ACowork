@@ -123,9 +123,9 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 
   return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-      <div className="w-full max-w-2xl rounded-md bg-modal-surface shadow-xl">
+      <div className="w-full max-w-2xl rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
+        <div className="flex items-center justify-between border-b border-border-divider px-6 py-4">
           <h2 className="text-lg font-semibold text-text ">
             Workspaces
           </h2>
@@ -205,7 +205,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
+        <div className="flex items-center justify-between border-t border-border-divider px-6 py-4">
           <button
             onClick={() => setShowAddDialog(true)}
             className="flex items-center gap-2 rounded btn-solid px-4 py-2 text-sm font-medium"
@@ -297,7 +297,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
   return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
       <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl">
-        <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
+        <div className="flex items-center justify-between border-b border-border-divider px-6 py-4">
           <h3 className="text-base font-semibold text-text ">Add Workspace</h3>
           <button onClick={onClose} className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-800">
             <X className="h-5 w-5" />
@@ -397,7 +397,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
+        <div className="flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onClose}
             className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
@@ -466,7 +466,7 @@ function ConfirmPermissionChange({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-6 py-4 dark:border-zinc-700">
+        <div className="flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onCancel}
             className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"

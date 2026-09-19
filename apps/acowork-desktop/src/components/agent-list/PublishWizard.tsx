@@ -277,9 +277,9 @@ export function PublishWizard({
       />
 
       {/* Dialog */}
-      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
+      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
+        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3.5">
           <Package className="h-5 w-5 text-text-tertiary " />
           <h2 className="text-sm font-semibold text-text ">
             Publish: {agentName}
@@ -287,7 +287,7 @@ export function PublishWizard({
         </div>
 
         {/* Step indicators */}
-        <div className="flex items-center gap-0 border-b border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <div className="flex items-center gap-0 border-b border-border-divider px-5 py-3">
           {STEPS.map((s, i) => {
             const Icon = s.icon;
             const active = s.key === step;
@@ -478,7 +478,7 @@ export function PublishWizard({
               <button
                 onClick={runExport}
                 disabled={busy}
-                className="flex items-center gap-2 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
+                className="flex items-center gap-2 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-50 disabled:opacity-50  dark:hover:bg-zinc-700"
               >
                 {busy ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -497,7 +497,7 @@ export function PublishWizard({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-between border-t border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <div className="flex justify-between border-t border-border-divider px-5 py-3">
           <button
             onClick={onClose}
             disabled={busy}
@@ -645,7 +645,7 @@ function AvatarPickerSubForm({
 
       {/* Builtin grid */}
       {value.kind === "builtin" && (
-        <div className="rounded-md border border-zinc-200 p-2 dark:border-zinc-700">
+        <div className="rounded-md border border-border-outer p-2">
           <div className="grid grid-cols-7 gap-1.5">
             {BUILTIN_ICON_IDS.map((iconId) => {
               const active = value.iconId === iconId;
@@ -678,7 +678,7 @@ function AvatarPickerSubForm({
 
       {/* Packaged info */}
       {value.kind === "packaged" && (
-        <div className="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700">
+        <div className="flex items-center justify-between rounded-md border border-border-outer px-3 py-2 text-xs">
           <div className="min-w-0">
             <div className="font-mono text-text-secondary ">
               {value.relativePath}
@@ -711,7 +711,7 @@ function AvatarPickerSubForm({
 
       {/* None — random fallback note */}
       {value.kind === "none" && (
-        <p className="rounded-md border border-dashed border-zinc-200 px-3 py-2 text-[11px] text-text-tertiary dark:border-zinc-700 ">
+        <p className="rounded-md border border-dashed border-border-outer px-3 py-2 text-[11px] text-text-tertiary">
           The client will assign a random builtin icon on first install.
         </p>
       )}
@@ -764,7 +764,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
   if (selection.kind === "builtin") {
     const src = BUILTIN_ICONS[selection.iconId] ?? BUILTIN_ICONS["icon-01"];
     return (
-      <div className="flex items-center gap-3 rounded-md border border-zinc-200 px-3 py-2 dark:border-zinc-700">
+      <div className="flex items-center gap-3 rounded-md border border-border-outer px-3 py-2">
         <img
           src={src}
           alt={selection.iconId}
@@ -789,7 +789,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
     // whether manifest.toml has been updated yet).
     const url = resolveAgentAvatarUrl(agentId);
     return (
-      <div className="flex items-center gap-3 rounded-md border border-zinc-200 px-3 py-2 dark:border-zinc-700">
+      <div className="flex items-center gap-3 rounded-md border border-border-outer px-3 py-2">
         {url ? (
           <img
             src={url}
@@ -816,7 +816,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
     );
   }
   return (
-    <div className="flex items-center gap-3 rounded-md border border-dashed border-zinc-200 px-3 py-2 dark:border-zinc-700">
+    <div className="flex items-center gap-3 rounded-md border border-dashed border-border-outer px-3 py-2">
       <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-text-tertiary dark:bg-zinc-800">
         <ImagePlus className="h-6 w-6" />
       </div>

@@ -271,7 +271,7 @@ export function DocEditor() {
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-editor-canvas">
       {/* ── 顶栏：标题 + 元信息 + 模式/保存 ─────────────────── */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-zinc-200 px-3 py-1.5 dark:border-zinc-800">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-3 py-1.5">
         <FileText className="h-4 w-4 shrink-0 text-text-tertiary" aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -312,7 +312,7 @@ export function DocEditor() {
         {/* 编辑引擎切换（rich=Tiptap 富文本 / source=Monaco 源码；预览模式隐藏） */}
         {mode !== "preview" && (
           <div
-            className="flex shrink-0 items-center rounded-md border border-zinc-200 p-0.5 text-[11px] dark:border-zinc-700"
+            className="flex shrink-0 items-center rounded-md border border-border-outer p-0.5 text-[11px]"
             role="group"
             aria-label={t("doc.engineLabel")}
           >
@@ -353,7 +353,7 @@ export function DocEditor() {
 
         {/* 模式切换（编辑/分栏/预览） */}
         <div
-          className="flex shrink-0 items-center rounded-md border border-zinc-200 p-0.5 text-[11px] dark:border-zinc-700"
+          className="flex shrink-0 items-center rounded-md border border-border-outer p-0.5 text-[11px]"
           role="tablist"
           aria-label={t("doc.modeLabel")}
         >

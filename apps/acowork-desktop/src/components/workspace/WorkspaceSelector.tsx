@@ -199,7 +199,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
         {/* Dropdown menu */}
         {open && (
           <div className={cn(
-            "absolute left-0 w-60 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700",
+            "absolute left-0 w-60 rounded-md border border-border-outer bg-modal-surface shadow-lg",
             dropDirection === "down" ? "top-full mt-1" : "bottom-full mb-1",
           )} style={{ zIndex: 100 }}>
             {/* Menu title */}
@@ -237,7 +237,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
               </button>
 
               {/* Divider */}
-              <div className="mx-3 my-1 border-t border-zinc-200 dark:border-zinc-700" />
+              <div className="mx-3 my-1 border-t border-border-divider" />
 
               {loading ? (
                 <div className="py-4 text-center text-xs text-text-tertiary">{t("workspace.loading")}</div>
@@ -348,7 +348,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
             </div>
 
             {/* Divider */}
-            <div className="border-t border-zinc-200 dark:border-zinc-700" />
+            <div className="border-t border-border-divider" />
 
             {/* Add workspace button */}
             <button

@@ -82,7 +82,7 @@ export function AgentPickerChip({ agents, value, onChange }: AgentPickerChipProp
                 <ul
                     role="listbox"
                     data-testid="agent-picker-popover"
-                    className="absolute left-0 top-full z-10 mt-1 max-h-72 w-72 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface py-1 shadow-lg dark:border-zinc-700"
+                    className="absolute left-0 top-full z-10 mt-1 max-h-72 w-72 overflow-y-auto rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg"
                 >
                     {agents.map((a) => {
                         const isSel = a.instance_id === value;

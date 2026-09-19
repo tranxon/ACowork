@@ -681,7 +681,7 @@ export function AgentList({ width }: AgentListProps) {
           <Plus className="h-3.5 w-3.5" />
         </button>
         {addMenuOpen && (
-          <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-zinc-200 bg-modal-surface py-1 shadow-lg dark:border-zinc-700">
+          <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg">
             {installNodes !== null ? (
               <>
                 <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">

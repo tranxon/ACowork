@@ -238,7 +238,7 @@ export function MemoryPanel() {
           They are part of the overview strip, paired with the
           health-degradation banner immediately below. */}
       {stats && (
-        <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 px-panel-gutter py-2 sm:grid-cols-4 dark:border-zinc-800">
+        <div className="grid grid-cols-2 gap-2 border-b border-border-divider px-panel-gutter py-2 sm:grid-cols-4">
           <StatCard label={t("memoryPanel.totalNodes")} value={stats.total_nodes} />
           {/* Optional chain on by_status defends against any future wire-format
               drift on the stats endpoint — the panel must render zeros rather
@@ -381,7 +381,7 @@ export function MemoryPanel() {
                 Knowledge / Autobiographical). border-b separates the
                 control strip from the list region below so the two
                 surfaces read as distinct blocks on the inset body. */}
-            <div className="flex shrink-0 flex-col gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
+            <div className="flex shrink-0 flex-col gap-2 border-b border-border-divider px-3 py-2">
               {/* Search input — Search icon pinned to the left edge,
                   input gets `pl-7` so the placeholder text never sits
                   under the icon. Mirrors the Session-tab search row at
@@ -492,7 +492,7 @@ export function MemoryPanel() {
       </div>
 
       {/* Bottom actions */}
-      <div className="flex gap-3 border-t border-zinc-200 px-panel-gutter py-2 dark:border-zinc-800">
+      <div className="flex gap-3 border-t border-border-divider px-panel-gutter py-2">
         <button
           onClick={handleDistill}
           disabled={loading}
@@ -521,7 +521,7 @@ function StatCard({
   value: string | number;
 }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded border border-zinc-200 bg-panel-block p-2 dark:border-zinc-700">
+    <div className="min-w-0 overflow-hidden rounded border border-border-outer bg-panel-block p-2">
       <p className="truncate text-[10px] text-text-tertiary " title={label}>{label}</p>
       <p
         className="mt-0.5 truncate text-xs font-semibold text-text-secondary "

@@ -96,7 +96,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   }, [project.id, deleteProject, t]);
 
   return (
-    <header className="shrink-0 border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
+    <header className="shrink-0 border-b border-border-divider px-4 py-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           {/* 标题 inline-edit */}
@@ -113,7 +113,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
                   setEditingTitle(false);
                 }
               }}
-              className="w-full rounded border border-zinc-200 bg-modal-surface px-2 py-0.5 text-base font-semibold text-text outline-none focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-900 "
+              className="w-full rounded border border-border-outer bg-modal-surface px-2 py-0.5 text-base font-semibold text-text outline-none focus:border-[var(--color-accent)]  dark:bg-zinc-900"
               aria-label={t("pm.projectTitleEdit")}
             />
           ) : (
@@ -149,7 +149,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
                   setEditingDesc(false);
                 }
               }}
-              className="mt-1 w-full resize-y rounded border border-zinc-200 bg-modal-surface px-2 py-1 text-xs text-text-tertiary outline-none focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-900 "
+              className="mt-1 w-full resize-y rounded border border-border-outer bg-modal-surface px-2 py-1 text-xs text-text-tertiary outline-none focus:border-[var(--color-accent)]  dark:bg-zinc-900"
               rows={2}
               aria-label={t("pm.projectDescEdit")}
             />
@@ -241,7 +241,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setMenuOpen(false)} />
                 <div
-                  className="absolute right-0 top-full z-40 mt-1 w-44 overflow-hidden rounded-md border border-zinc-200 bg-modal-surface py-1 shadow-lg dark:border-zinc-700"
+                  className="absolute right-0 top-full z-40 mt-1 w-44 overflow-hidden rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg"
                   role="menu"
                 >
                   <button

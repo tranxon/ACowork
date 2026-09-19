@@ -297,7 +297,7 @@ const handleCompressSummary = () => {
           // ponytail: cap is viewport-bound so the editor expands naturally
           // without a scrollbar; the previous 460px ceiling was too low once
           // the inline window editor + presets + breakdown all rendered.
-          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-zinc-200 bg-modal-surface text-text-secondary shadow-lg dark:border-zinc-700 "
+          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-border-outer bg-modal-surface text-text-secondary shadow-lg "
         >
           <div className="flex items-center justify-between px-3 pt-2.5">
             <h2 className="text-sm font-normal text-text-secondary ">
@@ -343,7 +343,7 @@ const handleCompressSummary = () => {
 
             {/* ADR-074: per-session window editor (inline, same popover). */}
             {editingWindow && (
-              <div className="mt-2.5 rounded-md border border-zinc-200 bg-zinc-50/80 p-2 dark:border-zinc-700 dark:bg-zinc-800/50">
+              <div className="mt-2.5 rounded-md border border-border-outer bg-zinc-50/80 p-2  dark:bg-zinc-800/50">
                 <div className="flex items-center gap-1.5">
                   <input
                     type="number"
@@ -458,7 +458,7 @@ const handleCompressSummary = () => {
 
           {hasCacheData(contextUsage, "cumulative") ? (
             <>
-              <div className="border-t border-zinc-200 dark:border-zinc-700" />
+              <div className="border-t border-border-divider" />
               <div className="px-3 pt-2 pb-3">
                 <div className="text-sm font-normal text-text-secondary ">
                   {t("contextUsage.cacheHitLabel")}
@@ -484,7 +484,7 @@ const handleCompressSummary = () => {
 
           {agentDebugEnabled && hasCacheData(contextUsage, "per-turn") ? (
             <>
-              <div className="border-t border-zinc-200 dark:border-zinc-700" />
+              <div className="border-t border-border-divider" />
               <div className="px-3 pt-2 pb-3">
                 <div className="text-sm font-normal text-text-secondary ">
                   {t("contextUsage.cacheHitPerTurnLabel")}
@@ -508,7 +508,7 @@ const handleCompressSummary = () => {
             </>
           ) : null}
 
-          <div className="border-t border-zinc-200 dark:border-zinc-700" />
+          <div className="border-t border-border-divider" />
           <button
             onClick={handleCompressSummary}
             disabled={!canAct}

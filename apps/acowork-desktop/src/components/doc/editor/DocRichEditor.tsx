@@ -130,7 +130,7 @@ export function DocRichEditor({
       {/* 字符计数（DocFlow 同款上限，ADR-079 §7 大文档性能） */}
       <div
         className={cn(
-          "flex shrink-0 items-center justify-end border-t border-zinc-200 px-3 py-0.5 text-[10px] tabular-nums dark:border-zinc-800",
+          "flex shrink-0 items-center justify-end border-t border-border-divider px-3 py-0.5 text-[10px] tabular-nums",
           overLimit ? "text-red-500" : "text-text-tertiary",
         )}
       >

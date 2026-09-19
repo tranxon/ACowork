@@ -405,7 +405,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           cut off and resizing would break. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-right-panel-border bg-right-panel">
       {/* Tab title header */}
-      <div className="border-b border-right-panel-border px-3 pt-[10px] pb-[7px] text-xs font-medium text-text-tertiary ">
+      <div className="border-b border-border-divider px-3 pt-[10px] pb-[7px] text-xs font-medium text-text-tertiary ">
         {t(`rightPanel.${activeTab}`)}
       </div>
 
@@ -451,7 +451,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           {/* Divider — full panel-width hairline separating the PROMPT
               override area (above) from the debug controls (below). Matches
               the workspace/memory panel divider style. */}
-          <div className="my-2 border-t border-right-panel-border" />
+          <div className="my-2 border-t border-border-divider" />
 
           {!selectedAgent?.alive ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-text-tertiary ">
@@ -483,7 +483,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   tab. The earlier `px-2` was 4px shy and made the
                   Switch + label sit visibly closer to the left edge
                   than the chevron + title of the cards below it. */}
-              <div className="flex min-h-[38px] items-center rounded-md border border-zinc-200 bg-panel-block px-3 dark:border-zinc-700">
+              <div className="flex min-h-[38px] items-center rounded-md border border-border-outer bg-panel-block px-3">
                 <div className="flex w-full items-center gap-1">
                   <Switch
                     checked={selectedAgent?.debug_state === "enabled"}
@@ -616,7 +616,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                 ) : (
                   <>
                     {/* State card */}
-                    <div className="rounded-md border border-zinc-200 bg-panel-block p-3 dark:border-zinc-700">
+                    <div className="rounded-md border border-border-outer bg-panel-block p-3">
                       <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                         <StateLabel label={t("rightPanel.iteration")} value={`#${iteration}`} />
                         <StateLabel label={t("rightPanel.phase")} value={phase} highlight />
@@ -641,7 +641,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                         onToggle={() => setSnapshotsOpen((v) => !v)}
                         title={t("rightPanel.contextSnapshots", { count: snapshots.length })}
                         ariaLabel={t("rightPanel.contextSnapshots", { count: snapshots.length })}
-                        bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+                        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
                         trailing={
                           snapshotTotalPages > 1 ? (
                             <span
@@ -747,7 +747,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               onToggle={() => setSessionStatusOpen((v) => !v)}
               title={t("rightPanel.sessionStatus")}
               ariaLabel={t("rightPanel.sessionStatus")}
-              bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 text-xs dark:border-zinc-700"
+              bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-2 text-xs"
             >
               {/* Context usage progress bar */}
               {contextUsage ? (
@@ -813,7 +813,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                 </div>
               )}
               {/* Divider */}
-              {contextUsage && <div className="border-t border-zinc-100 dark:border-zinc-700/50 mb-2" />}
+              {contextUsage && <div className="border-t border-border-divider mb-2" />}
               <StatRow label={t("rightPanel.promptTokens")} value={(tokenUsage?.prompt_tokens ?? contextUsage?.input_tokens)?.toLocaleString()} />
               <StatRow label={t("rightPanel.completionTokens")} value={(tokenUsage?.completion_tokens ?? contextUsage?.output_tokens)?.toLocaleString()} />
               {/* Cumulative session totals — sourced from SessionTokens via the
@@ -840,7 +840,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   symmetric — `StatRow` already has `py-1`, so an
                   asymmetric `mb-2` makes the line look glued to the
                   text above and far from the text below. */}
-              <div className="my-2 border-t border-zinc-100 dark:border-zinc-700/50" />
+              <div className="my-2 border-t border-border-divider" />
               <StatRow label={t("rightPanel.iterations")} value={iterations ? String(iterations) : undefined} />
               {sessionModel && (
                 <StatRow label={t("rightPanel.labelModel")} value={sessionModel} />
@@ -880,7 +880,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           {/* Divider — full panel-width hairline separating the Session
               Status card (above) from the Agent Status card (below).
               Matches the workspace/memory panel divider style. */}
-          <div className="-mx-3 my-2 border-t border-right-panel-border" />
+          <div className="-mx-3 my-2 border-t border-border-divider" />
 
           {/* Agent Status — level-1 collapsible card, same grammar as
               the Session Status card above. */}
@@ -890,7 +890,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               onToggle={() => setAgentStatusOpen((v) => !v)}
               title={t("rightPanel.agentStatus")}
               ariaLabel={t("rightPanel.agentStatus")}
-              bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-2 text-xs dark:border-zinc-700"
+              bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-2 text-xs"
             >
               {selectedAgent ? (
                 <>
@@ -932,7 +932,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       below the line is symmetric (the surrounding rows
                       use `py-1`, so an asymmetric `mb-2` would make the
                       line look glued to the row above). */}
-                  <div className="my-2 border-t border-zinc-100 dark:border-zinc-700/50" />
+                  <div className="my-2 border-t border-border-divider" />
                   {/* ADR-028: agent-scoped cumulative totals across every LLM
                       call made by this Runtime process for this agent. These
                       are agent-level (not session-level) figures, so they

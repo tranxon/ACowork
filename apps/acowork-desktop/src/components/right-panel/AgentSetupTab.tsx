@@ -673,7 +673,7 @@ export function AgentSetupTab() {
           onToggle={() => setAgentInfoOpen((v) => !v)}
           title={t("agentSetup.sectionAgentInfo")}
           ariaLabel={t("agentSetup.sectionAgentInfo")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
         >
           <div className="space-y-3">
     {/* Avatar preview — click to open picker popup */}
@@ -715,11 +715,11 @@ export function AgentSetupTab() {
                       onClick={() => setAvatarPopupOpen(false)}
                     />
                     <div
-                      className="fixed z-50 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
+                      className="fixed z-50 w-72 rounded-lg border border-border-outer bg-modal-surface p-3 shadow-lg max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
                       style={{ top: avatarPopupPos?.top ?? 0, left: avatarPopupPos?.left ?? 0 }}
                     >
                     {/* Tabs */}
-                    <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
+                    <div className="mb-3 flex gap-1 border-b border-border-divider">
                       <button
                         onClick={() => setAvatarTab("custom")}
                         className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
@@ -854,7 +854,7 @@ export function AgentSetupTab() {
           Agent Info card (above) from the Session Parameters
           card (below). Matches the workspace/memory panel
           divider style. */}
-      <div className="-mx-3 my-2 border-t border-right-panel-border" />
+      <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* ── Card 2: Session Parameters ─────────────────────────
           Iteration / session-count / approval / idle /
@@ -866,7 +866,7 @@ export function AgentSetupTab() {
           onToggle={() => setSessionParamsOpen((v) => !v)}
           title={t("agentSetup.sectionSessionParams")}
           ariaLabel={t("agentSetup.sectionSessionParams")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
         >
           <div className="space-y-3">
     {/* Session Language (per-agent LLM language override).
@@ -1085,7 +1085,7 @@ export function AgentSetupTab() {
       {/* Divider — full panel-width hairline separating the
           Session Parameters card (above) from the Model
           Parameters card (below). */}
-      <div className="-mx-3 my-2 border-t border-right-panel-border" />
+      <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* ── Card 3: Model Parameters ───────────────────────────
           max_output_tokens / context_window / temperature.
@@ -1096,7 +1096,7 @@ export function AgentSetupTab() {
           onToggle={() => setModelParamsOpen((v) => !v)}
           title={t("agentSetup.sectionModelParams")}
           ariaLabel={t("agentSetup.sectionModelParams")}
-          bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset px-3 py-3 dark:border-zinc-700"
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
         >
           <div className="space-y-3">
     {/* Max Output Tokens */}
@@ -1196,7 +1196,7 @@ export function AgentSetupTab() {
           </div>
         </ExpandableRow>
       </ListBox>
-<div className="-mx-3 my-2 border-t border-right-panel-border" />
+<div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
       <div className="flex items-center gap-3">

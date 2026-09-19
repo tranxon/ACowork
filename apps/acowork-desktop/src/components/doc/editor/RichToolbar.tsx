@@ -131,7 +131,7 @@ export function RichToolbar({ editor, disabled }: RichToolbarProps) {
     <div
       role="toolbar"
       aria-label={t("doc.richToolbar")}
-      className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-zinc-200 bg-editor-canvas px-2 py-1 dark:border-zinc-800"
+      className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-border-divider bg-editor-canvas px-2 py-1"
     >
       <ToolButton icon={Heading1} label={t("doc.tbH1")} active={is("heading", { level: 1 })} disabled={inactive} onClick={() => chain().toggleHeading({ level: 1 }).run()} />
       <ToolButton icon={Heading2} label={t("doc.tbH2")} active={is("heading", { level: 2 })} disabled={inactive} onClick={() => chain().toggleHeading({ level: 2 }).run()} />

@@ -124,7 +124,7 @@ function McpServerCard({
         </span>
       }
       surface="inset"
-      bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset-2 dark:border-zinc-700"
+      bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset-2"
       ariaLabel={`Toggle ${server.name} tools`}
     >
       {/* Body — one row per tool, name on the left, Switch on the
@@ -529,7 +529,7 @@ export function ToolsTab() {
             onToggle={() => setBuiltinOpen((v) => !v)}
             title={t("agentSetup.builtinTools", { count: builtinToolsAll.length })}
             ariaLabel={t("agentSetup.builtinTools", { count: builtinToolsAll.length })}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             {builtinToolsAll.length === 0 ? (
               <EmptyState message={t("agentSetup.noBuiltinTools")} />
@@ -566,7 +566,7 @@ export function ToolsTab() {
       {/* Divider — full panel-width hairline separating the functional
           blocks (Builtin Tools / Web Search / MCP). Matches the
           workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-right-panel-border" />
+      <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* Web Search Providers card — same Debug-panel collapsible
           style as the Builtin Tools card above. */}
@@ -577,7 +577,7 @@ export function ToolsTab() {
             onToggle={() => setSearchOpen((v) => !v)}
             title={t("agentSetup.webSearchProviders", { count: searchProviders.length })}
             ariaLabel={t("agentSetup.webSearchProviders", { count: searchProviders.length })}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             {searchProviders.length === 0 ? (
               <EmptyState message={t("agentSetup.noSearchKeys")} />
@@ -647,7 +647,7 @@ export function ToolsTab() {
       {/* Divider — full panel-width hairline separating the functional
           blocks (Builtin Tools / Web Search / MCP). Matches the
           workspace/memory panel divider style. */}
-      <div className="-mx-3 my-2 border-t border-right-panel-border" />
+      <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* MCP Servers card — the group is a level-1 collapsible card
           like the Debug-panel snapshot list; each server renders as a
@@ -660,7 +660,7 @@ export function ToolsTab() {
             onToggle={() => setMcpOpen((v) => !v)}
             title={t("agentSetup.mcpServers", { count: mcpServerDefs.length })}
             ariaLabel={t("agentSetup.mcpServers", { count: mcpServerDefs.length })}
-            bodyClassName="rounded-b-md border-t border-zinc-300 bg-panel-inset dark:border-zinc-700"
+            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
           >
             {mcpServerDefs.length === 0 ? (
               <EmptyState message={t("agentSetup.noMcpInCatalog")} />

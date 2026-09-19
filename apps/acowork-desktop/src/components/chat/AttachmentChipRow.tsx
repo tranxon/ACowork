@@ -118,7 +118,7 @@ function WorkspaceRefChip({
     <Tag
       type={Tag === "button" ? "button" : undefined}
       className={
-        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
+        "inline-flex items-center gap-1.5 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800 "
         + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -154,7 +154,7 @@ function SelectionChip({
     <Tag
       type={Tag === "button" ? "button" : undefined}
       className={
-        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
+        "inline-flex items-center gap-1.5 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800 "
         + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
@@ -193,7 +193,7 @@ function FolderChip({
     <Tag
       type={Tag === "button" ? "button" : undefined}
       className={
-        "inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
+        "inline-flex items-center gap-1.5 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800 "
         + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"

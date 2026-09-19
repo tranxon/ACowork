@@ -171,7 +171,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       onContextMenu={onContextMenu}
     >
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      <div className="flex items-center justify-between border-b border-border-divider px-3 py-2">
         <button
           onClick={onClose}
           className="inline-flex items-center gap-1 rounded p-0.5 text-[11px] text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
@@ -266,7 +266,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       </div>
 
       {/* Actions footer */}
-      <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+      <div className="border-t border-border-divider p-3">
         <button
           onClick={handleDelete}
           className="inline-flex w-full items-center justify-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400 dark:hover:bg-red-900"

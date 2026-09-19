@@ -223,7 +223,7 @@ export function LspIndicator({
 
             {/* Install hint popover */}
             {showPopover && hint && (
-                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 text-xs">
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-border-outer bg-modal-surface p-3 shadow-lg text-xs">
                     <div className="font-medium text-text-secondary  mb-1.5">
                         {t("fileStatus.lsp.installTitle", { name: hint.name })}
                     </div>

@@ -46,14 +46,15 @@
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
-  --color-chat-input-border: hsl(240 5.9% 90.6% / 0.5);
+  --color-chat-input-border: var(--color-border-outer);
   /* = zinc-200, #e4e4e7 — chat input box outline (matches the
      right-panel section divider hairlines like `border-zinc-200` on
      RightPanel's tab header / section dividers, so the input reads
      as part of the layout instead of disappearing into
      `bg-right-panel`. Independent from --color-chat-border — tweak
-     here without touching the CodeBlock/Mermaid wrapper border. */
-  --color-right-panel-border: hsl(240 5.9% 90.6% / 0.7);
+     here without touching the CodeBlock/Mermaid wrapper border.
+     Alias of --color-border-outer. */
+  --color-right-panel-border: var(--color-border-outer);
   /* = zinc-200, #e4e4e7 — right-panel outer/divider hairline (light).
      Used by RightPanel.tsx (tab header bottom border, section
      dividers) and any future right-side surface borders. Mirrors
@@ -61,15 +62,29 @@
      the same layout grid. Consumers write `border-right-panel-border`
      with no `dark:` prefix needed — the .dark block below flips the
      value. Independent from --color-chat-border (which drives
-     CodeBlock/Mermaid wrappers). */
-  --color-agentlist-border: hsl(240 5.9% 90.6% / 0.7);
+     CodeBlock/Mermaid wrappers). Alias of --color-border-outer. */
+  --color-agentlist-border: var(--color-border-outer);
   /* = zinc-200, #e4e4e7 — left AgentList panel outer hairline (light).
      Used by AppLayout.tsx / AgentList.tsx for the sidebar container
      outline. Same value as --color-right-panel-border so the two
      panel frames stay visually symmetric; tweak independently if
      one side needs more/less contrast against its surface
      (`bg-nav-surface` vs `bg-right-panel`). Consumers write
-     `border-agentlist-border` with no `dark:` prefix needed. */
+     `border-agentlist-border` with no `dark:` prefix needed.
+     Alias of --color-border-outer. */
+
+  /* Hairline border palette (light) — anchors on the same zinc-200
+     family as the existing chat-input / right-panel / agentlist
+     hairlines. Same two-tier split as .dark: outer edge vs inner
+     divider, with the divider a hair darker so the silhouette reads
+     first. */
+  --color-border-outer: hsl(240 5.9% 90.6%);
+  /* #E4E4E7 — outer hairline (light). Matches the existing
+     right-panel-border / agentlist-border value. */
+  --color-border-divider: hsl(240 5.9% 88%);
+  /* ≈ #DFDFE2 — one step darker than border-outer; inner dividers
+     inside a dialog/menu/card so the seam reads weaker than the
+     outer edge. */
   --color-chat-badge: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
@@ -143,8 +158,10 @@
      flips this to solid zinc-900. */
   --color-modal-surface: hsl(0 0% 100%);
   /* = #FFFFFF — dialog / dropdown / card content surface (light) */
-  --color-modal-overlay: hsl(0 0% 0% / 0.5);
-  /* = black/50 — modal scrim (theme-independent) */
+  --color-modal-overlay: hsl(0 0% 0% / 0.65);
+  /* = black/65 — modal scrim. Slightly darker than the light-mode
+     black/50 so the dimming reads on the already-near-black page
+     background and the dialog edge stays visible. */
   /* NavBar / AgentList warm-tint palette — a subtly cooler-gray shift
      away from pure zinc, giving the sidebar a distinct visual identity
      from the chat area. Used by:
@@ -402,17 +419,17 @@
   /* = zinc-900, #18181b — block body (darker, closer to panel) */
   --color-chat-border: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — container border */
-  --color-chat-input-border: hsl(0 0% 13%);
+  --color-chat-input-border: var(--color-border-outer);
   /* = zinc-800, #27272a — chat input box outline (mirrors the
      right-panel section divider hairlines `dark:border-zinc-800` on
      RightPanel's tab header / section dividers). Independent from
-     --color-chat-border. */
-  --color-right-panel-border: hsl(0 0% 13%);
+     --color-chat-border. Alias of --color-border-outer. */
+  --color-right-panel-border: var(--color-border-outer);
   /* = zinc-800, #27272a — right-panel outer/divider hairline (dark).
-     Auto-flips the @theme light value above. */
-  --color-agentlist-border: hsl(0 0% 13%);
+     Auto-flips the @theme light value above. Alias of --color-border-outer. */
+  --color-agentlist-border: var(--color-border-outer);
   /* = zinc-800, #27272a — left AgentList panel outer hairline (dark).
-     Auto-flips the @theme light value above. */
+     Auto-flips the @theme light value above. Alias of --color-border-outer. */
   --color-chat-badge: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
@@ -427,7 +444,7 @@
   /* = zinc-950 附近，#131316 — unified page background (chat/settings/harness/pm/doc) */
   --color-right-panel: hsl(0 0% 11.7%);
   /* = #1E1E1E — right panel surface (dark) */
-  --color-panel-block: hsl(240 3.8% 15.7%);
+  --color-panel-block: hsl(240 3.8% 16.7%);
   /* = zinc-800, #27272a — right-panel embedded card/list/block base (dark) */
   --color-panel-inset: hsl(240 3.8% 8%);
   /* = zinc-900 @ 60% alpha over the zinc-800 card ≈ #1e1e22 — expanded
@@ -437,8 +454,38 @@
   /* = zinc-950 附近 — LEVEL-2 nested list surface (dark), clearly one
      step darker than `panel-inset` (≈#1e1e22): e.g. MCP server ->
      its tool list, snapshot Iteration -> its sections area. */
-  --color-modal-surface: hsl(240 3.8% 15.7%);
-  /* = zinc-800, #27272a — dialog / dropdown / card content surface (dark) */
+  --color-modal-surface: hsl(240 5% 10%);
+  /* ≈ #19191D — dialog / dropdown / card content surface (dark).
+     One step brighter than --color-page-bg (#131316) so the modal
+     reads as a raised surface via a subtle 4% lightness lift rather
+     than a flat gray slab. Pairs with --color-modal-overlay
+     (black/65) and the dialog shadow to establish layering. */
+
+  /* Hairline border palette (dark) — single source of truth for the
+     "barely-there" outline style on dialog / menu / popover / folded
+     card containers, plus the slightly fainter internal dividers.
+     Anchored on the existing chat-input / right-panel / agentlist
+     hairlines (hsl 0 0% 13%, #212121) so the new dialog/menu outlines
+     match the rest of the chrome exactly.
+       - border-outer  : container outer edge — dialog / menu / popover /
+                         dropdown panel / folded-card wrapper
+       - border-divider: internal separator — header/footer hairlines,
+                         section dividers, list row separators inside
+                         the same container */
+  --color-border-outer: hsl(0 0% 13%);
+  /* #212121 — outer hairline (dark). Same value as the pre-existing
+     chat-input-border / right-panel-border / agentlist-border tokens,
+     which are now aliases of this one. */
+  --color-border-divider: hsl(240 5% 17%);
+  /* ≈ #2B2B2B — dark-mode inner divider. One step brighter than
+     --color-border-outer (#212121, L≈13%) so a divider reads as
+     slightly raised without competing with the outer container
+     edge. Contrast against the modal surface (#19191D, L≈10%) is
+     ~1.7:1 — "barely there" hairline, in line with the existing
+     chat-input / right-panel / agentlist hairlines the rest of the
+     chrome already uses. Previously locked at zinc-700 (#3F3F46)
+     which was too bright (3:1) and made dividers read as a
+     separate object instead of an edge. */
   /* modal-overlay is theme-independent (black/50 in both modes) */
   /* NavBar / AgentList warm-tint palette (dark) — auto-flips the @theme
      light values. Same hue, swapped lightness. */
@@ -1588,8 +1635,8 @@ input[type="radio"]:checked {
   z-index: 100;
   min-width: 160px;
   border-radius: var(--radius-md);
-  border: 1px solid #e4e4e7;
-  background-color: #ffffff;
+  border: 1px solid var(--color-border-outer);
+  background-color: var(--color-modal-surface);
   padding: 0.25rem 0;
   box-shadow:
     0 4px 6px -1px rgb(0 0 0 / 0.1),
@@ -1601,8 +1648,10 @@ input[type="radio"]:checked {
 }
 
 .dark .context-menu {
-  border-color: #3f3f46;
-  background-color: #27272a;
+  /* border-outer / modal-surface auto-flip in the .dark block, so
+     this rule is now a no-op placeholder — kept for future dark-only
+     overrides (e.g. heavier shadow on dark) without rewriting call
+     sites. */
   box-shadow:
     0 4px 6px -1px rgb(0 0 0 / 0.5),
     0 2px 4px -2px rgb(0 0 0 / 0.5);

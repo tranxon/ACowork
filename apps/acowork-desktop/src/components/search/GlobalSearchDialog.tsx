@@ -746,18 +746,18 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             onMouseDown={() => closeDialog()}
         >
             <div
-                className="relative z-10 flex max-h-[70vh] w-full max-w-3xl flex-col overflow-hidden rounded-md border border-zinc-200 bg-modal-surface text-text shadow-xl dark:border-zinc-700"
+                className="relative z-10 flex max-h-[70vh] w-full max-w-3xl flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface text-text shadow-xl"
                 onMouseDown={(e) => e.stopPropagation()}
                 onKeyDown={onKeyDown}
             >
                 {/* ── Header ──────────────────────────────────────────── */}
-                <div className="flex shrink-0 items-center gap-2 border-b border-zinc-200 px-5 py-3 dark:border-zinc-700">
+                <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-5 py-3">
                     <Search className="h-5 w-5 text-text-tertiary" />
                     <h2 className="text-sm font-semibold">{t("globalSearch.title")}</h2>
                 </div>
 
                 {/* ── Zone 1: agent picker + search input ─────────────── */}
-                <div className="flex shrink-0 items-stretch border-b border-zinc-200 dark:border-zinc-700">
+                <div className="flex shrink-0 items-stretch border-b border-border-divider">
                     <AgentPickerChip
                         agents={agentList.map((a) => a.meta)}
                         value={agentId}
@@ -808,8 +808,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     dialog jumps taller the moment a query produces rows.
                     `flex-1` lets it grow up to the 70vh dialog cap once
                     Zone 3 has claimed its fixed 140–300px. */}
-                <div className="flex min-h-[180px] flex-1 flex-col overflow-hidden border-b border-zinc-200 dark:border-zinc-700">
-                    <div className="flex shrink-0 gap-1 border-b border-zinc-200 px-2 pt-1 dark:border-zinc-700">
+                <div className="flex min-h-[180px] flex-1 flex-col overflow-hidden border-b border-border-divider">
+                    <div className="flex shrink-0 gap-1 border-b border-border-divider px-2 pt-1">
                         {TABS.map((tabDef) => (
                             <button
                                 key={tabDef.key}
@@ -937,7 +937,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 </div>
 
                 {/* ── Footer ──────────────────────────────────────────── */}
-                <div className="flex shrink-0 justify-end border-t border-zinc-200 px-5 py-3 dark:border-zinc-700">
+                <div className="flex shrink-0 justify-end border-t border-border-divider px-5 py-3">
                     <button
                         type="button"
                         onClick={() => closeDialog()}

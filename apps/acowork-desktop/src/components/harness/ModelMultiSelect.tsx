@@ -278,7 +278,7 @@ export function ModelMultiSelect({
       />
 
       {/* Model list */}
-      <div className="mt-1 max-h-40 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-700">
+      <div className="mt-1 max-h-40 overflow-y-auto rounded border border-border-outer">
         {loading ? (
           <div className="px-3 py-2 text-xs text-text-tertiary">{t("harness.loadingModels")}</div>
         ) : visibleModels.length === 0 ? (

@@ -205,7 +205,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-page-bg shadow-xl outline-none dark:bg-zinc-900"
       >
         {/* 头部：标题 + 徽章 + 关闭 */}
-        <header className="shrink-0 border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
+        <header className="shrink-0 border-b border-border-divider px-4 py-3">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <h2 className="break-words text-sm font-semibold text-text ">
@@ -231,7 +231,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
           <div
             role="tablist"
             aria-label={t("pm.task.tabs")}
-            className="mt-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700"
+            className="mt-3 flex gap-1 border-b border-border-divider"
           >
             {tabs.map((tab, i) => (
               <button
@@ -362,7 +362,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
                   {attachments.map((att) => (
                     <li
                       key={att.id}
-                      className="group relative overflow-hidden rounded-md border border-zinc-200 bg-card-surface dark:border-zinc-700"
+                      className="group relative overflow-hidden rounded-md border border-border-outer bg-card-surface"
                     >
                       {att.kind === "image" ? (
                         <a href={attachmentUrl(att.id)} target="_blank" rel="noreferrer">
@@ -419,7 +419,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         </div>
 
         {/* 底部操作 */}
-        <footer className="flex shrink-0 items-center gap-2 border-t border-zinc-200 px-4 py-2.5 dark:border-zinc-700">
+        <footer className="flex shrink-0 items-center gap-2 border-t border-border-divider px-4 py-2.5">
           {onEdit && (
             <button
               type="button"

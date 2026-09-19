@@ -80,8 +80,8 @@ export function TableBubbleMenu({ editor, readOnly }: TableBubbleMenuProps) {
         return ed.isActive("table") || state.selection instanceof CellSelection;
       }}
       className={cn(
-        "flex items-center gap-0.5 rounded-md border border-zinc-200 bg-white/95 p-1 shadow-md backdrop-blur",
-        "dark:border-zinc-700 dark:bg-zinc-900/95",
+        "flex items-center gap-0.5 rounded-md border border-border-outer bg-white/95 p-1 shadow-md backdrop-blur",
+        "dark:bg-zinc-900/95",
       )}
     >
       <MenuButton icon={ArrowUp} label={t("doc.tbAddRowBefore")} onClick={() => chain().addRowBefore().run()} />

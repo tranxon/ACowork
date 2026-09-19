@@ -110,7 +110,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
 
       {/* Dropdown menu */}
       {open && (
-        <div className="absolute bottom-full left-0 mb-2 w-72 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700 z-50">
+        <div className="absolute bottom-full left-0 mb-2 w-72 rounded-md border border-border-outer bg-modal-surface shadow-lg z-50">
           {/* Session list */}
           <div ref={listRef} className="max-h-80 overflow-y-auto py-1">
             {isLoading && sessions.length === 0 && (
@@ -209,7 +209,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
           </div>
 
           {/* Footer: New conversation */}
-          <div className="border-t border-zinc-200 p-2 dark:border-zinc-700">
+          <div className="border-t border-border-divider p-2">
             <button
               onClick={() => {
                 createSession(agentId);

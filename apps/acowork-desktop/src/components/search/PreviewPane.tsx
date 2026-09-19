@@ -289,7 +289,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
         <div className="flex h-full flex-col">
             <PreviewHeader icon={FileText} title={hit.title} sub={`${hit.path}:${hit.line}`} />
             {matchedOutOfRange && (
-                <div className="border-b border-zinc-200 px-4 py-1.5 text-[10px] text-text-tertiary dark:border-zinc-800">
+                <div className="border-b border-border-divider px-4 py-1.5 text-[10px] text-text-tertiary">
                     匹配行 {state.matchedLine} 已超出当前文件范围（{totalLines} 行），显示附近行
                 </div>
             )}
@@ -494,7 +494,7 @@ function MemoryPreview({ hit, agentId }: { hit: MemoryHit; agentId: string }) {
 
 function PreviewHeader({ icon: Icon, title, sub }: { icon: React.ElementType; title: string; sub: string }) {
     return (
-        <div className="flex shrink-0 items-center gap-2 border-b border-zinc-200 px-4 py-2 dark:border-zinc-800">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-4 py-2">
             <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
             <span className="truncate text-xs font-medium text-text">{title}</span>
             <span className="truncate font-mono text-[10px] text-text-tertiary">{sub}</span>

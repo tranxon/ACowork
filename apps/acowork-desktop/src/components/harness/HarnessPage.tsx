@@ -41,7 +41,7 @@ export function HarnessPage() {
   return (
     <div className="flex flex-1 flex-col bg-nav-surface">
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
+      <div className="flex gap-1 border-b border-border-divider px-6 pt-2">
         {tabs.map((tab) => (
           <TabButton
             key={tab.id}

@@ -120,12 +120,12 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
       <div
-        className="relative z-10 flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700"
+        className="relative z-10 flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl"
         role="dialog"
         aria-modal="true"
         aria-label={t("pm.memberManagerTitle")}
       >
-        <header className="flex items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <header className="flex items-center justify-between border-b border-border-divider px-5 py-3">
           <h3 className="text-sm font-semibold text-text ">
             {t("pm.memberManagerTitle")}
           </h3>
@@ -139,7 +139,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
           </button>
         </header>
 
-        <p className="border-b border-zinc-200 px-5 py-2 text-[11px] text-text-tertiary dark:border-zinc-700 ">
+        <p className="border-b border-border-divider px-5 py-2 text-[11px] text-text-tertiary">
           {t("pm.memberManagerHint")}
         </p>
 

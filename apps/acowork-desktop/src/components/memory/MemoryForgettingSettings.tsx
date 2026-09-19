@@ -159,7 +159,7 @@ export function MemoryForgettingSettings({
 
   // ── Render ────────────────────────────────────────────────────────────
   const numInputCls =
-    "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 ";
+    "rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
 
   // Visual grammar mirrors the distill card (MemoryDistillSettings.tsx):
   //   - Title row: chevron + "记忆遗忘" + trailing Switch.
@@ -180,13 +180,13 @@ export function MemoryForgettingSettings({
   // numeric values vs. the inputs below, (3) wrong position — the
   // description should sit below the controls per the distill card.
   //
-  // Vertical rhythm: the wrapper carries `border-b border-zinc-200
-  // dark:border-zinc-800` so this card is separated from the 记忆搜索
-  // card below by the same hairline that separates 记忆沉淀 from this
-  // card. Spacing above / below each hairline is the wrapper's `p-3`
-  // on each side — uniform across the three lifecycle / search cards.
+  // Vertical rhythm: the wrapper carries `border-b border-border-divider`
+  // so this card is separated from the 记忆搜索 card below by the same
+  // hairline that separates 记忆沉淀 from this card. Spacing above /
+  // below each hairline is the wrapper's `p-3` on each side — uniform
+  // across the three lifecycle / search cards.
   return (
-    <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
+    <div className="border-b border-border-divider p-3">
       <ListBox dividers={false}>
         <ExpandableRow
           open={expanded}

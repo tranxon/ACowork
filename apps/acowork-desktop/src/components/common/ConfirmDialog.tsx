@@ -40,22 +40,33 @@ export function ConfirmDialog({
       {/* Backdrop */}
       <div className="absolute inset-0 bg-modal-overlay" onClick={onCancel} />
 
-      {/* Dialog */}
+      {/* Dialog — standard 3-row layout: header / body / footer, two
+          dividers, matching PublishWizard / CloneDialog / CreateWizard. */}
       <div
-        className="relative z-10 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700"
+        className="relative z-10 flex w-full max-w-sm flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-title"
         aria-describedby="confirm-desc"
       >
-        <h3 id="confirm-title" className="text-sm font-semibold">
+        {/* Header */}
+        <h3
+          id="confirm-title"
+          className="border-b border-border-divider px-5 py-3 text-sm font-semibold text-text"
+        >
           {title}
         </h3>
-        <p id="confirm-desc" className="mt-2 text-xs text-text-tertiary ">
+
+        {/* Body */}
+        <p
+          id="confirm-desc"
+          className="px-5 py-4 text-xs text-text-tertiary"
+        >
           {message}
         </p>
 
-        <div className="mt-6 flex justify-end gap-2">
+        {/* Footer */}
+        <div className="flex justify-end gap-2 border-t border-border-divider px-5 py-3">
           <button
             ref={cancelRef}
             onClick={onCancel}

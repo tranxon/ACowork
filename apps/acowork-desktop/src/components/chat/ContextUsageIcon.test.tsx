@@ -118,8 +118,7 @@ describe("ContextUsageIcon", () => {
     // same width / radius / border as sibling toolbar dropdowns.
     expect(dialog.className).toContain("bg-modal-surface");
     expect(dialog.className).toContain("rounded-md");
-    expect(dialog.className).toContain("border-zinc-200");
-    expect(dialog.className).toContain("dark:border-zinc-700");
+    expect(dialog.className).toContain("border-border-outer");
     expect(dialog.className).not.toContain("bg-[#202126]");
     expect(dialog.className).not.toContain("rounded-[22px]");
   });

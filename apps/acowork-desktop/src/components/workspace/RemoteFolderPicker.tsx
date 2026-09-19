@@ -268,7 +268,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
             <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl flex flex-col max-h-[80vh]">
                 {/* Header */}
-                <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
+                <div className="flex items-center justify-between border-b border-border-divider px-4 py-3">
                     <h3 className="text-sm font-semibold text-text ">
                         {t("workspace.remoteBrowseTitle")}
                     </h3>
@@ -329,7 +329,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                 </div>
 
                 {/* Selected path display + action buttons */}
-                <div className="border-t border-zinc-200 dark:border-zinc-700 px-4 py-3">
+                <div className="border-t border-border-divider px-4 py-3">
                     {selectedPath && (
                         <div className="mb-2 text-xs text-text-tertiary  truncate">
                             {t("workspace.remoteBrowseSelected")}: <span className="font-mono text-text-secondary ">{selectedPath}</span>

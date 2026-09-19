@@ -100,9 +100,9 @@ export function CloneDialog({
       <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
 
       {/* Dialog */}
-      <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
+      <div className="relative z-10 w-full max-w-lg rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
+        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3.5">
           <Copy className="h-5 w-5 text-text-tertiary " />
           <h2 className="text-sm font-semibold text-text ">
             {t("cloneDialog.title")}
@@ -157,7 +157,7 @@ export function CloneDialog({
                   className={cn(
                     "flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
                     mode === m
-                      ? "border-zinc-200 bg-zinc-200 text-text dark:border-zinc-300 dark:bg-zinc-300 "
+                      ? "border-zinc-200 bg-zinc-200 text-text dark:border-zinc-600 dark:bg-zinc-600 dark:text-text "
                       : "border-zinc-200 text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700",
                   )}
                 >
@@ -177,7 +177,7 @@ export function CloneDialog({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end gap-2 border-t border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <div className="flex justify-end gap-2 border-t border-border-divider px-5 py-3">
           <button
             onClick={onClose}
             disabled={cloning}
@@ -188,7 +188,7 @@ export function CloneDialog({
           <button
             onClick={handleClone}
             disabled={cloning || !newAgentId.trim()}
-            className="flex items-center gap-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cloning ? (
               <>

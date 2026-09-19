@@ -113,7 +113,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
     return (
         <div className="flex h-full w-full flex-col">
             {/* ── Navigation Toolbar ── */}
-            <div className="flex shrink-0 items-center gap-1 border-b border-zinc-200 bg-zinc-50 px-2 py-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="flex shrink-0 items-center gap-1 border-b border-border-divider bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
                 {/* Back */}
                 <button
                     onClick={() => { try { iframeRef.current?.contentWindow?.history.back(); } catch {} }}

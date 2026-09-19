@@ -136,7 +136,7 @@ export function SkillBrowser() {
   return (
     <div className="flex flex-1 flex-col bg-page-bg">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
+      <div className="flex items-center justify-between border-b border-border-divider px-6 py-4">
         <h1 className="text-xl font-semibold">{t("skillsPanel.title")}</h1>
         <div className="flex items-center gap-2">
           <button
@@ -171,7 +171,7 @@ export function SkillBrowser() {
           /* List view */
           <div className="flex flex-1 flex-col overflow-hidden">
             {/* Search */}
-            <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="border-b border-border-divider p-3">
               <StyledInput
                 type="text"
                 value={searchQuery}
@@ -239,7 +239,7 @@ export function SkillBrowser() {
             </div>
 
             {/* List footer */}
-            <div className="flex items-center justify-between border-t border-zinc-200 px-4 py-2 text-xs text-text-tertiary dark:border-zinc-800 ">
+            <div className="flex items-center justify-between border-t border-border-divider px-4 py-2 text-xs text-text-tertiary">
               <span>
                 {total > 0 ? (
                   <>
@@ -266,7 +266,7 @@ export function SkillBrowser() {
       {/* Import Dialog */}
       {importDialogOpen && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-modal-overlay">
-          <div className="w-96 rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700">
+          <div className="w-96 rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl">
             {/* Header */}
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-text ">

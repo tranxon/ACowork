@@ -40,7 +40,7 @@ export function ListBox({
           // square hover/selected fills of the first/last row (e.g. the
           // collapsible title row) would paint over the card's top/bottom
           // rounded corners and turn them into right angles on hover.
-          "overflow-hidden rounded-md border border-zinc-200 bg-panel-block dark:border-zinc-700",
+          "overflow-hidden rounded-md border border-border-outer bg-panel-block",
         dividers && "divide-y divide-zinc-200 dark:divide-zinc-700",
         className,
       )}

@@ -59,7 +59,7 @@ export function DocumentChip({
     ? "border-[var(--color-accent)] animate-pulse"
     : status === "error"
       ? "border-red-400 dark:border-red-500 bg-red-50 dark:bg-red-900/20"
-      : "border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800";
+      : "border-border-outer  bg-zinc-50 dark:bg-zinc-800";
 
   return (
     <div

@@ -210,7 +210,7 @@ export function MemoryDistillSettings({
 
   // ── Render ────────────────────────────────────────────────────────────
   const numInputCls =
-    "rounded-md border border-zinc-200 bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] dark:border-zinc-700 ";
+    "rounded-md border border-border-outer bg-modal-surface px-2 py-1 text-[11px] outline-none focus:border-[var(--color-accent)] ";
 
   // Backlog / last-run hint lives INSIDE the expanded body — it is
   // status info about the runtime, not metadata about the card itself,
@@ -257,7 +257,7 @@ export function MemoryDistillSettings({
     // full panel width and the spacing above / below the hairline is
     // always the wrapper's `p-3` on each side — uniform across the
     // three cards.
-    <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
+    <div className="border-b border-border-divider p-3">
       <ListBox dividers={false}>
         <ExpandableRow
           open={expanded}

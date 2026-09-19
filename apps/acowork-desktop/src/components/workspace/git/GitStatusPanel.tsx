@@ -418,7 +418,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       {totalPages > 1 && (
         <div
           data-testid="git-status-pagination"
-          className="flex shrink-0 items-center justify-between gap-2 border-t border-zinc-200 px-2 py-1 dark:border-zinc-700"
+          className="flex shrink-0 items-center justify-between gap-2 border-t border-border-divider px-2 py-1"
         >
           <span className="text-[10px] tabular-nums text-text-tertiary ">
             {pageIndex * PAGE_SIZE + 1}–{Math.min((pageIndex + 1) * PAGE_SIZE, changes.length)} / {changes.length}

@@ -2233,7 +2233,7 @@ export function ChatPanel() {
 {/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-text-secondary select-none dark:border-zinc-700 dark:bg-zinc-800/40 ">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-zinc-50 px-4 py-2 text-text-secondary select-none  dark:bg-zinc-800/40 ">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2254,7 +2254,7 @@ export function ChatPanel() {
             )}
             {loopDetectedPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-text-secondary select-none dark:border-zinc-700 dark:bg-zinc-800/40 ">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-zinc-50 px-4 py-2 text-text-secondary select-none  dark:bg-zinc-800/40 ">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2401,7 +2401,7 @@ export function ChatPanel() {
         {todos.length > 0 && (
           <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
-              className="flex items-center w-full px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
+              className="flex items-center w-full px-2.5 py-1.5 border-b border-border-divider hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
             >
               {session.todosCollapsed ? (
@@ -2482,7 +2482,7 @@ export function ChatPanel() {
             "mx-12 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
-            <div className="flex items-center px-2.5 py-1.5 border-b border-zinc-200 dark:border-zinc-800">
+            <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
               <span className="text-[10px] font-medium text-text-tertiary  uppercase tracking-wider">
                 {t("chatPanel.messageQueue", { count: queuedMessages.length })}
               </span>
@@ -2833,7 +2833,7 @@ function UnsupportedImageDialog({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-modal-overlay" onClick={onClose}>
       <div
-        className="w-[400px] overflow-hidden rounded-md bg-modal-surface shadow-xl flex flex-col"
+        className="w-[400px] overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="shrink-0 px-6 pt-6 pb-2 text-sm font-semibold text-text ">
@@ -2971,7 +2971,7 @@ function ModelMenu({
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-modal-surface dark:border-zinc-700",
+            "border-zinc-200 bg-modal-surface dark:border-border-outer",
           )}
           style={{ width: `${menuWidth}px` }}
         >
@@ -3028,7 +3028,7 @@ function ModelMenu({
           </div>
 
           {/* Divider */}
-          <div className="border-t border-zinc-200 dark:border-zinc-700" />
+          <div className="border-t border-border-divider" />
 
           {/* Add Models button — same style as Install Agent */}
           <button
@@ -3119,7 +3119,7 @@ function ReasoningEffortMenu({
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-modal-surface dark:border-zinc-700",
+            "border-zinc-200 bg-modal-surface dark:border-border-outer",
           )}
           style={{ width: "140px" }}
         >

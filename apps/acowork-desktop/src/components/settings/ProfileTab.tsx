@@ -318,11 +318,11 @@ export function ProfileTab() {
                   onClick={() => setAvatarPopupOpen(false)}
                 />
                 <div
-                  className="fixed z-50 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
+                  className="fixed z-50 w-72 rounded-lg border border-border-outer bg-modal-surface p-3 shadow-lg max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
                   style={{ top: avatarPopupPos?.top ?? 0, left: avatarPopupPos?.left ?? 0 }}
                 >
                   {/* Tabs */}
-                  <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
+                  <div className="mb-3 flex gap-1 border-b border-border-divider">
                     <button
                       onClick={() => setAvatarTab("custom")}
                       className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"

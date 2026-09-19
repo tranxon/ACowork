@@ -80,7 +80,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
     <section
       ref={setNodeRef}
       className={cn(
-        "flex min-h-0 min-w-0 flex-1 flex-col rounded-md border border-zinc-200 bg-zinc-50/70 dark:border-zinc-700/60 dark:bg-zinc-900/40",
+        "flex min-h-0 min-w-0 flex-1 flex-col rounded-md border border-border-outer bg-zinc-50/70  dark:bg-zinc-900/40",
         active && "border-[var(--color-accent)] bg-[var(--color-accent)]/5",
       )}
       aria-label={t(i18nKey)}

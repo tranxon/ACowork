@@ -14,7 +14,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
     return (
       <div className="flex h-full flex-col overflow-hidden">
         {onBack && (
-          <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div className="flex items-center gap-3 border-b border-border-divider px-4 py-3">
             <button
               onClick={onBack}
               className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
@@ -36,7 +36,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
     return (
       <div className="flex h-full flex-col overflow-hidden">
         {onBack && (
-          <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div className="flex items-center gap-3 border-b border-border-divider px-4 py-3">
             <button
               onClick={onBack}
               className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
@@ -62,7 +62,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
     <div className="flex h-full flex-col overflow-hidden">
       {/* Back header */}
       {onBack && (
-        <div className="flex items-center gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+        <div className="flex items-center gap-3 border-b border-border-divider px-4 py-3">
           <button
             onClick={onBack}
             className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
@@ -75,7 +75,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
       )}
       <div className="flex-1 overflow-y-auto p-6">
       {/* Basic info card */}
-      <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+      <div className="rounded-md border border-border-outer p-4">
         <h2 className="text-lg font-semibold text-text ">
           {detail.name}
         </h2>
@@ -139,7 +139,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         <h3 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary ">
           Instructions
         </h3>
-        <div className="mt-2 rounded-md border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50">
+        <div className="mt-2 rounded-md border border-border-outer bg-zinc-50 p-4  dark:bg-zinc-800/50">
           <pre className="whitespace-pre-wrap text-sm text-text-secondary ">
             {detail.instructions}
           </pre>

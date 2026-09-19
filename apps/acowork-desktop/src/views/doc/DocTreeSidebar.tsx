@@ -99,7 +99,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
       aria-label={t("doc.sidebarLabel")}
     >
       {/* ── 头部：标题 + 新建按钮 ───────────────────────────── */}
-      <div className="flex items-center gap-1 border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-800">
+      <div className="flex items-center gap-1 border-b border-border-divider px-2 py-1.5">
         <BookOpen className="mr-1 h-3.5 w-3.5 text-text-tertiary" aria-hidden />
         <span className="flex-1 truncate font-medium text-text-secondary ">
           {t("doc.title")}
@@ -153,7 +153,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
       </div>
 
       {/* ── 底部：回收站 + 离线提示 ─────────────────────────── */}
-      <div className="border-t border-zinc-200 p-1 dark:border-zinc-800">
+      <div className="border-t border-border-divider p-1">
         {healthy === false && (
           <div className="mb-1 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
             {t("doc.offlineHint")}

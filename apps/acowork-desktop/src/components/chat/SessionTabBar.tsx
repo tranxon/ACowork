@@ -114,10 +114,10 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full mt-1 w-72 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700 z-50"
+      className="absolute right-0 top-full mt-1 w-72 rounded-md border border-border-outer bg-modal-surface shadow-lg z-50"
     >
       {/* Header with total count */}
-      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-text-tertiary dark:border-zinc-700 ">
+      <div className="flex items-center justify-between border-b border-border-divider px-3 py-1.5 text-[11px] text-text-tertiary">
         <span>
           {totalCount > 0 ? (
             <>{t("sessionTabBar.sidebarShowing", { start, end, total: totalCount })}</>
@@ -128,7 +128,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
       </div>
 
       {/* Search input */}
-      <div className="border-b border-zinc-200 px-2 py-1.5 dark:border-zinc-700">
+      <div className="border-b border-border-divider px-2 py-1.5">
         <div className="relative">
           <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-text-tertiary" />
           <StyledInput
@@ -240,7 +240,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-between border-t border-zinc-200 px-1 py-1.5 dark:border-zinc-700">
+        <div className="flex items-center justify-between border-t border-border-divider px-1 py-1.5">
           <button
             onClick={() => handlePageChange(currentPage - 1)}
             disabled={currentPage <= 1}
@@ -523,7 +523,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   if (!agent) return null;
 
   return (
-    <div className="flex select-none px-0.5 gap-0.5 pt-[5px] border-b border-zinc-200 dark:border-zinc-800">
+    <div className="flex select-none px-0.5 gap-0.5 pt-[5px] border-b border-border-divider">
       <ScrollableTabBar
         ref={scrollableRef}
         activeItemSelector={activeSessionId ? `[data-session-id="${activeSessionId}"]` : undefined}
@@ -696,7 +696,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
       {closingSessionId && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-modal-overlay" onClick={() => setClosingSessionId(null)}>
           <div
-            className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
+            className="mx-4 w-full max-w-sm rounded-md border border-border-outer bg-modal-surface p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">

@@ -267,7 +267,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
       <div className="mt-6 space-y-4">
         {/* Mode selection */}
-        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-border-outer p-4">
           <label className="mb-2 block text-xs text-text-tertiary">{t("onboarding.gateway.modeLabel")}</label>
           <RadioGroup
             name="gatewayMode"
@@ -292,7 +292,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
         {/* Local mode: auto-start status */}
         {gatewayMode === "local" && (
-          <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+          <div className="rounded-md border border-border-outer p-4">
             <div className="flex items-center gap-2 text-sm">
               <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
               {starting ? (
@@ -330,7 +330,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
 
         {/* Remote mode: URL config + test */}
         {gatewayMode === "remote" && (
-          <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+          <div className="rounded-md border border-border-outer p-4">
             <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.gateway.urlLabel")}</label>
             <div className="flex gap-2">
               <input
@@ -338,7 +338,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
                 value={urlDraft}
                 onChange={(e) => setUrlDraft(e.target.value)}
                 placeholder={DEFAULT_GATEWAY_URL}
-                className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
+                className="flex-1 rounded-md border border-border-outer px-3 py-2 text-sm  dark:bg-zinc-800"
               />
               {urlDraft !== gatewayUrl && (
                 <button
@@ -492,7 +492,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
 
       <div className="mt-6 space-y-4">
         {/* Provider selector */}
-        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-border-outer p-4">
           <div className="flex items-center gap-2">
             <span className="text-lg">🔑</span>
             <Dropdown
@@ -509,7 +509,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaved(false); }}
               placeholder={keyPlaceholder(provider)}
-              className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
+              className="mt-2 w-full rounded-md border border-border-outer px-3 py-2 text-sm  dark:bg-zinc-800"
             />
           )}
 
@@ -520,7 +520,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               value={baseUrl}
               onChange={(e) => { setBaseUrl(e.target.value); setSaved(false); }}
               placeholder={t("onboarding.apiKey.baseUrlPlaceholder")}
-              className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-xs font-mono dark:border-zinc-700 dark:bg-zinc-800 "
+              className="mt-2 w-full rounded-md border border-border-outer px-3 py-2 text-xs font-mono  dark:bg-zinc-800"
             />
           )}
 
@@ -555,7 +555,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
         </div>
 
         {/* Local providers info */}
-        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-border-outer p-4">
           <div className="flex items-center gap-2">
             <span className="text-lg">🏠</span>
             <span className="text-sm font-medium">{t("onboarding.apiKey.localProvidersLabel")}</span>
@@ -606,7 +606,7 @@ function IdentityStep({
             value={name}
             onChange={(e) => onUpdate({ name: e.target.value })}
             placeholder={t("onboarding.identity.namePlaceholder")}
-            className="rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 "
+            className="rounded-md border border-border-outer px-3 py-2 text-sm  dark:bg-zinc-800"
           />
         </div>
         <div>
@@ -897,7 +897,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           </p>
         )}
 
-        <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
+        <div className="rounded-md border border-border-outer p-4">
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-sm font-medium">{t("onboarding.installAgent.recommendedTitle")}</h3>

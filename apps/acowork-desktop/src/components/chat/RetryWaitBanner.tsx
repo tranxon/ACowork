@@ -123,7 +123,7 @@ export function RetryWaitBanner() {
       <div
         role="status"
         aria-live="polite"
-        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-text-secondary select-none dark:border-zinc-700 dark:bg-zinc-800/40 "
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-zinc-50 px-4 py-2 text-text-secondary select-none  dark:bg-zinc-800/40 "
         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
       >
         <span className="flex shrink-0 items-center gap-1.5">

@@ -73,7 +73,7 @@ export function MemoryNodeList({
   // than one page; single-page result sets stay clean.
   const pager =
     totalPages > 1 ? (
-      <div className="flex shrink-0 items-center justify-between border-t border-zinc-200 px-1 py-1.5 dark:border-zinc-700">
+      <div className="flex shrink-0 items-center justify-between border-t border-border-divider px-1 py-1.5">
         <button
           type="button"
           aria-label="Previous memory page"

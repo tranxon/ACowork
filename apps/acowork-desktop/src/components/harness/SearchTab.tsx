@@ -259,7 +259,7 @@ export function SearchTab() {
               {/* Provider display (read-only) */}
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.provider")}</label>
-                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 ">
+                <div className="w-full rounded-md border border-border-outer bg-zinc-50 px-3 py-2 text-xs  dark:bg-zinc-900">
                   {lookupSearchProvider(newProvider)?.name || newProvider}
                 </div>
               </div>
@@ -335,7 +335,7 @@ export function SearchTab() {
               {/* Provider display (read-only) */}
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harnessSearch.provider")}</label>
-                <div className="w-full rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 ">
+                <div className="w-full rounded-md border border-border-outer bg-zinc-50 px-3 py-2 text-xs  dark:bg-zinc-900">
                   {editProviderDef?.name || showEditDialog}
                 </div>
               </div>

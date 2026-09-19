@@ -129,7 +129,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
 
       {/* 离线时禁用写操作 */}
       {healthy === false && (
-        <div className="border-t border-zinc-200 px-3 py-2 text-[10px] text-text-tertiary dark:border-zinc-700 ">
+        <div className="border-t border-border-divider px-3 py-2 text-[10px] text-text-tertiary">
           {t("pm.offlineReadonlyHint")}
         </div>
       )}
@@ -142,7 +142,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
             onClick={() => closeCreate()}
           />
           <div
-            className="relative z-10 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
+            className="relative z-10 w-full max-w-sm rounded-md border border-border-outer bg-modal-surface p-5 shadow-xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="pm-new-project-title"

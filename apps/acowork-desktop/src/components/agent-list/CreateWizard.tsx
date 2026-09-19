@@ -144,9 +144,9 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
       />
 
       {/* Dialog */}
-      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
+      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
-        <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
+        <div className="flex items-center gap-2 border-b border-border-divider px-5 py-3.5">
           <Sparkles className="h-5 w-5 text-text-tertiary " />
           <h2 className="text-sm font-semibold text-text ">
             Create New Agent
@@ -154,7 +154,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
         </div>
 
         {/* Step indicators */}
-        <div className="flex items-center gap-0 border-b border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <div className="flex items-center gap-0 border-b border-border-divider px-5 py-3">
           {STEPS.map((s, i) => {
             const Icon = s.icon;
             const active = s.key === step;
@@ -340,7 +340,7 @@ dev = true
         </div>
 
         {/* Footer */}
-        <div className="flex justify-between border-t border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <div className="flex justify-between border-t border-border-divider px-5 py-3">
           <button
             onClick={stepIndex === 0 ? onClose : handleBack}
             disabled={busy}

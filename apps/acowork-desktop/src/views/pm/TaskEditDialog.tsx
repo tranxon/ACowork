@@ -205,13 +205,13 @@ export function TaskEditDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
       <div
-        className="relative z-10 flex max-h-[90vh] w-full max-w-[640px] flex-col overflow-hidden rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700"
+        className="relative z-10 flex max-h-[90vh] w-full max-w-[640px] flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="pm-edit-task-title"
       >
         {/* 头部 */}
-        <header className="flex shrink-0 items-center justify-between border-b border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <header className="flex shrink-0 items-center justify-between border-b border-border-divider px-5 py-3">
           <h3 id="pm-edit-task-title" className="text-sm font-semibold">
             {mode === "create" ? t("pm.newTask") : t("pm.task.edit")}
           </h3>
@@ -304,7 +304,7 @@ export function TaskEditDialog({
             {depOptions.length === 0 ? (
               <p className="text-xs text-text-tertiary">{t("pm.task.noCandidates")}</p>
             ) : (
-              <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border border-zinc-200 p-2 dark:border-zinc-700">
+              <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border border-border-outer p-2">
                 {depOptions.map((opt) => (
                   <label
                     key={opt.value}
@@ -325,7 +325,7 @@ export function TaskEditDialog({
         </div>
 
         {/* 底部操作 */}
-        <footer className="flex shrink-0 justify-end gap-2 border-t border-zinc-200 px-5 py-3 dark:border-zinc-700">
+        <footer className="flex shrink-0 justify-end gap-2 border-t border-border-divider px-5 py-3">
           <button
             type="button"
             onClick={onClose}

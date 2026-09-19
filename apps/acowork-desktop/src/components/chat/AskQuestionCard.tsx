@@ -66,7 +66,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
 
   return (
     <div
-      className="my-1.5 max-w-[var(--content-max-width)] rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-800/40"
+      className="my-1.5 max-w-[var(--content-max-width)] rounded-md border border-border-outer bg-zinc-50 px-3 py-2  dark:bg-zinc-800/40"
     >
       {/* Header */}
       <div className="flex items-start gap-1.5 mb-1.5">

@@ -95,9 +95,9 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
       <div
         role="dialog"
         aria-label={t("doc.trash")}
-        className="relative z-10 flex max-h-[70vh] w-[440px] flex-col overflow-hidden rounded-lg border border-zinc-200 bg-surface shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
+        className="relative z-10 flex max-h-[70vh] w-[440px] flex-col overflow-hidden rounded-lg border border-border-outer bg-surface shadow-xl dark:bg-zinc-900"
       >
-        <div className="flex items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-700">
+        <div className="flex items-center gap-2 border-b border-border-divider px-3 py-2">
           <Trash2 className="h-4 w-4 text-text-tertiary" aria-hidden />
           <span className="flex-1 text-sm font-medium text-text-secondary ">
             {t("doc.trash")}
@@ -162,7 +162,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
         </div>
 
         {!isEmpty && (
-          <div className="border-t border-zinc-200 px-3 py-1.5 text-[10px] text-text-tertiary dark:border-zinc-700">
+          <div className="border-t border-border-divider px-3 py-1.5 text-[10px] text-text-tertiary">
             {t("doc.trashNote")}
           </div>
         )}

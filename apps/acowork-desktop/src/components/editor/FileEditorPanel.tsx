@@ -1305,7 +1305,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             style={{ width }}
         >
             {/* Tab bar */}
-            <div className="flex bg-page-bg select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
+            <div className="flex bg-page-bg select-none px-0.5 gap-0.5 mt-[5px] border-b border-border-divider">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}
@@ -1840,7 +1840,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     onClick={() => setClosingFileId(null)}
                 >
                     <div
-                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
+                        className="mx-4 w-full max-w-sm rounded-md border border-border-outer bg-modal-surface p-5 shadow-xl"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">
@@ -1917,7 +1917,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     onClick={() => setBatchCloseRequest(null)}
                 >
                     <div
-                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
+                        className="mx-4 w-full max-w-sm rounded-md border border-border-outer bg-modal-surface p-5 shadow-xl"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">

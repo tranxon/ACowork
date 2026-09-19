@@ -74,7 +74,7 @@ export function MermaidNodeView({ node, editor }: NodeViewProps) {
   return (
     <NodeViewWrapper
       data-mermaid-nodeview
-      className="mermaid-nodeview group relative my-2 overflow-x-auto rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50"
+      className="mermaid-nodeview group relative my-2 overflow-x-auto rounded-md border border-border-outer bg-zinc-50  dark:bg-zinc-900/50"
     >
       {/* 渲染态：图 / 占位 / 失败回退（代码） */}
       {!isEditing && svg && (

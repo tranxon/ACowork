@@ -52,7 +52,7 @@ export function ProjectBoard({
   if (loading) {
     return (
       <main className="flex min-w-0 flex-1 flex-col">
-        <div className="shrink-0 border-b border-zinc-200 px-4 py-3 dark:border-zinc-700">
+        <div className="shrink-0 border-b border-border-divider px-4 py-3">
           <div className="h-5 w-40 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-2 h-3 w-64 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
         </div>
@@ -69,7 +69,7 @@ export function ProjectBoard({
     <main className="flex min-w-0 flex-1 flex-col bg-page-bg">
       <ProjectHeader project={project} onNewTask={newTask} />
       {error && (
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-200 bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:border-zinc-700 dark:bg-amber-950/40 dark:text-amber-300">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border-divider bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
           <span className="min-w-0 truncate">{error}</span>
           {onRetry && (
             <button

@@ -23,7 +23,7 @@ export const StyledInput = React.forwardRef<HTMLInputElement, StyledInputProps>(
       <input
         ref={ref}
         className={cn(
-          "w-full rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900",
+          "w-full rounded-md border border-border-outer px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)]  dark:bg-zinc-900",
           fontMono && "font-mono",
           className,
         )}
@@ -54,7 +54,7 @@ export const StyledTextarea = React.forwardRef<
     <textarea
       ref={ref}
       className={cn(
-        "w-full resize-y rounded-md border border-zinc-200 px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-900",
+        "w-full resize-y rounded-md border border-border-outer px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)]  dark:bg-zinc-900",
         fontMono && "font-mono",
         className,
       )}

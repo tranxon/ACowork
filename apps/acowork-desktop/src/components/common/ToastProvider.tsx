@@ -98,7 +98,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
   return (
     <div
       className={cn(
-        "flex items-start gap-2 rounded-md border border-zinc-200 bg-modal-surface px-3 py-2.5 shadow-lg w-fit max-w-xs dark:border-zinc-700",
+        "flex items-start gap-2 rounded-md border border-border-outer bg-modal-surface px-3 py-2.5 shadow-lg w-fit max-w-xs",
         style[toast.type],
       )}
       role="alert"

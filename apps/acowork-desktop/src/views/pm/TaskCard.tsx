@@ -104,8 +104,8 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           }
         }}
         className={cn(
-          "group w-full rounded-md border border-zinc-200 bg-card-surface px-2.5 py-2 text-left shadow-sm transition-colors",
-          "hover:border-zinc-300 hover:shadow dark:border-zinc-700 dark:bg-zinc-800 dark:hover:border-zinc-600",
+          "group w-full rounded-md border border-border-outer bg-card-surface px-2.5 py-2 text-left shadow-sm transition-colors",
+          "hover:border-zinc-300 hover:shadow dark:bg-zinc-800 dark:hover:border-zinc-600",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]",
           task.status === "submitted" && "border-amber-300 bg-amber-50/60 dark:border-amber-700/60 dark:bg-amber-950/30",
           isDragging && "opacity-40",

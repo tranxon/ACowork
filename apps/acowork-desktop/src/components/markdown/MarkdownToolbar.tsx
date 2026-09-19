@@ -170,7 +170,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
     <div
       role="toolbar"
       aria-label={t("doc.toolbarLabel")}
-      className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-zinc-200 bg-editor-canvas px-2 py-1 dark:border-zinc-800"
+      className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-border-divider bg-editor-canvas px-2 py-1"
     >
       {items.map((item) => (
         <button
@@ -200,7 +200,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
           <Table className="h-3.5 w-3.5" aria-hidden />
         </button>
         {tableOpen && (
-          <div className="absolute right-0 top-full z-30 mt-1 flex items-center gap-2 rounded-md border border-zinc-200 bg-white p-2 shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+          <div className="absolute right-0 top-full z-30 mt-1 flex items-center gap-2 rounded-md border border-border-outer bg-white p-2 shadow-lg dark:bg-zinc-900">
             <label className="flex items-center gap-1 text-[11px] text-text-tertiary ">
               {t("doc.tbTableRows")}
               <input
@@ -209,7 +209,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
                 max={20}
                 value={rows}
                 onChange={(e) => setRows(Math.max(1, Math.min(20, Number.parseInt(e.target.value, 10) || 1)))}
-                className="w-12 rounded border border-zinc-200 px-1 py-0.5 text-[11px] dark:border-zinc-700 dark:bg-zinc-800"
+                className="w-12 rounded border border-border-outer px-1 py-0.5 text-[11px]  dark:bg-zinc-800"
               />
             </label>
             <label className="flex items-center gap-1 text-[11px] text-text-tertiary ">
@@ -220,7 +220,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
                 max={12}
                 value={cols}
                 onChange={(e) => setCols(Math.max(1, Math.min(12, Number.parseInt(e.target.value, 10) || 1)))}
-                className="w-12 rounded border border-zinc-200 px-1 py-0.5 text-[11px] dark:border-zinc-700 dark:bg-zinc-800"
+                className="w-12 rounded border border-border-outer px-1 py-0.5 text-[11px]  dark:bg-zinc-800"
               />
             </label>
             <button

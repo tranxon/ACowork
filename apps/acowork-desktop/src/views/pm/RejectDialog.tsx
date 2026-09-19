@@ -42,7 +42,7 @@ export function RejectDialog({ open, taskTitle, onConfirm, onCancel }: RejectDia
     <div className="fixed inset-0 z-[60] flex items-center justify-center">
       <div className="absolute inset-0 bg-modal-overlay" onClick={onCancel} />
       <div
-        className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700"
+        className="relative z-10 w-full max-w-md rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="reject-title"

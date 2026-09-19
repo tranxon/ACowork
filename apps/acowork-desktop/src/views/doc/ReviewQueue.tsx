@@ -97,7 +97,7 @@ export function ReviewQueue() {
   const pendingCount = requests.length;
 
   return (
-    <div className="shrink-0 border-b border-zinc-200 bg-page-bg dark:border-zinc-800">
+    <div className="shrink-0 border-b border-border-divider bg-page-bg">
       {/* ── 顶条 ──────────────────────────────────────────── */}
       <button
         type="button"
@@ -196,7 +196,7 @@ export function ReviewQueue() {
           <div
             role="dialog"
             aria-label={t("doc.reject")}
-            className="relative z-10 w-[400px] rounded-lg border border-zinc-200 bg-surface p-3 shadow-xl dark:border-zinc-700 dark:bg-zinc-900"
+            className="relative z-10 w-[400px] rounded-lg border border-border-outer bg-surface p-3 shadow-xl dark:bg-zinc-900"
           >
             <div className="mb-2 text-sm font-medium text-text-secondary ">
               {t("doc.rejectTitle", { name: noteTarget.path })}
@@ -207,7 +207,7 @@ export function ReviewQueue() {
               onChange={(e) => setNote(e.target.value)}
               placeholder={t("doc.rejectNotePlaceholder")}
               rows={3}
-              className="w-full resize-none rounded-md border border-zinc-200 bg-input px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)] dark:border-zinc-700"
+              className="w-full resize-none rounded-md border border-border-outer bg-input px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]"
             />
             <div className="mt-2 flex justify-end gap-2">
               <button

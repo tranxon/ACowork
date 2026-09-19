@@ -66,7 +66,7 @@ export function AttachedContextChips() {
         return (
           <div
             key={item.id}
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-text-secondary dark:border-zinc-700 dark:bg-zinc-800 "
+            className="inline-flex items-center gap-1 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800"
           >
             {isOpenable ? (
               /* Clickable chip body — opens the workspace ref in fileTab.
